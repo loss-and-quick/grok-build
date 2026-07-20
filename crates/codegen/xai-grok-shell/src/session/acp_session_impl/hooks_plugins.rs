@@ -677,6 +677,21 @@ impl SessionActor {
                     }
                     registry.append_specs(specs);
                 }
+                // TS sidecar plugins: register `HandlerType::Plugin` specs for all
+                // canonical events so the dispatcher routes them to the sidecar via
+                // the injected `PluginHookInvoker`. Registering the full event set
+                // (rather than probing subscriptions here) is cheap: the host
+                // short-circuits events a plugin didn't subscribe to after its
+                // handshake. Merged in the same plugin loop as command/http hooks
+                // so it inherits the identical load lifecycle and precedence.
+                if plugin.sidecar_spec().is_some() {
+                    registry.append_specs(
+                        crate::session::plugin_host::sidecar_plugin_hook_specs(
+                            &plugin.name,
+                            &plugin.root,
+                        ),
+                    );
+                }
             }
         }
         let hook_count = registry.len();
@@ -877,6 +892,16 @@ impl SessionActor {
                         tracing::warn!("{w}");
                     }
                     new_specs.extend(specs);
+                }
+                // TS sidecar plugins: synthetic `HandlerType::Plugin` specs for
+                // all canonical events (see `sidecar_plugin_hook_specs`). Named
+                // `plugin/…` so the `remove_by_prefix("plugin/")` below re-cleans
+                // them on each snapshot, exactly like command/http plugin hooks.
+                if plugin.sidecar_spec().is_some() {
+                    new_specs.extend(crate::session::plugin_host::sidecar_plugin_hook_specs(
+                        &plugin.name,
+                        &plugin.root,
+                    ));
                 }
             }
             hooks_reloaded = new_specs.len();

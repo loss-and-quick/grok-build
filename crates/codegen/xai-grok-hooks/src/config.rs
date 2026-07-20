@@ -67,6 +67,11 @@ pub struct RawHandler {
     pub handler_type: String,
     pub command: Option<String>,
     pub url: Option<String>,
+    /// Plugin name (plugin handlers): which TS plugin sidecar owns the handler.
+    pub plugin: Option<String>,
+    /// Optional handler id within the plugin (plugin handlers). Defaults to the
+    /// event name at run time when absent.
+    pub handler: Option<String>,
     /// Seconds (converted to milliseconds internally).
     pub timeout: Option<u64>,
     /// Extra env vars for the hook process; merged into [`HookSpec::extra_env`]
@@ -111,6 +116,9 @@ fn default_timeout_ms(event: crate::event::HookEventName) -> u64 {
 pub enum HandlerType {
     Command,
     Http,
+    /// Executed by a TS plugin sidecar via the injected
+    /// [`crate::invoker::PluginHookInvoker`], not a process or URL.
+    Plugin,
 }
 
 impl HandlerType {
@@ -118,6 +126,7 @@ impl HandlerType {
         match self {
             Self::Command => "command",
             Self::Http => "http",
+            Self::Plugin => "plugin",
         }
     }
 }
@@ -152,6 +161,12 @@ pub struct HookSpec {
     pub url: Option<String>,
     /// Pre-expansion source for `url`, for display; see [`command_raw`](HookSpec::command_raw).
     pub url_raw: Option<String>,
+    /// Plugin name (plugin handlers): the TS plugin sidecar the invoker routes
+    /// to. Required for [`HandlerType::Plugin`]; `None` for command/http.
+    pub plugin: Option<String>,
+    /// Optional handler id within the plugin (plugin handlers). `None` means the
+    /// runner uses the event name (see [`crate::runner::plugin`]).
+    pub plugin_handler: Option<String>,
     pub timeout_ms: u64,
     pub source_dir: PathBuf,
     /// Extra environment variables injected into the hook process.
@@ -305,6 +320,7 @@ pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<H
                 let handler_type = match handler.handler_type.as_str() {
                     "command" => HandlerType::Command,
                     "http" => HandlerType::Http,
+                    "plugin" => HandlerType::Plugin,
                     _ => {
                         errors.push(HookError::UnsupportedHandlerType {
                             name,
@@ -319,34 +335,53 @@ pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<H
                 // env). Unset refs are preserved: command hooks defer to the
                 // runner, and the HTTP runner re-expands before SSRF validation
                 // in case `extra_env` was populated after parsing.
-                let (command, command_raw, url, url_raw) = match handler_type {
-                    HandlerType::Command => {
-                        let Some(command) = handler.command else {
-                            errors.push(HookError::InvalidConfig {
-                                name,
-                                path: file_path.to_path_buf(),
-                                detail: "command handler requires a 'command' field".into(),
-                            });
-                            continue;
-                        };
-                        let expanded =
-                            crate::env_expand::expand_env_vars_with_extra(&command, &extra_env);
-                        (Some(PathBuf::from(expanded)), Some(command), None, None)
-                    }
-                    HandlerType::Http => {
-                        let Some(url) = handler.url else {
-                            errors.push(HookError::InvalidConfig {
-                                name,
-                                path: file_path.to_path_buf(),
-                                detail: "http handler requires a 'url' field".into(),
-                            });
-                            continue;
-                        };
-                        let expanded =
-                            crate::env_expand::expand_env_vars_with_extra(&url, &extra_env);
-                        (None, None, Some(expanded), Some(url))
-                    }
-                };
+                let (command, command_raw, url, url_raw, plugin, plugin_handler) =
+                    match handler_type {
+                        HandlerType::Command => {
+                            let Some(command) = handler.command else {
+                                errors.push(HookError::InvalidConfig {
+                                    name,
+                                    path: file_path.to_path_buf(),
+                                    detail: "command handler requires a 'command' field".into(),
+                                });
+                                continue;
+                            };
+                            let expanded =
+                                crate::env_expand::expand_env_vars_with_extra(&command, &extra_env);
+                            (
+                                Some(PathBuf::from(expanded)),
+                                Some(command),
+                                None,
+                                None,
+                                None,
+                                None,
+                            )
+                        }
+                        HandlerType::Http => {
+                            let Some(url) = handler.url else {
+                                errors.push(HookError::InvalidConfig {
+                                    name,
+                                    path: file_path.to_path_buf(),
+                                    detail: "http handler requires a 'url' field".into(),
+                                });
+                                continue;
+                            };
+                            let expanded =
+                                crate::env_expand::expand_env_vars_with_extra(&url, &extra_env);
+                            (None, None, Some(expanded), Some(url), None, None)
+                        }
+                        HandlerType::Plugin => {
+                            let Some(plugin) = handler.plugin else {
+                                errors.push(HookError::InvalidConfig {
+                                    name,
+                                    path: file_path.to_path_buf(),
+                                    detail: "plugin handler requires a 'plugin' field".into(),
+                                });
+                                continue;
+                            };
+                            (None, None, None, None, Some(plugin), handler.handler)
+                        }
+                    };
 
                 specs.push(HookSpec {
                     name,
@@ -359,6 +394,8 @@ pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<H
                     command_raw,
                     url,
                     url_raw,
+                    plugin,
+                    plugin_handler,
                     timeout_ms,
                     source_dir: source_dir.clone(),
                     extra_env,
@@ -631,6 +668,104 @@ mod tests {
             specs[0].url.as_deref(),
             Some("https://hooks.example.com/check")
         );
+    }
+
+    #[test]
+    fn parse_plugin_handler_type() {
+        let json = r#"{
+            "hooks": {
+                "PreToolUse": [
+                    { "hooks": [{ "type": "plugin", "plugin": "guardrails", "handler": "check_bash" }] }
+                ]
+            }
+        }"#;
+        let (specs, errors) = parse_hook_file(json, Path::new("/tmp/test.json"));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].handler_type, HandlerType::Plugin);
+        assert!(specs[0].command.is_none());
+        assert!(specs[0].url.is_none());
+        assert_eq!(specs[0].plugin.as_deref(), Some("guardrails"));
+        assert_eq!(specs[0].plugin_handler.as_deref(), Some("check_bash"));
+    }
+
+    /// The `handler` id is optional; when absent the runner falls back to the
+    /// event name, so the spec simply carries `None`.
+    #[test]
+    fn parse_plugin_handler_without_handler_id() {
+        let json = r#"{
+            "hooks": {
+                "Stop": [
+                    { "hooks": [{ "type": "plugin", "plugin": "guardrails" }] }
+                ]
+            }
+        }"#;
+        let (specs, errors) = parse_hook_file(json, Path::new("/tmp/test.json"));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].handler_type, HandlerType::Plugin);
+        assert_eq!(specs[0].plugin.as_deref(), Some("guardrails"));
+        assert!(specs[0].plugin_handler.is_none());
+    }
+
+    #[test]
+    fn reject_plugin_handler_without_plugin_name() {
+        let json = r#"{
+            "hooks": {
+                "PreToolUse": [
+                    { "hooks": [{ "type": "plugin", "handler": "check_bash" }] }
+                ]
+            }
+        }"#;
+        let (specs, errors) = parse_hook_file(json, Path::new("/tmp/test.json"));
+        assert!(specs.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(&errors[0], HookError::InvalidConfig { .. }));
+    }
+
+    /// A single file mixing all three handler types round-trips to three specs
+    /// with the right kind and payload fields populated.
+    #[test]
+    fn parse_all_three_handler_types_round_trip() {
+        let json = r#"{
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "hooks": [
+                            { "type": "command", "command": "bin/check.sh" },
+                            { "type": "http", "url": "https://hooks.example.com/check" },
+                            { "type": "plugin", "plugin": "guardrails", "handler": "pre_tool" }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+        let (specs, errors) = parse_hook_file(json, Path::new("/tmp/test.json"));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(specs.len(), 3);
+
+        let command = specs
+            .iter()
+            .find(|s| s.handler_type == HandlerType::Command)
+            .expect("command spec");
+        assert_eq!(command.command, Some(PathBuf::from("bin/check.sh")));
+        assert!(command.plugin.is_none());
+
+        let http = specs
+            .iter()
+            .find(|s| s.handler_type == HandlerType::Http)
+            .expect("http spec");
+        assert_eq!(http.url.as_deref(), Some("https://hooks.example.com/check"));
+        assert!(http.plugin.is_none());
+
+        let plugin = specs
+            .iter()
+            .find(|s| s.handler_type == HandlerType::Plugin)
+            .expect("plugin spec");
+        assert_eq!(plugin.plugin.as_deref(), Some("guardrails"));
+        assert_eq!(plugin.plugin_handler.as_deref(), Some("pre_tool"));
+        assert!(plugin.command.is_none());
+        assert!(plugin.url.is_none());
     }
 
     #[test]

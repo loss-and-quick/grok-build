@@ -834,6 +834,8 @@ mod tests {
                 timeout_ms: 5000,
                 source_dir: std::path::PathBuf::from(source),
                 extra_env: std::collections::HashMap::new(),
+                plugin: None,
+                plugin_handler: None,
             };
         use crate::config::HandlerType;
         assert_eq!(
@@ -876,6 +878,8 @@ mod tests {
             timeout_ms: 5000,
             source_dir: std::env::temp_dir(),
             extra_env: std::collections::HashMap::new(),
+            plugin: None,
+            plugin_handler: None,
         }
     }
 
@@ -905,6 +909,7 @@ mod tests {
         RunContext {
             session_id: "test-session",
             workspace_root: "/tmp",
+            plugin_invoker: None,
         }
     }
 
@@ -1038,6 +1043,8 @@ mod tests {
             timeout_ms: 5000,
             source_dir: tmp.path().to_path_buf(),
             extra_env,
+            plugin: None,
+            plugin_handler: None,
         };
 
         let envelope = make_envelope();
@@ -1096,12 +1103,15 @@ mod tests {
             timeout_ms: 5000,
             source_dir: tmp.path().to_path_buf(),
             extra_env: std::collections::HashMap::new(),
+            plugin: None,
+            plugin_handler: None,
         };
 
         let envelope = make_envelope();
         let ctx = RunContext {
             session_id: "test-session",
             workspace_root: &workspace,
+            plugin_invoker: None,
         };
         let (result, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
 
@@ -1225,6 +1235,8 @@ mod tests {
             timeout_ms: 5000,
             source_dir: std::env::temp_dir(),
             extra_env,
+            plugin: None,
+            plugin_handler: None,
         };
 
         let envelope = make_envelope();
@@ -1298,6 +1310,8 @@ mod tests {
             timeout_ms: 5000,
             source_dir: std::env::temp_dir(),
             extra_env,
+            plugin: None,
+            plugin_handler: None,
         };
 
         let envelope = make_envelope();
@@ -1363,6 +1377,8 @@ mod tests {
             timeout_ms: 5000,
             source_dir: tmp.path().to_path_buf(),
             extra_env: std::collections::HashMap::new(),
+            plugin: None,
+            plugin_handler: None,
         };
 
         let envelope = make_envelope();

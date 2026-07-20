@@ -13532,6 +13532,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "which",
+ "xai-grok-hooks",
+ "xai-grok-plugin-protocol",
+ "xai-tty-utils",
+]
+
+[[package]]
 name = "xai-grok-plugin-marketplace"
 version = "0.1.0"
 dependencies = [
@@ -13550,6 +13567,15 @@ dependencies = [
  "xai-grok-config",
  "xai-hooks-plugins-types",
  "xai-tty-utils",
+]
+
+[[package]]
+name = "xai-grok-plugin-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ts-rs",
 ]
 
 [[package]]
@@ -13767,6 +13793,7 @@ dependencies = [
  "xai-grok-memory",
  "xai-grok-models",
  "xai-grok-paths",
+ "xai-grok-plugin-host",
  "xai-grok-plugin-marketplace",
  "xai-grok-sampler",
  "xai-grok-sampling-types",

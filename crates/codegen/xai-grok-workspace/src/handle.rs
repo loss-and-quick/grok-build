@@ -7417,6 +7417,8 @@ pub(crate) mod tests {
                 command_raw: Some("echo injected".into()),
                 url: None,
                 url_raw: None,
+                plugin: None,
+                plugin_handler: None,
                 timeout_ms: 10_000,
                 source_dir: std::path::PathBuf::from("/tmp"),
                 extra_env: std::collections::HashMap::new(),

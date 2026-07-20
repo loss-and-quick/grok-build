@@ -51,6 +51,8 @@ pub struct HookSpecWire {
     pub command_raw: Option<String>,
     pub url: Option<String>,
     pub url_raw: Option<String>,
+    pub plugin: Option<String>,
+    pub plugin_handler: Option<String>,
     pub timeout_ms: u64,
     pub source_dir: PathBuf,
     pub extra_env: HashMap<String, String>,
@@ -218,6 +220,8 @@ mod tests {
                     "command_raw": "${X}/check.sh",
                     "url": null,
                     "url_raw": null,
+                    "plugin": null,
+                    "plugin_handler": null,
                     "timeout_ms": 5000,
                     "source_dir": "/home/u/.grok/hooks",
                     "extra_env": { "FOO": "bar" }

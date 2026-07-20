@@ -1099,6 +1099,17 @@ pub(crate) async fn spawn_session_actor(
             }
         };
     let hook_registry_for_handle = built_hook_registry.clone();
+    // TS plugin sidecar host: built once from the initial registry snapshot when
+    // any loaded plugin declares a sidecar. `None` (no sidecar plugins) keeps
+    // startup free of any plugin-host machinery. Sidecars spawn lazily on the
+    // first matching hook; the synthetic `Plugin` hook specs that route events
+    // here are appended by the hooks_adapter merge path (see
+    // `session::plugin_host::sidecar_plugin_hook_specs`).
+    let built_plugin_host = crate::session::plugin_host::build_session_plugin_host(
+        plugin_registry.as_deref(),
+        &session_info.id.0,
+        &resolved_workspace_root,
+    );
     let workspace_ops_for_handle = workspace_ops.clone();
     #[allow(clippy::arc_with_non_send_sync)]
     let mut _hook_load_errors: Vec<String> = hook_discovery_errors
@@ -1334,6 +1345,7 @@ pub(crate) async fn spawn_session_actor(
         hook_load_errors: std::cell::RefCell::new(_hook_load_errors),
         plugin_registry: std::cell::RefCell::new(plugin_registry.clone()),
         plugin_registry_handle,
+        plugin_host: built_plugin_host,
         events: crate::session::events::EventTracker::new(
             &crate::session::persistence::session_dir(&session_info),
         ),

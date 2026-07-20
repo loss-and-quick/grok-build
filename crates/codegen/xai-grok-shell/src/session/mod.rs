@@ -330,6 +330,7 @@ pub(crate) mod normalize_cache;
 pub mod persistence;
 pub use xai_grok_shared::placeholder_images;
 pub mod plan_mode;
+pub(crate) mod plugin_host;
 pub mod prompt_history;
 pub mod prompt_parser;
 pub(crate) mod prompt_timing;

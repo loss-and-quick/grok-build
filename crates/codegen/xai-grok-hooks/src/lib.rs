@@ -42,6 +42,7 @@ pub mod dispatcher;
 mod env_expand;
 pub mod error;
 pub mod event;
+pub mod invoker;
 pub mod matcher;
 pub mod result;
 pub mod runner;

@@ -951,6 +951,13 @@ pub(crate) struct SessionActor {
     /// Shared handle to the agent-level plugin registry.
     /// Used by `/plugins reload` to trigger a rebuild that new sessions see.
     pub(crate) plugin_registry_handle: Option<xai_grok_agent::plugins::SharedPluginRegistryHandle>,
+    /// TS plugin sidecar host for this session, when any loaded plugin declares a
+    /// sidecar (`LoadedPlugin::sidecar_spec()`). `None` when the session has no
+    /// sidecar plugins. Coerces to `Arc<dyn PluginHookInvoker>` for the hook
+    /// runner (see `hook_run_ctx`); disposed on session shutdown. Built once at
+    /// spawn from the initial plugin registry snapshot; not rebuilt on
+    /// `/plugins reload` in Phase 1.
+    pub(crate) plugin_host: Option<std::sync::Arc<xai_grok_plugin_host::PluginHost>>,
     /// Centralized event tracking: event log, turn-end guard, active tool,
     /// doom loop terminate flag. All event-related state lives here.
     pub(crate) events: crate::session::events::EventTracker,
@@ -1356,6 +1363,9 @@ fn load_prompt_context_from_dir(
 #[cfg(test)]
 #[path = "acp_session_tests/client_hooks_tests.rs"]
 mod client_hooks_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/plugin_sidecar_e2e_tests.rs"]
+mod plugin_sidecar_e2e_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;

@@ -96,6 +96,13 @@ impl SessionActor {
         xai_grok_hooks::runner::RunContext {
             session_id: &self.session_info.id.0,
             workspace_root: &self.hook_resolved_workspace_root,
+            // `Arc<PluginHost>` coerces to `Arc<dyn PluginHookInvoker>`; `None`
+            // when the session has no sidecar plugins, in which case any stray
+            // `Plugin` hook spec fails open (as it does with no host wired).
+            plugin_invoker: self
+                .plugin_host
+                .clone()
+                .map(|h| h as std::sync::Arc<dyn xai_grok_hooks::invoker::PluginHookInvoker>),
         }
     }
 

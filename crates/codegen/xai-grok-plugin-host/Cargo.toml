@@ -1,0 +1,43 @@
+[package]
+license = "Apache-2.0"
+edition.workspace = true
+name = "xai-grok-plugin-host"
+version = "0.1.0"
+description = "Sidecar supervisor for grok-build TS plugins: spawns per-plugin runtimes (bun/node/deno), speaks bidirectional JSON-RPC 2.0 over stdio, restarts on crash, and bridges hook invocations onto the plugin wire protocol."
+authors = ["xAI"]
+
+[dependencies]
+# Wire-contract DTOs + the invoker seam are sibling member crates, not
+# `[workspace.dependencies]` entries, so they come in as path deps (mirrors how
+# xai-grok-mcp pulls `xai-file-utils`).
+xai-grok-plugin-protocol = { path = "../xai-grok-plugin-protocol" }
+xai-grok-hooks = { path = "../xai-grok-hooks" }
+
+# Proven cross-platform child-group + TTY-detach helpers (setsid pre_exec,
+# killpg). Reused rather than reimplemented; this is a shared util crate, not the
+# rmcp-coupled `SafeTokioChildProcess`.
+xai-tty-utils = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+which = { workspace = true }
+# Atomic KV persistence (NamedTempFile + persist).
+tempfile = { workspace = true }
+
+[dev-dependencies]
+# `fmt` (pulls `registry`) gives a capturing subscriber for the `log_emit` ->
+# tracing forwarding test; the workspace default set omits it.
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+
+# The `fake_sidecar` fixture bin talks the wire protocol over stdio so the
+# supervisor/sidecar tests never need a real bun/node/deno. Cargo builds all
+# unguarded bins before integration tests and exports `CARGO_BIN_EXE_fake_sidecar`.
+[[bin]]
+name = "fake_sidecar"
+path = "src/bin/fake_sidecar.rs"
+
+[lints]
+workspace = true

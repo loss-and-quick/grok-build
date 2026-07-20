@@ -225,6 +225,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         hook_load_errors: std::cell::RefCell::new(Vec::new()),
         plugin_registry: std::cell::RefCell::new(None),
         plugin_registry_handle: None,
+        plugin_host: None,
         events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
         observability_bridge: noop_observability_bridge(),
         current_turn_number: std::cell::Cell::new(0),

@@ -870,6 +870,9 @@ pub(super) async fn run_session(
                     .sync_loop_cancel { cancel.cancel(); } session.feedback_manager
                     .shutdown(session.upload_queue.get()). await; if ! session.startup_hints
                     .is_subagent { session.persist_background_task_manifest(). await; }
+                    if let Some(plugin_host) = & session.plugin_host {
+                        plugin_host.dispose(). await;
+                    }
                     cleanup_session_scratch(& session); return; } } }
                 }
     }

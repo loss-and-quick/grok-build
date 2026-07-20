@@ -1,0 +1,2 @@
+# ts-rs default export base; real bindings go to sdk/plugin/src/generated (empty here).
+/bindings/

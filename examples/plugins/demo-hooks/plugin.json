@@ -1,0 +1,8 @@
+{
+  "name": "demo-hooks",
+  "version": "0.1.0",
+  "description": "Demo: a TypeScript sidecar plugin exercising the PreToolUse / Stop / SessionStart hooks.",
+  "plugin": "./index.ts",
+  "runtime": "auto",
+  "network": false
+}

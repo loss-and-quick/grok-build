@@ -708,6 +708,8 @@ fn file_registry_with_stop_spec(
         command_raw: Some(script.to_string()),
         url: None,
         url_raw: None,
+        plugin: None,
+        plugin_handler: None,
         timeout_ms: 5000,
         source_dir: std::path::PathBuf::from("/tmp"),
         extra_env: std::collections::HashMap::new(),

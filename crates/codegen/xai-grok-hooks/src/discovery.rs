@@ -928,6 +928,8 @@ mod tests {
             timeout_ms: 5_000,
             source_dir: PathBuf::from("/tmp"),
             extra_env: Default::default(),
+            plugin: None,
+            plugin_handler: None,
         }
     }
 

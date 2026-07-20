@@ -526,6 +526,7 @@ mod tests {
         RunContext {
             session_id: "test-session",
             workspace_root: "/tmp",
+            plugin_invoker: None,
         }
     }
 
@@ -551,6 +552,8 @@ mod tests {
             timeout_ms: 5000,
             source_dir: PathBuf::from("/tmp"),
             extra_env: HashMap::new(),
+            plugin: None,
+            plugin_handler: None,
         }
     }
 
@@ -1158,5 +1161,125 @@ if hook_name == "crasher"),
                 "hub_hook_kind wrong for {event:?}"
             );
         }
+    }
+
+    // --- Plugin-handler dispatch, exercising all three paths via a mock
+    // invoker. The Plugin arm lives in `runner::run_hook`, so a passing tool
+    // (deny), stop (block), and non-blocking (observe) test proves every
+    // dispatch path routes plugin hooks correctly.
+
+    use crate::invoker::{
+        PluginHookFuture, PluginHookInvoker, PluginHookRequest, PluginHookResponse,
+    };
+    use std::sync::Arc;
+
+    struct MockInvoker(PluginHookResponse);
+
+    impl PluginHookInvoker for MockInvoker {
+        fn invoke<'a>(&'a self, _req: PluginHookRequest) -> PluginHookFuture<'a> {
+            let resp = self.0.clone();
+            Box::pin(async move { Ok(resp) })
+        }
+    }
+
+    fn plugin_ctx(response: PluginHookResponse) -> RunContext<'static> {
+        RunContext {
+            session_id: "test-session",
+            workspace_root: "/tmp",
+            plugin_invoker: Some(Arc::new(MockInvoker(response))),
+        }
+    }
+
+    fn plugin_spec(name: &str, event: HookEventName) -> HookSpec {
+        HookSpec {
+            name: name.into(),
+            event,
+            handler_type: crate::config::HandlerType::Plugin,
+            configured_matcher: None,
+            matcher: None,
+            enabled: true,
+            command: None,
+            command_raw: None,
+            url: None,
+            url_raw: None,
+            plugin: Some("guardrails".into()),
+            plugin_handler: None,
+            timeout_ms: 5000,
+            source_dir: PathBuf::from("/tmp"),
+            extra_env: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_deny_on_pre_tool_use() {
+        let registry = registry_from_specs(vec![plugin_spec("guard", HookEventName::PreToolUse)]);
+        let ctx = plugin_ctx(PluginHookResponse::Decision {
+            allow: false,
+            reason: Some("blocked by plugin".into()),
+        });
+        let result =
+            dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("run_terminal_cmd"), &ctx)
+                .await;
+        match result.decision {
+            HookDecision::Deny {
+                ref reason,
+                ref hook_name,
+            } => {
+                assert_eq!(reason, "blocked by plugin");
+                assert_eq!(hook_name, "guard");
+            }
+            ref other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_stop_block_with_additional_context() {
+        let registry = registry_from_specs(vec![plugin_spec("guard", HookEventName::Stop)]);
+        let ctx = plugin_ctx(PluginHookResponse::Stop {
+            block: true,
+            reason: Some("keep going".into()),
+            continue_: None,
+            additional_context: Some("run the tests".into()),
+        });
+        let result = dispatch_stop(&registry, HookEventName::Stop, &stop_envelope(), &ctx).await;
+        assert!(result.wants_continuation());
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(result.blocks[0].reason, "keep going");
+        assert_eq!(result.additional_context, ["run the tests"]);
+    }
+
+    #[tokio::test]
+    async fn plugin_observe_on_non_blocking() {
+        let mut spec = plugin_spec("guard", HookEventName::SessionStart);
+        spec.event = HookEventName::SessionStart;
+        let registry = registry_from_specs(vec![spec]);
+        let ctx = plugin_ctx(PluginHookResponse::Observed);
+        let results = dispatch_non_blocking(
+            &registry,
+            HookEventName::SessionStart,
+            &session_start_envelope(),
+            &ctx,
+        )
+        .await;
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0], HookRunResult::Success { .. }));
+    }
+
+    #[tokio::test]
+    async fn plugin_absent_invoker_fails_open_on_pre_tool_use() {
+        let registry = registry_from_specs(vec![plugin_spec("guard", HookEventName::PreToolUse)]);
+        // `run_ctx()` carries no invoker: the plugin hook fails open (allow).
+        let result = dispatch_pre_tool_use(
+            &registry,
+            &pre_tool_use_envelope("run_terminal_cmd"),
+            &run_ctx(),
+        )
+        .await;
+        assert_eq!(result.decision, HookDecision::Allow);
+        assert!(
+            matches!(&result.results[0], HookRunResult::Failed { hook_name, .. } if hook_name == "guard"),
+            "the missing invoker must be recorded as a failure, got {:?}",
+            result.results
+        );
     }
 }

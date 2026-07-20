@@ -300,6 +300,8 @@ mod tests {
             command_raw: command_raw.map(str::to_string),
             url: url.map(str::to_string),
             url_raw: url_raw.map(str::to_string),
+            plugin: None,
+            plugin_handler: None,
             timeout_ms: 5000,
             source_dir: PathBuf::from("/tmp"),
             extra_env: HashMap::new(),

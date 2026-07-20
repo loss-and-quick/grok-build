@@ -1,10 +1,13 @@
 pub mod command;
 pub mod http;
+pub mod plugin;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::HookSpec;
 use crate::event::HookEventEnvelope;
+use crate::invoker::PluginHookInvoker;
 use serde::Deserialize;
 
 use crate::result::{HookDecision, HttpInfo, StopHookOutcome};
@@ -17,6 +20,10 @@ pub use crate::event::GateKind;
 pub struct RunContext<'a> {
     pub session_id: &'a str,
     pub workspace_root: &'a str,
+    /// Injected bridge for [`HandlerType::Plugin`](crate::config::HandlerType::Plugin)
+    /// hooks. `None` (the default) means no plugin host is wired: plugin hooks
+    /// then fail open. Command/http hooks never consult it.
+    pub plugin_invoker: Option<Arc<dyn PluginHookInvoker>>,
 }
 
 /// Result of running a single hook (any handler type).
@@ -130,5 +137,9 @@ pub async fn run_hook(
             (result, elapsed, None)
         }
         crate::config::HandlerType::Http => http::run_http_hook(spec, envelope, ctx, mode).await,
+        crate::config::HandlerType::Plugin => {
+            let (result, elapsed) = plugin::run_plugin_hook(spec, envelope, ctx, mode).await;
+            (result, elapsed, None)
+        }
     }
 }
