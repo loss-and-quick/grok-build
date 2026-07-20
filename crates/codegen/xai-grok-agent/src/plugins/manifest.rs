@@ -129,6 +129,21 @@ pub enum PathOrInline {
     Inline(serde_json::Value),
 }
 
+/// TypeScript sidecar plugin runtime selection (`plugin.json`'s `runtime` field).
+///
+/// `Auto` (the default) defers to the plugin host's own probe order —
+/// `bun` → `node` (22+) → `deno` — per the Phase 1 plan. Explicit variants
+/// pin the sidecar to a single runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginRuntime {
+    #[default]
+    Auto,
+    Bun,
+    Node,
+    Deno,
+}
+
 /// Parsed plugin manifest from `plugin.json`.
 ///
 /// Forward-compatible: unknown fields are silently ignored via
@@ -167,6 +182,20 @@ pub struct PluginManifest {
     pub mcp_servers: Option<PathOrInline>,
     #[serde(default)]
     pub lsp_servers: Option<PathOrInline>,
+
+    // ── TypeScript sidecar plugin ────────────────────────────────────
+    /// Relative path to the sidecar entry file (e.g. `"./index.ts"`).
+    /// Presence of this field marks the plugin as a TS sidecar plugin.
+    #[serde(default)]
+    pub plugin: Option<String>,
+    /// Sidecar runtime selection. Defaults to `Auto` when `plugin` is set
+    /// but `runtime` is omitted; see [`PluginManifest::runtime_or_default`].
+    #[serde(default)]
+    pub runtime: Option<PluginRuntime>,
+    /// Whether the sidecar's child process may reach the network.
+    /// Defaults to `false`; see [`PluginManifest::network_enabled`].
+    #[serde(default)]
+    pub network: Option<bool>,
 }
 
 impl PluginManifest {
@@ -245,6 +274,51 @@ impl PluginManifest {
         }
     }
 
+    /// Whether the manifest declares a TypeScript sidecar entry (`plugin` field).
+    pub fn has_sidecar(&self) -> bool {
+        self.plugin.is_some()
+    }
+
+    /// Effective sidecar runtime: the manifest's `runtime`, or `Auto` when unset.
+    pub fn runtime_or_default(&self) -> PluginRuntime {
+        self.runtime.unwrap_or_default()
+    }
+
+    /// Effective network flag: the manifest's `network`, or `false` when unset.
+    pub fn network_enabled(&self) -> bool {
+        self.network.unwrap_or(false)
+    }
+
+    /// Resolve the sidecar entry path from the manifest `plugin` field.
+    ///
+    /// Returns `None` when `plugin` is unset, the path is absolute or escapes
+    /// the plugin root (via `..` components — reuses the same
+    /// [`is_path_contained`] containment check as `hooks_path`/`mcp_config_path`),
+    /// or the resolved file does not exist. Like the other component-path
+    /// accessors, existence is checked lazily here rather than eagerly in
+    /// [`PluginManifest::validate`].
+    pub fn sidecar_entry_path(&self, plugin_root: &Path) -> Option<PathBuf> {
+        let entry = self.plugin.as_ref()?;
+        if Path::new(entry).is_absolute() {
+            tracing::warn!(
+                path = entry,
+                plugin_root = %plugin_root.display(),
+                "sidecar plugin path must be relative; skipping"
+            );
+            return None;
+        }
+        let resolved = plugin_root.join(entry);
+        if !is_path_contained(&resolved, plugin_root) {
+            tracing::warn!(
+                path = %resolved.display(),
+                plugin_root = %plugin_root.display(),
+                "sidecar plugin path escapes plugin root; skipping"
+            );
+            return None;
+        }
+        resolved.is_file().then_some(resolved)
+    }
+
     /// Log informational messages about manifest features.
     ///
     /// Called during discovery. Inline hooks and MCP servers are now
@@ -263,6 +337,14 @@ impl PluginManifest {
             tracing::info!(
                 plugin = plugin_name,
                 "plugin uses inline lspServers in manifest"
+            );
+        }
+        if self.has_sidecar() {
+            tracing::info!(
+                plugin = plugin_name,
+                runtime = ?self.runtime_or_default(),
+                network = self.network_enabled(),
+                "plugin declares a TypeScript sidecar entry"
             );
         }
     }
@@ -640,6 +722,9 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
+            plugin: None,
+            runtime: None,
+            network: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1);
@@ -667,6 +752,9 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
+            plugin: None,
+            runtime: None,
+            network: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(dirs.is_empty());
@@ -696,6 +784,9 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
+            plugin: None,
+            runtime: None,
+            network: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(
@@ -725,6 +816,9 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
+            plugin: None,
+            runtime: None,
+            network: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1, "path within plugin root should be accepted");
@@ -754,6 +848,9 @@ mod tests {
             hooks: Some(PathOrInline::Path("../outside-hooks.json".to_string())),
             mcp_servers: None,
             lsp_servers: None,
+            plugin: None,
+            runtime: None,
+            network: None,
         };
         assert!(
             manifest.hooks_path(&root).is_none(),
@@ -784,6 +881,9 @@ mod tests {
             hooks: None,
             mcp_servers: Some(PathOrInline::Path("../outside-mcp.json".to_string())),
             lsp_servers: None,
+            plugin: None,
+            runtime: None,
+            network: None,
         };
         assert!(
             manifest.mcp_config_path(&root).is_none(),
@@ -807,6 +907,9 @@ mod tests {
             hooks: None,
             mcp_servers: Some(PathOrInline::Inline(servers)),
             lsp_servers: None,
+            plugin: None,
+            runtime: None,
+            network: None,
         }
     }
 
@@ -865,5 +968,132 @@ mod tests {
             "foo": { "command": "./server" }
         }));
         assert!(manifest.mcp_config_path(&root).is_none());
+    }
+
+    // ── TS sidecar plugin (`plugin`/`runtime`/`network`) ────────────────
+
+    #[test]
+    fn parse_manifest_with_sidecar_plugin() {
+        let json = r#"{
+            "name": "ts-plugin",
+            "plugin": "./index.ts",
+            "runtime": "bun",
+            "network": true
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.plugin.as_deref(), Some("./index.ts"));
+        assert_eq!(manifest.runtime, Some(PluginRuntime::Bun));
+        assert_eq!(manifest.network, Some(true));
+        assert!(manifest.has_sidecar());
+        assert!(manifest.network_enabled());
+        manifest.validate().unwrap();
+    }
+
+    #[test]
+    fn parse_manifest_sidecar_runtime_spellings() {
+        for (spelling, expected) in [
+            ("auto", PluginRuntime::Auto),
+            ("bun", PluginRuntime::Bun),
+            ("node", PluginRuntime::Node),
+            ("deno", PluginRuntime::Deno),
+        ] {
+            let json = format!(
+                r#"{{"name": "ts-plugin", "plugin": "./index.ts", "runtime": "{spelling}"}}"#
+            );
+            let manifest: PluginManifest = serde_json::from_str(&json).unwrap();
+            assert_eq!(manifest.runtime, Some(expected), "spelling: {spelling}");
+        }
+    }
+
+    #[test]
+    fn sidecar_runtime_defaults_to_auto_when_plugin_set() {
+        let json = r#"{"name": "ts-plugin", "plugin": "./index.ts"}"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.runtime.is_none());
+        assert_eq!(manifest.runtime_or_default(), PluginRuntime::Auto);
+    }
+
+    #[test]
+    fn sidecar_network_defaults_to_false() {
+        let json = r#"{"name": "ts-plugin", "plugin": "./index.ts"}"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.network.is_none());
+        assert!(!manifest.network_enabled());
+    }
+
+    #[test]
+    fn existing_manifest_without_plugin_field_unchanged() {
+        // Manifests authored before the sidecar fields existed must still
+        // parse identically: `plugin`/`runtime`/`network` all default to None.
+        let json = r#"{"name": "my-plugin", "version": "1.0.0"}"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(!manifest.has_sidecar());
+        assert!(manifest.plugin.is_none());
+        assert!(manifest.runtime.is_none());
+        assert!(manifest.network.is_none());
+        manifest.validate().unwrap();
+    }
+
+    #[test]
+    fn sidecar_entry_path_resolves_within_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ts-plugin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.ts"), "export default {};").unwrap();
+
+        let json = r#"{"name": "ts-plugin", "plugin": "./index.ts"}"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let resolved = manifest.sidecar_entry_path(&root);
+        assert_eq!(resolved, Some(root.join("index.ts")));
+    }
+
+    #[test]
+    fn sidecar_entry_path_missing_file_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ts-plugin");
+        std::fs::create_dir_all(&root).unwrap();
+        // index.ts is never written.
+
+        let json = r#"{"name": "ts-plugin", "plugin": "./index.ts"}"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.sidecar_entry_path(&root).is_none());
+    }
+
+    #[test]
+    fn sidecar_entry_path_escape_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ts-plugin");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().join("outside-index.ts");
+        std::fs::write(&outside, "export default {};").unwrap();
+
+        let json = r#"{"name": "ts-plugin", "plugin": "../outside-index.ts"}"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(
+            manifest.sidecar_entry_path(&root).is_none(),
+            "sidecar path escaping plugin root should be rejected"
+        );
+    }
+
+    #[test]
+    fn sidecar_entry_path_absolute_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ts-plugin");
+        std::fs::create_dir_all(&root).unwrap();
+        // Create the file at the absolute path the manifest points to, so a
+        // permissive implementation would otherwise happily resolve it.
+        let absolute_target = tmp.path().join("abs-index.ts");
+        std::fs::write(&absolute_target, "export default {};").unwrap();
+
+        let json = serde_json::json!({
+            "name": "ts-plugin",
+            "plugin": absolute_target.to_string_lossy(),
+        })
+        .to_string();
+        let manifest: PluginManifest = serde_json::from_str(&json).unwrap();
+        assert!(
+            manifest.sidecar_entry_path(&root).is_none(),
+            "absolute sidecar path should be rejected"
+        );
     }
 }

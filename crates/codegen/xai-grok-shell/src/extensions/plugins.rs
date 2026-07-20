@@ -227,6 +227,7 @@ mod tests {
             inline_mcp_servers: None,
             inline_lsp_servers: None,
             conflict: None,
+            sidecar: None,
         }
     }
 

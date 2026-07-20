@@ -165,6 +165,13 @@ impl DiscoveredPlugin {
     pub fn plugin_name(&self) -> &str {
         &self.manifest.name
     }
+
+    /// Resolved absolute path to the TS sidecar entry file, if the manifest
+    /// declares a `plugin` entry. Computed on demand from `manifest`/`root`
+    /// rather than cached as a field (mirrors `plugin_name()` above).
+    pub fn sidecar_entry_path(&self) -> Option<PathBuf> {
+        self.manifest.sidecar_entry_path(&self.root)
+    }
 }
 
 /// Configuration for plugin discovery.
@@ -458,6 +465,7 @@ pub fn discover_plugins(
             has_hooks = p.hooks_path.is_some(),
             has_mcp = p.mcp_config_path.is_some(),
             has_lsp = p.lsp_config_path.is_some(),
+            has_sidecar = p.sidecar_entry_path().is_some(),
             "plugin discovered"
         );
     }
@@ -672,6 +680,9 @@ fn collect_plugin(
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
+                plugin: None,
+                runtime: None,
+                network: None,
             }
         }
         Err(e) => {

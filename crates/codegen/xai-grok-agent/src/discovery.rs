@@ -725,6 +725,7 @@ mod tests {
             inline_mcp_servers: None,
             inline_lsp_servers: None,
             conflict: None,
+            sidecar: None,
         };
 
         let LoadedPlugin { agent_dirs, .. } = loaded;
@@ -744,6 +745,9 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
+                plugin: None,
+                runtime: None,
+                network: None,
             },
             id: PluginId::new(scope, &root, plugin_name),
             root: root.clone(),

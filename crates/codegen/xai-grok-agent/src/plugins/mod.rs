@@ -27,6 +27,6 @@ pub use discovery::{
 };
 pub use hooks_adapter::parse_plugin_hooks;
 pub use install_registry::InstallRegistry;
-pub use manifest::PluginManifest;
-pub use registry::{LoadedPlugin, PluginRegistry, SharedPluginRegistryHandle};
+pub use manifest::{PluginManifest, PluginRuntime};
+pub use registry::{LoadedPlugin, PluginRegistry, SharedPluginRegistryHandle, SidecarSpec};
 pub use trust::TrustStore;

@@ -1601,6 +1601,7 @@ mod tests {
             inline_mcp_servers: None,
             inline_lsp_servers: None,
             conflict: None,
+            sidecar: None,
         };
 
         let mut skills = vec![make_skill(
@@ -1648,6 +1649,9 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
+                plugin: None,
+                runtime: None,
+                network: None,
             },
             id: PluginId::new(PluginScope::User, root, name),
             root: root.to_path_buf(),
@@ -2351,6 +2355,7 @@ mod tests {
             inline_mcp_servers: None,
             inline_lsp_servers: None,
             conflict: None,
+            sidecar: None,
         }
     }
 

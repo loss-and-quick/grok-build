@@ -8,6 +8,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::discovery::{DiscoveredPlugin, PluginId, PluginOrigin, PluginScope};
+use super::manifest::PluginRuntime;
+
+/// Resolved TypeScript sidecar plugin invocation, when the manifest declares
+/// a `plugin` entry (see `PluginManifest::sidecar_entry_path`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarSpec {
+    /// Absolute path to the sidecar entry file (e.g. `<plugin_root>/index.ts`).
+    pub entry: PathBuf,
+    /// Runtime to spawn the sidecar with (`Auto` resolves at spawn time).
+    pub runtime: PluginRuntime,
+    /// Whether the sidecar's child process is allowed network access.
+    pub network: bool,
+}
 
 /// A loaded plugin with resolved components, ready for use by the session.
 #[derive(Debug, Clone)]
@@ -75,6 +88,9 @@ pub struct LoadedPlugin {
     pub inline_lsp_servers: Option<serde_json::Value>,
     /// Warning if this plugin won a name collision with another plugin.
     pub conflict: Option<String>,
+    /// Resolved TS sidecar invocation, when the manifest declares a `plugin`
+    /// entry and the entry file exists. See [`LoadedPlugin::sidecar_spec`].
+    pub sidecar: Option<SidecarSpec>,
 }
 
 impl LoadedPlugin {
@@ -93,6 +109,12 @@ impl LoadedPlugin {
     /// Plugin data dir path as a string (for env var substitution).
     pub fn data_dir_str(&self) -> String {
         self.data_dir().to_string_lossy().to_string()
+    }
+
+    /// Resolved TS sidecar spec (entry path, runtime, network flag), if the
+    /// manifest declares a `plugin` entry and the entry file exists.
+    pub fn sidecar_spec(&self) -> Option<SidecarSpec> {
+        self.sidecar.clone()
     }
 }
 
@@ -167,6 +189,14 @@ impl PluginRegistry {
             let lsp_server_count = count_lsp_servers(&dp);
             let has_inline_lsp_only =
                 dp.lsp_config_path.is_none() && dp.manifest.inline_lsp_servers().is_some();
+            let sidecar = dp
+                .manifest
+                .sidecar_entry_path(&dp.root)
+                .map(|entry| SidecarSpec {
+                    entry,
+                    runtime: dp.manifest.runtime_or_default(),
+                    network: dp.manifest.network_enabled(),
+                });
 
             // Capture inline data before consuming the manifest
             let inline_hooks = dp.manifest.inline_hooks().cloned();
@@ -215,6 +245,7 @@ impl PluginRegistry {
                 inline_mcp_servers,
                 inline_lsp_servers,
                 conflict: dp.conflict,
+                sidecar,
             };
 
             // Track MCP server ownership for enabled + trusted plugins
@@ -647,6 +678,9 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
+                plugin: None,
+                runtime: None,
+                network: None,
             },
             id: PluginId::new(scope, &root, name),
             root: root.clone(),
@@ -1240,6 +1274,94 @@ mod tests {
         assert!(
             reg.active_plugins().is_empty(),
             "untrusted plugin must not appear in active_plugins"
+        );
+    }
+
+    // ── TS sidecar plugin (SidecarSpec) ─────────────────────────────────
+
+    /// Build a [`DiscoveredPlugin`] whose manifest declares a `plugin` sidecar
+    /// entry, rooted at a real tempdir so `sidecar_entry_path`'s existence
+    /// check (and thus `SidecarSpec` resolution) succeeds.
+    fn make_discovered_with_sidecar(root: &Path, name: &str) -> DiscoveredPlugin {
+        DiscoveredPlugin {
+            manifest: PluginManifest {
+                name: name.to_string(),
+                version: None,
+                description: None,
+                author: None,
+                homepage: None,
+                repository: None,
+                license: None,
+                keywords: vec![],
+                skills: None,
+                commands: None,
+                agents: None,
+                hooks: None,
+                mcp_servers: None,
+                lsp_servers: None,
+                plugin: Some("./index.ts".to_string()),
+                runtime: Some(super::super::manifest::PluginRuntime::Bun),
+                network: Some(true),
+            },
+            id: PluginId::new(PluginScope::User, root, name),
+            root: root.to_path_buf(),
+            canonical_root: root.to_path_buf(),
+            scope: PluginScope::User,
+            origin: PluginOrigin::UserGrok,
+            trusted: true,
+            skill_dirs: vec![],
+            command_dirs: vec![],
+            agent_dirs: vec![],
+            hooks_path: None,
+            mcp_config_path: None,
+            lsp_config_path: None,
+            conflict: None,
+        }
+    }
+
+    #[test]
+    fn registry_exposes_sidecar_spec_with_resolved_absolute_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ts-plugin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.ts"), "export default {};").unwrap();
+
+        let dp = make_discovered_with_sidecar(&root, "ts-plugin");
+        let reg = PluginRegistry::from_discovered(vec![dp], &[], &["ts-plugin".to_string()]);
+
+        let plugin = reg.get("ts-plugin").unwrap();
+        let spec = plugin.sidecar_spec().expect("sidecar spec resolved");
+        assert_eq!(spec.entry, root.join("index.ts"));
+        assert!(spec.entry.is_absolute());
+        assert_eq!(spec.runtime, super::super::manifest::PluginRuntime::Bun);
+        assert!(spec.network);
+    }
+
+    #[test]
+    fn registry_sidecar_spec_none_without_plugin_field() {
+        // Existing (non-sidecar) plugins must not spuriously get a SidecarSpec.
+        let dp = make_discovered("plain-plugin", PluginScope::User, true);
+        let reg = PluginRegistry::from_discovered(vec![dp], &[], &["plain-plugin".to_string()]);
+        assert!(reg.get("plain-plugin").unwrap().sidecar_spec().is_none());
+    }
+
+    #[test]
+    fn registry_sidecar_spec_none_when_entry_file_missing() {
+        // `plugin` declared but the entry file doesn't exist on disk: the
+        // sidecar must not resolve (mirrors hooks_path/mcp_config_path laziness).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ts-plugin-missing");
+        std::fs::create_dir_all(&root).unwrap();
+        // index.ts intentionally not written.
+
+        let dp = make_discovered_with_sidecar(&root, "ts-plugin-missing");
+        let reg =
+            PluginRegistry::from_discovered(vec![dp], &[], &["ts-plugin-missing".to_string()]);
+        assert!(
+            reg.get("ts-plugin-missing")
+                .unwrap()
+                .sidecar_spec()
+                .is_none()
         );
     }
 }
