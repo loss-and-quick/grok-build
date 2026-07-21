@@ -36,6 +36,110 @@ for the version of the code present in this tree.
 
 </div>
 
+## About this fork
+
+A fork of [xai-org/grok-build](https://github.com/xai-org/grok-build) that adds
+a TypeScript plugin system.
+
+### Why this fork exists
+
+Upstream grok-build has a strong Rust core — a hooks dispatcher, a subagent
+system, an OS-level sandbox (Landlock on Linux, Seatbelt on macOS), and a
+mature ratatui TUI — but no extensibility short of recompiling the whole
+workspace. This fork adds a TypeScript plugin system on top of that core
+without changing it: plugins run as sidecar processes and talk to the core
+over a versioned JSON-RPC wire contract. A plugin never sees core internals,
+and a plugin crash doesn't take the core down with it.
+
+### What's here now
+
+- `plugin.json` gains a `"plugin": "./index.ts"` sidecar entry. The runtime is
+  auto-discovered in preference order **bun → node (>=22) → deno**, or pinned
+  explicitly via a `"runtime"` field. No vendoring, no embedded JS engine.
+- All 15 hook events bridged from the core's hook dispatcher are available to
+  TS plugins, each with its typed gate semantics: **Observe** (acknowledged,
+  no control), **Tool** (allow/deny a tool call, with a reason), or **Stop**
+  (block the stop and/or inject `additionalContext` into the next turn).
+- Per-plugin KV storage (`ctx.storage`), structured logging (`ctx.log`), and
+  manifest-config access (`ctx.config()`), all over the same RPC channel — no
+  self-managed files or locks in plugin code.
+- Fail-open supervision: a plugin that never starts, times out, or crashes
+  doesn't block the hook it's gating — the host falls back to "no gate
+  applied" and restarts the sidecar with exponential backoff, disabling it
+  after too many consecutive crashes.
+- Network is denied by default (`"network": false` in `plugin.json`). On
+  Linux this is enforced with a per-child seccomp filter installed on the
+  sidecar unless the plugin opts in; this enforcement is not yet wired up on
+  non-Linux hosts.
+- `@grok-build/plugin` ([`sdk/plugin/`](sdk/plugin/)) — the TypeScript SDK:
+  `definePlugin()`, wire types generated from the Rust side, and a typed
+  `ctx` (log/storage/config). No build step: Bun and Deno run the source
+  directly, Node runs it via `--experimental-strip-types`.
+- A reference plugin at
+  [`examples/plugins/demo-hooks/`](examples/plugins/demo-hooks/), with e2e
+  tests asserting its `pre_tool_use`/`stop` behavior matches an equivalent
+  command-hook.
+- A Nix devshell (`nix develop`), a `grok`/`xai-grok-pager` package, and a
+  Home Manager module (`programs.grok-build`, in
+  [`nix/hm-module.nix`](nix/hm-module.nix)) exposing `enable`, `settings`
+  (written to `~/.grok/config.toml`), and `plugins` (deployed to
+  `~/.grok/plugins/<name>/`).
+
+### Planned
+
+- Provider request interception and model fallback.
+- Programmatic subagent orchestration for plugins.
+- OAuth flows via plugins.
+- Plugin TUI panels.
+- WebSocket access to the headless server.
+
+### Quickstart
+
+```sh
+nix develop                                  # toolchain + bun/node/deno, see nix/shells.nix
+cargo build -p xai-grok-pager-bin --release  # build the grok binary
+```
+
+A plugin is a directory with a `plugin.json` and an entry file:
+
+```json
+{
+  "name": "my-plugin",
+  "plugin": "./index.ts"
+}
+```
+
+```ts
+import { definePlugin, allow, deny } from "@grok-build/plugin";
+
+definePlugin({
+  name: "my-plugin",
+  hooks: {
+    pre_tool_use: (payload, ctx) => {
+      // inspect payload; use ctx.log / ctx.storage / ctx.config() as needed
+      return allow();
+    },
+  },
+});
+```
+
+See [`examples/plugins/demo-hooks/`](examples/plugins/demo-hooks/) for a
+fuller reference plugin and [`sdk/plugin/README.md`](sdk/plugin/README.md)
+for the full SDK surface.
+
+Plugins are discovered from, in priority order: `--plugin-dir`,
+`.grok/plugins/*/` (project scope, walked up to the worktree root),
+`~/.grok/plugins/*/` (user scope, always trusted), and `[plugins].paths` in
+config. `.claude/plugins/` paths are also read for compatibility.
+
+### Relationship to upstream
+
+Upstream syncs continue as before. Core crate names (`xai-grok-*`) are
+unchanged. The plugin system lives in its own crates
+(`xai-grok-plugin-host`, `xai-grok-plugin-protocol`) plus a thin
+`HandlerType::Plugin` seam added to the existing hooks dispatcher — the
+plugin surface is additive and nothing upstream depends on it.
+
 ---
 
 ## Installing the released binary
