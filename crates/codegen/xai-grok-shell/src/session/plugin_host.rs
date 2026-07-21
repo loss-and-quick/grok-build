@@ -139,7 +139,7 @@ pub(crate) fn build_session_plugin_host(
                 // paths). When one lands, forward it here so `initialize` and
                 // `config_get` see the plugin's own config instead of `{}`.
                 config: serde_json::json!({}),
-                declared_tools: Vec::new(),
+                declared_tools: spec.tools.iter().map(|t| t.name.clone()).collect(),
                 workspace_root: workspace_root.clone(),
                 session_id: session_id.to_string(),
                 leader_socket: leader_socket.clone(),
@@ -410,6 +410,230 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
     }
 }
 
+/// One manifest-declared sidecar tool prepared for catalog registration:
+/// the qualified name, the dispatching [`PluginSidecarTool`], and the input
+/// schema forwarded to the model.
+pub(crate) struct PluginToolRegistration {
+    pub(crate) qualified_name: String,
+    pub(crate) tool: PluginSidecarTool,
+    pub(crate) input_schema: serde_json::Value,
+}
+
+/// Build the tool-catalog registrations for every active sidecar plugin that
+/// declares manifest tools. Pure (no registration side effects) so it is unit
+/// testable; the session spawn path feeds the result to
+/// `ToolBridge::register_mcp_tools`, which is the exact channel MCP tools ride —
+/// the model sees `<plugin>__<tool>` names, and permission checks plus
+/// pre/post_tool_use hooks apply on the shared dispatch path with no extra
+/// wiring (the name parses as an MCP qualified name → `AccessKind::MCPTool`).
+///
+/// Invalid qualified names (should be impossible after manifest validation,
+/// but the MCP-side validator is authoritative) are warned about and skipped,
+/// mirroring `McpTool::into_registration`.
+pub(crate) fn plugin_sidecar_tool_registrations(
+    registry: &PluginRegistry,
+    host: &Arc<PluginHost>,
+    session_id: &str,
+    agent: &str,
+    fallback_cwd: &str,
+) -> Vec<PluginToolRegistration> {
+    let mut out = Vec::new();
+    for plugin in registry.active_plugins() {
+        let Some(spec) = plugin.sidecar_spec() else {
+            continue;
+        };
+        for tool in &spec.tools {
+            if let Some(reg) = sidecar_tool_registration(
+                &plugin.name,
+                tool,
+                host,
+                session_id,
+                agent,
+                fallback_cwd,
+            ) {
+                out.push(reg);
+            }
+        }
+    }
+    out
+}
+
+/// Build one catalog registration for a validated manifest tool, or `None`
+/// (with a warning) when the qualified name fails the authoritative MCP-side
+/// validators. Split out of [`plugin_sidecar_tool_registrations`] for direct
+/// unit testing.
+fn sidecar_tool_registration(
+    plugin_name: &str,
+    tool: &xai_grok_agent::plugins::SidecarToolSpec,
+    host: &Arc<PluginHost>,
+    session_id: &str,
+    agent: &str,
+    fallback_cwd: &str,
+) -> Option<PluginToolRegistration> {
+    use crate::session::mcp_servers::{
+        MCP_TOOL_NAME_DELIMITER, parse_mcp_tool_name, validate_tool_name,
+    };
+
+    let qualified_name = format!("{plugin_name}{MCP_TOOL_NAME_DELIMITER}{}", tool.name);
+    if parse_mcp_tool_name(&qualified_name).is_none() {
+        tracing::warn!(plugin = %plugin_name, tool = %tool.name,
+            "skipping sidecar tool with ambiguous qualified name");
+        return None;
+    }
+    if let Err(reason) = validate_tool_name(&qualified_name) {
+        tracing::warn!(plugin = %plugin_name, tool = %tool.name, reason = %reason,
+            "skipping sidecar tool with invalid name");
+        return None;
+    }
+    Some(PluginToolRegistration {
+        qualified_name,
+        tool: PluginSidecarTool {
+            host: Arc::clone(host),
+            plugin: plugin_name.to_string(),
+            tool: tool.name.clone(),
+            description: tool.description.clone(),
+            timeout_ms: tool.timeout_ms,
+            session_id: session_id.to_string(),
+            agent: agent.to_string(),
+            fallback_cwd: fallback_cwd.to_string(),
+        },
+        input_schema: tool.input_schema.clone(),
+    })
+}
+
+/// A manifest-declared plugin tool in the session tool catalog. Dispatch is
+/// the `tool_invoke` RPC: the handler runs in the plugin's sidecar with the
+/// full plugin context (storage/agents/config/log) plus the per-call context
+/// assembled here — {session_id, cwd, agent}, with cwd resolved per call
+/// (`Cwd` override first, then the session resources), so a handler can key
+/// its state per project and per caller.
+pub(crate) struct PluginSidecarTool {
+    host: Arc<PluginHost>,
+    /// Owning plugin (= the `server` half of the qualified name).
+    plugin: String,
+    /// Bare tool name as declared in the manifest.
+    tool: String,
+    description: String,
+    /// Per-tool deadline from the manifest; `0` → host default.
+    timeout_ms: u64,
+    session_id: String,
+    /// `"main"` for the root session, otherwise the subagent type label.
+    agent: String,
+    /// Session cwd used when the runtime context carries none.
+    fallback_cwd: String,
+}
+
+impl std::fmt::Debug for PluginSidecarTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginSidecarTool")
+            .field("plugin", &self.plugin)
+            .field("tool", &self.tool)
+            .finish()
+    }
+}
+
+impl xai_grok_tools::types::tool_metadata::ToolMetadata for PluginSidecarTool {
+    fn kind(&self) -> xai_grok_tools::types::tool::ToolKind {
+        xai_grok_tools::types::tool::ToolKind::Other
+    }
+
+    fn tool_namespace(&self) -> xai_grok_tools::types::tool::ToolNamespace {
+        xai_grok_tools::types::tool::ToolNamespace::MCP
+    }
+
+    fn description_template(&self) -> &str {
+        &self.description
+    }
+}
+
+impl xai_tool_runtime::Tool for PluginSidecarTool {
+    type Args = serde_json::Value;
+    type Output = xai_grok_tools::types::output::ToolOutput;
+
+    fn id(&self) -> xai_tool_protocol::ToolId {
+        // Qualified so two plugins exposing the same bare tool name get
+        // distinct LocalRegistry entries (mirrors `McpErasedTool::id`).
+        let qualified = format!(
+            "{}{}{}",
+            self.plugin,
+            crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER,
+            self.tool
+        );
+        xai_tool_protocol::ToolId::new(&qualified)
+            .unwrap_or_else(|_| xai_tool_protocol::ToolId::new("plugin_tool").expect("valid"))
+    }
+
+    fn description(
+        &self,
+        _ctx: &xai_tool_runtime::ListToolsContext,
+    ) -> xai_tool_types::ToolDescription {
+        xai_tool_types::ToolDescription::new(&self.tool, &self.description)
+    }
+
+    async fn run(
+        &self,
+        ctx: xai_tool_runtime::ToolCallContext,
+        raw: serde_json::Value,
+    ) -> Result<xai_grok_tools::types::output::ToolOutput, xai_tool_runtime::ToolError> {
+        use xai_grok_tools::types::output::{MCPOutput, ToolOutput};
+
+        // Per-call cwd: the dispatch layer's `Cwd` override wins, then the
+        // session resources' cwd, then the registration-time fallback.
+        let cwd = match xai_grok_tools::types::tool_metadata::shared_resources(&ctx) {
+            Ok(resources) => {
+                xai_grok_tools::types::tool_metadata::resolve_cwd(&ctx, &resources)
+                    .await
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| self.fallback_cwd.clone())
+            }
+            Err(_) => ctx
+                .extensions
+                .get::<xai_tool_runtime::Cwd>()
+                .map(|c| c.0.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.fallback_cwd.clone()),
+        };
+
+        let call_context = xai_grok_plugin_host::ToolCallContextDto {
+            session_id: self.session_id.clone(),
+            cwd,
+            agent: self.agent.clone(),
+        };
+
+        match self
+            .host
+            .invoke_tool(
+                &self.plugin,
+                &self.tool,
+                raw,
+                call_context,
+                self.timeout_ms,
+            )
+            .await
+        {
+            // Handler-reported failure: an ordinary error tool result, the
+            // same shape an MCP tool error takes in the conversation.
+            Ok(result) if result.is_error => Ok(ToolOutput::MCP(MCPOutput::errored(
+                self.tool.clone(),
+                self.plugin.clone(),
+                result.content,
+            ))),
+            Ok(result) => Ok(ToolOutput::MCP(MCPOutput::okay_output(
+                self.tool.clone(),
+                self.plugin.clone(),
+                result.content,
+            ))),
+            // Infrastructure failure (timeout, sidecar crash, disabled
+            // plugin): a ToolError, so the model sees the failure and the
+            // post_tool_use_failure path fires — never a hang (the host's
+            // deadline already bounded the wait).
+            Err(e) => Err(xai_tool_runtime::ToolError::custom(
+                "plugin_tool",
+                e.message,
+            )),
+        }
+    }
+}
+
 /// `permission_ask` seam over the session plugin host, handed to the permission
 /// manager so a plugin can allow/deny a guarded tool call before the interactive
 /// prompt (see `xai_grok_workspace::permission::PermissionAskHook`).
@@ -520,5 +744,58 @@ mod tests {
         assert_eq!(runtime_kind(PluginRuntime::Bun), RuntimeKind::Bun);
         assert_eq!(runtime_kind(PluginRuntime::Node), RuntimeKind::Node);
         assert_eq!(runtime_kind(PluginRuntime::Deno), RuntimeKind::Deno);
+    }
+
+    fn tool_spec(name: &str) -> xai_grok_agent::plugins::SidecarToolSpec {
+        xai_grok_agent::plugins::SidecarToolSpec {
+            name: name.to_string(),
+            description: "a tool".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            timeout_ms: 0,
+        }
+    }
+
+    fn test_host() -> Arc<PluginHost> {
+        Arc::new(PluginHost::new(std::env::temp_dir().join("plugin-tool-test")))
+    }
+
+    #[test]
+    fn sidecar_tool_registration_uses_mcp_qualified_name() {
+        let host = test_host();
+        let reg = sidecar_tool_registration(
+            "demo-hooks",
+            &tool_spec("echo"),
+            &host,
+            "sess-1",
+            "main",
+            "/ws",
+        )
+        .expect("valid tool registers");
+        // Exactly the MCP convention: `<server>__<tool>` with the plugin as
+        // the server half — permission matchers and the `AccessKind::MCPTool`
+        // classification apply unchanged.
+        assert_eq!(reg.qualified_name, "demo-hooks__echo");
+        assert_eq!(reg.input_schema["type"], "object");
+        use xai_tool_runtime::Tool as _;
+        assert_eq!(reg.tool.id().as_str(), "demo-hooks__echo");
+    }
+
+    #[test]
+    fn sidecar_tool_registration_rejects_ambiguous_names() {
+        let host = test_host();
+        // A bare name containing `__` would make the qualified name ambiguous
+        // to split; the manifest validator already drops it, and this seam
+        // (the authoritative MCP-side check) must also refuse it.
+        assert!(
+            sidecar_tool_registration(
+                "demo-hooks",
+                &tool_spec("has__delim"),
+                &host,
+                "sess-1",
+                "main",
+                "/ws",
+            )
+            .is_none()
+        );
     }
 }

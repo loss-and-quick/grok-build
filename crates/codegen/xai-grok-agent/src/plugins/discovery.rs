@@ -683,6 +683,7 @@ fn collect_plugin(
                 plugin: None,
                 runtime: None,
                 network: None,
+                tools: None,
             }
         }
         Err(e) => {

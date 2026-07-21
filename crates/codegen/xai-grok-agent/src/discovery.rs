@@ -748,6 +748,7 @@ mod tests {
                 plugin: None,
                 runtime: None,
                 network: None,
+                tools: None,
             },
             id: PluginId::new(scope, &root, plugin_name),
             root: root.clone(),

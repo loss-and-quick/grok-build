@@ -20,6 +20,10 @@ pub struct SidecarSpec {
     pub runtime: PluginRuntime,
     /// Whether the sidecar's child process is allowed network access.
     pub network: bool,
+    /// Validated model-visible tools from the manifest's `tools` array,
+    /// registered in the session tool catalog as `<plugin>__<name>` and
+    /// executed in the sidecar via `tool_invoke`.
+    pub tools: Vec<super::manifest::SidecarToolSpec>,
 }
 
 /// A loaded plugin with resolved components, ready for use by the session.
@@ -196,6 +200,7 @@ impl PluginRegistry {
                     entry,
                     runtime: dp.manifest.runtime_or_default(),
                     network: dp.manifest.network_enabled(),
+                    tools: dp.manifest.sidecar_tools(),
                 });
 
             // Capture inline data before consuming the manifest
@@ -681,6 +686,7 @@ mod tests {
                 plugin: None,
                 runtime: None,
                 network: None,
+                tools: None,
             },
             id: PluginId::new(scope, &root, name),
             root: root.clone(),
@@ -1302,6 +1308,12 @@ mod tests {
                 plugin: Some("./index.ts".to_string()),
                 runtime: Some(super::super::manifest::PluginRuntime::Bun),
                 network: Some(true),
+                tools: Some(vec![super::super::manifest::ManifestToolSpec {
+                    name: "echo".to_string(),
+                    description: Some("echo back".to_string()),
+                    input_schema: None,
+                    timeout_ms: Some(1_000),
+                }]),
             },
             id: PluginId::new(PluginScope::User, root, name),
             root: root.to_path_buf(),
@@ -1335,6 +1347,12 @@ mod tests {
         assert!(spec.entry.is_absolute());
         assert_eq!(spec.runtime, super::super::manifest::PluginRuntime::Bun);
         assert!(spec.network);
+        // Manifest tools flow through, validated and defaulted.
+        assert_eq!(spec.tools.len(), 1);
+        assert_eq!(spec.tools[0].name, "echo");
+        assert_eq!(spec.tools[0].description, "echo back");
+        assert_eq!(spec.tools[0].timeout_ms, 1_000);
+        assert_eq!(spec.tools[0].input_schema["type"], "object");
     }
 
     #[test]

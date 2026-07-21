@@ -1162,6 +1162,40 @@ pub(crate) async fn spawn_session_actor(
             .unwrap_or_default();
         slot.attach(host.clone(), plugin_names);
     }
+    // Manifest-declared sidecar tools enter the session tool catalog here, on
+    // the same dynamic-registration path as MCP tools (`register_mcp_tools`),
+    // under `<plugin>__<tool>` names — so permission checks (AccessKind::
+    // MCPTool) and pre/post_tool_use hooks apply on the shared dispatch path.
+    // Dispatch is `PluginHost::invoke_tool`; the sidecar still starts lazily,
+    // on the first call.
+    if let (Some(host), Some(registry)) = (&built_plugin_host, plugin_registry.as_deref()) {
+        let agent_label = if startup_hints.is_subagent {
+            startup_hints
+                .subagent_type
+                .clone()
+                .unwrap_or_else(|| agent.definition().name.clone())
+        } else {
+            "main".to_string()
+        };
+        for reg in crate::session::plugin_host::plugin_sidecar_tool_registrations(
+            registry,
+            host,
+            &session_info.id.0,
+            &agent_label,
+            &session_info.cwd,
+        ) {
+            let name = reg.qualified_name.clone();
+            if let Err(e) = agent
+                .tool_bridge()
+                .register_mcp_tools(reg.qualified_name, reg.tool, Some(reg.input_schema))
+                .await
+            {
+                tracing::warn!(tool = %name, "failed to register plugin sidecar tool: {e}");
+            } else {
+                tracing::info!(tool = %name, "registered plugin sidecar tool");
+            }
+        }
+    }
     let workspace_ops_for_handle = workspace_ops.clone();
     // Snapshot for `SessionHandle`: the coordinator-side `subagent_resolve`
     // seam dispatches through this invoker (the actor keeps the owning Arc).

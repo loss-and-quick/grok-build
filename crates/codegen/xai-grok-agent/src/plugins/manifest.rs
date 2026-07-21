@@ -196,6 +196,59 @@ pub struct PluginManifest {
     /// Defaults to `false`; see [`PluginManifest::network_enabled`].
     #[serde(default)]
     pub network: Option<bool>,
+    /// Model-visible tools the sidecar serves via `tool_invoke`. The manifest
+    /// is the source of truth for the tool catalog (built before any sidecar
+    /// starts, so lazy sidecar start survives); the SDK-side handler map is
+    /// cross-checked against it at handshake. See
+    /// [`PluginManifest::sidecar_tools`].
+    #[serde(default)]
+    pub tools: Option<Vec<ManifestToolSpec>>,
+}
+
+/// One model-visible tool declared in a sidecar plugin's manifest (`tools`
+/// array). The shell registers it in the session tool catalog under the
+/// MCP-style qualified name `<plugin>__<name>`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestToolSpec {
+    /// Bare tool name (no plugin prefix). Same charset as an MCP tool name;
+    /// must not contain `__` (the qualified-name delimiter).
+    pub name: String,
+    /// Description shown to the model.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// JSON Schema for the tool input. Defaults to an open object schema.
+    #[serde(default)]
+    pub input_schema: Option<serde_json::Value>,
+    /// Per-tool `tool_invoke` deadline override in milliseconds (0/absent →
+    /// the host default).
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// A validated sidecar tool ready for catalog registration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    /// `0` → the host's default tool timeout.
+    pub timeout_ms: u64,
+}
+
+/// Max length of a bare sidecar tool name.
+const MAX_TOOL_NAME_LEN: usize = 64;
+
+/// Whether `name` is a valid bare sidecar tool name: 1-64 chars of
+/// `[a-zA-Z0-9_-]`, without the `__` qualified-name delimiter (which would
+/// make `<plugin>__<tool>` ambiguous to split).
+fn is_valid_sidecar_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_TOOL_NAME_LEN
+        && !name.contains("__")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 impl PluginManifest {
@@ -287,6 +340,60 @@ impl PluginManifest {
     /// Effective network flag: the manifest's `network`, or `false` when unset.
     pub fn network_enabled(&self) -> bool {
         self.network.unwrap_or(false)
+    }
+
+    /// Validated sidecar tools from the manifest's `tools` array.
+    ///
+    /// Follows the component-loading convention: invalid entries (bad name,
+    /// non-object schema) are warned about and skipped rather than failing
+    /// the whole plugin, and a `tools` array without a sidecar entry is
+    /// meaningless (nothing would serve `tool_invoke`) so it yields nothing.
+    pub fn sidecar_tools(&self) -> Vec<SidecarToolSpec> {
+        let Some(tools) = &self.tools else {
+            return Vec::new();
+        };
+        if !self.has_sidecar() {
+            if !tools.is_empty() {
+                tracing::warn!(
+                    plugin = %self.name,
+                    "manifest declares tools but no sidecar entry (`plugin`); ignoring them"
+                );
+            }
+            return Vec::new();
+        }
+        let mut out: Vec<SidecarToolSpec> = Vec::new();
+        for tool in tools {
+            if !is_valid_sidecar_tool_name(&tool.name) {
+                tracing::warn!(
+                    plugin = %self.name,
+                    tool = %tool.name,
+                    "skipping sidecar tool with invalid name (1-{MAX_TOOL_NAME_LEN} chars of \
+                     [a-zA-Z0-9_-], no `__`)"
+                );
+                continue;
+            }
+            if out.iter().any(|t| t.name == tool.name) {
+                tracing::warn!(plugin = %self.name, tool = %tool.name,
+                    "skipping duplicate sidecar tool declaration");
+                continue;
+            }
+            let input_schema = match &tool.input_schema {
+                Some(schema) if schema.is_object() => schema.clone(),
+                Some(_) => {
+                    tracing::warn!(plugin = %self.name, tool = %tool.name,
+                        "skipping sidecar tool: inputSchema must be a JSON object");
+                    continue;
+                }
+                None => serde_json::json!({ "type": "object", "properties": {} }),
+            };
+            out.push(SidecarToolSpec {
+                name: tool.name.clone(),
+                description: tool.description.clone().unwrap_or_default(),
+                input_schema,
+                timeout_ms: tool.timeout_ms.unwrap_or(0),
+            });
+        }
+        out
     }
 
     /// Resolve the sidecar entry path from the manifest `plugin` field.
@@ -725,6 +832,7 @@ mod tests {
             plugin: None,
             runtime: None,
             network: None,
+            tools: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1);
@@ -755,6 +863,7 @@ mod tests {
             plugin: None,
             runtime: None,
             network: None,
+            tools: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(dirs.is_empty());
@@ -787,6 +896,7 @@ mod tests {
             plugin: None,
             runtime: None,
             network: None,
+            tools: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(
@@ -819,6 +929,7 @@ mod tests {
             plugin: None,
             runtime: None,
             network: None,
+            tools: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1, "path within plugin root should be accepted");
@@ -851,6 +962,7 @@ mod tests {
             plugin: None,
             runtime: None,
             network: None,
+            tools: None,
         };
         assert!(
             manifest.hooks_path(&root).is_none(),
@@ -884,6 +996,7 @@ mod tests {
             plugin: None,
             runtime: None,
             network: None,
+            tools: None,
         };
         assert!(
             manifest.mcp_config_path(&root).is_none(),
@@ -910,6 +1023,7 @@ mod tests {
             plugin: None,
             runtime: None,
             network: None,
+            tools: None,
         }
     }
 
@@ -1094,6 +1208,72 @@ mod tests {
         assert!(
             manifest.sidecar_entry_path(&root).is_none(),
             "absolute sidecar path should be rejected"
+        );
+    }
+
+    #[test]
+    fn sidecar_tools_parse_with_defaults_and_camel_case() {
+        let json = r#"{
+            "name": "toolful",
+            "plugin": "./index.ts",
+            "tools": [
+                {
+                    "name": "planner",
+                    "description": "Plan a change",
+                    "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } },
+                    "timeoutMs": 300000
+                },
+                { "name": "bare_tool" }
+            ]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let tools = manifest.sidecar_tools();
+        assert_eq!(tools.len(), 2);
+
+        assert_eq!(tools[0].name, "planner");
+        assert_eq!(tools[0].description, "Plan a change");
+        assert_eq!(tools[0].timeout_ms, 300_000);
+        assert!(tools[0].input_schema["properties"]["q"].is_object());
+
+        // Omitted fields default: empty description, open object schema,
+        // timeout 0 (host default).
+        assert_eq!(tools[1].name, "bare_tool");
+        assert_eq!(tools[1].description, "");
+        assert_eq!(tools[1].timeout_ms, 0);
+        assert_eq!(tools[1].input_schema["type"], "object");
+    }
+
+    #[test]
+    fn sidecar_tools_skip_invalid_entries() {
+        let json = r#"{
+            "name": "toolful",
+            "plugin": "./index.ts",
+            "tools": [
+                { "name": "ok-tool" },
+                { "name": "" },
+                { "name": "has__delimiter" },
+                { "name": "bad name!" },
+                { "name": "ok-tool" },
+                { "name": "bad-schema", "inputSchema": "not-an-object" }
+            ]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let tools = manifest.sidecar_tools();
+        // Only the first `ok-tool` survives: empty / `__` / bad charset /
+        // duplicate / non-object schema are each warned and skipped.
+        assert_eq!(
+            tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            vec!["ok-tool"]
+        );
+    }
+
+    #[test]
+    fn sidecar_tools_without_sidecar_entry_are_ignored() {
+        let json = r#"{ "name": "no-sidecar", "tools": [{ "name": "ghost" }] }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(
+            manifest.sidecar_tools().is_empty(),
+            "tools without a `plugin` sidecar entry have nothing to serve them"
         );
     }
 }

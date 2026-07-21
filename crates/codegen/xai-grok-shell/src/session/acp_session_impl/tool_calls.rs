@@ -793,7 +793,17 @@ impl SessionActor {
             let _span = tracing::info_span!("tool.refresh_managed_mcp").entered();
             self.refresh_managed_mcp_if_stale().await;
         }
-        if is_mcp_tool && !self.mcp_state.lock().await.is_initialized() {
+        // Plugin sidecar tools share the MCP qualified-name shape
+        // (`plugin__tool`) but are registered in the catalog at session spawn,
+        // independent of MCP server init — a name already present in the
+        // bridge must not wait on (or be failed by) MCP initialization.
+        let already_in_catalog = self
+            .agent
+            .borrow()
+            .tool_bridge()
+            .tool_kind(&call.function.name)
+            .is_some();
+        if is_mcp_tool && !already_in_catalog && !self.mcp_state.lock().await.is_initialized() {
             match self.mcp_strategy {
                 McpInitStrategy::Blocking => {
                     let _span = tracing::info_span!("tool.wait_mcp_init").entered();
