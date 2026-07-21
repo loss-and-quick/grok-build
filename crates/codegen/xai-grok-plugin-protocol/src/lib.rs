@@ -352,6 +352,185 @@ pub struct ConfigGetResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// agent_* (plugin→core requests) — subagent orchestration.
+//
+// A plugin spawns real children of its session (they route through the same
+// coordinator as model-initiated Task spawns and are visible in the TUI like
+// any other subagent). Progress delivery is cursor-based polling
+// (`agent_events`), not server→plugin notifications: the capability server is
+// transport-agnostic request/reply, and poll state survives sidecar restarts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `agent_spawn` request params. Plugin→core. `agent_type` defaults to
+/// `general-purpose`; `timeout_ms` (per-spawn) auto-cancels the subagent when
+/// it has not finished in time. The spawn is validated exactly like a
+/// model-initiated Task call (type allow-list, toggle, model catalog);
+/// validation failures surface as the terminal result of `agent_wait`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+pub struct AgentSpawnParams {
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    pub prompt: String,
+    /// Short human-readable description shown in the TUI. Defaults to a
+    /// plugin-derived label.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Model override, validated against the model catalog.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Working directory for the child session (defaults to the parent's).
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Per-spawn budget: when set, the host cancels the subagent after this
+    /// many milliseconds and reports a `cancelled` terminal result.
+    #[serde(default)]
+    #[ts(type = "number | null", optional = nullable)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// `agent_spawn` reply. Plugin→core. `id` keys every other `agent_*` call.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AgentSpawnResult {
+    pub id: String,
+}
+
+/// Subagent lifecycle status. Shared vocabulary, plugin→core.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub enum AgentStatusDto {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// `agent_wait` request params. Plugin→core. `timeout_ms` defaults to 30 000;
+/// on timeout the reply carries `status: running` (poll again or cancel).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+pub struct AgentWaitParams {
+    pub id: String,
+    #[serde(default)]
+    #[ts(type = "number | null", optional = nullable)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// `agent_wait` reply. Plugin→core. Terminal when `status != running`:
+/// `output`/`error` and the usage counters are then populated inline.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+pub struct AgentWaitResult {
+    pub status: AgentStatusDto,
+    #[serde(default)]
+    pub output: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[ts(type = "number")]
+    pub tokens_used: u64,
+    #[ts(type = "number")]
+    pub duration_ms: u64,
+    pub tool_calls: u32,
+    pub turns: u32,
+}
+
+/// `agent_events` request params. Plugin→core. Cursor-based long-poll:
+/// `cursor` is the first sequence number the caller has not seen (start at 0);
+/// `timeout_ms` (default 0 = reply immediately) bounds how long the host may
+/// hold the request open waiting for a new event.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+pub struct AgentEventsParams {
+    pub id: String,
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub cursor: u64,
+    #[serde(default)]
+    #[ts(type = "number | null", optional = nullable)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Kind of one subagent progress event. Shared vocabulary, plugin→core.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub enum AgentEventKindDto {
+    /// The spawn was accepted (seq 0; `data` carries the resolved request).
+    Spawned,
+    /// Live counters changed (`data`: turns, tool_calls, tokens_used, …).
+    Progress,
+    /// Terminal (`data`: the same summary `agent_wait` returns).
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// One subagent progress event. Plugin→core.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AgentEventDto {
+    #[ts(type = "number")]
+    pub seq: u64,
+    pub kind: AgentEventKindDto,
+    #[ts(type = "unknown")]
+    pub data: serde_json::Value,
+}
+
+/// `agent_events` reply. Plugin→core. `next_cursor` is the cursor for the
+/// next call; `done` is set once a terminal event exists (stop polling). The
+/// per-subagent buffer is capped: a slow consumer may observe a seq gap
+/// (oldest progress events dropped first).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AgentEventsResult {
+    #[serde(default)]
+    pub events: Vec<AgentEventDto>,
+    #[ts(type = "number")]
+    pub next_cursor: u64,
+    pub done: bool,
+}
+
+/// `agent_list` request params (empty). Plugin→core.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AgentListParams {}
+
+/// `agent_list` reply. Plugin→core. Spawnable agent types for this session
+/// (sorted; filtered by config toggles).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AgentListResult {
+    #[serde(default)]
+    pub agents: Vec<String>,
+}
+
+/// `agent_cancel` request params. Plugin→core.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AgentCancelParams {
+    pub id: String,
+}
+
+/// `agent_cancel` outcome. Plugin→core.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub enum AgentCancelOutcomeDto {
+    Cancelled,
+    AlreadyFinished,
+    NotFound,
+}
+
+/// `agent_cancel` reply. Plugin→core.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AgentCancelResult {
+    pub outcome: AgentCancelOutcomeDto,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ts-rs export
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -393,6 +572,20 @@ mod bindings_export {
             StorageListResult,
             ConfigGetParams,
             ConfigGetResult,
+            AgentSpawnParams,
+            AgentSpawnResult,
+            AgentStatusDto,
+            AgentWaitParams,
+            AgentWaitResult,
+            AgentEventsParams,
+            AgentEventKindDto,
+            AgentEventDto,
+            AgentEventsResult,
+            AgentListParams,
+            AgentListResult,
+            AgentCancelParams,
+            AgentCancelOutcomeDto,
+            AgentCancelResult,
         );
     }
 }
@@ -593,6 +786,136 @@ mod tests {
             },
             json!({ "value": { "on": true } }),
         );
+    }
+
+    #[test]
+    fn agent_rpc_round_trip() {
+        round_trip(
+            &AgentSpawnParams {
+                agent_type: Some("explore".into()),
+                prompt: "map the repo".into(),
+                description: Some("mapper".into()),
+                model: None,
+                cwd: None,
+                timeout_ms: Some(60_000),
+            },
+            json!({
+                "agent_type": "explore",
+                "prompt": "map the repo",
+                "description": "mapper",
+                "model": null,
+                "cwd": null,
+                "timeout_ms": 60000,
+            }),
+        );
+        round_trip(&AgentSpawnResult { id: "a-1".into() }, json!({ "id": "a-1" }));
+
+        round_trip(
+            &AgentWaitParams {
+                id: "a-1".into(),
+                timeout_ms: None,
+            },
+            json!({ "id": "a-1", "timeout_ms": null }),
+        );
+        round_trip(
+            &AgentWaitResult {
+                status: AgentStatusDto::Completed,
+                output: Some("done".into()),
+                error: None,
+                tokens_used: 1234,
+                duration_ms: 9000,
+                tool_calls: 7,
+                turns: 3,
+            },
+            json!({
+                "status": "completed",
+                "output": "done",
+                "error": null,
+                "tokens_used": 1234,
+                "duration_ms": 9000,
+                "tool_calls": 7,
+                "turns": 3,
+            }),
+        );
+
+        round_trip(
+            &AgentEventsParams {
+                id: "a-1".into(),
+                cursor: 2,
+                timeout_ms: Some(500),
+            },
+            json!({ "id": "a-1", "cursor": 2, "timeout_ms": 500 }),
+        );
+        round_trip(
+            &AgentEventsResult {
+                events: vec![AgentEventDto {
+                    seq: 2,
+                    kind: AgentEventKindDto::Progress,
+                    data: json!({ "turns": 1 }),
+                }],
+                next_cursor: 3,
+                done: false,
+            },
+            json!({
+                "events": [{ "seq": 2, "kind": "progress", "data": { "turns": 1 } }],
+                "next_cursor": 3,
+                "done": false,
+            }),
+        );
+
+        round_trip(&AgentListParams {}, json!({}));
+        round_trip(
+            &AgentListResult {
+                agents: vec!["Explore".into(), "general-purpose".into()],
+            },
+            json!({ "agents": ["Explore", "general-purpose"] }),
+        );
+        round_trip(
+            &AgentCancelParams { id: "a-1".into() },
+            json!({ "id": "a-1" }),
+        );
+        round_trip(
+            &AgentCancelResult {
+                outcome: AgentCancelOutcomeDto::AlreadyFinished,
+            },
+            json!({ "outcome": "already_finished" }),
+        );
+    }
+
+    /// Spawn params tolerate a minimal `{ prompt }` object (all other fields
+    /// defaulted) and unknown future fields.
+    #[test]
+    fn agent_spawn_params_tolerate_minimal_and_unknown() {
+        let p: AgentSpawnParams =
+            serde_json::from_value(json!({ "prompt": "go", "future": 1 })).unwrap();
+        assert_eq!(p.prompt, "go");
+        assert_eq!(p.agent_type, None);
+        assert_eq!(p.timeout_ms, None);
+
+        let e: AgentEventsParams = serde_json::from_value(json!({ "id": "x" })).unwrap();
+        assert_eq!(e.cursor, 0);
+        assert_eq!(e.timeout_ms, None);
+    }
+
+    #[test]
+    fn agent_status_and_event_kind_wire_forms() {
+        for (v, s) in [
+            (AgentStatusDto::Running, "running"),
+            (AgentStatusDto::Completed, "completed"),
+            (AgentStatusDto::Failed, "failed"),
+            (AgentStatusDto::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(serde_json::to_value(v).unwrap(), json!(s));
+        }
+        for (v, s) in [
+            (AgentEventKindDto::Spawned, "spawned"),
+            (AgentEventKindDto::Progress, "progress"),
+            (AgentEventKindDto::Completed, "completed"),
+            (AgentEventKindDto::Failed, "failed"),
+            (AgentEventKindDto::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(serde_json::to_value(v).unwrap(), json!(s));
+        }
     }
 
     #[test]

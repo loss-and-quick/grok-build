@@ -1141,6 +1141,9 @@ pub(crate) async fn spawn_session_actor(
         plugin_registry.as_deref(),
         &session_info.id.0,
         &resolved_workspace_root,
+        // Arms the plugin `agent_*` orchestration RPCs: plugin spawns route
+        // through this session's subagent coordinator like any Task spawn.
+        tool_context.subagent_event_tx.clone(),
     );
     // Now that the plugin host exists, fill the deferred `permission_ask` seam so
     // the permission manager can dispatch to sidecar plugins. Only sidecar plugins

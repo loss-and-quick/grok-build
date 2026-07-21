@@ -89,6 +89,71 @@ describe("PluginContext", () => {
     await endpoint.stop();
   });
 
+  test("agents.spawn/wait/events/list/cancel round-trip through the agent_* RPCs", async () => {
+    const reader = new MemoryByteReader();
+    const writer = new MemoryByteWriter();
+    const endpoint = new JsonRpcEndpoint({ reader, writer });
+    endpoint.start();
+    const ctx = createPluginContext(new HostClient(endpoint), INIT_PARAMS);
+
+    const spawnP = ctx.agents.spawn({
+      agent_type: "Explore",
+      prompt: "map the repo",
+      description: null,
+      model: null,
+      cwd: null,
+      timeout_ms: 60_000,
+    });
+    await respondToNext(writer, reader, 1, { id: "agent-1" });
+    expect(await spawnP).toBe("agent-1");
+    const spawnReq = writer.messages[0] as { method: string; params: unknown };
+    expect(spawnReq.method).toBe("agent_spawn");
+    expect(spawnReq.params).toEqual({
+      agent_type: "Explore",
+      prompt: "map the repo",
+      description: null,
+      model: null,
+      cwd: null,
+      timeout_ms: 60_000,
+    });
+
+    const waitP = ctx.agents.wait("agent-1", 1_000);
+    await respondToNext(writer, reader, 2, {
+      status: "completed",
+      output: "done",
+      error: null,
+      tokens_used: 12,
+      duration_ms: 34,
+      tool_calls: 2,
+      turns: 1,
+    });
+    expect((await waitP).status).toBe("completed");
+    const waitReq = writer.messages[1] as { method: string; params: unknown };
+    expect(waitReq.method).toBe("agent_wait");
+    expect(waitReq.params).toEqual({ id: "agent-1", timeout_ms: 1_000 });
+
+    const eventsP = ctx.agents.events("agent-1", 1);
+    await respondToNext(writer, reader, 3, {
+      events: [{ seq: 1, kind: "completed", data: {} }],
+      next_cursor: 2,
+      done: true,
+    });
+    expect((await eventsP).done).toBe(true);
+    const eventsReq = writer.messages[2] as { method: string; params: unknown };
+    expect(eventsReq.method).toBe("agent_events");
+    expect(eventsReq.params).toEqual({ id: "agent-1", cursor: 1, timeout_ms: 0 });
+
+    const listP = ctx.agents.list();
+    await respondToNext(writer, reader, 4, { agents: ["Explore"] });
+    expect(await listP).toEqual(["Explore"]);
+
+    const cancelP = ctx.agents.cancel("agent-1");
+    await respondToNext(writer, reader, 5, { outcome: "already_finished" });
+    expect(await cancelP).toBe("already_finished");
+
+    await endpoint.stop();
+  });
+
   test("config<T>() calls config_get and returns its value", async () => {
     const reader = new MemoryByteReader();
     const writer = new MemoryByteWriter();

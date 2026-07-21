@@ -576,6 +576,18 @@ pub struct SubagentValidateTypeRequest {
     pub respond_to: oneshot::Sender<SubagentValidateTypeOutcome>,
 }
 
+/// Request to list the spawnable subagent types for a parent session
+/// (sorted, `[subagents.toggle]`-filtered). Sent by the plugin host's
+/// `agent_list` orchestration RPC; handled by the coordinator drain with the
+/// same validation context `ValidateType` uses.
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct SubagentListTypesRequest {
+    pub parent_session_id: String,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<Vec<String>>,
+}
+
 // Describe-type protocol
 
 /// Outcome of a `describe_subagent_type` round-trip.
@@ -662,6 +674,7 @@ pub enum SubagentEvent {
     ClearUsageNotApplied(SubagentClearUsageNotAppliedRequest),
     MarkUsageNotApplied(SubagentMarkUsageNotAppliedRequest),
     ValidateType(SubagentValidateTypeRequest),
+    ListTypes(SubagentListTypesRequest),
     DescribeType(SubagentDescribeRequest),
 }
 

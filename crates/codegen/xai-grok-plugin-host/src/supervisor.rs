@@ -80,6 +80,11 @@ pub struct PluginHost {
     handshake_timeout: Duration,
     next_invocation: AtomicU64,
     plugins: std::sync::Mutex<HashMap<String, Arc<PluginEntry>>>,
+    /// The injected subagent-orchestration seam, fanned out to every plugin's
+    /// capability server (current and future registrations). `None` keeps the
+    /// `agent_*` methods answering `method_not_found`.
+    agent_orchestrator:
+        std::sync::Mutex<Option<Arc<dyn crate::orchestration::AgentOrchestrator>>>,
 }
 
 /// One registered plugin: its spec, capability server (shared across restarts),
@@ -120,6 +125,7 @@ impl PluginHost {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             next_invocation: AtomicU64::new(1),
             plugins: std::sync::Mutex::new(HashMap::new()),
+            agent_orchestrator: std::sync::Mutex::new(None),
         }
     }
 
@@ -147,6 +153,25 @@ impl PluginHost {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             next_invocation: AtomicU64::new(1),
             plugins: std::sync::Mutex::new(HashMap::new()),
+            agent_orchestrator: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Install the subagent-orchestration seam, fanning it out to every
+    /// registered plugin's capability server; plugins registered later inherit
+    /// it too. Takes `&self`: the shell wires it after the host is built (the
+    /// coordinator channel may not exist yet at construction).
+    pub fn set_agent_orchestrator(
+        &self,
+        orchestrator: Arc<dyn crate::orchestration::AgentOrchestrator>,
+    ) {
+        *self
+            .agent_orchestrator
+            .lock()
+            .expect("orchestrator slot poisoned") = Some(Arc::clone(&orchestrator));
+        let plugins = self.plugins.lock().expect("registry poisoned");
+        for entry in plugins.values() {
+            entry.caps.set_orchestrator(Arc::clone(&orchestrator));
         }
     }
 
@@ -158,6 +183,14 @@ impl PluginHost {
             spec.config.clone(),
             storage_path(&self.data_dir, &spec.name),
         ));
+        if let Some(orchestrator) = self
+            .agent_orchestrator
+            .lock()
+            .expect("orchestrator slot poisoned")
+            .as_ref()
+        {
+            caps.set_orchestrator(Arc::clone(orchestrator));
+        }
         let entry = Arc::new(PluginEntry {
             caps,
             state: Mutex::new(SupervisorState::default()),

@@ -31,6 +31,7 @@
 //! shell-integration task which owns `xai-grok-sandbox`.
 
 mod capabilities;
+pub mod orchestration;
 mod rpc;
 pub mod runtime;
 pub mod sidecar;
@@ -38,6 +39,10 @@ pub mod supervisor;
 
 use std::path::PathBuf;
 
+pub use orchestration::{
+    AgentOrchestrator, AgentOutcome, AgentProgress, AgentSpawnSpec, AgentStatusDto,
+    OrchestratorCancel, OrchestratorFuture, SpawnedSubagent,
+};
 pub use runtime::RuntimeKind;
 pub use supervisor::{PluginHost, SpawnHardener};
 

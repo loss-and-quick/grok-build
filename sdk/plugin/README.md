@@ -32,6 +32,49 @@ That call *is* the program: it starts the stdio JSON-RPC loop, answers the
 host's `initialize` handshake (subscriptions are derived from the `hooks`
 keys), dispatches `hook_invoke`, and exits on `shutdown`.
 
+## Subagent orchestration (`ctx.agents`)
+
+Every hook and `setup()` receives `ctx.agents`, a typed wrapper over the
+`agent_*` RPCs. Spawned subagents are **real children of the plugin's
+session** — same coordinator, TUI visibility, and cancellation as the
+model's `Task` tool:
+
+```ts
+const id = await ctx.agents.spawn({
+  agent_type: "Explore",           // default: "general-purpose"
+  prompt: "map the crate layout",
+  description: "layout mapper",    // shown in the TUI
+  model: null,                     // catalog-validated when set
+  cwd: null,
+  timeout_ms: 120_000,             // per-spawn budget: auto-cancel after
+});
+
+// Progress: cursor-based poll. Pass the last next_cursor (start at 0);
+// timeoutMs long-polls until a new event arrives. Stop once done.
+let cursor = 0;
+for (;;) {
+  const { events, next_cursor, done } = await ctx.agents.events(id, cursor, 10_000);
+  for (const e of events) ctx.log.info(`agent ${e.kind}`, e.data);
+  cursor = next_cursor;
+  if (done) break;
+}
+
+const result = await ctx.agents.wait(id, 30_000); // "running" on timeout
+if (result.status === "completed") ctx.log.info(result.output ?? "");
+
+await ctx.agents.list();   // spawnable agent types
+await ctx.agents.cancel(id);
+```
+
+Progress is delivered by **cursor-based polling rather than host→plugin
+notifications**: the capability server is plain request/reply and keeps
+this state host-side, so a poll cursor survives a sidecar crash-restart
+where a notification subscription would be lost. Spec-level failures
+(unknown agent type, bad model) surface as the spawn's terminal result,
+not as an RPC error. In sessions without orchestration wiring every
+`ctx.agents` call rejects with JSON-RPC `method_not_found` (-32601) —
+catch it to feature-detect.
+
 ## Leader socket (headless ACP access)
 
 When the host process runs in leader mode, each sidecar is told where the

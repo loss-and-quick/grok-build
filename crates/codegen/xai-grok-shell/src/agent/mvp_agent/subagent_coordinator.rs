@@ -219,6 +219,17 @@ impl MvpAgent {
                                 .mark_subagent_usage_not_applied(&request.prompt_id);
                             let _ = request.respond_to.send(());
                         }
+                        SubagentEvent::ListTypes(request) => {
+                            let agent_ref = agent_ref.clone();
+                            tokio::task::spawn_local(async move {
+                                let this = agent_ref.get();
+                                let ctx = this
+                                    .build_subagent_validation_context(&request.parent_session_id);
+                                let available =
+                                    crate::agent::subagent::available_subagent_types(&ctx);
+                                let _ = request.respond_to.send(available);
+                            });
+                        }
                         SubagentEvent::ValidateType(request) => {
                             let agent_ref = agent_ref.clone();
                             tokio::task::spawn_local(async move {

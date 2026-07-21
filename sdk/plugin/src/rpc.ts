@@ -20,6 +20,15 @@ import type { StorageDeleteParams } from "./generated/StorageDeleteParams.ts";
 import type { StorageDeleteResult } from "./generated/StorageDeleteResult.ts";
 import type { StorageListParams } from "./generated/StorageListParams.ts";
 import type { StorageListResult } from "./generated/StorageListResult.ts";
+import type { AgentSpawnParams } from "./generated/AgentSpawnParams.ts";
+import type { AgentSpawnResult } from "./generated/AgentSpawnResult.ts";
+import type { AgentWaitParams } from "./generated/AgentWaitParams.ts";
+import type { AgentWaitResult } from "./generated/AgentWaitResult.ts";
+import type { AgentEventsParams } from "./generated/AgentEventsParams.ts";
+import type { AgentEventsResult } from "./generated/AgentEventsResult.ts";
+import type { AgentListResult } from "./generated/AgentListResult.ts";
+import type { AgentCancelParams } from "./generated/AgentCancelParams.ts";
+import type { AgentCancelResult } from "./generated/AgentCancelResult.ts";
 
 /** Core→plugin method names, v1 (see wire-contract-v1.md). */
 export const CoreToPluginMethod = {
@@ -36,6 +45,11 @@ export const PluginToCoreMethod = {
   StorageDelete: "storage_delete",
   StorageList: "storage_list",
   ConfigGet: "config_get",
+  AgentSpawn: "agent_spawn",
+  AgentWait: "agent_wait",
+  AgentEvents: "agent_events",
+  AgentList: "agent_list",
+  AgentCancel: "agent_cancel",
 } as const;
 
 /** Handlers for the three core→plugin methods a plugin must serve. */
@@ -110,6 +124,53 @@ export class HostClient {
     return this.endpoint.request<ConfigGetResult>(
       PluginToCoreMethod.ConfigGet,
       {},
+    );
+  }
+
+  // --- Subagent orchestration (`agent_*`). The host answers
+  // `method_not_found` when the session has no orchestration wiring;
+  // feature-detect by catching that error on the first call. ---
+
+  agentSpawn(params: AgentSpawnParams): Promise<AgentSpawnResult> {
+    return this.endpoint.request<AgentSpawnResult>(
+      PluginToCoreMethod.AgentSpawn,
+      params,
+    );
+  }
+
+  agentWait(
+    params: AgentWaitParams,
+    opts?: { timeoutMs?: number },
+  ): Promise<AgentWaitResult> {
+    return this.endpoint.request<AgentWaitResult>(
+      PluginToCoreMethod.AgentWait,
+      params,
+      opts,
+    );
+  }
+
+  agentEvents(
+    params: AgentEventsParams,
+    opts?: { timeoutMs?: number },
+  ): Promise<AgentEventsResult> {
+    return this.endpoint.request<AgentEventsResult>(
+      PluginToCoreMethod.AgentEvents,
+      params,
+      opts,
+    );
+  }
+
+  agentList(): Promise<AgentListResult> {
+    return this.endpoint.request<AgentListResult>(
+      PluginToCoreMethod.AgentList,
+      {},
+    );
+  }
+
+  agentCancel(params: AgentCancelParams): Promise<AgentCancelResult> {
+    return this.endpoint.request<AgentCancelResult>(
+      PluginToCoreMethod.AgentCancel,
+      params,
     );
   }
 }

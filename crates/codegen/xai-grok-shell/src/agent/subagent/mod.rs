@@ -1643,6 +1643,32 @@ impl SubagentValidationContext {
         self.subagent_toggle.get(name).copied().unwrap_or(true)
     }
 }
+/// The spawnable subagent types for `ctx`: discovery (built-ins + plugins) plus
+/// CLI-registered agents, `[subagents.toggle]`-filtered, deduped, and sorted by
+/// `str::cmp` for stable rendering. Shared by `validate_subagent_type`'s
+/// `Unknown` reply and the coordinator's `ListTypes` drain arm (plugin
+/// `agent_list` RPC).
+pub(crate) fn available_subagent_types(ctx: &SubagentValidationContext) -> Vec<String> {
+    let mut available: Vec<String> = xai_grok_agent::discovery::all_subagents_with_plugins(
+        &ctx.parent_cwd,
+        &ctx.subagent_toggle,
+        ctx.plugin_registry.as_deref(),
+    )
+    .into_iter()
+    .map(|e| e.name)
+    .collect();
+    let mut seen: std::collections::HashSet<String> = available.iter().cloned().collect();
+    for name in &ctx.cli_agent_names {
+        if !ctx.is_subagent_enabled(name) {
+            continue;
+        }
+        if seen.insert(name.clone()) {
+            available.push(name.clone());
+        }
+    }
+    available.sort();
+    available
+}
 /// Synchronously validate a subagent type against discovery + toggle + allow-list.
 /// `Unknown { available }` is sorted by `str::cmp` for stable rendering.
 pub(crate) fn validate_subagent_type(
@@ -1657,25 +1683,9 @@ pub(crate) fn validate_subagent_type(
         )
         .is_some();
     if !resolves {
-        let mut available: Vec<String> = xai_grok_agent::discovery::all_subagents_with_plugins(
-            &ctx.parent_cwd,
-            &ctx.subagent_toggle,
-            ctx.plugin_registry.as_deref(),
-        )
-        .into_iter()
-        .map(|e| e.name)
-        .collect();
-        let mut seen: std::collections::HashSet<String> = available.iter().cloned().collect();
-        for name in &ctx.cli_agent_names {
-            if !ctx.is_subagent_enabled(name) {
-                continue;
-            }
-            if seen.insert(name.clone()) {
-                available.push(name.clone());
-            }
-        }
-        available.sort();
-        return SubagentValidateTypeOutcome::Unknown { available };
+        return SubagentValidateTypeOutcome::Unknown {
+            available: available_subagent_types(ctx),
+        };
     }
     if !ctx.is_subagent_enabled(subagent_type) {
         return SubagentValidateTypeOutcome::Disabled;

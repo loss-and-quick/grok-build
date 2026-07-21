@@ -4,6 +4,20 @@
 // and `definePlugin`.
 
 // --- Generated wire types (source of truth: xai-grok-plugin-protocol via ts-rs) ---
+export type { AgentCancelOutcomeDto } from "./generated/AgentCancelOutcomeDto.ts";
+export type { AgentCancelParams } from "./generated/AgentCancelParams.ts";
+export type { AgentCancelResult } from "./generated/AgentCancelResult.ts";
+export type { AgentEventDto } from "./generated/AgentEventDto.ts";
+export type { AgentEventKindDto } from "./generated/AgentEventKindDto.ts";
+export type { AgentEventsParams } from "./generated/AgentEventsParams.ts";
+export type { AgentEventsResult } from "./generated/AgentEventsResult.ts";
+export type { AgentListParams } from "./generated/AgentListParams.ts";
+export type { AgentListResult } from "./generated/AgentListResult.ts";
+export type { AgentSpawnParams } from "./generated/AgentSpawnParams.ts";
+export type { AgentSpawnResult } from "./generated/AgentSpawnResult.ts";
+export type { AgentStatusDto } from "./generated/AgentStatusDto.ts";
+export type { AgentWaitParams } from "./generated/AgentWaitParams.ts";
+export type { AgentWaitResult } from "./generated/AgentWaitResult.ts";
 export type { ConfigGetParams } from "./generated/ConfigGetParams.ts";
 export type { ConfigGetResult } from "./generated/ConfigGetResult.ts";
 export type { DecisionDto } from "./generated/DecisionDto.ts";
@@ -64,7 +78,12 @@ export type { IncomingHandlers } from "./rpc.ts";
 
 // --- Plugin context ---
 export { createPluginContext } from "./context.ts";
-export type { PluginContext, PluginLogger, PluginStorage } from "./context.ts";
+export type {
+  PluginAgents,
+  PluginContext,
+  PluginLogger,
+  PluginStorage,
+} from "./context.ts";
 
 // --- definePlugin + gate-aware result helpers ---
 export {

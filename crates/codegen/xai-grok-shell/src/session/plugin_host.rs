@@ -104,10 +104,17 @@ fn spawn_hardener() -> Option<xai_grok_plugin_host::SpawnHardener> {
 ///
 /// Registers one plugin per active plugin that resolves a `sidecar_spec()`;
 /// spawning is deferred until the first matching hook fires.
+/// `subagent_event_tx` (the session's coordinator channel) arms the `agent_*`
+/// orchestration RPCs; without it they answer `method_not_found`.
 pub(crate) fn build_session_plugin_host(
     plugin_registry: Option<&PluginRegistry>,
     session_id: &str,
     workspace_root: &str,
+    subagent_event_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<
+            xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
+        >,
+    >,
 ) -> Option<Arc<PluginHost>> {
     let registry = plugin_registry?;
     let workspace_root = PathBuf::from(workspace_root);
@@ -146,6 +153,15 @@ pub(crate) fn build_session_plugin_host(
     let mut host = PluginHost::new(plugin_storage_dir());
     if let Some(hardener) = spawn_hardener() {
         host.set_spawn_hardener(hardener);
+    }
+    // Tier 2 orchestration: route the `agent_*` RPCs through this session's
+    // subagent coordinator channel, so plugin spawns are real children of the
+    // session (TUI-visible, cancellable) on the exact same path as Task spawns.
+    if let Some(tx) = subagent_event_tx {
+        host.set_agent_orchestrator(Arc::new(SessionAgentOrchestrator {
+            session_id: session_id.to_string(),
+            tx,
+        }));
     }
     for spec in &sidecar_plugins {
         tracing::info!(
@@ -199,6 +215,198 @@ pub(crate) fn sidecar_plugin_hook_specs(
             }
         })
         .collect()
+}
+
+/// The shell's [`xai_grok_plugin_host::AgentOrchestrator`]: routes every
+/// plugin `agent_*` RPC through the session's subagent coordinator channel.
+/// Plugin-spawned subagents are therefore real children of the session —
+/// spawned, tracked, surfaced, and cancelled by the exact machinery behind the
+/// model's Task tool. All methods are callable from the host's plain
+/// `tokio::spawn` request tasks (the channel is `Send`; the coordinator drain
+/// runs on the agent's own thread).
+pub(crate) struct SessionAgentOrchestrator {
+    pub(crate) session_id: String,
+    pub(crate) tx: tokio::sync::mpsc::UnboundedSender<
+        xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
+    >,
+}
+
+/// Default agent type for a plugin spawn that names none.
+const PLUGIN_SPAWN_DEFAULT_AGENT_TYPE: &str = "general-purpose";
+
+impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
+    fn spawn(
+        &self,
+        spec: xai_grok_plugin_host::AgentSpawnSpec,
+    ) -> Result<xai_grok_plugin_host::SpawnedSubagent, String> {
+        use xai_grok_plugin_host::AgentStatusDto;
+        use xai_grok_tools::implementations::grok_build::task::types::{
+            ModelOverrideProvenance, SubagentEvent, SubagentRequest, SubagentResult,
+            SubagentRuntimeOverrides,
+        };
+
+        let id = uuid::Uuid::now_v7().to_string();
+        let (result_tx, coord_rx) = tokio::sync::oneshot::channel::<SubagentResult>();
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        // Bridge the coordinator's result type onto the host's wire-shaped
+        // outcome. Dropping without a send (session teardown) propagates as a
+        // dropped `outcome_tx`, which the host reports as a failure.
+        tokio::spawn(async move {
+            if let Ok(result) = coord_rx.await {
+                let status = match result.status() {
+                    "completed" => AgentStatusDto::Completed,
+                    "cancelled" => AgentStatusDto::Cancelled,
+                    _ => AgentStatusDto::Failed,
+                };
+                let _ = outcome_tx.send(xai_grok_plugin_host::AgentOutcome {
+                    status,
+                    output: result.output.to_string(),
+                    error: result.error,
+                    tokens_used: result.tokens_used,
+                    duration_ms: result.duration_ms,
+                    tool_calls: result.tool_calls,
+                    turns: result.turns,
+                });
+            }
+        });
+
+        let request = SubagentRequest {
+            id: id.clone(),
+            prompt: spec.prompt,
+            description: spec
+                .description
+                .unwrap_or_else(|| format!("plugin:{}", spec.plugin)),
+            subagent_type: spec
+                .agent_type
+                .unwrap_or_else(|| PLUGIN_SPAWN_DEFAULT_AGENT_TYPE.to_string()),
+            parent_session_id: self.session_id.clone(),
+            // No parent prompt: a plugin spawn belongs to the session, not to
+            // whichever turn happens to be running (turn cancellation must not
+            // reap it; the per-spawn timeout and agent_cancel do).
+            parent_prompt_id: None,
+            resume_from: None,
+            cwd: spec.cwd,
+            runtime_overrides: SubagentRuntimeOverrides {
+                model: spec.model,
+                // Tool provenance: a plugin-supplied slug gets the same
+                // catalog validation as a model-emitted `Task.model`.
+                model_override_provenance: ModelOverrideProvenance::Tool,
+                ..Default::default()
+            },
+            // Background: never block the parent's turn, survive turn ends.
+            run_in_background: true,
+            // The plugin owns the result; don't queue a between-turn
+            // completion reminder at the model.
+            surface_completion: false,
+            fork_context: false,
+            result_tx,
+        };
+        self.tx
+            .send(SubagentEvent::Spawn(Box::new(request)))
+            .map_err(|_| "subagent coordinator unavailable (agent shutting down?)".to_string())?;
+        Ok(xai_grok_plugin_host::SpawnedSubagent {
+            id,
+            result_rx: outcome_rx,
+        })
+    }
+
+    fn progress<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> xai_grok_plugin_host::OrchestratorFuture<'a, Option<xai_grok_plugin_host::AgentProgress>>
+    {
+        use xai_grok_tools::implementations::grok_build::task::types::{
+            SubagentEvent, SubagentQueryRequest, SubagentSnapshotStatus,
+        };
+        Box::pin(async move {
+            let (respond_to, rx) = tokio::sync::oneshot::channel();
+            self.tx
+                .send(SubagentEvent::Query(SubagentQueryRequest {
+                    subagent_id: id.to_string(),
+                    block: false,
+                    timeout_ms: None,
+                    respond_to,
+                }))
+                .ok()?;
+            let snapshot = rx.await.ok().flatten()?;
+            match snapshot.status {
+                SubagentSnapshotStatus::Initializing => {
+                    Some(xai_grok_plugin_host::AgentProgress {
+                        phase: "initializing",
+                        turns: 0,
+                        tool_calls: 0,
+                        tokens_used: 0,
+                        elapsed_ms: snapshot.duration_ms,
+                    })
+                }
+                SubagentSnapshotStatus::Running {
+                    turn_count,
+                    tool_call_count,
+                    tokens_used,
+                    ..
+                } => Some(xai_grok_plugin_host::AgentProgress {
+                    phase: "running",
+                    turns: turn_count,
+                    tool_calls: tool_call_count,
+                    tokens_used,
+                    elapsed_ms: snapshot.duration_ms,
+                }),
+                // Terminal states are delivered through the outcome channel.
+                _ => None,
+            }
+        })
+    }
+
+    fn cancel<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> xai_grok_plugin_host::OrchestratorFuture<'a, xai_grok_plugin_host::OrchestratorCancel>
+    {
+        use xai_grok_plugin_host::OrchestratorCancel;
+        use xai_grok_tools::implementations::grok_build::task::types::{
+            SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget, SubagentEvent,
+        };
+        Box::pin(async move {
+            let (respond_to, rx) = tokio::sync::oneshot::channel();
+            if self
+                .tx
+                .send(SubagentEvent::Cancel(SubagentCancelRequest {
+                    target: SubagentCancelTarget::SubagentId(id.to_string()),
+                    respond_to,
+                }))
+                .is_err()
+            {
+                return OrchestratorCancel::NotFound;
+            }
+            match rx.await {
+                Ok(SubagentCancelOutcome::Cancelled) => OrchestratorCancel::Cancelled,
+                Ok(SubagentCancelOutcome::AlreadyFinished { .. }) => {
+                    OrchestratorCancel::AlreadyFinished
+                }
+                Ok(SubagentCancelOutcome::NotFound) | Err(_) => OrchestratorCancel::NotFound,
+            }
+        })
+    }
+
+    fn list_agent_types<'a>(&'a self) -> xai_grok_plugin_host::OrchestratorFuture<'a, Vec<String>> {
+        use xai_grok_tools::implementations::grok_build::task::types::{
+            SubagentEvent, SubagentListTypesRequest,
+        };
+        Box::pin(async move {
+            let (respond_to, rx) = tokio::sync::oneshot::channel();
+            if self
+                .tx
+                .send(SubagentEvent::ListTypes(SubagentListTypesRequest {
+                    parent_session_id: self.session_id.clone(),
+                    respond_to,
+                }))
+                .is_err()
+            {
+                return Vec::new();
+            }
+            rx.await.unwrap_or_default()
+        })
+    }
 }
 
 /// `permission_ask` seam over the session plugin host, handed to the permission
