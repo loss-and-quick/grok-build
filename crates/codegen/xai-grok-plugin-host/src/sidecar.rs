@@ -484,6 +484,7 @@ pub fn initialize_params(
     workspace_root: PathBuf,
     session_id: String,
     storage: bool,
+    leader_socket: Option<String>,
 ) -> InitializeParams {
     InitializeParams {
         protocol_version: PROTOCOL_VERSION,
@@ -493,8 +494,10 @@ pub fn initialize_params(
         session_id,
         capabilities: xai_grok_plugin_protocol::HostCapabilities {
             storage,
-            // Leader socket not exposed yet (reserved; not wired).
-            leader_socket: None,
+            // Tier 1 orchestration: the leader's Unix-socket path, when the
+            // hosting process is a leader (also exported to the sidecar env
+            // as `GROK_LEADER_SOCKET`; see `runtime::build_command`).
+            leader_socket,
         },
     }
 }

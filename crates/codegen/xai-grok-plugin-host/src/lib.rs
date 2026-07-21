@@ -60,6 +60,12 @@ pub struct RegisteredPlugin {
     pub workspace_root: PathBuf,
     /// Session id, forwarded at `initialize`.
     pub session_id: String,
+    /// The session leader's Unix-socket path, when this process runs (or is)
+    /// a leader. Advertised as `HostCapabilities::leader_socket` at
+    /// `initialize` and exported as `GROK_LEADER_SOCKET` in the sidecar's env,
+    /// so a plugin can attach to the session as one more headless ACP client.
+    /// `None` outside leader mode.
+    pub leader_socket: Option<String>,
 }
 
 /// A plugin's supervised runtime state, for UI listing via [`PluginHost::status`].

@@ -1047,6 +1047,12 @@ pub async fn run_leader(
     // Cloned before control_state moves into the IPC server; auth wired below.
     let workspace_control = control_state.workspace.clone();
 
+    // Record the socket for in-process consumers (TS plugin sidecars receive
+    // it via `HostCapabilities::leader_socket` / `GROK_LEADER_SOCKET` at
+    // session spawn). Safe to record before the bind: any plugin spawn happens
+    // well after the server below is listening.
+    crate::leader::record_active_leader_socket(socket_path.clone());
+
     // ── Phase 3: Bind socket and start IPC server (BEFORE auth/prefetch) ──────
     //
     // Starting the server here means connect_or_spawn sees the socket in < 100 ms

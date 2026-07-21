@@ -261,6 +261,13 @@ pub fn build_command(
 
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args).current_dir(&spec.workspace_root);
+    // Tier 1 orchestration: hand the leader socket to the sidecar under the
+    // same env var the leader client honors, so an SDK-less plugin (or any
+    // headless ACP client library) connects with zero extra plumbing. Also
+    // advertised in `HostCapabilities::leader_socket` at `initialize`.
+    if let Some(socket) = &spec.leader_socket {
+        cmd.env("GROK_LEADER_SOCKET", socket);
+    }
     Ok(cmd)
 }
 
@@ -377,6 +384,37 @@ mod tests {
                 OsString::from("/ws/p/index.ts"),
             ]
         );
+    }
+
+    #[test]
+    fn build_command_exports_leader_socket_env() {
+        // Needs a real runtime on PATH to resolve; skip quietly otherwise
+        // (same guard as the sidecar e2e tests).
+        if resolve_runtime(RuntimeKind::Auto).is_err() {
+            return;
+        }
+        let spec = |leader_socket: Option<String>| RegisteredPlugin {
+            name: "p".into(),
+            entry: PathBuf::from("/ws/p/index.ts"),
+            runtime: RuntimeKind::Auto,
+            network: false,
+            config: serde_json::Value::Null,
+            workspace_root: PathBuf::from("/ws"),
+            session_id: "s".into(),
+            leader_socket,
+        };
+        let env_of = |cmd: &tokio::process::Command| -> Option<OsString> {
+            cmd.as_std()
+                .get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new("GROK_LEADER_SOCKET"))
+                .and_then(|(_, v)| v.map(|v| v.to_os_string()))
+        };
+
+        let with = build_command(&spec(Some("/tmp/leader.sock".into()))).unwrap();
+        assert_eq!(env_of(&with), Some(OsString::from("/tmp/leader.sock")));
+
+        let without = build_command(&spec(None)).unwrap();
+        assert_eq!(env_of(&without), None);
     }
 
     #[test]

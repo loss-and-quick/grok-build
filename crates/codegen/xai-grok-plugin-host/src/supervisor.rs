@@ -314,6 +314,7 @@ impl PluginHost {
             spec.workspace_root.clone(),
             spec.session_id.clone(),
             true,
+            spec.leader_socket.clone(),
         );
         let init = sidecar.handshake(params, self.handshake_timeout).await?;
 

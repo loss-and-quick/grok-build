@@ -2,6 +2,9 @@
 
 /**
  * Host abilities advertised to the plugin at handshake. Part of `initialize`,
- * core→plugin. `leader_socket` is reserved and currently `None`.
+ * core→plugin. `leader_socket` is the session leader's Unix-socket path when
+ * the host process runs in leader mode (also exported to the sidecar's env as
+ * `GROK_LEADER_SOCKET`): a plugin may connect to it as one more headless ACP
+ * client. `None` outside leader mode.
  */
 export type HostCapabilities = { storage: boolean, leader_socket?: string | null, };

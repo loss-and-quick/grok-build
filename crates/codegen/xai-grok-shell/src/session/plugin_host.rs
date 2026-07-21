@@ -111,6 +111,11 @@ pub(crate) fn build_session_plugin_host(
 ) -> Option<Arc<PluginHost>> {
     let registry = plugin_registry?;
     let workspace_root = PathBuf::from(workspace_root);
+    // Tier 1 orchestration: when this process is a leader, every sidecar gets
+    // the session leader's socket (initialize capability + GROK_LEADER_SOCKET
+    // env) so a plugin can attach as one more headless ACP client.
+    let leader_socket = crate::leader::active_leader_socket()
+        .map(|p| p.to_string_lossy().into_owned());
 
     let sidecar_plugins: Vec<RegisteredPlugin> = registry
         .active_plugins()
@@ -129,6 +134,7 @@ pub(crate) fn build_session_plugin_host(
                 config: serde_json::json!({}),
                 workspace_root: workspace_root.clone(),
                 session_id: session_id.to_string(),
+                leader_socket: leader_socket.clone(),
             })
         })
         .collect();

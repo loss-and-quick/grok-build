@@ -71,6 +71,7 @@ fn build_host(data_dir: PathBuf) -> Arc<PluginHost> {
         config: serde_json::json!({}),
         workspace_root: repo_root(),
         session_id: "e2e-session".to_string(),
+        leader_socket: None,
     });
     Arc::new(host)
 }

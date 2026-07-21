@@ -32,6 +32,30 @@ That call *is* the program: it starts the stdio JSON-RPC loop, answers the
 host's `initialize` handshake (subscriptions are derived from the `hooks`
 keys), dispatches `hook_invoke`, and exits on `shutdown`.
 
+## Leader socket (headless ACP access)
+
+When the host process runs in leader mode, each sidecar is told where the
+session leader's Unix socket lives, twice: as
+`capabilities.leader_socket` in the `initialize` params (surfaced on
+`ctx` via the raw init object) and as the `GROK_LEADER_SOCKET` env var —
+the same variable the built-in leader clients honor. A plugin can open
+that socket and speak ACP over it as one more headless client: create
+its own sessions, drive prompts, observe notifications — everything a
+TUI or IDE client can do. The SDK deliberately ships no ACP client
+wrapper (yet); bring any newline-delimited JSON-RPC client, e.g.:
+
+```ts
+import { connect } from "node:net";
+
+const path = process.env.GROK_LEADER_SOCKET;
+if (path) {
+  const sock = connect(path); // then speak ACP JSON-RPC over `sock`
+}
+```
+
+Outside leader mode the capability is `null` and the env var is unset —
+feature-detect and degrade gracefully.
+
 ## Runtime support
 
 | Runtime   | Status | Notes |

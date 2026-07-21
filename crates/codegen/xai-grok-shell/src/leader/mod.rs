@@ -87,6 +87,25 @@ const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CLIENT_LEADER_VERSION: &str = xai_grok_version::VERSION;
 /// Max wait for an evicted leader to exit before force-killing (relaunch drain ~5s).
 const EVICT_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
+/// The socket path this process is serving as leader, recorded once by
+/// `run_leader` when the IPC server starts. `None` in non-leader processes.
+///
+/// Read at session spawn to advertise the socket to TS plugin sidecars
+/// (`HostCapabilities::leader_socket` + the `GROK_LEADER_SOCKET` env), letting
+/// a plugin attach to the session as one more headless ACP client.
+static ACTIVE_LEADER_SOCKET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Record the socket path this process serves as leader. First call wins;
+/// later calls are ignored (a process leads at most one socket).
+pub fn record_active_leader_socket(path: PathBuf) {
+    let _ = ACTIVE_LEADER_SOCKET.set(path);
+}
+
+/// The socket path recorded by [`record_active_leader_socket`], if any.
+pub fn active_leader_socket() -> Option<&'static Path> {
+    ACTIVE_LEADER_SOCKET.get().map(PathBuf::as_path)
+}
+
 /// Whether `leader_version` is a strictly-older parseable semver than `baseline`.
 /// Unparseable versions (e.g. dev `"unknown"`) return `false` — leave them alone.
 pub fn leader_is_older_than(leader_version: &str, baseline: &str) -> bool {
