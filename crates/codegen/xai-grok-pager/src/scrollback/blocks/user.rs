@@ -677,7 +677,8 @@ mod tests {
     #[test]
     fn mid_text_token_only_token_is_teal() {
         let text = "great /pr-workflow all good now";
-        let block = UserPromptBlock::with_skill_tokens(text, vec![6..18]);
+        let skill_range = 6..18;
+        let block = UserPromptBlock::with_skill_tokens(text, vec![skill_range]);
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 1);
 
@@ -714,7 +715,8 @@ mod tests {
     fn mid_text_token_on_second_logical_line() {
         let text = "first line\nthen /model here";
         // "/model" starts after "first line\nthen " = 16 bytes.
-        let block = UserPromptBlock::with_skill_tokens(text, vec![16..22]);
+        let skill_range = 16..22;
+        let block = UserPromptBlock::with_skill_tokens(text, vec![skill_range]);
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 2);
 
@@ -761,7 +763,8 @@ mod tests {
 
     #[test]
     fn all_token_ranges_invalid_renders_plain() {
-        let block = UserPromptBlock::with_skill_tokens("plain text", vec![100..200]);
+        let out_of_bounds_range = 100..200;
+        let block = UserPromptBlock::with_skill_tokens("plain text", vec![out_of_bounds_range]);
         assert!(block.skill_token_ranges.is_empty());
         let lines = block.wrap_prompt_lines(80, None, true, false);
         let theme = Theme::current();
@@ -785,7 +788,8 @@ mod tests {
         // straddles the last visible row and the hidden continuation; the
         // truncating re-wrap must keep the visible head teal.
         let text = "one\ntwo\n/pr-workflow tail";
-        let block = UserPromptBlock::with_skill_tokens(text, vec![8..20]);
+        let skill_range = 8..20;
+        let block = UserPromptBlock::with_skill_tokens(text, vec![skill_range]);
         let lines = block.wrap_prompt_lines(8, Some(3), false, false);
         assert_eq!(lines.len(), 3);
 
@@ -804,7 +808,8 @@ mod tests {
         // "/do-it" (bytes 8..14) fits fully on the truncated last line even at
         // the ellipsis-reduced width, so it must survive whole and teal.
         let text = "one\ntwo\n/do-it more words here";
-        let block = UserPromptBlock::with_skill_tokens(text, vec![8..14]);
+        let skill_range = 8..14;
+        let block = UserPromptBlock::with_skill_tokens(text, vec![skill_range]);
         let lines = block.wrap_prompt_lines(20, Some(3), false, false);
         assert_eq!(lines.len(), 3);
 
@@ -826,7 +831,8 @@ mod tests {
         // Expanded (no max_lines): the 12-wide token cannot fit at width 8, so
         // the wrapper splits it mid-token; every piece must stay teal.
         let text = "aa /pr-workflow zz";
-        let block = UserPromptBlock::with_skill_tokens(text, vec![3..15]);
+        let skill_range = 3..15;
+        let block = UserPromptBlock::with_skill_tokens(text, vec![skill_range]);
         let lines = block.wrap_prompt_lines(8, None, false, false);
         assert!(lines.len() >= 2);
 

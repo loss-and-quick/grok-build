@@ -2756,8 +2756,8 @@ impl AppView {
 }
 pub(crate) use crate::views::session_picker::filter_session_entries;
 use crate::views::session_picker::{
-    CONTENT_EXPAND_OFFSET, PickerItem, SessionPickerWorktreeSelection, build_entry_map,
-    session_picker_worktree_selection, sync_session_picker_query_expansion,
+    CONTENT_EXPAND_OFFSET, PickerItem, SessionPickerSnapshot, SessionPickerWorktreeSelection,
+    build_entry_map, session_picker_worktree_selection, sync_session_picker_query_expansion,
 };
 /// Context for welcome-view input handling.
 struct WelcomeInputCtx<'a> {
@@ -3138,12 +3138,14 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
             PickerOutcome::QueryChanged => {
                 sync_session_picker_query_expansion(
-                    ctx.sp_entries.as_deref(),
-                    ctx.sp_content_results.as_deref(),
-                    ctx.sp_entries_query.as_deref(),
+                    SessionPickerSnapshot {
+                        entries: ctx.sp_entries.as_deref(),
+                        content_results: ctx.sp_content_results.as_deref(),
+                        entries_query: ctx.sp_entries_query.as_deref(),
+                        grouped: ctx.session_picker_grouped,
+                        content_loading: ctx.sp_content_loading,
+                    },
                     ctx.sp_state,
-                    ctx.session_picker_grouped,
-                    ctx.sp_content_loading,
                     source_filter,
                     Some(current_repo.as_str()),
                 );
@@ -3153,10 +3155,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             PickerOutcome::Unchanged => {
                 if let Event::Key(key) = ev
                     && key.kind == KeyEventKind::Press
+                    && key!('/', CONTROL).matches(key)
+                    && !ctx.sp_state.query().trim().is_empty()
                 {
-                    if key!('/', CONTROL).matches(key) && !ctx.sp_state.query().trim().is_empty() {
-                        return InputOutcome::Action(Action::ForceDeepSearch);
-                    }
+                    return InputOutcome::Action(Action::ForceDeepSearch);
                 }
                 return InputOutcome::Unchanged;
             }

@@ -579,6 +579,8 @@ fn send_prompt_mid_text_skill_token_carries_ranges() {
         &mut app,
     );
 
+    let expected_range = 6..18;
+
     assert_eq!(effects.len(), 1);
     match &effects[0] {
         Effect::SendPrompt {
@@ -587,14 +589,14 @@ fn send_prompt_mid_text_skill_token_carries_ranges() {
             ..
         } => {
             assert_eq!(text, "great /pr-workflow all good now");
-            assert_eq!(skill_token_ranges, &vec![6..18]);
+            assert_eq!(skill_token_ranges, &vec![expected_range.clone()]);
         }
         other => panic!("expected SendPrompt, got {other:?}"),
     }
     // The drained echo block styles exactly the composer-recognized token.
     match &app.agents[&id].scrollback.get(0).unwrap().block {
         RenderBlock::UserPrompt(b) => {
-            assert_eq!(b.skill_token_ranges, vec![6..18]);
+            assert_eq!(b.skill_token_ranges, vec![expected_range]);
         }
         other => panic!("expected UserPrompt, got {other:?}"),
     }
@@ -633,9 +635,10 @@ fn image_prompt_with_ranges_styles_echo_but_wire_meta_absent() {
     {
         // Real constructor path, with the image attached to the queued row.
         let agent = app.agents.get_mut(&id).unwrap();
+        let skill_range = 6..18;
         agent
             .session
-            .enqueue_prompt_with_skill_tokens("great /pr-workflow go".into(), vec![6..18]);
+            .enqueue_prompt_with_skill_tokens("great /pr-workflow go".into(), vec![skill_range]);
         agent.session.pending_prompts.back_mut().unwrap().images =
             vec![crate::app::agent_view::test_fixtures::test_pasted_image()];
     }

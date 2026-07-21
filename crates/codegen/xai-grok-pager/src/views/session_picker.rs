@@ -550,23 +550,30 @@ pub(crate) fn session_picker_worktree_selection(
     )
 }
 
+/// Session-picker data snapshot needed to rebuild the filtered/grouped entry
+/// map. Bundled so `sync_session_picker_query_expansion` doesn't have to
+/// thread five loosely-related parameters individually.
+pub(crate) struct SessionPickerSnapshot<'a> {
+    pub entries: Option<&'a [SessionPickerEntry]>,
+    pub content_results: Option<&'a [xai_grok_shell::extensions::session_search::SearchSessionHit]>,
+    pub entries_query: Option<&'a str>,
+    pub grouped: bool,
+    pub content_loading: bool,
+}
+
 /// Rebuild backing-index expansion after a session query changes.
 pub(crate) fn sync_session_picker_query_expansion(
-    entries: Option<&[SessionPickerEntry]>,
-    content_results: Option<&[xai_grok_shell::extensions::session_search::SearchSessionHit]>,
-    entries_query: Option<&str>,
+    snapshot: SessionPickerSnapshot<'_>,
     state: &mut PickerState,
-    grouped: bool,
-    content_loading: bool,
     source_filter: SourceFilter,
     current_repo: Option<&str>,
 ) {
     let entry_map = build_entry_map(
-        entries,
-        content_results,
-        effective_filter_query(state.query(), entries_query),
-        grouped,
-        content_loading,
+        snapshot.entries,
+        snapshot.content_results,
+        effective_filter_query(state.query(), snapshot.entries_query),
+        snapshot.grouped,
+        snapshot.content_loading,
         source_filter,
         current_repo,
     );

@@ -749,13 +749,14 @@ mod tests {
         let id = agent.session.id;
         app.agents.insert(id, agent);
         let effects = crate::app::dispatch::maybe_drain_queue_and_note_peek(&mut app, id);
+        let expected_range = 6..18;
         let agent = app.agents.get(&id).unwrap();
         match &agent.scrollback.get(0).unwrap().block {
             RenderBlock::UserPrompt(b) => {
                 assert_eq!(b.text, "great /pr-workflow go");
                 assert_eq!(
                     b.skill_token_ranges,
-                    vec![6..18],
+                    vec![expected_range.clone()],
                     "echo must style the recomputed mid-text token"
                 );
             }
@@ -768,7 +769,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(text, "great /pr-workflow go");
-                assert_eq!(skill_token_ranges, &vec![6..18]);
+                assert_eq!(skill_token_ranges, &vec![expected_range]);
             }
             other => panic!("expected plain SendPrompt, got {other:?}"),
         }

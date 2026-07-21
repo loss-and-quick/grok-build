@@ -528,6 +528,16 @@ fn restore_after_child(
     }
 }
 
+/// Terminal input-reader handles shared by both suspend paths ($EDITOR and
+/// $PAGER): the park/resume flags and the raw input channel. Bundled so
+/// `run_pending_suspends` doesn't have to thread them as three separate
+/// parameters (which pushed it over clippy's argument-count limit).
+struct SuspendInputHandles<'a> {
+    input_paused: &'a std::sync::atomic::AtomicBool,
+    reader_parked: &'a std::sync::atomic::AtomicBool,
+    input_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
+}
+
 /// Consume a pending `$EDITOR` / `$PAGER` suspend request, if any.
 ///
 /// Called at the top of every event-loop iteration because any select arm can
@@ -538,9 +548,7 @@ fn restore_after_child(
 fn run_pending_suspends(
     app: &mut AppView,
     terminal: &mut PagerTerminal,
-    input_paused: &std::sync::atomic::AtomicBool,
-    reader_parked: &std::sync::atomic::AtomicBool,
-    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
+    input: &mut SuspendInputHandles<'_>,
     presenter: &mut Presenter,
     suspend_retry_after: &mut Option<Instant>,
     suspend_wait_reports: &mut SuspendWaitReports,
@@ -568,9 +576,9 @@ fn run_pending_suspends(
         let moved_cursor = match suspend_for_child(
             app.screen_mode,
             terminal,
-            input_paused,
-            reader_parked,
-            input_rx,
+            input.input_paused,
+            input.reader_parked,
+            input.input_rx,
             || {
                 let _ = std::process::Command::new(&editor).arg(&path).status();
             },
@@ -618,9 +626,9 @@ fn run_pending_suspends(
         let moved_cursor = match suspend_for_child(
             app.screen_mode,
             terminal,
-            input_paused,
-            reader_parked,
-            input_rx,
+            input.input_paused,
+            input.reader_parked,
+            input.input_rx,
             || {
                 // $PAGER may carry flags (e.g. "less -R"); split on
                 // whitespace so program + args are both honored.
@@ -1745,9 +1753,11 @@ pub(crate) async fn run(
         run_pending_suspends(
             &mut app,
             terminal,
-            &input_paused,
-            &reader_parked,
-            &mut input_rx,
+            &mut SuspendInputHandles {
+                input_paused: &input_paused,
+                reader_parked: &reader_parked,
+                input_rx: &mut input_rx,
+            },
             &mut presenter,
             &mut suspend_retry_after,
             &mut suspend_wait_reports,

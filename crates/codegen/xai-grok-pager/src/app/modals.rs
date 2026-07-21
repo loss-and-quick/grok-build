@@ -919,9 +919,9 @@ impl AgentView {
                 ..
             } => {
                 use crate::views::session_picker::{
-                    CONTENT_EXPAND_OFFSET, PickerItem, SessionPickerWorktreeSelection,
-                    build_entry_map, effective_filter_query, session_picker_worktree_selection,
-                    sync_session_picker_query_expansion,
+                    CONTENT_EXPAND_OFFSET, PickerItem, SessionPickerSnapshot,
+                    SessionPickerWorktreeSelection, build_entry_map, effective_filter_query,
+                    session_picker_worktree_selection, sync_session_picker_query_expansion,
                 };
 
                 // Build grouped mapping using shared helper (now with content).
@@ -1159,12 +1159,14 @@ impl AgentView {
                     }
                     PickerOutcome::QueryChanged => {
                         sync_session_picker_query_expansion(
-                            entries.as_deref(),
-                            content_results.as_deref(),
-                            entries_query.as_deref(),
+                            SessionPickerSnapshot {
+                                entries: entries.as_deref(),
+                                content_results: content_results.as_deref(),
+                                entries_query: entries_query.as_deref(),
+                                grouped: true,
+                                content_loading: *content_loading,
+                            },
                             state,
-                            true,
-                            *content_loading,
                             *source_filter,
                             Some(current_repo.as_str()),
                         );
