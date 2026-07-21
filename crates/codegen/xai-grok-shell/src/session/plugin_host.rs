@@ -139,6 +139,7 @@ pub(crate) fn build_session_plugin_host(
                 // paths). When one lands, forward it here so `initialize` and
                 // `config_get` see the plugin's own config instead of `{}`.
                 config: serde_json::json!({}),
+                declared_tools: Vec::new(),
                 workspace_root: workspace_root.clone(),
                 session_id: session_id.to_string(),
                 leader_socket: leader_socket.clone(),

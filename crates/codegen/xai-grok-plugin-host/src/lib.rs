@@ -45,6 +45,10 @@ pub use orchestration::{
 };
 pub use runtime::RuntimeKind;
 pub use supervisor::{PluginHost, SpawnHardener};
+// Re-exported so tool-surface integrations (the shell) can name the
+// `tool_invoke` wire shapes without a direct protocol dependency (the same
+// idiom as `orchestration::AgentStatusDto`).
+pub use xai_grok_plugin_protocol::{ToolCallContextDto, ToolInvokeResult};
 
 /// A plugin registered with the host: everything needed to spawn and hand-shake
 /// its sidecar. Cloneable so the host can rebuild `initialize` params on restart.
@@ -61,6 +65,11 @@ pub struct RegisteredPlugin {
     pub network: bool,
     /// Opaque config forwarded verbatim at `initialize` and via `config_get`.
     pub config: serde_json::Value,
+    /// Bare tool names the manifest declares (the model-facing catalog is
+    /// built from the manifest before any sidecar starts). Used only for a
+    /// drift warning at handshake against the code-registered handlers the
+    /// sidecar reports in `InitializeResult::tools`.
+    pub declared_tools: Vec<String>,
     /// Workspace root; the sidecar's cwd and deno's read/write scope.
     pub workspace_root: PathBuf,
     /// Session id, forwarded at `initialize`.

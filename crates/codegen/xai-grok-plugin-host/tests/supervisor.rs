@@ -33,11 +33,20 @@ fn host_with(env: &[(&'static str, String)], backoff: Duration) -> (PluginHost, 
         runtime: RuntimeKind::Auto,
         network: false,
         config: serde_json::json!({ "k": "v" }),
+        declared_tools: vec!["echo".to_string()],
         workspace_root: ws.path().to_path_buf(),
         session_id: "sess-1".to_string(),
         leader_socket: None,
     });
     (host, data_dir, ws)
+}
+
+fn test_ctx() -> xai_grok_plugin_protocol::ToolCallContextDto {
+    xai_grok_plugin_protocol::ToolCallContextDto {
+        session_id: "sess-1".into(),
+        cwd: "/ws".into(),
+        agent: "main".into(),
+    }
 }
 
 fn req(event: &str, timeout_ms: u64) -> PluginHookRequest {
@@ -253,6 +262,171 @@ async fn crash_restarts_then_disables_after_three() {
     // Further invokes are refused outright (disabled), never restarting.
     let err = host.invoke(req("pre_tool_use", 5000)).await.unwrap_err();
     assert!(err.message.contains("disabled"), "got: {}", err.message);
+}
+
+#[tokio::test]
+async fn tool_invoke_round_trips_with_call_context() {
+    let (host, _d, _w) = host_with(
+        &[("FAKE_MODE", "normal".into())],
+        Duration::from_millis(10),
+    );
+
+    let result = host
+        .invoke_tool(
+            "p",
+            "echo",
+            serde_json::json!({ "text": "hi" }),
+            xai_grok_plugin_protocol::ToolCallContextDto {
+                session_id: "sess-9".into(),
+                cwd: "/work/dir".into(),
+                agent: "main".into(),
+            },
+            5_000,
+        )
+        .await
+        .unwrap();
+
+    assert!(!result.is_error);
+    // The fixture echoes every per-call context field back into the content.
+    assert!(result.content.contains("tool=echo"), "{}", result.content);
+    assert!(result.content.contains(r#""text":"hi""#), "{}", result.content);
+    assert!(result.content.contains("session=sess-9"), "{}", result.content);
+    assert!(result.content.contains("cwd=/work/dir"), "{}", result.content);
+    assert!(result.content.contains("agent=main"), "{}", result.content);
+
+    host.dispose().await;
+}
+
+#[tokio::test]
+async fn tool_invoke_maps_is_error_through() {
+    let (host, _d, _w) = host_with(
+        &[
+            ("FAKE_MODE", "normal".into()),
+            ("FAKE_TOOL_MODE", "error".into()),
+        ],
+        Duration::from_millis(10),
+    );
+
+    let result = host
+        .invoke_tool("p", "echo", serde_json::json!({}), test_ctx(), 5_000)
+        .await
+        .unwrap();
+    assert!(result.is_error);
+    assert!(result.content.contains("failed on purpose"));
+
+    host.dispose().await;
+}
+
+#[tokio::test]
+async fn tool_invoke_times_out_without_counting_a_crash() {
+    let (host, _d, _w) = host_with(
+        &[
+            ("FAKE_MODE", "normal".into()),
+            ("FAKE_TOOL_MODE", "hang".into()),
+        ],
+        Duration::from_millis(10),
+    );
+
+    let err = host
+        .invoke_tool("p", "echo", serde_json::json!({}), test_ctx(), 150)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("timed out"), "got: {}", err.message);
+
+    // A slow tool is not a crash: no restart/backoff pressure.
+    let status = host.status().await;
+    assert_eq!(status[0].state, PluginState::Running);
+    assert_eq!(status[0].consecutive_crashes, 0);
+
+    host.dispose().await;
+}
+
+#[tokio::test]
+async fn tool_invoke_sidecar_crash_is_an_error_not_a_hang() {
+    let (host, _d, _w) = host_with(
+        &[
+            ("FAKE_MODE", "normal".into()),
+            ("FAKE_TOOL_MODE", "crash".into()),
+        ],
+        Duration::from_millis(10),
+    );
+
+    let err = host
+        .invoke_tool("p", "echo", serde_json::json!({}), test_ctx(), 5_000)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("crashed"), "got: {}", err.message);
+
+    // The crash feeds the normal supervisor policy.
+    let status = host.status().await;
+    assert_eq!(status[0].consecutive_crashes, 1);
+}
+
+#[tokio::test]
+async fn tool_invoke_serves_counter_storage_rpcs_mid_call() {
+    // The fixture issues storage_set + storage_get (plugin→core) while its
+    // tool_invoke reply (core→plugin) is still pending — the round trip only
+    // completes if the host's rpc loop serves both directions concurrently.
+    let (host, _d, _w) = host_with(
+        &[
+            ("FAKE_MODE", "normal".into()),
+            ("FAKE_TOOL_MODE", "storage_probe".into()),
+        ],
+        Duration::from_millis(10),
+    );
+
+    let result = host
+        .invoke_tool(
+            "p",
+            "echo",
+            serde_json::json!({ "n": 42 }),
+            test_ctx(),
+            5_000,
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error);
+    assert!(
+        result.content.contains(r#"stored-and-loaded: {"n":42}"#),
+        "{}",
+        result.content
+    );
+
+    host.dispose().await;
+}
+
+#[tokio::test]
+async fn concurrent_tool_and_hook_invokes_share_one_sidecar() {
+    // Several in-flight core→plugin requests at once: two tool calls plus a
+    // hook invoke, all correlated over the same transport. Exercises the
+    // pending-map plumbing (distinct ids, out-of-order-safe completion).
+    let (host, _d, _w) = host_with(
+        &[
+            ("FAKE_MODE", "normal".into()),
+            ("FAKE_SUBSCRIPTIONS", "pre_tool_use".into()),
+        ],
+        Duration::from_millis(10),
+    );
+
+    let t1 = host.invoke_tool("p", "echo", serde_json::json!({ "i": 1 }), test_ctx(), 5_000);
+    let t2 = host.invoke_tool("p", "echo", serde_json::json!({ "i": 2 }), test_ctx(), 5_000);
+    let h = host.invoke(req("pre_tool_use", 5_000));
+    let (r1, r2, hr) = tokio::join!(t1, t2, h);
+
+    let r1 = r1.unwrap();
+    let r2 = r2.unwrap();
+    assert!(r1.content.contains(r#""i":1"#), "{}", r1.content);
+    assert!(r2.content.contains(r#""i":2"#), "{}", r2.content);
+    assert!(matches!(
+        hr.unwrap(),
+        PluginHookResponse::Decision { allow: false, .. }
+    ));
+
+    let status = host.status().await;
+    assert_eq!(status[0].state, PluginState::Running);
+    assert_eq!(status[0].consecutive_crashes, 0);
+
+    host.dispose().await;
 }
 
 #[tokio::test]

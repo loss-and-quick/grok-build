@@ -69,6 +69,7 @@ fn build_host(data_dir: PathBuf) -> Arc<PluginHost> {
         runtime: RuntimeKind::Auto,
         network: false,
         config: serde_json::json!({}),
+        declared_tools: Vec::new(),
         workspace_root: repo_root(),
         session_id: "e2e-session".to_string(),
         leader_socket: None,

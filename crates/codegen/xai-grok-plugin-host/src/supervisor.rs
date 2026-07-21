@@ -33,7 +33,9 @@ use xai_grok_hooks::event::{GateKind, HookEventName};
 use xai_grok_hooks::invoker::{
     PluginHookFuture, PluginHookInvoker, PluginHookRequest, PluginHookResponse, PluginInvokeError,
 };
-use xai_grok_plugin_protocol::{DecisionDto, GateKindDto, HookInvokeResult};
+use xai_grok_plugin_protocol::{
+    DecisionDto, GateKindDto, HookInvokeResult, ToolCallContextDto, ToolInvokeResult,
+};
 
 use crate::capabilities::{PluginCapabilities, storage_path};
 use crate::sidecar::{PluginSidecar, StartError, initialize_params};
@@ -49,6 +51,10 @@ const BACKOFF_CAP: Duration = Duration::from_secs(30);
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Fallback invoke timeout when a request carries `timeout_ms == 0`.
 const DEFAULT_INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Fallback `tool_invoke` timeout when a call carries `timeout_ms == 0`.
+/// Deliberately longer than the hook default: tool handlers legitimately do
+/// real work (spawn subagents, batch storage) where a hook must stay snappy.
+const DEFAULT_TOOL_INVOKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Produces the spawn `Command` for a plugin. Overridable in tests to inject a
 /// fake sidecar; production uses [`crate::runtime::build_command`].
@@ -361,6 +367,26 @@ impl PluginHost {
         state.plugin_version = init.plugin_version;
         state.next_retry_at = None;
         state.last_error = None;
+
+        // Tool drift warnings: the manifest (what the model sees) and the
+        // code-registered handlers should agree. Neither direction is fatal —
+        // a missing handler surfaces as an error tool result on invoke, and an
+        // undeclared handler is simply unreachable from the model.
+        let handler_names: HashSet<&str> = init.tools.iter().map(|t| t.name.as_str()).collect();
+        for declared in &spec.declared_tools {
+            if !handler_names.contains(declared.as_str()) {
+                tracing::warn!(plugin = %spec.name, tool = %declared,
+                    "manifest declares a tool the sidecar registered no handler for");
+            }
+        }
+        for handler in &init.tools {
+            if !spec.declared_tools.iter().any(|d| d == &handler.name) {
+                tracing::warn!(plugin = %spec.name, tool = %handler.name,
+                    "sidecar registered a tool handler the manifest does not declare; \
+                     it is not visible to the model");
+            }
+        }
+
         tracing::debug!(plugin = %spec.name, subscriptions = ?state.subscriptions, "sidecar handshaked");
         Ok(sidecar)
     }
@@ -473,6 +499,87 @@ impl PluginHost {
             Err(crate::sidecar::SidecarError::Rpc(e)) => Err(PluginInvokeError::new(format!(
                 "plugin '{}' returned an error: {e}",
                 req.plugin
+            ))),
+        }
+    }
+
+    /// Execute one plugin tool call (`tool_invoke`) in the plugin's sidecar.
+    ///
+    /// `tool` is the bare (unprefixed) name as declared in the manifest;
+    /// `context` is the per-call context ({session_id, cwd, agent}) the
+    /// handler receives. `timeout_ms == 0` selects
+    /// [`DEFAULT_TOOL_INVOKE_TIMEOUT`]; the timeout is a hard deadline — on
+    /// expiry (and on a sidecar crash mid-call) the caller gets an `Err`
+    /// immediately, never a hang, and maps it onto an error tool result for
+    /// the model. Timeouts do not count as crashes (the sidecar may be
+    /// legitimately busy); a closed transport does, feeding the normal
+    /// restart/backoff policy.
+    pub async fn invoke_tool(
+        &self,
+        plugin: &str,
+        tool: &str,
+        arguments: Value,
+        context: ToolCallContextDto,
+        timeout_ms: u64,
+    ) -> Result<ToolInvokeResult, PluginInvokeError> {
+        let entry = {
+            let plugins = self.plugins.lock().expect("registry poisoned");
+            plugins.get(plugin).cloned()
+        };
+        let Some(entry) = entry else {
+            return Err(PluginInvokeError::new(format!(
+                "no plugin registered as '{plugin}'"
+            )));
+        };
+
+        // Same locking discipline as `invoke_inner`: hold the state guard only
+        // to obtain a live sidecar, never across the RPC round-trip, so
+        // concurrent tool calls (and hook invokes) to one plugin don't
+        // serialize on the wire.
+        let sidecar = {
+            let mut state = entry.state.lock().await;
+            self.ensure_alive(&entry, &mut state).await?
+        };
+
+        let invocation_id = format!(
+            "tinv-{}",
+            self.next_invocation.fetch_add(1, Ordering::Relaxed)
+        );
+        let timeout = if timeout_ms == 0 {
+            DEFAULT_TOOL_INVOKE_TIMEOUT
+        } else {
+            Duration::from_millis(timeout_ms)
+        };
+        let params = json!({
+            "invocation_id": invocation_id,
+            "tool": tool,
+            "arguments": arguments,
+            "context": context,
+            "timeout_ms": timeout.as_millis() as u64,
+        });
+
+        match sidecar.call("tool_invoke", params, timeout).await {
+            Ok(value) => {
+                self.reset_crashes(&entry).await;
+                serde_json::from_value::<ToolInvokeResult>(value).map_err(|e| {
+                    PluginInvokeError::new(format!(
+                        "plugin '{plugin}' returned a bad tool result for '{tool}': {e}"
+                    ))
+                })
+            }
+            Err(crate::sidecar::SidecarError::Timeout) => Err(PluginInvokeError::new(format!(
+                "plugin '{plugin}' tool '{tool}' timed out after {} ms",
+                timeout.as_millis()
+            ))),
+            Err(crate::sidecar::SidecarError::Closed) => {
+                let mut state = entry.state.lock().await;
+                self.note_crash(&mut state, plugin, "transport closed during tool_invoke");
+                Err(PluginInvokeError::new(format!(
+                    "plugin '{plugin}' crashed during tool '{tool}'"
+                )))
+            }
+            Err(crate::sidecar::SidecarError::Rpc(e)) => Err(PluginInvokeError::new(format!(
+                "plugin '{plugin}' tool '{tool}' failed: {e}"
             ))),
         }
     }

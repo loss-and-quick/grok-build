@@ -177,7 +177,11 @@ pub struct InitializeParams {
 }
 
 /// `initialize` reply. Plugin→core, handshake. `subscriptions` are event
-/// names from the dictionary; `plugin_version` is informational.
+/// names from the dictionary; `plugin_version` is informational. `tools` are
+/// the tool handlers the plugin's code registered — informational only: the
+/// manifest's `tools` array is what populates the model-facing catalog (the
+/// catalog is built before any sidecar starts), and the host warns when the
+/// two drift.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
 pub struct InitializeResult {
@@ -186,6 +190,8 @@ pub struct InitializeResult {
     pub subscriptions: Vec<String>,
     #[serde(default)]
     pub plugin_version: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<ToolDescriptorDto>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -238,6 +244,70 @@ pub enum HookInvokeResult {
         #[ts(type = "unknown", optional = nullable)]
         payload: Option<serde_json::Value>,
     },
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// tool_invoke (core→plugin request) — model-visible plugin tools.
+//
+// A plugin's manifest declares tools (name, description, input schema); the
+// shell registers them in the session tool catalog under the MCP-style
+// qualified name `<plugin>__<tool>`, so the model calls them like any other
+// tool (permissions and pre/post_tool_use hooks apply on the normal dispatch
+// path). Execution is this RPC: the host forwards the call to the sidecar,
+// which runs the matching handler with the full plugin context (storage,
+// agents, config, log) plus the per-call context below.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One tool a plugin offers to the model. Shared vocabulary: the manifest's
+/// `tools` array parses into this shape, and `initialize` replies carry the
+/// code-registered handlers for drift warnings.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct ToolDescriptorDto {
+    /// Bare tool name (no plugin prefix); the host namespaces it for the model.
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the tool's input.
+    #[ts(type = "unknown")]
+    pub input_schema: serde_json::Value,
+}
+
+/// Per-call context forwarded with every `tool_invoke`. Core→plugin.
+/// `agent` names the caller: `"main"` for the root session, otherwise the
+/// subagent type label.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct ToolCallContextDto {
+    pub session_id: String,
+    /// Working directory the call runs in (per-call, not session-static).
+    pub cwd: String,
+    pub agent: String,
+}
+
+/// `tool_invoke` request params. Core→plugin. `tool` is the bare name as
+/// declared; `timeout_ms` is the host's hard deadline (informational to the
+/// plugin — the host enforces it).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct ToolInvokeParams {
+    pub invocation_id: String,
+    pub tool: String,
+    #[ts(type = "unknown")]
+    pub arguments: serde_json::Value,
+    pub context: ToolCallContextDto,
+    #[ts(type = "number")]
+    pub timeout_ms: u64,
+}
+
+/// `tool_invoke` reply. Plugin→core. `content` is the tool result text
+/// returned to the conversation; `is_error` marks it as a failed call
+/// (surfaced to the model exactly like an MCP tool error).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct ToolInvokeResult {
+    pub content: String,
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -560,6 +630,10 @@ mod bindings_export {
             InitializeResult,
             HookInvokeParams,
             HookInvokeResult,
+            ToolDescriptorDto,
+            ToolCallContextDto,
+            ToolInvokeParams,
+            ToolInvokeResult,
             ShutdownParams,
             LogEmitParams,
             StorageGetParams,
@@ -640,11 +714,21 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 subscriptions: vec!["session_start".into(), "pre_tool_use".into()],
                 plugin_version: Some("0.2.0".into()),
+                tools: vec![ToolDescriptorDto {
+                    name: "echo".into(),
+                    description: "echo back".into(),
+                    input_schema: json!({ "type": "object" }),
+                }],
             },
             json!({
                 "protocol_version": 1,
                 "subscriptions": ["session_start", "pre_tool_use"],
                 "plugin_version": "0.2.0",
+                "tools": [{
+                    "name": "echo",
+                    "description": "echo back",
+                    "input_schema": { "type": "object" },
+                }],
             }),
         );
     }
@@ -658,6 +742,44 @@ mod tests {
                 .expect("deserialize with missing optionals + unknown field");
         assert_eq!(r.subscriptions, Vec::<String>::new());
         assert_eq!(r.plugin_version, None);
+        assert_eq!(r.tools, Vec::<ToolDescriptorDto>::new());
+    }
+
+    #[test]
+    fn tool_invoke_round_trip() {
+        round_trip(
+            &ToolInvokeParams {
+                invocation_id: "tinv-1".into(),
+                tool: "planner".into(),
+                arguments: json!({ "question": "ship it?" }),
+                context: ToolCallContextDto {
+                    session_id: "sess-1".into(),
+                    cwd: "/repo".into(),
+                    agent: "main".into(),
+                },
+                timeout_ms: 120_000,
+            },
+            json!({
+                "invocation_id": "tinv-1",
+                "tool": "planner",
+                "arguments": { "question": "ship it?" },
+                "context": { "session_id": "sess-1", "cwd": "/repo", "agent": "main" },
+                "timeout_ms": 120000,
+            }),
+        );
+
+        round_trip(
+            &ToolInvokeResult {
+                content: "verdict: yes".into(),
+                is_error: false,
+            },
+            json!({ "content": "verdict: yes", "is_error": false }),
+        );
+
+        // `is_error` defaults to false when a plugin omits it.
+        let r: ToolInvokeResult = serde_json::from_value(json!({ "content": "ok" })).unwrap();
+        assert!(!r.is_error);
+        assert_eq!(r.content, "ok");
     }
 
     #[test]

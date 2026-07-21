@@ -18,13 +18,23 @@
 //!     - `exit_after_handshake` — reply to initialize, then exit(0).
 //!     - `storage_probe`      — on invoke, round-trip through `storage_*`/`log_emit`,
 //!                              then reply Observed (exercises the plugin→core path).
+//! - `FAKE_TOOL_MODE` (independent of `FAKE_MODE`; governs `tool_invoke`):
+//!     - `echo` (default)     — reply with a content string echoing the tool,
+//!                              arguments, and per-call context.
+//!     - `error`              — reply `{ content, is_error: true }`.
+//!     - `storage_probe`      — drive counter storage RPCs mid-`tool_invoke`
+//!                              (reentrancy: the reply depends on the host
+//!                              serving plugin→core while core→plugin is
+//!                              in flight), then echo the stored value.
+//!     - `hang`               — never reply to `tool_invoke`.
+//!     - `crash`              — exit(1) on the first `tool_invoke`.
 
 use std::io::{BufRead, StdinLock, Write};
 
 use serde_json::{Value, json};
 use xai_grok_plugin_protocol::{
     DecisionDto, GateKindDto, HookInvokeParams, HookInvokeResult, InitializeResult,
-    PROTOCOL_VERSION,
+    PROTOCOL_VERSION, ToolDescriptorDto, ToolInvokeParams, ToolInvokeResult,
 };
 
 fn env(key: &str) -> Option<String> {
@@ -75,6 +85,11 @@ fn main() {
                     protocol_version: version,
                     subscriptions,
                     plugin_version: env("FAKE_PLUGIN_VERSION"),
+                    tools: vec![ToolDescriptorDto {
+                        name: "echo".to_string(),
+                        description: "echo fixture tool".to_string(),
+                        input_schema: json!({ "type": "object" }),
+                    }],
                 };
                 reply_ok(&id, serde_json::to_value(result).unwrap());
                 if mode == "exit_after_handshake" {
@@ -118,6 +133,64 @@ fn main() {
                         },
                         _ => HookInvokeResult::Observed,
                     }
+                };
+                reply_ok(&id, serde_json::to_value(result).unwrap());
+            }
+            Some("tool_invoke") => {
+                let tool_mode = env("FAKE_TOOL_MODE").unwrap_or_else(|| "echo".to_string());
+                match tool_mode.as_str() {
+                    "crash" => std::process::exit(1),
+                    "hang" => {
+                        // Drain and never reply until the pipe closes.
+                        while reader.read_line(&mut line).unwrap_or(0) != 0 {}
+                        return;
+                    }
+                    _ => {}
+                }
+                let params: ToolInvokeParams =
+                    serde_json::from_value(msg.get("params").cloned().unwrap_or(Value::Null))
+                        .expect("valid tool_invoke params");
+
+                let result = match tool_mode.as_str() {
+                    "error" => ToolInvokeResult {
+                        content: format!("tool '{}' failed on purpose", params.tool),
+                        is_error: true,
+                    },
+                    "storage_probe" => {
+                        // Counter plugin→core RPCs while this tool_invoke is
+                        // still pending: set then read back a value keyed by
+                        // the invocation, proving both directions interleave
+                        // on one transport.
+                        let set_id = alloc(&mut next_id);
+                        request(
+                            set_id,
+                            "storage_set",
+                            json!({ "key": params.invocation_id, "value": params.arguments }),
+                        );
+                        let _ = read_response_for(&mut reader, set_id);
+
+                        let get_id = alloc(&mut next_id);
+                        request(get_id, "storage_get", json!({ "key": params.invocation_id }));
+                        let got = read_response_for(&mut reader, get_id);
+                        ToolInvokeResult {
+                            content: format!(
+                                "stored-and-loaded: {}",
+                                got.get("value").cloned().unwrap_or(Value::Null)
+                            ),
+                            is_error: false,
+                        }
+                    }
+                    _ => ToolInvokeResult {
+                        content: format!(
+                            "echo tool={} args={} session={} cwd={} agent={}",
+                            params.tool,
+                            params.arguments,
+                            params.context.session_id,
+                            params.context.cwd,
+                            params.context.agent,
+                        ),
+                        is_error: false,
+                    },
                 };
                 reply_ok(&id, serde_json::to_value(result).unwrap());
             }

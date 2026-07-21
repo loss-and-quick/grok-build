@@ -399,6 +399,7 @@ mod tests {
             runtime: RuntimeKind::Auto,
             network: false,
             config: serde_json::Value::Null,
+            declared_tools: Vec::new(),
             workspace_root: PathBuf::from("/ws"),
             session_id: "s".into(),
             leader_socket,
