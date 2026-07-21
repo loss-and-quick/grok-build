@@ -217,6 +217,12 @@ pub(crate) async fn spawn_session_actor(
     );
     let _ = support_permission;
     let owns_permission_manager = inherited_permission_handle.is_none();
+    // `permission_ask` plugin seam: created empty in the owning branch, handed to
+    // the permission manager, then filled once the session plugin host is built
+    // further down (the host lands after the manager). Held here so both sites see it.
+    let mut permission_ask_slot: Option<
+        std::sync::Arc<crate::session::plugin_host::PluginPermissionAsk>,
+    > = None;
     let (permissions, permission_events_rx, deny_read_globs) = if let Some(handle) =
         inherited_permission_handle
     {
@@ -228,9 +234,28 @@ pub(crate) async fn spawn_session_actor(
             WebFetchConfig::Enabled { params } => params.allowed_domains(),
             WebFetchConfig::Disabled => vec![],
         };
+        // Fold each discoverable agent's declared permission rules into the
+        // policy, auto-scoped to that agent, so this owning session's single
+        // compiled policy carries every agent's scope (subagents inherit this
+        // handle and never build their own). Empty when no agent declares rules,
+        // in which case resolution is identical to the plain fallback path.
+        let agent_permission_rules: Vec<
+            xai_grok_workspace::permission::resolution::AgentPermissionRules,
+        > = xai_grok_agent::discovery::discover(tool_context.cwd.as_path())
+            .into_iter()
+            .filter(|def| !def.permissions.is_empty())
+            .map(|def| {
+                xai_grok_workspace::permission::resolution::AgentPermissionRules {
+                    agent: def.name,
+                    source_path: def.source_path,
+                    rules: def.permissions,
+                }
+            })
+            .collect();
         let mut permission_config =
-            xai_grok_workspace::permission::resolution::resolve_permission_config_with_fallback(
+            xai_grok_workspace::permission::resolution::resolve_permission_config_with_agents(
                 tool_context.cwd.as_path(),
+                &agent_permission_rules,
             )
             .await;
         let yolo_pin = xai_grok_workspace::permission::resolution::yolo_disabled_by_policy();
@@ -296,6 +321,9 @@ pub(crate) async fn spawn_session_actor(
         } else {
             None
         };
+        let permission_ask =
+            std::sync::Arc::new(crate::session::plugin_host::PluginPermissionAsk::new());
+        permission_ask_slot = Some(permission_ask.clone());
         let (permissions, permission_events_rx) =
             xai_grok_workspace::permission::spawn_permission_manager_with_hub(
                 session_info.id.clone(),
@@ -309,6 +337,10 @@ pub(crate) async fn spawn_session_actor(
                 session_client_identifier.clone(),
                 crate::util::config::remember_tool_approvals_from_disk(),
                 hub_permission,
+                Some(
+                    permission_ask
+                        as std::sync::Arc<dyn xai_grok_workspace::permission::PermissionAskHook>,
+                ),
             );
         if crate::util::config::auto_mode_session_active(
             crate::util::config::auto_permission_mode_enabled_from_disk(),
@@ -1110,6 +1142,23 @@ pub(crate) async fn spawn_session_actor(
         &session_info.id.0,
         &resolved_workspace_root,
     );
+    // Now that the plugin host exists, fill the deferred `permission_ask` seam so
+    // the permission manager can dispatch to sidecar plugins. Only sidecar plugins
+    // (those the host registered) can subscribe.
+    if let (Some(slot), Some(host)) = (&permission_ask_slot, &built_plugin_host) {
+        let plugin_names: Vec<String> = plugin_registry
+            .as_deref()
+            .map(|registry| {
+                registry
+                    .active_plugins()
+                    .iter()
+                    .filter(|plugin| plugin.sidecar_spec().is_some())
+                    .map(|plugin| plugin.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        slot.attach(host.clone(), plugin_names);
+    }
     let workspace_ops_for_handle = workspace_ops.clone();
     #[allow(clippy::arc_with_non_send_sync)]
     let mut _hook_load_errors: Vec<String> = hook_discovery_errors

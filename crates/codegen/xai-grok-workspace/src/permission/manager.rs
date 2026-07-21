@@ -48,6 +48,8 @@ mod reasons {
     pub const SAFE_COMMAND: &str = "safe_command";
     pub const SESSION_DENY: &str = "session_deny";
     pub const PROMPT_DENY: &str = "prompt_deny";
+    /// A `permission_ask` plugin denied the call (returns `PolicyDeny` to the model).
+    pub const PLUGIN_DENY: &str = "plugin_deny";
     pub const NEEDS_USER: &str = "needs_user";
     pub const BASH_REQUEST_FLOOR: &str = "bash_request_floor";
     pub const OPAQUE_SHELL: &str = "opaque_shell";
@@ -967,6 +969,8 @@ pub fn spawn_permission_manager(
         // `spawn_permission_manager_with_hub` with the resolved gate.
         true,
         None,
+        // No `permission_ask` plugin seam on the legacy entry point.
+        None,
     )
 }
 
@@ -991,6 +995,7 @@ pub fn spawn_permission_manager_with_hub(
     // options and lets an explicit grant satisfy an `ask` rule (ask once, remember).
     remember_tool_approvals: bool,
     hub_permission: Option<Arc<dyn crate::permission::PermissionHookTransport>>,
+    permission_ask_hook: Option<Arc<dyn crate::permission::PermissionAskHook>>,
 ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
     // Read the pin ONCE (file I/O) and cache it; never re-read per tool-call.
     // Every yolo ingestion path funnels through construction or SetYoloMode.
@@ -1007,6 +1012,7 @@ pub fn spawn_permission_manager_with_hub(
         remember_tool_approvals,
         crate::permission::resolution::yolo_disabled_by_policy(),
         hub_permission,
+        permission_ask_hook,
     )
 }
 
@@ -1025,6 +1031,7 @@ fn spawn_permission_manager_with_pin(
     remember_tool_approvals: bool,
     yolo_pin: Option<&'static str>,
     hub_permission: Option<Arc<dyn crate::permission::PermissionHookTransport>>,
+    permission_ask_hook: Option<Arc<dyn crate::permission::PermissionAskHook>>,
 ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
     let (tx, mut rx) = mpsc::unbounded_channel::<PermissionCommand>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<PermissionEvent>();
@@ -1089,6 +1096,7 @@ fn spawn_permission_manager_with_pin(
 
         let prompter = AcpPrompter::new(session_id.clone(), gateway.clone(), client_type)
             .with_hub_permission(hub_permission)
+            .with_permission_ask_hook(permission_ask_hook)
             .with_remember_tool_approvals(remember_tool_approvals);
         let mut yolo_mode = initial_yolo;
         let mut auto_mode = seed_auto;
@@ -1294,19 +1302,26 @@ fn spawn_permission_manager_with_pin(
                     // Evaluate managed policy (direct access + per-segment Bash command
                     // rules + Bash shell-file args) up front so the YOLO/sandbox fast
                     // paths below honor a deny or forced prompt.
+                    // Scope every managed-policy check to the requesting agent so
+                    // agent-scoped rules bind only their agent; the root session
+                    // (subagent_type `None`) matches unscoped and `main`-scoped rules.
+                    let request_agent = request_subagent_type.as_deref();
                     let direct_decision = compiled_policy
                         .as_ref()
-                        .and_then(|policy| policy.evaluate(&access));
+                        .and_then(|policy| policy.evaluate_for_agent(&access, request_agent));
                     let shell_command_decision = match (&compiled_policy, &access) {
                         (Some(policy), AccessKind::Bash(cmd)) => {
-                            policy.evaluate_bash_command_policy(cmd)
+                            policy.evaluate_bash_command_policy_for_agent(cmd, request_agent)
                         }
                         _ => None,
                     };
                     let shell_file_decision = match (&compiled_policy, &access) {
-                        (Some(policy), AccessKind::Bash(cmd)) => {
-                            policy.evaluate_shell_file_access(cmd, cwd.as_path())
-                        }
+                        (Some(policy), AccessKind::Bash(cmd)) => policy
+                            .evaluate_shell_file_access_for_agent(
+                                cmd,
+                                cwd.as_path(),
+                                request_agent,
+                            ),
                         _ => None,
                     };
                     let shell_file_forced_prompt =
@@ -1800,7 +1815,7 @@ fn spawn_permission_manager_with_pin(
                             // (e.g. `curl … && sh` must not become two separate
                             // prompts for `curl …` then `sh`).
                             let prompt_outcome = tokio::select! {
-                                outcome = prompter.request(&access, &tool_call_update) => outcome,
+                                outcome = prompter.request(&access, &tool_call_update, request_subagent_type.as_deref()) => outcome,
                                 _ = respond_to.closed() => PromptOutcome::Cancelled,
                             };
 
@@ -1839,6 +1854,9 @@ fn spawn_permission_manager_with_pin(
                                         "reject_always_bash",
                                     )
                                 }
+                                PromptOutcome::PolicyDeny(reason) => {
+                                    (Decision::PolicyDeny(reason), reasons::PLUGIN_DENY)
+                                }
                                 PromptOutcome::Cancelled => (Decision::Cancelled, "cancelled"),
                                 PromptOutcome::FollowupMessage(msg) => {
                                     (Decision::FollowupMessage(msg), "followup")
@@ -1856,7 +1874,7 @@ fn spawn_permission_manager_with_pin(
                         _ => {
                             // Non-bash access kinds keep the single-prompt flow.
                             let prompt_outcome = tokio::select! {
-                                outcome = prompter.request(&access, &tool_call_update) => outcome,
+                                outcome = prompter.request(&access, &tool_call_update, request_subagent_type.as_deref()) => outcome,
                                 _ = respond_to.closed() => PromptOutcome::Cancelled,
                             };
                             let (decision, outcome_str) = match &prompt_outcome {
@@ -1967,6 +1985,9 @@ fn spawn_permission_manager_with_pin(
                                     Decision::Reject("User rejected the execution".to_owned()),
                                     "reject_once",
                                 ),
+                                PromptOutcome::PolicyDeny(reason) => {
+                                    (Decision::PolicyDeny(reason.clone()), reasons::PLUGIN_DENY)
+                                }
                                 PromptOutcome::Cancelled => (Decision::Cancelled, "cancelled"),
                                 PromptOutcome::Error(e) => (
                                     Decision::Reject(format!(
@@ -2103,6 +2124,7 @@ mod tests {
             true,
             yolo_pin,
             None,
+            None,
         )
     }
 
@@ -2125,7 +2147,62 @@ mod tests {
             true,
             None,
             None,
+            None,
         )
+    }
+
+    #[tokio::test]
+    async fn agent_scoped_deny_binds_subagent_but_not_main_session() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                // An `explore`-scoped deny; yolo is on so the root session
+                // auto-allows — proving the scope gates the deny rather than a
+                // blanket block. Policy deny is enforced before yolo, so the
+                // scoped agent is still denied.
+                use crate::permission::types::{PatternMode, RuleAction, ToolFilter};
+                let rule = crate::permission::types::PermissionRule {
+                    action: RuleAction::Deny,
+                    tool: ToolFilter::Bash,
+                    pattern: Some("rm*".into()),
+                    pattern_mode: PatternMode::Glob,
+                    agents: vec!["explore".into()],
+                };
+                let config = crate::permission::types::PermissionConfig::new(vec![rule]);
+                let (mgr, _e) = test_manager_with_config(&cwd, config, true);
+
+                let explore = mgr
+                    .request(
+                        AccessKind::Bash("rm -rf /".into()),
+                        tool_call(),
+                        Some("child-sess".into()),
+                        Some("explore".into()),
+                        None,
+                    )
+                    .await;
+                assert!(
+                    matches!(explore, Decision::PolicyDeny(_)),
+                    "an explore-scoped deny must bind the explore subagent, got {explore:?}"
+                );
+
+                let main = mgr
+                    .request(
+                        AccessKind::Bash("rm -rf /".into()),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert_eq!(
+                    main,
+                    Decision::Allow,
+                    "the root session must not be bound by an explore-scoped rule"
+                );
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -2211,6 +2288,7 @@ mod tests {
             true,
             None,
             Some(hub_permission),
+            None,
         )
     }
 
@@ -2517,6 +2595,7 @@ mod tests {
                     tool: ToolFilter::Read,
                     pattern: Some("**/secrets/**".to_owned()),
                     pattern_mode: PatternMode::Glob,
+                    agents: Vec::new(),
                 }]);
                 let tc = || {
                     acp::ToolCallUpdate::new(
@@ -2572,6 +2651,7 @@ mod tests {
                     tool,
                     pattern: Some(pattern.to_owned()),
                     pattern_mode: PatternMode::Glob,
+                    agents: Vec::new(),
                 };
                 let config = || {
                     PermissionConfig::new(vec![
@@ -2730,6 +2810,7 @@ mod tests {
                     tool,
                     pattern: Some(pattern.to_owned()),
                     pattern_mode: PatternMode::Glob,
+                    agents: Vec::new(),
                 };
                 let tc = || {
                     acp::ToolCallUpdate::new(
@@ -2862,6 +2943,7 @@ mod tests {
                     false,
                     None,
                     true,
+                    None,
                     None,
                     None,
                 );
@@ -3032,6 +3114,7 @@ mod tests {
             false,
             None,
             remember_tool_approvals,
+            None,
             None,
             None,
         )
@@ -3285,6 +3368,7 @@ mod tests {
                     tool: ToolFilter::Bash,
                     pattern: Some("evil-tool*".to_owned()),
                     pattern_mode: PatternMode::Glob,
+                    agents: Vec::new(),
                 }]);
                 let (mgr, _e) = manager_with_recording_client_remember(
                     &cwd,
@@ -3546,6 +3630,7 @@ mod tests {
                     tool: ToolFilter::Bash,
                     pattern: Some("ls*".to_owned()),
                     pattern_mode: PatternMode::Glob,
+                    agents: Vec::new(),
                 }]);
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -3719,6 +3804,7 @@ mod tests {
                         tool: ToolFilter::Bash,
                         pattern: Some("*".to_owned()),
                         pattern_mode: PatternMode::Glob,
+                        agents: Vec::new(),
                     }]);
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -4010,6 +4096,7 @@ mod tests {
                     tool: ToolFilter::Edit,
                     pattern: None,
                     pattern_mode: Default::default(),
+                    agents: Vec::new(),
                 }]);
                 let mut deny = crate::permission::types::PermissionConfig::new(vec![]);
                 deny.prompt_policy = PromptPolicy::Deny;
@@ -4225,6 +4312,7 @@ mod tests {
                     true,
                     None,
                     None,
+                    None,
                 );
                 let PermissionHandle::Actor { ref cmd_tx, .. } = mgr else {
                     panic!("manager must be actor-backed");
@@ -4417,6 +4505,7 @@ mod tests {
                     true,
                     None,
                     None,
+                    None,
                 );
 
                 // Request A parks in the gated prompt; B then arrives and overlaps it.
@@ -4498,6 +4587,7 @@ mod tests {
             tool: ToolFilter::Bash,
             pattern: Some(glob.to_owned()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }])
     }
 
@@ -4617,6 +4707,7 @@ mod tests {
                     tool: ToolFilter::Read,
                     pattern: Some("**/notes.txt".to_owned()),
                     pattern_mode: PatternMode::Glob,
+                    agents: Vec::new(),
                 }]);
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -6373,6 +6464,7 @@ mod tests {
                     tool: ToolFilter::Bash,
                     pattern: Some("my-deploy-tool *".to_owned()),
                     pattern_mode: PatternMode::Glob,
+                    agents: Vec::new(),
                 }]);
                 let (mgr, _ev) = test_manager_with_config(&cwd, config, false);
                 mgr.set_auto_mode(true);

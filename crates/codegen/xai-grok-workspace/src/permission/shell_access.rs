@@ -15,6 +15,18 @@ impl CompiledPolicy {
     /// Escalate (never auto-allow) a shell reader/writer/redirect touching a
     /// restricted path; unpinnable operands return `Ask`.
     pub fn evaluate_shell_file_access(&self, cmd: &str, cwd: &Path) -> Option<Decision> {
+        self.evaluate_shell_file_access_for_agent(cmd, cwd, None)
+    }
+
+    /// Agent-scoped variant of [`evaluate_shell_file_access`]. `agent` is the
+    /// requesting subagent type (`None` for the root session), threaded to the
+    /// underlying rule evaluation so agent-scoped file rules apply correctly.
+    pub fn evaluate_shell_file_access_for_agent(
+        &self,
+        cmd: &str,
+        cwd: &Path,
+        agent: Option<&str>,
+    ) -> Option<Decision> {
         if !self.has_file_restrictions {
             return None;
         }
@@ -45,7 +57,8 @@ impl CompiledPolicy {
                 {
                     forced_ask = true;
                 }
-                decision = combine_decisions(decision, self.evaluate_shell_path(&path, cwd, mode));
+                decision =
+                    combine_decisions(decision, self.evaluate_shell_path(&path, cwd, mode, agent));
             }
         }
 
@@ -75,7 +88,8 @@ impl CompiledPolicy {
                 if shell_arg_is_ambiguous(&path) {
                     forced_ask = true;
                 }
-                decision = combine_decisions(decision, self.evaluate_shell_path(&path, cwd, mode));
+                decision =
+                    combine_decisions(decision, self.evaluate_shell_path(&path, cwd, mode, agent));
             }
             // dd's only file operands are if=/of=, handled above.
             if program_lower == "dd" {
@@ -87,8 +101,10 @@ impl CompiledPolicy {
                     if shell_arg_is_ambiguous(path) {
                         forced_ask = true;
                     }
-                    decision =
-                        combine_decisions(decision, self.evaluate_shell_path(path, cwd, mode));
+                    decision = combine_decisions(
+                        decision,
+                        self.evaluate_shell_path(path, cwd, mode, agent),
+                    );
                 }
                 continue;
             }
@@ -106,8 +122,10 @@ impl CompiledPolicy {
                     forced_ask = true;
                 }
                 for &mode in modes {
-                    decision =
-                        combine_decisions(decision, self.evaluate_shell_path(token, cwd, mode));
+                    decision = combine_decisions(
+                        decision,
+                        self.evaluate_shell_path(token, cwd, mode, agent),
+                    );
                 }
             }
             if shell_reader_can_recurse(&program_lower, words, &candidates) {
@@ -122,6 +140,7 @@ impl CompiledPolicy {
         token: &str,
         cwd: &Path,
         mode: ShellFileMode,
+        agent: Option<&str>,
     ) -> Option<Decision> {
         let path = normalize_shell_path(token);
         let absolute = if is_absolute_shell_path(&path) {
@@ -130,7 +149,7 @@ impl CompiledPolicy {
             normalize_shell_path(&cwd.join(&path).to_string_lossy())
         };
         // Escalate only: drop Allow so a file allow-rule can't auto-approve here.
-        let escalate = |access: &AccessKind| match self.evaluate(access) {
+        let escalate = |access: &AccessKind| match self.evaluate_for_agent(access, agent) {
             Some(Decision::Allow) | None => None,
             other => other,
         };
@@ -885,6 +904,7 @@ mod tests {
             tool,
             pattern: Some(pattern.to_owned()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }
     }
 

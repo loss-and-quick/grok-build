@@ -55,6 +55,8 @@ fn synthetic_rules_for_default_mode(
                 tool: ToolFilter::Any,
                 pattern: None,
                 pattern_mode: PatternMode::Glob,
+                // Session-wide synthetic mode rule: applies to every agent.
+                agents: Vec::new(),
             });
         }
     } else if effects.accept_edits {
@@ -64,6 +66,7 @@ fn synthetic_rules_for_default_mode(
             tool: ToolFilter::Edit,
             pattern: None,
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         });
     }
 
@@ -315,6 +318,20 @@ pub async fn resolve_permission_config_with_fallback(cwd: &Path) -> Option<Permi
         .map(|r| r.config)
 }
 
+/// Like [`resolve_permission_config_with_fallback`] but also folds each agent
+/// definition's declared permission rules (auto-scoped to its agent) into the
+/// config. Used by the owning session so its single compiled policy carries every
+/// agent's scope; subagents inherit that policy. With an empty `agents` slice this
+/// is identical to [`resolve_permission_config_with_fallback`].
+pub async fn resolve_permission_config_with_agents(
+    cwd: &Path,
+    agents: &[AgentPermissionRules],
+) -> Option<PermissionConfig> {
+    resolve_permissions_with_provenance_and_agents(cwd, agents)
+        .await
+        .map(|r| r.config)
+}
+
 /// Patterns of `Deny` rules that forbid *reading* a path — those on `Read`,
 /// `Grep`, or `Any` (the tools that surface file contents). Write-only denies
 /// (`Edit`/`Write`/`Bash`) and non-deny actions are excluded.
@@ -431,6 +448,10 @@ struct ResolveInputs<'a> {
     policy_block: Option<&'static str>,
     managed: &'a ManagedSettings,
     managed_config_rules: Vec<Sourced<PermissionRule>>,
+    /// Agent-definition rules, already auto-scoped and source-tagged. Folded at
+    /// the agent tier (below managed, above nothing) inside the same resolve so
+    /// the yolo-pin catch-all drop still applies to them.
+    agent_rules: Vec<Sourced<PermissionRule>>,
 }
 
 impl ResolveInputs<'static> {
@@ -441,6 +462,7 @@ impl ResolveInputs<'static> {
             managed_config_rules: managed_config_permissions(
                 &xai_grok_config::managed_config_layers(),
             ),
+            agent_rules: Vec::new(),
         }
     }
 }
@@ -468,6 +490,99 @@ pub async fn resolve_permissions_with_provenance(cwd: &Path) -> Option<ResolvedP
     resolve_permissions_with_provenance_inner(cwd, ResolveInputs::live()).await
 }
 
+/// One agent definition's declared permission rules to fold into the resolved
+/// policy, auto-scoped to that agent.
+pub struct AgentPermissionRules {
+    /// The agent's subagent type — the scope its rules bind to. A rule here fires
+    /// only for requests carrying this subagent type (the root session's own
+    /// agent would use the reserved `main` name to bind the root session).
+    pub agent: String,
+    /// Where the definition was loaded from (its `.md` path), for provenance;
+    /// synthesized for built-in agents that have no file.
+    pub source_path: Option<PathBuf>,
+    /// The agent author's declared rules, in the config-facing rule shape.
+    pub rules: Vec<xai_grok_config_types::permission::PermissionRule>,
+}
+
+fn config_rule_action(action: xai_grok_config_types::permission::RuleAction) -> RuleAction {
+    use xai_grok_config_types::permission::RuleAction as C;
+    match action {
+        C::Allow => RuleAction::Allow,
+        C::Deny => RuleAction::Deny,
+        C::Ask => RuleAction::Ask,
+    }
+}
+
+fn config_tool_filter(tool: xai_grok_config_types::permission::ToolFilter) -> ToolFilter {
+    use xai_grok_config_types::permission::ToolFilter as C;
+    // The config mirror has no `WebSearch` variant, so every case is expressible.
+    match tool {
+        C::Any => ToolFilter::Any,
+        C::Bash => ToolFilter::Bash,
+        C::Edit => ToolFilter::Edit,
+        C::Read => ToolFilter::Read,
+        C::Grep => ToolFilter::Grep,
+        C::Mcp => ToolFilter::Mcp,
+        C::WebFetch => ToolFilter::WebFetch,
+    }
+}
+
+fn config_pattern_mode(mode: xai_grok_config_types::permission::PatternMode) -> PatternMode {
+    use xai_grok_config_types::permission::PatternMode as C;
+    match mode {
+        C::Glob => PatternMode::Glob,
+        C::Domain => PatternMode::Domain,
+    }
+}
+
+/// Convert one agent's declared rules into policy-engine rules, forcing each
+/// rule's scope to that agent. An agent definition governs only its own agent,
+/// so any `agents` the author wrote on a rule is replaced with the agent's name
+/// — an agent cannot scope its rules onto a different agent.
+pub(crate) fn agent_definition_sourced_rules(
+    entry: &AgentPermissionRules,
+) -> Vec<Sourced<PermissionRule>> {
+    let source = RequirementSource::AgentDefinition {
+        agent: entry.agent.clone(),
+        path: entry
+            .source_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(format!("agent:{}", entry.agent))),
+    };
+    entry
+        .rules
+        .iter()
+        .map(|r| Sourced {
+            value: PermissionRule {
+                action: config_rule_action(r.action),
+                tool: config_tool_filter(r.tool.clone()),
+                pattern: r.pattern.clone(),
+                pattern_mode: config_pattern_mode(r.pattern_mode),
+                agents: vec![entry.agent.clone()],
+            },
+            source: source.clone(),
+        })
+        .collect()
+}
+
+/// Like [`resolve_permissions_with_provenance`] but also folds each agent
+/// definition's declared rules into the policy, auto-scoped to its agent. Agent
+/// rules rank below managed/system tiers (they are `.md`-authored, so
+/// [`is_admin_source`] never trusts them) and pass through the same yolo-pin
+/// catch-all drop as config/settings. Pass the discoverable subagent catalog so
+/// the owning session's single compiled policy carries every agent's scope.
+pub async fn resolve_permissions_with_provenance_and_agents(
+    cwd: &Path,
+    agents: &[AgentPermissionRules],
+) -> Option<ResolvedPermissions> {
+    let mut inputs = ResolveInputs::live();
+    inputs.agent_rules = agents
+        .iter()
+        .flat_map(agent_definition_sourced_rules)
+        .collect();
+    resolve_permissions_with_provenance_inner(cwd, inputs).await
+}
+
 async fn resolve_permissions_with_provenance_inner(
     cwd: &Path,
     inputs: ResolveInputs<'_>,
@@ -476,6 +591,7 @@ async fn resolve_permissions_with_provenance_inner(
         policy_block,
         managed,
         managed_config_rules,
+        agent_rules,
     } = inputs;
     let config_toml_rules = load_config_toml_permissions(cwd);
 
@@ -488,7 +604,7 @@ async fn resolve_permissions_with_provenance_inner(
         UserDefaultModeLoad::Apply
     };
 
-    // Phase 2 cutoff: skip the .claude/ fallback once the user has imported.
+    // Import cutoff: skip the .claude/ fallback once the user has imported.
     // Native config-derived permissions still apply.
     let skip_claude = is_claude_import_marked_with_log("resolve_permissions_with_provenance");
     let settings_json = if skip_claude {
@@ -525,6 +641,9 @@ async fn resolve_permissions_with_provenance_inner(
 
     all_rules.extend(managed_config_rules);
     all_rules.extend(config_toml_rules);
+    // Agent-definition rules rank just below config.toml: they are `.md`-authored
+    // (non-admin), so their catch-all allows are dropped under the pin below.
+    all_rules.extend(agent_rules);
     if let Some((config, skipped_rules, path)) = settings_json {
         skipped.extend(skipped_rules);
         // User-tier prompt_policy only when managed did not set defaultMode.
@@ -1415,6 +1534,7 @@ mod tests {
             tool,
             pattern: Some(pat.to_string()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         };
         let config = PermissionConfig::new(vec![
             rule(RuleAction::Deny, ToolFilter::Read, "**/.env"),
@@ -1633,7 +1753,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Phase 4: Integration / Precedence Tests
+    // Integration / Precedence Tests
     // ═══════════════════════════════════════════════════════════════════════
 
     /// Integration test: end-to-end flow from .claude/settings.json file
@@ -2098,6 +2218,7 @@ mod tests {
             tool: ToolFilter::Read,
             pattern: Some("**/.env*".to_string()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }];
 
         let policy = CompiledPolicy::new(PermissionConfig::new(rules));
@@ -2973,6 +3094,7 @@ if name == "internal-only"),
             policy_block,
             managed: DEFAULT_MANAGED.get_or_init(ManagedSettings::default),
             managed_config_rules: Vec::new(),
+            agent_rules: Vec::new(),
         }
     }
 
@@ -2985,6 +3107,7 @@ if name == "internal-only"),
             policy_block,
             managed,
             managed_config_rules: Vec::new(),
+            agent_rules: Vec::new(),
         }
     }
 
@@ -3193,6 +3316,7 @@ if name == "internal-only"),
             tool: ToolFilter::Any,
             pattern: pattern.map(str::to_string),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }
     }
 
@@ -3202,6 +3326,7 @@ if name == "internal-only"),
             tool: tool.clone(),
             pattern: pattern.map(str::to_string),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }
     }
 
@@ -3223,6 +3348,7 @@ if name == "internal-only"),
             tool: ToolFilter::Any,
             pattern: Some("*".into()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }));
     }
 
@@ -4205,5 +4331,85 @@ if name == "internal-only"),
         }));
         assert!(!resolved.config.rules.iter().any(is_catchall_allow));
         assert!(resolved.skipped.iter().any(|s| s.reason == PIN));
+    }
+
+    #[test]
+    fn agent_definition_rules_are_force_scoped_to_their_agent() {
+        use xai_grok_config_types::permission as cfg;
+        // The author scoped a rule to `plan`; folding must override it to the
+        // owning agent (`explore`) — an agent cannot grant onto another.
+        let entry = AgentPermissionRules {
+            agent: "explore".into(),
+            source_path: None,
+            rules: vec![cfg::PermissionRule {
+                action: cfg::RuleAction::Deny,
+                tool: cfg::ToolFilter::Edit,
+                pattern: Some("src/**".into()),
+                pattern_mode: cfg::PatternMode::Glob,
+                agents: vec!["plan".into()],
+            }],
+        };
+        let sourced = agent_definition_sourced_rules(&entry);
+        assert_eq!(sourced.len(), 1);
+        assert_eq!(sourced[0].value.agents, vec!["explore".to_string()]);
+        assert_eq!(sourced[0].value.tool, ToolFilter::Edit);
+        assert!(matches!(
+            sourced[0].source,
+            RequirementSource::AgentDefinition { ref agent, .. } if agent == "explore"
+        ));
+    }
+
+    #[tokio::test]
+    async fn agent_definition_rules_merge_at_agent_tier_and_pin_drops_catchall() {
+        use xai_grok_config_types::permission as cfg;
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = AgentPermissionRules {
+            agent: "explore".into(),
+            source_path: Some(std::path::PathBuf::from("/agents/explore.md")),
+            rules: vec![
+                cfg::PermissionRule {
+                    action: cfg::RuleAction::Deny,
+                    tool: cfg::ToolFilter::Bash,
+                    pattern: Some("rm*".into()),
+                    pattern_mode: cfg::PatternMode::Glob,
+                    agents: Vec::new(),
+                },
+                // A catch-all allow: dropped under the pin because the agent tier
+                // is user/project-authored (non-admin).
+                cfg::PermissionRule {
+                    action: cfg::RuleAction::Allow,
+                    tool: cfg::ToolFilter::Bash,
+                    pattern: None,
+                    pattern_mode: cfg::PatternMode::Glob,
+                    agents: Vec::new(),
+                },
+            ],
+        };
+        let resolved = resolve_permissions_with_provenance_inner(
+            tmp.path(),
+            ResolveInputs {
+                agent_rules: agent_definition_sourced_rules(&entry),
+                ..inputs(Some(PIN))
+            },
+        )
+        .await
+        .expect("agent rules alone produce a config");
+        // The deny rule is present, scoped to explore, tagged as an agent source.
+        let deny_idx = resolved
+            .config
+            .rules
+            .iter()
+            .position(|r| r.action == RuleAction::Deny && r.pattern.as_deref() == Some("rm*"))
+            .expect("agent deny rule merged");
+        assert_eq!(
+            resolved.config.rules[deny_idx].agents,
+            vec!["explore".to_string()]
+        );
+        assert!(matches!(
+            resolved.sources[deny_idx],
+            RequirementSource::AgentDefinition { ref agent, .. } if agent == "explore"
+        ));
+        // The catch-all allow was dropped under the pin (agent tier is not admin).
+        assert!(!resolved.config.rules.iter().any(is_catchall_allow));
     }
 }

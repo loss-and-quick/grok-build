@@ -728,6 +728,14 @@ pub struct AgentDefinition {
     pub capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
     #[serde(default)]
     pub permission_mode: PermissionMode,
+    /// Permission rules declared in this agent's `.md` frontmatter. Each rule is
+    /// auto-scoped to this agent (matched by its `name`) when merged into the
+    /// session's resolved permission policy, so an agent author can tighten or
+    /// loosen tool access for their own agent without affecting others. Ranks
+    /// below managed/system tiers: `.md` files are user/project-authored, not
+    /// root-owned, so their catch-all allows are droppable under the yolo pin.
+    #[serde(default)]
+    pub permissions: Vec<xai_grok_config_types::permission::PermissionRule>,
     #[serde(default)]
     pub skills: Vec<String>,
     /// When true (the default), the AgentBuilder discovers skills from CWD
@@ -1429,6 +1437,7 @@ impl AgentDefinition {
             tool_config: default_grok_build_toolset(),
             capability_mode: None,
             permission_mode: PermissionMode::Default,
+            permissions: vec![],
             skills: vec![],
             agents_md: true,
             discover_skills: true,
@@ -1875,6 +1884,40 @@ Mixed agent.
             vec!["search_replace".to_string()],
             "disallowedTools should have 1 entry"
         );
+    }
+    #[test]
+    fn test_parse_agent_permissions() {
+        use xai_grok_config_types::permission as cfg;
+        let content = r#"---
+name: scoped-agent
+description: Declares its own permission rules
+permissions:
+  - action: deny
+    tool: bash
+    pattern: "rm -rf*"
+  - action: allow
+    tool: edit
+    pattern: "src/**"
+---
+
+Scoped agent.
+"#;
+        let def = AgentDefinition::parse(content).unwrap();
+        assert_eq!(
+            def.permissions.len(),
+            2,
+            "both rules parse from frontmatter"
+        );
+        assert_eq!(def.permissions[0].action, cfg::RuleAction::Deny);
+        assert_eq!(def.permissions[0].tool, cfg::ToolFilter::Bash);
+        assert_eq!(def.permissions[0].pattern.as_deref(), Some("rm -rf*"));
+        assert_eq!(def.permissions[1].action, cfg::RuleAction::Allow);
+    }
+    #[test]
+    fn test_agent_permissions_default_empty() {
+        // Existing agents (no `permissions`) parse unchanged with no rules.
+        let def = AgentDefinition::parse("---\nname: a\ndescription: b\n---\nx\n").unwrap();
+        assert!(def.permissions.is_empty());
     }
     #[test]
     fn test_parse_tools_with_agent_parens() {

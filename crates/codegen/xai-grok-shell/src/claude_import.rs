@@ -1226,6 +1226,7 @@ mod tests {
             tool: ToolFilter::Bash,
             pattern: Some("npm run build".to_string()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         };
         assert_eq!(format_rule_string(&rule), "Bash(npm run build)");
     }
@@ -1237,6 +1238,7 @@ mod tests {
             tool: ToolFilter::Bash,
             pattern: None,
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         };
         assert_eq!(format_rule_string(&rule), "Bash");
     }
@@ -1249,6 +1251,7 @@ mod tests {
             tool: ToolFilter::Any,
             pattern: None,
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         };
         assert_eq!(format_rule_string(&rule), "*");
     }
@@ -1260,6 +1263,7 @@ mod tests {
             tool: ToolFilter::Any,
             pattern: Some("src/**".to_string()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         };
         assert_eq!(format_rule_string(&rule), "src/**");
     }
@@ -1271,6 +1275,7 @@ mod tests {
             tool: ToolFilter::WebFetch,
             pattern: Some("example.com".to_string()),
             pattern_mode: PatternMode::Domain,
+            agents: Vec::new(),
         };
         assert_eq!(format_rule_string(&rule), "WebFetch(domain:example.com)");
     }
@@ -1315,12 +1320,14 @@ mod tests {
             tool: ToolFilter::Bash,
             pattern: Some("npm test".to_string()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         };
         let rule_new = PermissionRule {
             action: RuleAction::Allow,
             tool: ToolFilter::Bash,
             pattern: Some("npm run build".to_string()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         };
 
         let count = merge_permissions(&mut table, &[&rule_existing, &rule_new]).unwrap();

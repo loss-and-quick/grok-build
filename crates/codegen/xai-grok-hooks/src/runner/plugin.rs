@@ -458,8 +458,14 @@ mod tests {
         });
         let mut spec = plugin_spec(None);
         spec.timeout_ms = 100;
-        let (result, _) =
-            run_plugin_hook(&spec, &envelope(), &ctx_with(Some(invoker)), GateKind::Tool, None).await;
+        let (result, _) = run_plugin_hook(
+            &spec,
+            &envelope(),
+            &ctx_with(Some(invoker)),
+            GateKind::Tool,
+            None,
+        )
+        .await;
         assert!(
             matches!(&result, HookRunnerResult::Failed(msg) if msg.contains("timed out")),
             "expected a timeout failure, got {result:?}"

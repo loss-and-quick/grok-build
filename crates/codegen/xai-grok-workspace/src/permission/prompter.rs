@@ -278,6 +278,72 @@ pub enum McpScopeSelection {
     Server { server: String },
 }
 
+/// A `permission_ask` plugin's decision on a guarded tool call.
+#[derive(Debug, Clone)]
+pub enum PermissionAskDecision {
+    /// Allow the call (maps to a single-shot allow).
+    Allow,
+    /// Deny with a reason returned to the model (maps to [`Decision::PolicyDeny`]).
+    ///
+    /// [`Decision::PolicyDeny`]: crate::permission::types::Decision::PolicyDeny
+    Deny(String),
+    /// No decision: defer to the normal prompt. The host returns this when no
+    /// plugin subscribes, or when a response is absent/invalid; the seam also
+    /// treats a timeout as this (fail-open).
+    Passthrough,
+}
+
+/// Injected `permission_ask` seam: mirrors [`PermissionHookTransport`] but for the
+/// plugin Tool gate. The host implements it over the plugin sidecar invoker
+/// (fanning out across `permission_ask` subscribers); the workspace never sees
+/// the wire protocol. Fail-open by contract: any error, timeout, or missing
+/// subscriber defers to the normal prompt.
+///
+/// [`PermissionHookTransport`]: crate::permission::PermissionHookTransport
+#[async_trait::async_trait]
+pub trait PermissionAskHook: Send + Sync {
+    /// Dispatch the `permission_ask` event with `payload`, returning the decision.
+    async fn ask(&self, payload: serde_json::Value) -> PermissionAskDecision;
+}
+
+/// Hard cap on how long the `permission_ask` seam waits before failing open to
+/// the normal prompt, so a hung plugin never blocks a permission decision.
+pub const PERMISSION_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A compact, wire-friendly view of an [`AccessKind`] for the permission_ask payload.
+fn access_kind_payload(access: &AccessKind) -> serde_json::Value {
+    match access {
+        AccessKind::Read(path) => serde_json::json!({ "kind": "read", "path": path }),
+        AccessKind::Grep { path, glob } => {
+            serde_json::json!({ "kind": "grep", "path": path, "glob": glob })
+        }
+        AccessKind::Edit(path) => serde_json::json!({ "kind": "edit", "path": path }),
+        AccessKind::Bash(command) => serde_json::json!({ "kind": "bash", "command": command }),
+        AccessKind::MCPTool { name, input } => {
+            serde_json::json!({ "kind": "mcp", "name": name, "input": input })
+        }
+        AccessKind::WebFetch(url) => serde_json::json!({ "kind": "web_fetch", "url": url }),
+        AccessKind::WebSearch(query) => serde_json::json!({ "kind": "web_search", "query": query }),
+    }
+}
+
+/// Build the `permission_ask` payload handed to the plugin invoker: the access
+/// kind, the tool-call context, the originating session, and the subagent type.
+fn build_permission_ask_payload(
+    access: &AccessKind,
+    tool_call_update: &acp::ToolCallUpdate,
+    session_id: &acp::SessionId,
+    subagent_type: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "access_kind": access_kind_payload(access),
+        "tool_name": tool_name_for_access(access),
+        "tool_call_id": tool_call_update.tool_call_id.0.as_ref(),
+        "session_id": session_id.0.as_ref(),
+        "subagent_type": subagent_type,
+    })
+}
+
 #[derive(Debug)]
 pub enum PromptOutcome {
     AllowOnce,
@@ -295,6 +361,10 @@ pub enum PromptOutcome {
     AllowAlwaysMcpServer(String),
     RejectOnce,
     RejectAlwaysBashCommand(String),
+    /// A `permission_ask` plugin denied the call with a reason. Distinct from
+    /// `RejectOnce` so the manager returns [`Decision::PolicyDeny`] — the model
+    /// sees the denial and adapts, rather than the turn being cancelled.
+    PolicyDeny(String),
     Cancelled,
     // If the user provided a followup message instead of an action, the string here will
     // have it
@@ -321,6 +391,11 @@ pub struct AcpPrompter {
     /// Server permission transport: when set, [`request`](Self::request) asks chat for the
     /// decision over the server; `None` keeps the local prompt.
     hub_permission: Option<Arc<dyn crate::permission::PermissionHookTransport>>,
+    /// `permission_ask` plugin seam: when set, [`request`](Self::request)
+    /// dispatches to it before the hub/local prompt; a plugin allow/deny
+    /// short-circuits, anything else (incl. timeout) falls through. `None` keeps
+    /// the prompt unchanged.
+    permission_ask: Option<Arc<dyn PermissionAskHook>>,
     /// When `false` (default, fail-safe), the per-tool "Always allow …" options
     /// are stripped (see [`REMEMBER_TOOL_APPROVALS_GATED_IDS`]).
     remember_tool_approvals: bool,
@@ -494,9 +569,20 @@ impl AcpPrompter {
             // per-session `events.jsonl` opts in via [`with_event_writer`].
             event_writer: EventWriter::noop(),
             hub_permission: None,
+            permission_ask: None,
             // Fail-safe default; opt in via `with_remember_tool_approvals`.
             remember_tool_approvals: false,
         }
+    }
+
+    /// Install the `permission_ask` plugin seam; `None` (default) keeps the
+    /// prompt unchanged. See [`request`](Self::request) for the dispatch order.
+    pub fn with_permission_ask_hook(
+        mut self,
+        permission_ask: Option<Arc<dyn PermissionAskHook>>,
+    ) -> Self {
+        self.permission_ask = permission_ask;
+        self
     }
 
     /// Set whether the granular per-tool "Always allow …" options are shown.
@@ -719,6 +805,7 @@ impl AcpPrompter {
         &self,
         access: &AccessKind,
         tool_call_update: &acp::ToolCallUpdate,
+        subagent_type: Option<&str>,
     ) -> PromptOutcome {
         let tool_name = tool_name_for_access(access);
         // events.jsonl: `PermissionRequested` at prompt-start. The `Instant`
@@ -735,40 +822,72 @@ impl AcpPrompter {
             prompt_start,
         };
 
-        let outcome = match &self.hub_permission {
-            // Route the prompt to chat over the server (see
-            // `ToolServerPermissionTransport` for the await/release contract).
-            Some(transport) => {
-                crate::permission::hub_permission::request_permission_via_hub(
-                    transport.as_ref(),
-                    access,
-                    tool_call_update.tool_call_id.0.as_ref(),
-                )
-                .await
+        // The `permission_ask` plugin seam runs before the hub/local prompt,
+        // mirroring how `hub_permission` intercepts. A plugin allow/deny
+        // short-circuits; a passthrough, a hung plugin (hard timeout), or no
+        // subscriber falls through to the prompt below (fail-open). Runs after
+        // the `PermissionRequested` emit so the paired `PermissionResolved`
+        // still fires for a plugin decision.
+        let plugin_outcome = if let Some(hook) = &self.permission_ask {
+            let payload = build_permission_ask_payload(
+                access,
+                tool_call_update,
+                &self.session_id,
+                subagent_type,
+            );
+            match tokio::time::timeout(PERMISSION_ASK_TIMEOUT, hook.ask(payload)).await {
+                Ok(PermissionAskDecision::Allow) => Some(PromptOutcome::AllowOnce),
+                Ok(PermissionAskDecision::Deny(reason)) => Some(PromptOutcome::PolicyDeny(reason)),
+                Ok(PermissionAskDecision::Passthrough) => None,
+                Err(_elapsed) => {
+                    tracing::warn!("permission_ask plugin timed out; falling through to prompt");
+                    None
+                }
             }
-            None => {
-                let permission_options = self.build_options(access);
-                let req = acp::RequestPermissionRequest::new(
-                    self.session_id.clone(),
-                    tool_call_update.clone(),
-                    permission_options.values().cloned().collect(),
-                )
-                .meta(self.bash_selection_meta(access));
-                match self.gateway.request_permission(req).await {
-                    Ok(resp) => match resp.outcome {
-                        acp::RequestPermissionOutcome::Cancelled => PromptOutcome::Cancelled,
-                        acp::RequestPermissionOutcome::Selected(selected) => map_selected_outcome(
-                            &permission_options,
-                            &selected.option_id,
-                            resp.meta.as_ref(),
-                            access,
-                        ),
-                        // TODO(acp-0.10): `RequestPermissionOutcome` is #[non_exhaustive].
-                        _ => PromptOutcome::Error("unknown permission outcome".to_owned()),
-                    },
-                    Err(e) => {
-                        tracing::error!(?e, "failed to request permission");
-                        PromptOutcome::Error("failed to request permission".to_owned())
+        } else {
+            None
+        };
+
+        let outcome = if let Some(plugin_outcome) = plugin_outcome {
+            plugin_outcome
+        } else {
+            match &self.hub_permission {
+                // Route the prompt to chat over the server (see
+                // `ToolServerPermissionTransport` for the await/release contract).
+                Some(transport) => {
+                    crate::permission::hub_permission::request_permission_via_hub(
+                        transport.as_ref(),
+                        access,
+                        tool_call_update.tool_call_id.0.as_ref(),
+                    )
+                    .await
+                }
+                None => {
+                    let permission_options = self.build_options(access);
+                    let req = acp::RequestPermissionRequest::new(
+                        self.session_id.clone(),
+                        tool_call_update.clone(),
+                        permission_options.values().cloned().collect(),
+                    )
+                    .meta(self.bash_selection_meta(access));
+                    match self.gateway.request_permission(req).await {
+                        Ok(resp) => match resp.outcome {
+                            acp::RequestPermissionOutcome::Cancelled => PromptOutcome::Cancelled,
+                            acp::RequestPermissionOutcome::Selected(selected) => {
+                                map_selected_outcome(
+                                    &permission_options,
+                                    &selected.option_id,
+                                    resp.meta.as_ref(),
+                                    access,
+                                )
+                            }
+                            // TODO(acp-0.10): `RequestPermissionOutcome` is #[non_exhaustive].
+                            _ => PromptOutcome::Error("unknown permission outcome".to_owned()),
+                        },
+                        Err(e) => {
+                            tracing::error!(?e, "failed to request permission");
+                            PromptOutcome::Error("failed to request permission".to_owned())
+                        }
                     }
                 }
             }
@@ -839,6 +958,7 @@ fn permission_decision_for_outcome(outcome: &PromptOutcome) -> PermissionDecisio
         | PromptOutcome::AllowAlwaysMcpServer(_) => PermissionDecision::Allow,
         PromptOutcome::RejectOnce
         | PromptOutcome::RejectAlwaysBashCommand(_)
+        | PromptOutcome::PolicyDeny(_)
         | PromptOutcome::Error(_) => PermissionDecision::Deny,
         PromptOutcome::Cancelled => PermissionDecision::Cancelled,
         PromptOutcome::FollowupMessage(_) => PermissionDecision::Followup,
@@ -1625,7 +1745,7 @@ mod tests {
             acp::ToolCallUpdateFields::default(),
         );
 
-        let outcome = prompter.request(&access, &tool_call_update).await;
+        let outcome = prompter.request(&access, &tool_call_update, None).await;
         assert!(
             matches!(outcome, PromptOutcome::Error(_)),
             "dropped gateway receiver should yield PromptOutcome::Error"
@@ -1675,7 +1795,113 @@ mod tests {
             acp::ToolCallId::new(Arc::from("tc-2")),
             acp::ToolCallUpdateFields::default(),
         );
-        let outcome = prompter.request(&access, &tool_call_update).await;
+        let outcome = prompter.request(&access, &tool_call_update, None).await;
+        assert!(matches!(outcome, PromptOutcome::Error(_)));
+    }
+
+    // ── permission_ask seam ──────────────────────────────────────────────────
+
+    struct RecordingAsk {
+        decision: PermissionAskDecision,
+        seen: std::sync::Mutex<Option<serde_json::Value>>,
+    }
+    #[async_trait::async_trait]
+    impl PermissionAskHook for RecordingAsk {
+        async fn ask(&self, payload: serde_json::Value) -> PermissionAskDecision {
+            *self.seen.lock().unwrap() = Some(payload);
+            self.decision.clone()
+        }
+    }
+    struct HangingAsk;
+    #[async_trait::async_trait]
+    impl PermissionAskHook for HangingAsk {
+        async fn ask(&self, _payload: serde_json::Value) -> PermissionAskDecision {
+            std::future::pending().await
+        }
+    }
+
+    /// A prompter whose local prompt fails fast (dropped-receiver gateway), so a
+    /// fall-through surfaces as [`PromptOutcome::Error`] — distinct from a plugin
+    /// short-circuit — letting the tests tell the two paths apart.
+    fn prompter_with_ask(hook: Arc<dyn PermissionAskHook>) -> AcpPrompter {
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        AcpPrompter::new(
+            acp::SessionId::new(Arc::from("sess-ask")),
+            GatewaySender::new(tx),
+            ClientType::Generic,
+        )
+        .with_permission_ask_hook(Some(hook))
+    }
+    fn ask_tool_call() -> acp::ToolCallUpdate {
+        acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("tc-ask")),
+            acp::ToolCallUpdateFields::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn permission_ask_allow_short_circuits_before_prompt() {
+        let hook = Arc::new(RecordingAsk {
+            decision: PermissionAskDecision::Allow,
+            seen: std::sync::Mutex::new(None),
+        });
+        let prompter = prompter_with_ask(hook.clone());
+        let outcome = prompter
+            .request(
+                &AccessKind::Bash("ls".into()),
+                &ask_tool_call(),
+                Some("explore"),
+            )
+            .await;
+        assert!(matches!(outcome, PromptOutcome::AllowOnce));
+        // The payload carried the access kind, session, and subagent type.
+        let seen = hook.seen.lock().unwrap().clone().expect("hook invoked");
+        assert_eq!(seen["access_kind"]["kind"], "bash");
+        assert_eq!(seen["access_kind"]["command"], "ls");
+        assert_eq!(seen["subagent_type"], "explore");
+        assert_eq!(seen["session_id"], "sess-ask");
+        assert_eq!(seen["tool_call_id"], "tc-ask");
+    }
+
+    #[tokio::test]
+    async fn permission_ask_deny_maps_to_policy_deny() {
+        let hook = Arc::new(RecordingAsk {
+            decision: PermissionAskDecision::Deny("blocked by policy".into()),
+            seen: std::sync::Mutex::new(None),
+        });
+        let prompter = prompter_with_ask(hook);
+        let outcome = prompter
+            .request(&AccessKind::Edit("src/x.rs".into()), &ask_tool_call(), None)
+            .await;
+        match outcome {
+            PromptOutcome::PolicyDeny(reason) => assert_eq!(reason, "blocked by policy"),
+            other => panic!("expected PolicyDeny, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_ask_passthrough_falls_through_to_prompt() {
+        let hook = Arc::new(RecordingAsk {
+            decision: PermissionAskDecision::Passthrough,
+            seen: std::sync::Mutex::new(None),
+        });
+        let prompter = prompter_with_ask(hook);
+        // Fall-through hits the dropped-receiver gateway → Error (fail-open).
+        let outcome = prompter
+            .request(&AccessKind::Bash("ls".into()), &ask_tool_call(), None)
+            .await;
+        assert!(matches!(outcome, PromptOutcome::Error(_)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn permission_ask_timeout_falls_through_to_prompt() {
+        let prompter = prompter_with_ask(Arc::new(HangingAsk));
+        // The hard timeout fires (paused clock auto-advances past it), then the
+        // request falls through to the dropped-receiver gateway → Error.
+        let outcome = prompter
+            .request(&AccessKind::Bash("ls".into()), &ask_tool_call(), None)
+            .await;
         assert!(matches!(outcome, PromptOutcome::Error(_)));
     }
 }

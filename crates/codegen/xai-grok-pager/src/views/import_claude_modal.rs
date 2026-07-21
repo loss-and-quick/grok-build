@@ -1089,6 +1089,7 @@ mod tests {
                     tool: ToolFilter::Bash,
                     pattern: Some("cargo test *".into()),
                     pattern_mode: PatternMode::Glob,
+                    agents: Vec::new(),
                 }),
                 ImportableItem::EnvVar {
                     key: "RUST_LOG".into(),
@@ -1179,6 +1180,7 @@ mod tests {
                     tool: ToolFilter::Bash,
                     pattern: Some("true".into()),
                     pattern_mode: PatternMode::Glob,
+                    agents: Vec::new(),
                 }),
                 mcp("beta"),
                 ImportableItem::EnvVar {

@@ -11,7 +11,7 @@ mod memory;
 pub use memory::*;
 mod mcp;
 pub use mcp::*;
-mod permission;
+pub mod permission;
 pub use permission::*;
 mod pool;
 pub use pool::*;

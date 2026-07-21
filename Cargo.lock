@@ -13045,6 +13045,7 @@ dependencies = [
  "tokio",
  "tracing",
  "xai-grok-config",
+ "xai-grok-config-types",
  "xai-grok-hooks",
  "xai-grok-sampling-types",
  "xai-grok-tools",

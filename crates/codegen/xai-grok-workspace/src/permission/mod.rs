@@ -37,8 +37,9 @@ pub use policy::CompiledPolicy;
 pub use prompter::{
     ALLOW_EDITS_SESSION_OPTION_ID, AcpPrompter, BashCommandPermission, BashCommandSelectedTerms,
     ENABLE_ALWAYS_APPROVE_OPTION_ID, MCP_TOOL_NAME_DELIMITER, McpScopeSelection, McpToolPermission,
-    PromptOutcome, is_enable_always_approve_option, mcp_pretty_name_if_qualified,
-    mcp_titleize_segment, mcp_tool_action, mcp_tool_display_name,
+    PERMISSION_ASK_TIMEOUT, PermissionAskDecision, PermissionAskHook, PromptOutcome,
+    is_enable_always_approve_option, mcp_pretty_name_if_qualified, mcp_titleize_segment,
+    mcp_tool_action, mcp_tool_display_name,
 };
 pub use state::PermissionState;
 pub use state::cleanup_stale_permission_state;

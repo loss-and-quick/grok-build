@@ -286,7 +286,8 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
         }
     }
 }
-/// Permission policy configuration (duplicated from util/config.rs for Phase 1 move independence; identical).
+/// Permission policy configuration (duplicated from util/config.rs so this module
+/// owns its config shape independently of the shell; identical).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct PermissionConfig {
@@ -316,6 +317,13 @@ pub enum PromptPolicy {
     /// Seeded into the permission manager's auto flag at session start.
     Auto,
 }
+/// Reserved agent name the root/main session matches in [`PermissionRule::agents`].
+///
+/// Requests from the root session carry no subagent type; a rule scoped to this
+/// name therefore applies to the root session only. A subagent literally named
+/// `main` would collide with this reserved meaning.
+pub const MAIN_SESSION_AGENT: &str = "main";
+
 /// A single permission rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRule {
@@ -325,6 +333,12 @@ pub struct PermissionRule {
     pub pattern: Option<String>,
     #[serde(default)]
     pub pattern_mode: PatternMode,
+    /// Agents this rule is scoped to, matched by subagent type. Empty (the
+    /// default, so existing configs are unaffected) applies the rule to every
+    /// agent. A non-empty list restricts the rule to requests from those agents;
+    /// the root session matches the reserved name [`MAIN_SESSION_AGENT`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -383,6 +397,14 @@ pub enum RequirementSource {
     Settings {
         path: std::path::PathBuf,
     },
+    /// Rules declared in an agent definition's `.md` frontmatter, auto-scoped to
+    /// that agent. `.md` files are user/project-authored, not root-owned, so this
+    /// tier is never an admin source: its catch-all allows are dropped under the
+    /// yolo pin, exactly like config/settings.
+    AgentDefinition {
+        agent: String,
+        path: std::path::PathBuf,
+    },
 }
 impl std::fmt::Display for RequirementSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -400,6 +422,9 @@ impl std::fmt::Display for RequirementSource {
             }
             Self::Config { path } => write!(f, "{} (config)", path.display()),
             Self::Settings { path } => write!(f, "{} (settings)", path.display()),
+            Self::AgentDefinition { agent, path } => {
+                write!(f, "{} (agent {agent})", path.display())
+            }
         }
     }
 }
@@ -642,5 +667,24 @@ if name ==
             serde_json::from_value::<ClientType>("generic".into()).unwrap(),
             ClientType::Generic,
         );
+    }
+    #[test]
+    fn permission_rule_agents_default_empty_and_round_trip() {
+        // Existing rules (no `agents`) parse to an empty scope: additive change.
+        let bare: PermissionRule =
+            serde_json::from_str(r#"{"action":"deny","tool":"bash","pattern":"rm*"}"#).unwrap();
+        assert!(bare.agents.is_empty());
+        // A scoped rule round-trips its agent list.
+        let scoped: PermissionRule = serde_json::from_str(
+            r#"{"action":"ask","tool":"edit","pattern":"src/**","agents":["explore"]}"#,
+        )
+        .unwrap();
+        assert_eq!(scoped.agents, vec!["explore".to_string()]);
+        assert_eq!(
+            serde_json::to_value(&scoped).unwrap()["agents"],
+            serde_json::json!(["explore"])
+        );
+        // Empty scope is omitted from the serialized form (matches the mirror).
+        assert!(!serde_json::to_string(&bare).unwrap().contains("agents"));
     }
 }

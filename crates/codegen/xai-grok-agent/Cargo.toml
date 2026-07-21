@@ -24,6 +24,7 @@ chrono = { workspace = true }
 ignore = { workspace = true }
 dirs = "6"
 xai-grok-config = { workspace = true }
+xai-grok-config-types = { workspace = true }
 sha2 = { workspace = true }
 strum = { workspace = true }
 thiserror = { workspace = true }

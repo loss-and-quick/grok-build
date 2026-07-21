@@ -234,6 +234,7 @@ fn rule(action: RuleAction, pattern: &str) -> PermissionRule {
         tool: ToolFilter::Mcp,
         pattern: Some(pattern.to_owned()),
         pattern_mode: PatternMode::Glob,
+        agents: Vec::new(),
     }
 }
 
@@ -370,6 +371,7 @@ async fn policy_ask_suppresses_mcp_tool_allowlist() {
                 None,
                 false, // remember_tool_approvals
                 None,
+                None, // permission_ask_hook
             );
 
             // Script an outright reject so we can confirm the prompt fires.
@@ -421,6 +423,7 @@ async fn policy_ask_suppresses_mcp_server_allowlist() {
                 None,
                 false, // remember_tool_approvals
                 None,
+                None, // permission_ask_hook
             );
 
             gw.expected.send(("reject-once".to_string(), None)).unwrap();
@@ -714,6 +717,7 @@ async fn deny_rule_enforced_in_yolo_mode_bash() {
         tool: ToolFilter::Bash,
         pattern: Some("rm*".to_owned()),
         pattern_mode: PatternMode::Glob,
+        agents: Vec::new(),
     }]);
 
     run_actor_test_full(
@@ -750,6 +754,7 @@ async fn deny_rule_enforced_in_yolo_mode_mcp() {
         tool: ToolFilter::Mcp,
         pattern: Some("dangerous__*".to_owned()),
         pattern_mode: PatternMode::Glob,
+        agents: Vec::new(),
     }]);
 
     run_actor_test_full(
@@ -781,6 +786,7 @@ async fn deny_rule_enforced_in_yolo_mode_edit() {
         tool: ToolFilter::Edit,
         pattern: Some("/etc/**".to_owned()),
         pattern_mode: PatternMode::Glob,
+        agents: Vec::new(),
     }]);
 
     run_actor_test_full(
@@ -812,6 +818,7 @@ async fn deny_rule_enforced_in_yolo_mode_web_fetch() {
         tool: ToolFilter::WebFetch,
         pattern: Some("evil.com".to_owned()),
         pattern_mode: PatternMode::Domain,
+        agents: Vec::new(),
     }]);
 
     run_actor_test_full(

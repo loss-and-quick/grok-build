@@ -204,6 +204,9 @@ pub fn parse_permission_rule(
             tool,
             pattern: pattern_opt,
             pattern_mode,
+            // Rule-string DSL has no agent-scoping syntax; scoping comes from the
+            // structured config shape or an agent definition's own rules.
+            agents: Vec::new(),
         })
     } else {
         if let Some(tool) = tool_name_to_filter(rule) {
@@ -212,6 +215,7 @@ pub fn parse_permission_rule(
                 tool,
                 pattern: None,
                 pattern_mode: PatternMode::Glob,
+                agents: Vec::new(),
             });
         }
 
@@ -226,6 +230,7 @@ pub fn parse_permission_rule(
             tool: ToolFilter::Any,
             pattern: pattern_opt,
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         })
     }
 }

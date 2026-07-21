@@ -188,6 +188,81 @@ pub(crate) fn sidecar_plugin_hook_specs(
         .collect()
 }
 
+/// `permission_ask` seam over the session plugin host, handed to the permission
+/// manager so a plugin can allow/deny a guarded tool call before the interactive
+/// prompt (see `xai_grok_workspace::permission::PermissionAskHook`).
+///
+/// The manager is built before the plugin host exists (the host lands later in
+/// session spawn), so this holds deferred slots filled via [`Self::attach`] once
+/// the host is ready. A permission prompt only fires during a turn — well after
+/// startup — so the slots are populated by then; an unfilled slot fails open
+/// (passthrough → the normal prompt).
+pub(crate) struct PluginPermissionAsk {
+    host: std::sync::OnceLock<Arc<PluginHost>>,
+    plugins: std::sync::OnceLock<Vec<String>>,
+}
+
+impl PluginPermissionAsk {
+    pub(crate) fn new() -> Self {
+        Self {
+            host: std::sync::OnceLock::new(),
+            plugins: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Fill the deferred slots once the session plugin host and its registered
+    /// plugin names are known. Idempotent: later calls are ignored.
+    pub(crate) fn attach(&self, host: Arc<PluginHost>, plugins: Vec<String>) {
+        let _ = self.host.set(host);
+        let _ = self.plugins.set(plugins);
+    }
+}
+
+#[async_trait::async_trait]
+impl xai_grok_workspace::permission::PermissionAskHook for PluginPermissionAsk {
+    async fn ask(
+        &self,
+        payload: serde_json::Value,
+    ) -> xai_grok_workspace::permission::PermissionAskDecision {
+        use xai_grok_hooks::invoker::{PluginHookInvoker, PluginHookRequest, PluginHookResponse};
+        use xai_grok_workspace::permission::PermissionAskDecision;
+
+        let (Some(host), Some(plugins)) = (self.host.get(), self.plugins.get()) else {
+            return PermissionAskDecision::Passthrough;
+        };
+        let event = HookEventName::PermissionAsk.to_string();
+        // Deny wins over allow across subscribers; a non-subscriber, observe, or
+        // errored response contributes nothing (fail-open to the prompt).
+        let mut allow = false;
+        for plugin in plugins {
+            let req = PluginHookRequest {
+                plugin: plugin.clone(),
+                handler: event.clone(),
+                event: event.clone(),
+                payload: payload.clone(),
+                timeout_ms: DEFAULT_TIMEOUT_MS,
+            };
+            match host.invoke(req).await {
+                Ok(PluginHookResponse::Decision {
+                    allow: false,
+                    reason,
+                }) => {
+                    return PermissionAskDecision::Deny(
+                        reason.unwrap_or_else(|| "denied by permission_ask plugin".to_string()),
+                    );
+                }
+                Ok(PluginHookResponse::Decision { allow: true, .. }) => allow = true,
+                _ => {}
+            }
+        }
+        if allow {
+            PermissionAskDecision::Allow
+        } else {
+            PermissionAskDecision::Passthrough
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

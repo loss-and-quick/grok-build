@@ -1,7 +1,8 @@
 use crate::permission::bash_command_splitting::{all_commands_from_script, unwrap_wrappers};
 use crate::permission::shell_access::combine_decisions;
 use crate::permission::types::{
-    AccessKind, Decision, PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
+    AccessKind, Decision, MAIN_SESSION_AGENT, PatternMode, PermissionConfig, PermissionRule,
+    RuleAction, ToolFilter,
 };
 use xai_grok_tools::implementations::grok_build::web_fetch::domain::normalize_domain;
 
@@ -67,13 +68,29 @@ impl CompiledPolicy {
     /// `Reject`/`Ask`, never `Allow`. A script that can't be decomposed fails
     /// closed to `Ask` rather than falling through.
     pub fn evaluate_bash_command_policy(&self, cmd: &str) -> Option<Decision> {
+        self.evaluate_bash_command_policy_for_agent(cmd, None)
+    }
+
+    /// Agent-scoped variant of [`evaluate_bash_command_policy`]. `agent` is the
+    /// requesting subagent type (`None` for the root session, mapped to
+    /// [`MAIN_SESSION_AGENT`] when matched against a rule's agent scope).
+    pub fn evaluate_bash_command_policy_for_agent(
+        &self,
+        cmd: &str,
+        agent: Option<&str>,
+    ) -> Option<Decision> {
         if !self.has_bash_command_restrictions {
             return None;
         }
-        self.evaluate_bash_command_segments(cmd, 0)
+        self.evaluate_bash_command_segments(cmd, 0, agent)
     }
 
-    fn evaluate_bash_command_segments(&self, cmd: &str, depth: usize) -> Option<Decision> {
+    fn evaluate_bash_command_segments(
+        &self,
+        cmd: &str,
+        depth: usize,
+        agent: Option<&str>,
+    ) -> Option<Decision> {
         // Far deeper than legitimate `bash -c` nesting; fail closed rather than
         // let an over-nested script run unevaluated.
         if depth >= 8 {
@@ -82,7 +99,9 @@ impl CompiledPolicy {
         let Some(segments) = all_commands_from_script(cmd) else {
             return Some(Decision::Ask);
         };
-        let escalate = |segment: &str| match self.evaluate(&AccessKind::Bash(segment.to_owned())) {
+        let escalate = |segment: &str| match self
+            .evaluate_for_agent(&AccessKind::Bash(segment.to_owned()), agent)
+        {
             Some(Decision::Allow) | None => None,
             other => other,
         };
@@ -99,7 +118,7 @@ impl CompiledPolicy {
                 if let Some(inner) = shell_dash_c_script(words) {
                     decision = combine_decisions(
                         decision,
-                        self.evaluate_bash_command_segments(inner, depth + 1),
+                        self.evaluate_bash_command_segments(inner, depth + 1, agent),
                     );
                 }
             }
@@ -109,10 +128,22 @@ impl CompiledPolicy {
 
     /// Evaluate using deny > ask > allow precedence (order-independent).
     pub fn evaluate(&self, access: &AccessKind) -> Option<Decision> {
+        self.evaluate_for_agent(access, None)
+    }
+
+    /// Agent-scoped variant of [`evaluate`]. A rule carrying a non-empty
+    /// [`PermissionRule::agents`] list matches only when `agent` — the requesting
+    /// subagent type, or the root session mapped to [`MAIN_SESSION_AGENT`] — is in
+    /// the list; unscoped (empty-list) rules match every agent. Precedence stays
+    /// deny > ask > allow across the matching rules regardless of scope.
+    pub fn evaluate_for_agent(&self, access: &AccessKind, agent: Option<&str>) -> Option<Decision> {
         let mut matched_ask = false;
         let mut matched_allow = false;
 
         for (rule, matcher) in self.config.rules.iter().zip(&self.matchers) {
+            if !rule_agent_matches(rule, agent) {
+                continue;
+            }
             if !tool_filter_matches(access, &rule.tool) {
                 continue;
             }
@@ -190,6 +221,17 @@ pub(crate) fn shell_dash_c_script(words: &[String]) -> Option<&str> {
         }
     }
     None
+}
+
+/// Whether a rule's agent scope admits the requesting agent. An empty scope
+/// (the default) matches every agent; otherwise the current agent — the root
+/// session mapped to [`MAIN_SESSION_AGENT`] — must appear in the rule's list.
+fn rule_agent_matches(rule: &PermissionRule, agent: Option<&str>) -> bool {
+    if rule.agents.is_empty() {
+        return true;
+    }
+    let current = agent.unwrap_or(MAIN_SESSION_AGENT);
+    rule.agents.iter().any(|a| a == current)
 }
 
 fn tool_filter_matches(access: &AccessKind, filter: &ToolFilter) -> bool {
@@ -344,6 +386,7 @@ mod tests {
             tool: ToolFilter::Any,
             pattern: Some(pattern.to_string()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }
     }
 
@@ -353,6 +396,7 @@ mod tests {
             tool: ToolFilter::WebFetch,
             pattern: Some(pattern.to_string()),
             pattern_mode: PatternMode::Domain,
+            agents: Vec::new(),
         }
     }
 
@@ -380,6 +424,7 @@ mod tests {
             tool,
             pattern: pattern.map(str::to_string),
             pattern_mode: mode,
+            agents: Vec::new(),
         };
         let glob = |tool: ToolFilter, p: Option<&str>| rule(tool, p, PatternMode::Glob);
 
@@ -468,6 +513,7 @@ mod tests {
             tool: ToolFilter::Any,
             pattern: None,
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         };
         assert!(matches(&AccessKind::Bash("anything".into()), &none_rule));
         assert!(matches(&AccessKind::Read(None), &none_rule));
@@ -569,6 +615,7 @@ mod tests {
             tool: ToolFilter::Bash,
             pattern: Some(pattern.to_string()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }
     }
 
@@ -620,6 +667,117 @@ mod tests {
             Some(Decision::Reject(_))
         ));
         assert!(evaluate_policy(&AccessKind::Bash("ls".into()), &policy).is_none());
+    }
+
+    // ── agent-scope tests ─────────────────────────────────────────────────
+
+    fn agent_bash_rule(action: RuleAction, pattern: &str, agents: &[&str]) -> PermissionRule {
+        PermissionRule {
+            action,
+            tool: ToolFilter::Bash,
+            pattern: Some(pattern.to_string()),
+            pattern_mode: PatternMode::Glob,
+            agents: agents.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn agent_scoped_rule_binds_only_its_agent() {
+        // A deny scoped to `explore` binds only that agent; the root session and
+        // any other agent fall through to no decision.
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![agent_bash_rule(
+            RuleAction::Deny,
+            "rm*",
+            &["explore"],
+        )]));
+        let rm = AccessKind::Bash("rm -rf /".into());
+        assert!(matches!(
+            policy.evaluate_for_agent(&rm, Some("explore")),
+            Some(Decision::Reject(_))
+        ));
+        assert!(policy.evaluate_for_agent(&rm, Some("plan")).is_none());
+        assert!(policy.evaluate_for_agent(&rm, None).is_none());
+        // The no-arg wrapper is the root session (unscoped view).
+        assert!(policy.evaluate(&rm).is_none());
+    }
+
+    #[test]
+    fn unscoped_rule_binds_every_agent() {
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![bash_rule(
+            RuleAction::Deny,
+            "rm*",
+        )]));
+        let rm = AccessKind::Bash("rm -rf /".into());
+        for agent in [None, Some("explore"), Some("plan")] {
+            assert!(
+                matches!(
+                    policy.evaluate_for_agent(&rm, agent),
+                    Some(Decision::Reject(_))
+                ),
+                "unscoped rule must bind agent {agent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn main_reserved_name_scopes_to_root_session() {
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![agent_bash_rule(
+            RuleAction::Deny,
+            "rm*",
+            &["main"],
+        )]));
+        let rm = AccessKind::Bash("rm -rf /".into());
+        // The root session (subagent_type None) matches the reserved `main` name.
+        assert!(matches!(
+            policy.evaluate_for_agent(&rm, None),
+            Some(Decision::Reject(_))
+        ));
+        // A subagent does not.
+        assert!(policy.evaluate_for_agent(&rm, Some("explore")).is_none());
+    }
+
+    #[test]
+    fn deny_precedence_mixes_scoped_and_unscoped_rules() {
+        // Unscoped allow-all plus an explore-scoped deny: explore is denied while
+        // the root session keeps the allow (deny > allow only within the agent's
+        // matching rules).
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![
+            bash_rule(RuleAction::Allow, "*"),
+            agent_bash_rule(RuleAction::Deny, "rm*", &["explore"]),
+        ]));
+        let rm = AccessKind::Bash("rm -rf /".into());
+        assert!(matches!(
+            policy.evaluate_for_agent(&rm, Some("explore")),
+            Some(Decision::Reject(_))
+        ));
+        assert!(matches!(
+            policy.evaluate_for_agent(&rm, None),
+            Some(Decision::Allow)
+        ));
+        // A command outside the scoped deny stays allowed even for explore.
+        assert!(matches!(
+            policy.evaluate_for_agent(&AccessKind::Bash("ls".into()), Some("explore")),
+            Some(Decision::Allow)
+        ));
+    }
+
+    #[test]
+    fn bash_command_gate_respects_agent_scope() {
+        // The per-segment Bash gate threads the agent, so an explore-scoped deny in
+        // a chained command binds explore but not the root session.
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![
+            agent_bash_rule(RuleAction::Deny, "id", &["explore"]),
+            agent_bash_rule(RuleAction::Deny, "id *", &["explore"]),
+        ]));
+        assert!(matches!(
+            policy.evaluate_bash_command_policy_for_agent("echo SAFE && id", Some("explore")),
+            Some(Decision::Reject(_))
+        ));
+        assert!(
+            policy
+                .evaluate_bash_command_policy_for_agent("echo SAFE && id", None)
+                .is_none()
+        );
     }
 
     // ── CompiledPolicy reuse tests ────────────────────────────────────────
@@ -753,6 +911,7 @@ mod tests {
             tool: ToolFilter::Any,
             pattern: None,
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }]);
         let result = evaluate_policy(&AccessKind::Bash("anything".into()), &policy);
         assert!(
@@ -770,6 +929,7 @@ mod tests {
             tool: ToolFilter::Mcp,
             pattern: Some("evil_tool".into()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }]);
         let result = evaluate_policy(
             &AccessKind::MCPTool {
@@ -788,6 +948,7 @@ mod tests {
             tool: ToolFilter::Edit,
             pattern: Some("src/**/*.rs".into()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }]);
         assert!(matches!(
             evaluate_policy(&AccessKind::Edit("src/lib.rs".into()), &policy),
@@ -802,6 +963,7 @@ mod tests {
             tool: ToolFilter::WebSearch,
             pattern: None,
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }]);
         assert!(matches!(
             evaluate_policy(&AccessKind::WebSearch("rust lang".into()), &policy),
@@ -819,6 +981,7 @@ mod tests {
             tool: ToolFilter::WebFetch,
             pattern: None,
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         }]);
         assert!(matches!(
             evaluate_policy(&AccessKind::WebFetch("https://x.com".into()), &policy),
@@ -838,6 +1001,7 @@ mod tests {
             tool: ToolFilter::Read,
             pattern: Some(pattern.to_string()),
             pattern_mode: PatternMode::Glob,
+            agents: Vec::new(),
         };
         let config = PermissionConfig::new(vec![
             read_rule(RuleAction::Deny, "**/.env"),
