@@ -10,6 +10,8 @@ import type { InitializeResult } from "./generated/InitializeResult.ts";
 import type { HookInvokeParams } from "./generated/HookInvokeParams.ts";
 import type { HookInvokeResult } from "./generated/HookInvokeResult.ts";
 import type { ShutdownParams } from "./generated/ShutdownParams.ts";
+import type { ToolInvokeParams } from "./generated/ToolInvokeParams.ts";
+import type { ToolInvokeResult } from "./generated/ToolInvokeResult.ts";
 import type { LogEmitParams } from "./generated/LogEmitParams.ts";
 import type { ConfigGetResult } from "./generated/ConfigGetResult.ts";
 import type { StorageGetParams } from "./generated/StorageGetParams.ts";
@@ -34,6 +36,7 @@ import type { AgentCancelResult } from "./generated/AgentCancelResult.ts";
 export const CoreToPluginMethod = {
   Initialize: "initialize",
   HookInvoke: "hook_invoke",
+  ToolInvoke: "tool_invoke",
   Shutdown: "shutdown",
 } as const;
 
@@ -52,7 +55,7 @@ export const PluginToCoreMethod = {
   AgentCancel: "agent_cancel",
 } as const;
 
-/** Handlers for the three core→plugin methods a plugin must serve. */
+/** Handlers for the core→plugin methods a plugin must serve. */
 export interface IncomingHandlers {
   initialize(
     params: InitializeParams,
@@ -60,6 +63,9 @@ export interface IncomingHandlers {
   hookInvoke(
     params: HookInvokeParams,
   ): Promise<HookInvokeResult> | HookInvokeResult;
+  toolInvoke(
+    params: ToolInvokeParams,
+  ): Promise<ToolInvokeResult> | ToolInvokeResult;
   shutdown(params: ShutdownParams): Promise<void> | void;
 }
 
@@ -73,6 +79,9 @@ export function registerIncomingHandlers(
   );
   endpoint.setRequestHandler(CoreToPluginMethod.HookInvoke, (params) =>
     handlers.hookInvoke(params as HookInvokeParams),
+  );
+  endpoint.setRequestHandler(CoreToPluginMethod.ToolInvoke, (params) =>
+    handlers.toolInvoke(params as ToolInvokeParams),
   );
   endpoint.setNotificationHandler(CoreToPluginMethod.Shutdown, (params) =>
     handlers.shutdown(params as ShutdownParams),

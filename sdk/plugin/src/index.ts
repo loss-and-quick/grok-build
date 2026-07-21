@@ -39,6 +39,10 @@ export type { StorageListParams } from "./generated/StorageListParams.ts";
 export type { StorageListResult } from "./generated/StorageListResult.ts";
 export type { StorageSetParams } from "./generated/StorageSetParams.ts";
 export type { StorageSetResult } from "./generated/StorageSetResult.ts";
+export type { ToolCallContextDto } from "./generated/ToolCallContextDto.ts";
+export type { ToolDescriptorDto } from "./generated/ToolDescriptorDto.ts";
+export type { ToolInvokeParams } from "./generated/ToolInvokeParams.ts";
+export type { ToolInvokeResult } from "./generated/ToolInvokeResult.ts";
 
 // --- Transport ---
 export {
@@ -83,6 +87,7 @@ export type {
   PluginContext,
   PluginLogger,
   PluginStorage,
+  ToolCallContext,
 } from "./context.ts";
 
 // --- definePlugin + gate-aware result helpers ---
@@ -103,4 +108,7 @@ export type {
   HookHandler,
   HookResult,
   Teardown,
+  ToolDefinition,
+  ToolHandler,
+  ToolResult,
 } from "./define.ts";

@@ -9,6 +9,13 @@
 //                     turn without blocking the stop.
 //   • session_start — an *Observe* event: log that the session began.
 //
+// …plus one model-visible tool (`echo`), declared in plugin.json's `tools`
+// array (the catalog's source of truth) and served here via `tool_invoke`.
+// The model calls it as `demo-hooks__echo`; the handler runs in this sidecar
+// with the full ctx (storage/agents/log/config) and a per-call context —
+// note how it reads `call.cwd`, which is the *calling* session's working
+// directory at invoke time, not a session-static path.
+//
 // Import note: a real, installed plugin imports the SDK by its package name:
 //
 //     import { definePlugin, deny, observed } from "@grok-build/plugin";
@@ -36,6 +43,23 @@ export const STOP_CONTEXT =
 
 definePlugin({
   name: "demo-hooks",
+  tools: {
+    // Keep the descriptor fields in sync with plugin.json's `tools` entry —
+    // the host warns at handshake when the two drift.
+    echo: {
+      description: "Echo the given text back, with the caller's context.",
+      inputSchema: {
+        type: "object",
+        properties: { text: { type: "string", description: "Text to echo" } },
+        required: ["text"],
+      },
+      handler(input, ctx, call) {
+        const text = (input as { text?: unknown }).text ?? "";
+        ctx.log.info("demo-hooks: echo tool called", { cwd: call.cwd });
+        return `demo-echo: ${String(text)} (cwd=${call.cwd}, agent=${call.agent})`;
+      },
+    },
+  },
   hooks: {
     // Observe-only: the return value is ignored, but we log the session id so
     // the host's capability channel (`log_emit`) is exercised end to end.

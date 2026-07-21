@@ -461,8 +461,8 @@ pub(crate) fn plugin_sidecar_tool_registrations(
 /// Build one catalog registration for a validated manifest tool, or `None`
 /// (with a warning) when the qualified name fails the authoritative MCP-side
 /// validators. Split out of [`plugin_sidecar_tool_registrations`] for direct
-/// unit testing.
-fn sidecar_tool_registration(
+/// unit testing (and reused by the sidecar e2e tests).
+pub(crate) fn sidecar_tool_registration(
     plugin_name: &str,
     tool: &xai_grok_agent::plugins::SidecarToolSpec,
     host: &Arc<PluginHost>,

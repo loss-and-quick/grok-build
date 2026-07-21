@@ -335,6 +335,196 @@ describe("definePlugin — hook_invoke dispatch", () => {
   });
 });
 
+describe("definePlugin — tools", () => {
+  const TOOL_INVOKE_PARAMS = (tool: string, args: unknown) => ({
+    jsonrpc: "2.0",
+    id: 55,
+    method: "tool_invoke",
+    params: {
+      invocation_id: "tinv-1",
+      tool,
+      arguments: args,
+      context: { session_id: "sess-42", cwd: "/proj/dir", agent: "main" },
+      timeout_ms: 120_000,
+    },
+  });
+
+  test("handshake reports tool descriptors with defaulted schema", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      {
+        tools: {
+          echo: {
+            description: "Echo the input",
+            inputSchema: {
+              type: "object",
+              properties: { text: { type: "string" } },
+            },
+            handler: (input) => JSON.stringify(input),
+          },
+          bare: { handler: () => "ok" },
+        },
+      },
+      { reader, writer, exitOnShutdown: false },
+    );
+
+    const response = await initialize(reader, writer);
+    const result = response.result as unknown as {
+      tools: Array<{ name: string; description: string; input_schema: unknown }>;
+    };
+    expect(result.tools.map((t) => t.name).sort()).toEqual(["bare", "echo"]);
+    const echo = result.tools.find((t) => t.name === "echo")!;
+    expect(echo.description).toBe("Echo the input");
+    expect(echo.input_schema).toEqual({
+      type: "object",
+      properties: { text: { type: "string" } },
+    });
+    const bare = result.tools.find((t) => t.name === "bare")!;
+    expect(bare.description).toBe("");
+    expect(bare.input_schema).toEqual({ type: "object", properties: {} });
+  });
+
+  test("tool_invoke dispatches with input and per-call context", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      {
+        tools: {
+          echo: {
+            handler: (input, ctx, call) =>
+              `echo ${JSON.stringify(input)} session=${call.sessionId} ` +
+              `cwd=${call.cwd} agent=${call.agent} ws=${ctx.workspaceRoot}`,
+          },
+        },
+      },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    reader.pushLine(TOOL_INVOKE_PARAMS("echo", { text: "hi" }));
+    await writer.waitForCount(2);
+    const resp = writer.messages[1] as {
+      result: { content: string; is_error: boolean };
+    };
+    expect(resp.result.is_error).toBe(false);
+    expect(resp.result.content).toContain(`echo {"text":"hi"}`);
+    expect(resp.result.content).toContain("session=sess-42");
+    expect(resp.result.content).toContain("cwd=/proj/dir");
+    expect(resp.result.content).toContain("agent=main");
+    expect(resp.result.content).toContain("ws=/workspace");
+  });
+
+  test("a rich ToolResult maps isError onto the wire", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      {
+        tools: {
+          failing: {
+            handler: () => ({ content: "handler says no", isError: true }),
+          },
+        },
+      },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    reader.pushLine(TOOL_INVOKE_PARAMS("failing", {}));
+    await writer.waitForCount(2);
+    const resp = writer.messages[1] as { result: { content: string; is_error: boolean } };
+    expect(resp.result).toEqual({ content: "handler says no", is_error: true });
+  });
+
+  test("a void handler result is an empty success", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      { tools: { quiet: { handler: () => undefined } } },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    reader.pushLine(TOOL_INVOKE_PARAMS("quiet", {}));
+    await writer.waitForCount(2);
+    const resp = writer.messages[1] as { result: unknown };
+    expect(resp.result).toEqual({ content: "", is_error: false });
+  });
+
+  test("an unknown tool is an error result, not a crash", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      { tools: { known: { handler: () => "ok" } } },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    reader.pushLine(TOOL_INVOKE_PARAMS("ghost", {}));
+    await writer.waitForCount(2);
+    const resp = writer.messages[1] as { result: { content: string; is_error: boolean } };
+    expect(resp.result.is_error).toBe(true);
+    expect(resp.result.content).toContain('"ghost"');
+  });
+
+  test("a throwing handler becomes an error result plus a log_emit", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      {
+        tools: {
+          bomb: {
+            handler: () => {
+              throw new Error("tool bug");
+            },
+          },
+        },
+      },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    reader.pushLine(TOOL_INVOKE_PARAMS("bomb", {}));
+    // log_emit notification + the tool_invoke response.
+    await writer.waitForCount(3);
+    const log = writer.messages[1] as {
+      method: string;
+      params: { level: string; message: string };
+    };
+    expect(log.method).toBe("log_emit");
+    expect(log.params.level).toBe("error");
+    expect(log.params.message).toContain("bomb");
+    const resp = writer.messages[2] as { result: { content: string; is_error: boolean } };
+    expect(resp.result).toEqual({ content: "tool bug", is_error: true });
+  });
+
+  test("a tool handler can await ctx.storage.get without deadlocking", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      {
+        tools: {
+          lookup: {
+            handler: async (_input, ctx) => {
+              const value = await ctx.storage.get("k");
+              return `value=${JSON.stringify(value)}`;
+            },
+          },
+        },
+      },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    reader.pushLine(TOOL_INVOKE_PARAMS("lookup", {}));
+
+    // The outgoing storage_get must be written (and answered) BEFORE the
+    // tool_invoke response — the read loop keeps pumping while the handler
+    // awaits its own plugin→core call on the same stream.
+    await writer.waitForCount(2);
+    const storageReq = writer.messages[1] as { id: number; method: string };
+    expect(storageReq.method).toBe("storage_get");
+    reader.pushLine({ jsonrpc: "2.0", id: storageReq.id, result: { value: 7 } });
+
+    await writer.waitForCount(3);
+    const resp = writer.messages[2] as { result: unknown };
+    expect(resp.result).toEqual({ content: "value=7", is_error: false });
+  });
+});
+
 describe("definePlugin — shutdown", () => {
   test("runs the teardown callback returned by setup() and resolves whenShutdown", async () => {
     const { reader, writer } = setUpEndpoint();

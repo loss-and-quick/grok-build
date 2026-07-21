@@ -32,6 +32,45 @@ That call *is* the program: it starts the stdio JSON-RPC loop, answers the
 host's `initialize` handshake (subscriptions are derived from the `hooks`
 keys), dispatches `hook_invoke`, and exits on `shutdown`.
 
+## Model-visible tools (`tools`)
+
+A plugin can serve tools the model calls like any other tool. Declare each
+tool in **plugin.json** (`tools: [{ name, description, inputSchema,
+timeoutMs? }]`) — that array is what the model-facing catalog is built from,
+under the qualified name `<plugin>__<tool>` (so permission rules and
+`pre/post_tool_use` hooks apply exactly as for MCP tools) — and provide the
+handler in `definePlugin`:
+
+```ts
+definePlugin({
+  tools: {
+    echo: {
+      description: "Echo text back",       // informational; catalog uses plugin.json
+      inputSchema: { type: "object", properties: { text: { type: "string" } } },
+      handler: async (input, ctx, call) => {
+        // Full plugin context: ctx.storage / ctx.agents / ctx.log / ctx.config
+        await ctx.storage.set(`last:${call.cwd}`, input);
+        // Per-call context: who called, from where.
+        return `echo ${JSON.stringify(input)} (cwd=${call.cwd}, agent=${call.agent})`;
+      },
+    },
+  },
+});
+```
+
+The handler runs in the sidecar via the `tool_invoke` RPC with
+`call = { sessionId, cwd, agent }`: `cwd` is the calling session's working
+directory **at call time** (key project-scoped state off it) and `agent` is
+`"main"` for the root session or the subagent type label. Return a string
+(success content), `{ content, isError }`, or nothing (empty success);
+thrown errors become error tool results for the model, never a sidecar
+crash. The host enforces a hard per-call deadline (default 120 s;
+`timeoutMs` in the manifest overrides it per tool) — a slow or crashed
+sidecar yields an error result, not a hang. Handlers may freely await
+plugin→core calls (`ctx.storage`, `ctx.agents`, …) mid-invoke; the endpoint
+serves both directions concurrently. The host warns at handshake when the
+manifest's `tools` array and the `definePlugin` tools map drift.
+
 ## Subagent orchestration (`ctx.agents`)
 
 Every hook and `setup()` receives `ctx.agents`, a typed wrapper over the
@@ -125,12 +164,13 @@ for editor/typecheck support) are devDependencies only.
   outgoing call (e.g. `ctx.storage.get`) must not block the loop that would
   deliver its response.
 - `src/rpc.ts` — typed wrappers over the wire methods: `initialize` /
-  `hook_invoke` / `shutdown` handlers, and `HostClient` for
+  `hook_invoke` / `tool_invoke` / `shutdown` handlers, and `HostClient` for
   `log_emit`/`storage_*`/`config_get`.
 - `src/context.ts` — `PluginContext` (`log`, `storage`, `config()`,
-  `workspaceRoot`, `sessionId`).
-- `src/define.ts` — `definePlugin()` and the gate-aware result helpers
-  (`allow`, `deny`, `stopBlock`, `forceStop`, `observed`, `replace`).
+  `workspaceRoot`, `sessionId`) and the per-call `ToolCallContext`.
+- `src/define.ts` — `definePlugin()` (hooks + tools) and the gate-aware
+  result helpers (`allow`, `deny`, `stopBlock`, `forceStop`, `observed`,
+  `replace`).
 - `src/generated/*.ts` — **read-only**, generated from the Rust side via
   `ts-rs`. Do not edit; do not redefine these shapes elsewhere. `src/index.ts`
   re-exports them.

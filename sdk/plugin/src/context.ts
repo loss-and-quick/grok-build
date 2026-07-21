@@ -48,6 +48,19 @@ export interface PluginAgents {
   cancel(id: string): Promise<AgentCancelOutcomeDto>;
 }
 
+/**
+ * Per-call context a tool handler receives alongside the shared
+ * `PluginContext` (camelCase view of the wire `ToolCallContextDto`).
+ * `agent` names the caller: `"main"` for the root session, otherwise the
+ * subagent type label. `cwd` is the working directory of the call, not the
+ * session-static workspace root — key project-scoped state off it.
+ */
+export interface ToolCallContext {
+  readonly sessionId: string;
+  readonly cwd: string;
+  readonly agent: string;
+}
+
 export interface PluginContext {
   readonly workspaceRoot: string;
   readonly sessionId: string;

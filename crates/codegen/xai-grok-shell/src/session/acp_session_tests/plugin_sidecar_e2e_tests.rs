@@ -69,7 +69,7 @@ fn build_host(data_dir: PathBuf) -> Arc<PluginHost> {
         runtime: RuntimeKind::Auto,
         network: false,
         config: serde_json::json!({}),
-        declared_tools: Vec::new(),
+        declared_tools: vec!["echo".to_string()],
         workspace_root: repo_root(),
         session_id: "e2e-session".to_string(),
         leader_socket: None,
@@ -311,6 +311,102 @@ async fn demo_plugin_and_command_hook_reach_identical_outcomes() {
         cmd_stop.blocks.is_empty(),
         "plugin and command block behavior must match"
     );
+
+    host.dispose().await;
+}
+
+/// End-to-end tool surface: the demo plugin's manifest-declared `echo` tool,
+/// dispatched through the production [`PluginSidecarTool`] wrapper into a
+/// real sidecar running the real SDK. Asserts the per-call context
+/// ({session_id, cwd, agent}) reaches the handler, the result comes back as
+/// an ordinary MCP-shaped tool output, and an unregistered tool surfaces as
+/// an error result (not a hang or crash).
+#[tokio::test]
+async fn demo_plugin_tool_invoke_round_trips_with_call_context() {
+    use xai_grok_tools::types::output::{MCPOutputDetails, ToolOutput};
+    use xai_tool_runtime::Tool as _;
+
+    if !runtime_available() {
+        eprintln!(
+            "SKIP demo_plugin_tool_invoke_round_trips_with_call_context: \
+             no JS runtime (bun/node/deno) on PATH"
+        );
+        return;
+    }
+
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    let host = build_host(data_dir.path().to_path_buf());
+
+    let spec = xai_grok_agent::plugins::SidecarToolSpec {
+        name: "echo".to_string(),
+        description: "Echo the given text back, with the caller's context.".to_string(),
+        input_schema: serde_json::json!({ "type": "object" }),
+        timeout_ms: 0,
+    };
+    let reg = crate::session::plugin_host::sidecar_tool_registration(
+        "demo-hooks",
+        &spec,
+        &host,
+        "e2e-session",
+        "main",
+        "/fallback-cwd",
+    )
+    .expect("valid registration");
+    assert_eq!(reg.qualified_name, "demo-hooks__echo");
+
+    // Per-call cwd rides the dispatch context, exactly as `prepare_dispatch`
+    // provides it for a cwd_override.
+    let mut ctx = xai_tool_runtime::ToolCallContext::default();
+    ctx.extensions
+        .insert(xai_tool_runtime::Cwd(PathBuf::from("/per/call/dir")));
+
+    let output = reg
+        .tool
+        .run(ctx, serde_json::json!({ "text": "hello" }))
+        .await
+        .expect("tool run succeeds");
+    let ToolOutput::MCP(mcp) = &output else {
+        panic!("expected MCP-shaped output, got {output:?}");
+    };
+    assert!(!mcp.is_error);
+    let MCPOutputDetails::OkayOutput(text) = mcp.output() else {
+        panic!("expected okay output, got {:?}", mcp.output());
+    };
+    assert_eq!(
+        text,
+        "demo-echo: hello (cwd=/per/call/dir, agent=main)",
+        "handler must see the per-call cwd and agent label"
+    );
+
+    // A tool the sidecar never registered: an error tool result for the
+    // model, delivered promptly (the SDK answers; nothing waits for timeout).
+    let ghost_spec = xai_grok_agent::plugins::SidecarToolSpec {
+        name: "ghost".to_string(),
+        description: String::new(),
+        input_schema: serde_json::json!({ "type": "object" }),
+        timeout_ms: 0,
+    };
+    let ghost = crate::session::plugin_host::sidecar_tool_registration(
+        "demo-hooks",
+        &ghost_spec,
+        &host,
+        "e2e-session",
+        "main",
+        "/fallback-cwd",
+    )
+    .expect("valid registration");
+    let output = ghost
+        .tool
+        .run(
+            xai_tool_runtime::ToolCallContext::default(),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("unknown tool still yields an output, not a dispatch error");
+    let ToolOutput::MCP(mcp) = &output else {
+        panic!("expected MCP-shaped output, got {output:?}");
+    };
+    assert!(mcp.is_error, "unregistered tool must be an error result");
 
     host.dispose().await;
 }

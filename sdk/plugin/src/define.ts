@@ -11,11 +11,17 @@ import {
   type ByteWriter,
 } from "./stdio.ts";
 import { registerIncomingHandlers, HostClient } from "./rpc.ts";
-import { createPluginContext, type PluginContext } from "./context.ts";
+import {
+  createPluginContext,
+  type PluginContext,
+  type ToolCallContext,
+} from "./context.ts";
 
 import type { EventName } from "./generated/EventName.ts";
 import type { HookInvokeResult } from "./generated/HookInvokeResult.ts";
 import type { InitializeResult } from "./generated/InitializeResult.ts";
+import type { ToolDescriptorDto } from "./generated/ToolDescriptorDto.ts";
+import type { ToolInvokeResult } from "./generated/ToolInvokeResult.ts";
 
 /** The plugin SDK's own protocol version (wire contract v1). */
 export const PROTOCOL_VERSION = 1;
@@ -41,9 +47,44 @@ export type HookHandler<E extends EventName = EventName> = (
 /** Optional cleanup returned by `setup()`, run (best-effort) on `shutdown`. */
 export type Teardown = () => Promise<void> | void;
 
+/** A tool handler's result: rich `{ content, isError }`, or a bare string
+ * (success content). Returning `undefined`/`void` means empty success. */
+export interface ToolResult {
+  content: string;
+  isError?: boolean;
+}
+
+/**
+ * A tool handler. Receives the model's arguments, the same `PluginContext`
+ * hooks get (storage/agents/log/config), and the per-call
+ * [`ToolCallContext`] ({sessionId, cwd, agent}). Throwing surfaces as an
+ * error tool result to the model (with the message as content) — it never
+ * crashes the sidecar.
+ */
+export type ToolHandler = (
+  input: unknown,
+  ctx: PluginContext,
+  call: ToolCallContext,
+) => Promise<ToolResult | string | void> | ToolResult | string | void;
+
+/**
+ * One tool served by this plugin, keyed by bare name in
+ * `PluginDefinition.tools`. `description`/`inputSchema` are informational
+ * here: the *manifest's* `tools` array is what the model-facing catalog is
+ * built from (before the sidecar starts), and the host warns at handshake
+ * when the manifest and this map drift.
+ */
+export interface ToolDefinition {
+  description?: string;
+  /** JSON Schema for the tool input (an object schema). */
+  inputSchema?: unknown;
+  handler: ToolHandler;
+}
+
 export interface PluginDefinition {
   name?: string;
   hooks?: { [E in EventName]?: HookHandler<E> };
+  tools?: Record<string, ToolDefinition>;
   setup?: (ctx: PluginContext) => Promise<void | Teardown> | void | Teardown;
 }
 
@@ -148,6 +189,18 @@ export function definePlugin(
     resolveShutdown = resolve;
   });
 
+  // The tool descriptors reported at handshake, derived from the `tools`
+  // map. Informational: the host cross-checks them against the manifest's
+  // `tools` array (the catalog's source of truth) and warns on drift.
+  const toolDescriptors: ToolDescriptorDto[] = Object.entries(
+    def.tools ?? {},
+  ).map(([name, tool]) => ({
+    name,
+    description: tool.description ?? "",
+    input_schema:
+      tool.inputSchema ?? { type: "object", properties: {} },
+  }));
+
   registerIncomingHandlers(endpoint, {
     async initialize(params): Promise<InitializeResult> {
       ctx = createPluginContext(host, params);
@@ -161,6 +214,7 @@ export function definePlugin(
         protocol_version: PROTOCOL_VERSION,
         subscriptions,
         plugin_version: undefined,
+        tools: toolDescriptors,
       };
     },
 
@@ -178,6 +232,41 @@ export function definePlugin(
         });
         // Fail-open: an uncaught hook error must never block the host.
         return observed();
+      }
+    },
+
+    async toolInvoke(params): Promise<ToolInvokeResult> {
+      const tool = def.tools?.[params.tool];
+      if (!tool || !ctx) {
+        return {
+          content: `tool "${params.tool}" is not registered by this plugin`,
+          is_error: true,
+        };
+      }
+      const call: ToolCallContext = {
+        sessionId: params.context.session_id,
+        cwd: params.context.cwd,
+        agent: params.context.agent,
+      };
+      try {
+        const result = await tool.handler(params.arguments, ctx, call);
+        if (result === undefined || result === null) {
+          return { content: "", is_error: false };
+        }
+        if (typeof result === "string") {
+          return { content: result, is_error: false };
+        }
+        return { content: result.content, is_error: result.isError ?? false };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        host.logEmit({
+          level: "error",
+          message: `tool "${params.tool}" threw`,
+          fields: { error: message },
+        });
+        // An uncaught handler error is an error tool result for the model,
+        // never a sidecar crash.
+        return { content: message, is_error: true };
       }
     },
 
