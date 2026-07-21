@@ -286,6 +286,8 @@ pub async fn run_http_hook(
         GateKind::Tool => parse_http_blocking_result(&response_text, status, &spec.name),
         GateKind::Stop => parse_http_stop_result(&response_text, status, &spec.name),
         GateKind::Observe => HookRunnerResult::Success,
+        // An http hook cannot substitute a payload: always passthrough.
+        GateKind::Replace => HookRunnerResult::Replace(None),
     };
     (result, elapsed, http_info)
 }

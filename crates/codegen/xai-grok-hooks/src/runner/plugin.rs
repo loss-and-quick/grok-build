@@ -28,6 +28,7 @@ pub async fn run_plugin_hook(
     envelope: &HookEventEnvelope,
     ctx: &RunContext<'_>,
     mode: GateKind,
+    payload_override: Option<&serde_json::Value>,
 ) -> (HookRunnerResult, Duration) {
     let start = Instant::now();
 
@@ -56,14 +57,19 @@ pub async fn run_plugin_hook(
 
     // Forward the whole envelope verbatim, matching the command/http runners
     // (which send the same JSON on stdin / in the body); the host reshapes it.
-    let payload = match serde_json::to_value(envelope) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                HookRunnerResult::Failed(format!("failed to serialize envelope: {e}")),
-                start.elapsed(),
-            );
-        }
+    // A `payload_override` (Replace-gate chaining) supplants it so each hook sees
+    // the prior hook's transformed payload rather than the original envelope.
+    let payload = match payload_override {
+        Some(v) => v.clone(),
+        None => match serde_json::to_value(envelope) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    HookRunnerResult::Failed(format!("failed to serialize envelope: {e}")),
+                    start.elapsed(),
+                );
+            }
+        },
     };
 
     let req = PluginHookRequest {
@@ -133,13 +139,20 @@ fn response_to_result(
             PluginHookResponse::Decision { allow: true, .. } => {
                 HookRunnerResult::Decision(HookDecision::Allow)
             }
-            // Observe/Stop replies to a Tool gate carry no allow/deny signal:
-            // fail open (allow), warning on the clear gate mismatch.
+            // Observe/Stop/Replace replies to a Tool gate carry no allow/deny
+            // signal: fail open (allow), warning on the clear gate mismatch.
             PluginHookResponse::Observed => HookRunnerResult::Decision(HookDecision::Allow),
             PluginHookResponse::Stop { .. } => {
                 tracing::warn!(
                     hook_name,
                     "plugin returned a stop decision for a tool gate; allowing"
+                );
+                HookRunnerResult::Decision(HookDecision::Allow)
+            }
+            PluginHookResponse::Replace { .. } => {
+                tracing::warn!(
+                    hook_name,
+                    "plugin returned a replace payload for a tool gate; allowing"
                 );
                 HookRunnerResult::Decision(HookDecision::Allow)
             }
@@ -169,8 +182,8 @@ fn response_to_result(
                     force_stop,
                 })
             }
-            // Observe/Decision replies to a Stop gate carry no stop signal: allow
-            // the stop (empty outcome), warning only on the clear mismatch.
+            // Observe/Decision/Replace replies to a Stop gate carry no stop
+            // signal: allow the stop (empty outcome), warning on the mismatch.
             PluginHookResponse::Observed => HookRunnerResult::Stop(StopHookOutcome::default()),
             PluginHookResponse::Decision { .. } => {
                 tracing::warn!(
@@ -178,6 +191,27 @@ fn response_to_result(
                     "plugin returned an allow/deny decision for a stop gate; allowing stop"
                 );
                 HookRunnerResult::Stop(StopHookOutcome::default())
+            }
+            PluginHookResponse::Replace { .. } => {
+                tracing::warn!(
+                    hook_name,
+                    "plugin returned a replace payload for a stop gate; allowing stop"
+                );
+                HookRunnerResult::Stop(StopHookOutcome::default())
+            }
+        },
+        GateKind::Replace => match response {
+            // The transformed payload (Some) or an explicit passthrough (None).
+            PluginHookResponse::Replace { payload } => HookRunnerResult::Replace(payload),
+            // A non-replace reply to a Replace gate carries no substitution:
+            // pass the current payload through, warning on the clear mismatch.
+            PluginHookResponse::Observed => HookRunnerResult::Replace(None),
+            PluginHookResponse::Decision { .. } | PluginHookResponse::Stop { .. } => {
+                tracing::warn!(
+                    hook_name,
+                    "plugin returned a decision/stop for a replace gate; passing through"
+                );
+                HookRunnerResult::Replace(None)
             }
         },
     }
@@ -280,6 +314,7 @@ mod tests {
             &envelope(),
             &ctx_with(Some(invoker)),
             GateKind::Tool,
+            None,
         )
         .await;
         match result {
@@ -304,6 +339,7 @@ mod tests {
             &envelope(),
             &ctx_with(Some(invoker)),
             GateKind::Tool,
+            None,
         )
         .await;
         match result {
@@ -327,6 +363,7 @@ mod tests {
             &envelope(),
             &ctx_with(Some(invoker)),
             GateKind::Tool,
+            None,
         )
         .await;
         assert!(matches!(
@@ -350,6 +387,7 @@ mod tests {
             &envelope(),
             &ctx_with(Some(invoker)),
             GateKind::Stop,
+            None,
         )
         .await;
         match result {
@@ -380,6 +418,7 @@ mod tests {
             &envelope(),
             &ctx_with(Some(invoker)),
             GateKind::Stop,
+            None,
         )
         .await;
         match result {
@@ -406,6 +445,7 @@ mod tests {
             &envelope(),
             &ctx_with(Some(invoker)),
             GateKind::Observe,
+            None,
         )
         .await;
         assert!(matches!(result, HookRunnerResult::Success));
@@ -419,7 +459,7 @@ mod tests {
         let mut spec = plugin_spec(None);
         spec.timeout_ms = 100;
         let (result, _) =
-            run_plugin_hook(&spec, &envelope(), &ctx_with(Some(invoker)), GateKind::Tool).await;
+            run_plugin_hook(&spec, &envelope(), &ctx_with(Some(invoker)), GateKind::Tool, None).await;
         assert!(
             matches!(&result, HookRunnerResult::Failed(msg) if msg.contains("timed out")),
             "expected a timeout failure, got {result:?}"
@@ -436,6 +476,7 @@ mod tests {
             &envelope(),
             &ctx_with(Some(invoker)),
             GateKind::Tool,
+            None,
         )
         .await;
         assert!(
@@ -451,6 +492,7 @@ mod tests {
             &envelope(),
             &ctx_with(None),
             GateKind::Tool,
+            None,
         )
         .await;
         assert!(

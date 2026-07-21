@@ -40,6 +40,10 @@ const SUPPORTED_EVENTS: &[&str] = &[
     "SubagentEnd",
     "PreCompact",
     "PostCompact",
+    // Provider / permission events — PascalCase and snake_case
+    "ProviderRequest",
+    "ProviderError",
+    "PermissionAsk",
     "notification",
     "stop",
     "stop_failure",
@@ -51,6 +55,9 @@ const SUPPORTED_EVENTS: &[&str] = &[
     "subagent_end",
     "pre_compact",
     "post_compact",
+    "provider_request",
+    "provider_error",
+    "permission_ask",
 ];
 
 /// Parse plugin hook files with pre-filtering and env injection.

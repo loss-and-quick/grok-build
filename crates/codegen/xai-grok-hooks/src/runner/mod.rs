@@ -31,6 +31,8 @@ pub struct RunContext<'a> {
 pub enum HookRunnerResult {
     Decision(HookDecision),
     Stop(StopHookOutcome),
+    /// Replace gate: `Some` is the transformed payload, `None` a passthrough.
+    Replace(Option<serde_json::Value>),
     Success,
     /// Failed: the caller fails open.
     Failed(String),
@@ -131,6 +133,21 @@ pub async fn run_hook(
     ctx: &RunContext<'_>,
     mode: GateKind,
 ) -> HookRunOutput {
+    run_hook_with_payload(spec, envelope, ctx, mode, None).await
+}
+
+/// Like [`run_hook`], but with an optional `payload_override` that supplants the
+/// serialized envelope as the plugin request payload. Only the plugin runner
+/// consults it (command/http build their input from the envelope); it exists so
+/// [`crate::dispatcher::dispatch_replace`] can chain one Replace hook's output
+/// into the next.
+pub async fn run_hook_with_payload(
+    spec: &HookSpec,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+    mode: GateKind,
+    payload_override: Option<&serde_json::Value>,
+) -> HookRunOutput {
     match spec.handler_type {
         crate::config::HandlerType::Command => {
             let (result, elapsed) = command::run_command_hook(spec, envelope, ctx, mode).await;
@@ -138,7 +155,8 @@ pub async fn run_hook(
         }
         crate::config::HandlerType::Http => http::run_http_hook(spec, envelope, ctx, mode).await,
         crate::config::HandlerType::Plugin => {
-            let (result, elapsed) = plugin::run_plugin_hook(spec, envelope, ctx, mode).await;
+            let (result, elapsed) =
+                plugin::run_plugin_hook(spec, envelope, ctx, mode, payload_override).await;
             (result, elapsed, None)
         }
     }

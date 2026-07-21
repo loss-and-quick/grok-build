@@ -488,6 +488,7 @@ fn event_gate(event: &str) -> GateKindDto {
             GateKind::Observe => GateKindDto::Observe,
             GateKind::Tool => GateKindDto::Tool,
             GateKind::Stop => GateKindDto::Stop,
+            GateKind::Replace => GateKindDto::Replace,
         },
         Err(_) => GateKindDto::Observe,
     }
@@ -495,10 +496,10 @@ fn event_gate(event: &str) -> GateKindDto {
 
 /// Map a plugin's `HookInvokeResult` onto the runner's response vocabulary.
 ///
-/// `Replace` has no bridged counterpart in [`PluginHookResponse`] (the 15 bridged
-/// events are Observe/Tool/Stop only), so it fails open to `Observed` with a
-/// warning. A malformed reply is a plugin bug reported as an invoke error, which
-/// the runner also fails open on.
+/// `Replace` maps to [`PluginHookResponse::Replace`]; the runner keeps or
+/// substitutes the payload per the fired gate (a Replace reply on a non-Replace
+/// gate is logged and passed through there). A malformed reply is a plugin bug
+/// reported as an invoke error, which the runner fails open on.
 fn map_result(event: &str, value: Value) -> Result<PluginHookResponse, PluginInvokeError> {
     let result: HookInvokeResult = serde_json::from_value(value)
         .map_err(|e| PluginInvokeError::new(format!("bad hook result for '{event}': {e}")))?;
@@ -519,13 +520,7 @@ fn map_result(event: &str, value: Value) -> Result<PluginHookResponse, PluginInv
             continue_,
             additional_context,
         },
-        HookInvokeResult::Replace { .. } => {
-            tracing::warn!(
-                event,
-                "plugin returned a Replace result on a bridged event; ignoring"
-            );
-            PluginHookResponse::Observed
-        }
+        HookInvokeResult::Replace { payload } => PluginHookResponse::Replace { payload },
     })
 }
 
@@ -541,6 +536,9 @@ mod tests {
         assert_eq!(event_gate("subagent_stop"), GateKindDto::Stop);
         assert_eq!(event_gate("post_tool_use"), GateKindDto::Observe);
         assert_eq!(event_gate("session_start"), GateKindDto::Observe);
+        assert_eq!(event_gate("provider_request"), GateKindDto::Replace);
+        assert_eq!(event_gate("provider_error"), GateKindDto::Replace);
+        assert_eq!(event_gate("permission_ask"), GateKindDto::Tool);
         // Unknown -> Observe (fail-open).
         assert_eq!(event_gate("nonexistent_event"), GateKindDto::Observe);
     }
@@ -571,13 +569,24 @@ mod tests {
             }
         ));
 
-        // Replace fails open to Observed on a bridged event.
+        // Replace maps through to a Replace response (payload preserved); the
+        // runner decides passthrough vs. substitution per the fired gate.
         let r = map_result(
-            "session_start",
+            "provider_request",
+            json!({ "kind": "replace", "payload": { "swapped": true } }),
+        )
+        .unwrap();
+        assert!(matches!(
+            r,
+            PluginHookResponse::Replace { payload: Some(p) } if p == json!({ "swapped": true })
+        ));
+
+        let r = map_result(
+            "provider_request",
             json!({ "kind": "replace", "payload": null }),
         )
         .unwrap();
-        assert!(matches!(r, PluginHookResponse::Observed));
+        assert!(matches!(r, PluginHookResponse::Replace { payload: None }));
     }
 
     #[test]

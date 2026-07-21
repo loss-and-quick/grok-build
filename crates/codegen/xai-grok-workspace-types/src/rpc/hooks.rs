@@ -88,6 +88,9 @@ pub enum HookEventNameWire {
     SubagentEnd,
     PreCompact,
     PostCompact,
+    ProviderRequest,
+    ProviderError,
+    PermissionAsk,
     /// An event string this client does not know, preserved verbatim.
     Unknown(String),
 }
@@ -111,6 +114,9 @@ impl HookEventNameWire {
             Self::SubagentEnd => "subagent_end",
             Self::PreCompact => "pre_compact",
             Self::PostCompact => "post_compact",
+            Self::ProviderRequest => "provider_request",
+            Self::ProviderError => "provider_error",
+            Self::PermissionAsk => "permission_ask",
             Self::Unknown(s) => s,
         }
     }
@@ -144,6 +150,9 @@ impl<'de> Deserialize<'de> for HookEventNameWire {
             "subagent_end" => Self::SubagentEnd,
             "pre_compact" => Self::PreCompact,
             "post_compact" => Self::PostCompact,
+            "provider_request" => Self::ProviderRequest,
+            "provider_error" => Self::ProviderError,
+            "permission_ask" => Self::PermissionAsk,
             // Forward-tolerant: preserve an unknown event verbatim.
             _ => Self::Unknown(s),
         })
@@ -161,7 +170,7 @@ mod tests {
 
     #[test]
     fn hook_event_name_wire_snake_case_round_trip() {
-        // All 15 variants (mirrors upstream `event_name_deser_all_variants`).
+        // All known variants (mirrors upstream `event_name_deser_all_variants`).
         for (variant, wire) in [
             (HookEventNameWire::SessionStart, "session_start"),
             (HookEventNameWire::SessionEnd, "session_end"),
@@ -181,6 +190,9 @@ mod tests {
             (HookEventNameWire::SubagentEnd, "subagent_end"),
             (HookEventNameWire::PreCompact, "pre_compact"),
             (HookEventNameWire::PostCompact, "post_compact"),
+            (HookEventNameWire::ProviderRequest, "provider_request"),
+            (HookEventNameWire::ProviderError, "provider_error"),
+            (HookEventNameWire::PermissionAsk, "permission_ask"),
         ] {
             assert_eq!(
                 serde_json::to_value(&variant).unwrap(),

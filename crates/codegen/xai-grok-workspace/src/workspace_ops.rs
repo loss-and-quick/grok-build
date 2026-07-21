@@ -1808,6 +1808,9 @@ mod tests {
                 E::SubagentEnd => HookEventNameWire::SubagentEnd,
                 E::PreCompact => HookEventNameWire::PreCompact,
                 E::PostCompact => HookEventNameWire::PostCompact,
+                E::ProviderRequest => HookEventNameWire::ProviderRequest,
+                E::ProviderError => HookEventNameWire::ProviderError,
+                E::PermissionAsk => HookEventNameWire::PermissionAsk,
             }
         }
         for e in [
@@ -1826,6 +1829,9 @@ mod tests {
             E::SubagentEnd,
             E::PreCompact,
             E::PostCompact,
+            E::ProviderRequest,
+            E::ProviderError,
+            E::PermissionAsk,
         ] {
             assert_eq!(
                 serde_json::to_value(e).unwrap(),

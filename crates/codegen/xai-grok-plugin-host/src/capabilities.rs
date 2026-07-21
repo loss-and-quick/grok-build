@@ -8,7 +8,7 @@
 //!   store+mutex+GC in the user's taskboard/memory/council plugins).
 //! - `config_get`   → returns the plugin config handed to the host at
 //!   registration.
-//! - `agent_*`      → reserved orchestration surface; replies `method_not_found`.
+//! - `agent_*`      → reserved orchestration; replies `method_not_found`.
 //!
 //! One [`PluginCapabilities`] is built per registered plugin and shared with
 //! every sidecar spawned for it (across restarts), so storage state survives a

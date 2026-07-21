@@ -140,7 +140,9 @@ pub async fn dispatch_pre_tool_use(
                     http_info,
                 });
             }
-            HookRunnerResult::Success | HookRunnerResult::Stop(_) => {
+            HookRunnerResult::Success
+            | HookRunnerResult::Stop(_)
+            | HookRunnerResult::Replace(_) => {
                 tracing::info!(
                     hook_name = %spec.name,
                     elapsed_ms = elapsed.as_millis() as u64,
@@ -339,7 +341,9 @@ pub async fn dispatch_stop(
                     http_info,
                 });
             }
-            HookRunnerResult::Success | HookRunnerResult::Decision(_) => {
+            HookRunnerResult::Success
+            | HookRunnerResult::Decision(_)
+            | HookRunnerResult::Replace(_) => {
                 out.results.push(HookRunResult::Success {
                     hook_name: spec.name.clone(),
                     elapsed,
@@ -417,7 +421,9 @@ pub async fn dispatch_non_blocking(
                     http_info,
                 });
             }
-            HookRunnerResult::Decision(_) | HookRunnerResult::Stop(_) => {
+            HookRunnerResult::Decision(_)
+            | HookRunnerResult::Stop(_)
+            | HookRunnerResult::Replace(_) => {
                 tracing::info!(
                     hook_name = %spec.name,
                     elapsed_ms = elapsed.as_millis() as u64,
@@ -435,6 +441,110 @@ pub async fn dispatch_non_blocking(
     record_dispatch_counts(&span, &results);
 
     results
+}
+
+/// Dispatch a `Replace`-gate event against all matching hooks, chaining their
+/// output.
+///
+/// Hooks run sequentially in config order. The first hook sees the original
+/// serialized envelope; each hook that returns a substitute payload replaces the
+/// current one, and the next hook sees that transformed payload (chaining). A
+/// hook that passes through, or fails (timeout, crash, missing invoker), leaves
+/// the current payload untouched — fail-open, per hook.
+///
+/// Returns the final transformed payload, or `None` if no hook replaced it (the
+/// caller then keeps the original). Mirrors [`dispatch_pre_tool_use`]'s shape;
+/// command/http hooks on a Replace event can only pass through.
+pub async fn dispatch_replace(
+    registry: &HookRegistry,
+    event: HookEventName,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> Option<serde_json::Value> {
+    if event.traits().gate != GateKind::Replace {
+        debug_assert!(
+            false,
+            "dispatch_replace called with non-replace event {event:?}"
+        );
+        tracing::error!(%event, "dispatch_replace called with a non-replace event; ignoring");
+        return None;
+    }
+    let event = event.canonical();
+    let hooks = registry.hooks_for_canonical(event);
+    if hooks.is_empty() {
+        return None;
+    }
+
+    let span = dispatch_span(event, hooks.len());
+    let _enter = span.enter();
+
+    let match_value = envelope.payload.match_value().map(str::to_string);
+    // `None` means "no hook has replaced yet": the first hook sees the original
+    // envelope; once a hook substitutes, later hooks see the substitute.
+    let mut current: Option<serde_json::Value> = None;
+    let mut run_results = Vec::new();
+
+    for spec in hooks {
+        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut run_results) {
+            continue;
+        }
+
+        let _hook_span = tracing::info_span!(
+            "hook.run",
+            hook_name = %spec.name,
+            hook_event = %event,
+        )
+        .entered();
+
+        let (result, elapsed, http_info) =
+            runner::run_hook_with_payload(spec, envelope, ctx, GateKind::Replace, current.as_ref())
+                .await;
+
+        match result {
+            HookRunnerResult::Replace(Some(payload)) => {
+                tracing::info!(
+                    hook_name = %spec.name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "replace hook substituted the payload"
+                );
+                current = Some(payload);
+                run_results.push(HookRunResult::Success {
+                    hook_name: spec.name.clone(),
+                    elapsed,
+                    http_info,
+                });
+            }
+            // Explicit passthrough (`Replace(None)`) or any non-replace success:
+            // keep the current payload.
+            HookRunnerResult::Replace(None)
+            | HookRunnerResult::Success
+            | HookRunnerResult::Decision(_)
+            | HookRunnerResult::Stop(_) => {
+                run_results.push(HookRunResult::Success {
+                    hook_name: spec.name.clone(),
+                    elapsed,
+                    http_info,
+                });
+            }
+            HookRunnerResult::Failed(err) => {
+                tracing::warn!(
+                    hook_name = %spec.name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    error = %err,
+                    "replace hook failed; keeping current payload (fail-open)"
+                );
+                run_results.push(HookRunResult::Failed {
+                    hook_name: spec.name.clone(),
+                    error: err,
+                    elapsed,
+                    http_info,
+                });
+            }
+        }
+    }
+
+    record_dispatch_counts(&span, &run_results);
+    current
 }
 
 fn record_dispatch_counts(span: &tracing::Span, results: &[HookRunResult]) {
@@ -1104,7 +1214,11 @@ if hook_name == "crasher"),
 
     #[test]
     fn hub_hook_kind_maps_all_hub_forwarded_events() {
+        // Non-forwarded events (local-only or plugin-only seams) return None.
         assert_eq!(hub_hook_kind(HookEventName::PreToolUse), None);
+        assert_eq!(hub_hook_kind(HookEventName::ProviderRequest), None);
+        assert_eq!(hub_hook_kind(HookEventName::ProviderError), None);
+        assert_eq!(hub_hook_kind(HookEventName::PermissionAsk), None);
 
         let cases: &[(HookEventName, &str)] = &[
             (HookEventName::SessionStart, "hook.session_start"),
@@ -1144,11 +1258,16 @@ if hook_name == "crasher"),
                 | HookEventName::SubagentStop
                 | HookEventName::SubagentEnd
                 | HookEventName::PreCompact
-                | HookEventName::PostCompact => 15,
+                | HookEventName::PostCompact
+                | HookEventName::ProviderRequest
+                | HookEventName::ProviderError
+                | HookEventName::PermissionAsk => 18,
             }
         };
         assert_eq!(
-            cases.len() + 1, // +1 for PreToolUse (blocking, tested separately)
+            // +4 non-forwarded: PreToolUse (blocking) plus the three reserved
+            // seams (ProviderRequest/ProviderError/PermissionAsk), tested above.
+            cases.len() + 4,
             total_variants(HookEventName::SessionStart),
             "update hub_hook_kind test when new HookEventName variants are added"
         );
@@ -1280,6 +1399,170 @@ if hook_name == "crasher"),
             matches!(&result.results[0], HookRunResult::Failed { hook_name, .. } if hook_name == "guard"),
             "the missing invoker must be recorded as a failure, got {:?}",
             result.results
+        );
+    }
+
+    // --- Replace-gate dispatch. `provider_request` is a Replace event with no
+    // typed `HookPayload` variant yet, so the envelope carries a placeholder
+    // payload; the plugin sees it as opaque JSON.
+
+    fn provider_request_envelope() -> HookEventEnvelope {
+        HookEventEnvelope {
+            hook_event_name: HookEventName::ProviderRequest,
+            session_id: "test-session".into(),
+            cwd: "/tmp".into(),
+            workspace_root: "/tmp".into(),
+            timestamp: "2025-01-01T00:00:00Z".into(),
+            transcript_path: None,
+            client_identifier: None,
+            prompt_id: None,
+            permission_mode: None,
+            payload: HookPayload::UserPromptSubmit {
+                prompt: Some("original".into()),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_empty_registry_passes_through() {
+        let registry = registry_from_specs(vec![]);
+        let out = dispatch_replace(
+            &registry,
+            HookEventName::ProviderRequest,
+            &provider_request_envelope(),
+            &run_ctx(),
+        )
+        .await;
+        assert_eq!(out, None, "no hooks -> passthrough (original)");
+    }
+
+    #[tokio::test]
+    async fn replace_single_hook_substitutes_payload() {
+        let registry =
+            registry_from_specs(vec![plugin_spec("rewrite", HookEventName::ProviderRequest)]);
+        let ctx = plugin_ctx(PluginHookResponse::Replace {
+            payload: Some(serde_json::json!({ "swapped": true })),
+        });
+        let out = dispatch_replace(
+            &registry,
+            HookEventName::ProviderRequest,
+            &provider_request_envelope(),
+            &ctx,
+        )
+        .await;
+        assert_eq!(out, Some(serde_json::json!({ "swapped": true })));
+    }
+
+    #[tokio::test]
+    async fn replace_passthrough_keeps_original() {
+        let registry =
+            registry_from_specs(vec![plugin_spec("noop", HookEventName::ProviderRequest)]);
+        // A plugin that returns `replace` with no payload = explicit passthrough.
+        let ctx = plugin_ctx(PluginHookResponse::Replace { payload: None });
+        let out = dispatch_replace(
+            &registry,
+            HookEventName::ProviderRequest,
+            &provider_request_envelope(),
+            &ctx,
+        )
+        .await;
+        assert_eq!(out, None, "passthrough leaves the payload untransformed");
+    }
+
+    /// An invoker that records each request payload and returns `{"n": <call#>}`,
+    /// so a two-hook chain proves the second hook sees the first's output.
+    struct ChainInvoker {
+        seen: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl PluginHookInvoker for ChainInvoker {
+        fn invoke<'a>(&'a self, req: PluginHookRequest) -> PluginHookFuture<'a> {
+            let n = {
+                let mut seen = self.seen.lock().unwrap();
+                seen.push(req.payload);
+                seen.len() - 1
+            };
+            Box::pin(async move {
+                Ok(PluginHookResponse::Replace {
+                    payload: Some(serde_json::json!({ "n": n })),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_chains_each_hook_output_into_the_next() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = RunContext {
+            session_id: "test-session",
+            workspace_root: "/tmp",
+            plugin_invoker: Some(Arc::new(ChainInvoker {
+                seen: Arc::clone(&seen),
+            })),
+        };
+        let registry = registry_from_specs(vec![
+            plugin_spec("first", HookEventName::ProviderRequest),
+            plugin_spec("second", HookEventName::ProviderRequest),
+        ]);
+        let out = dispatch_replace(
+            &registry,
+            HookEventName::ProviderRequest,
+            &provider_request_envelope(),
+            &ctx,
+        )
+        .await;
+
+        // The final payload is the second hook's output.
+        assert_eq!(out, Some(serde_json::json!({ "n": 1 })));
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "both hooks ran");
+        // First hook saw the original serialized envelope (carries the event name).
+        assert_eq!(seen[0]["hookEventName"], "provider_request");
+        // Second hook saw the FIRST hook's output, not the original — chaining.
+        assert_eq!(seen[1], serde_json::json!({ "n": 0 }));
+    }
+
+    #[tokio::test]
+    async fn replace_failing_hook_keeps_current_payload() {
+        // A failing hook (no invoker registered) must not drop a prior substitution.
+        // Hook 1 replaces via a live invoker; hook 2 has a different plugin name the
+        // invoker doesn't know, so it errors — fail-open keeps hook 1's payload.
+        struct OnlyFirstInvoker;
+        impl PluginHookInvoker for OnlyFirstInvoker {
+            fn invoke<'a>(&'a self, req: PluginHookRequest) -> PluginHookFuture<'a> {
+                Box::pin(async move {
+                    if req.plugin == "first" {
+                        Ok(PluginHookResponse::Replace {
+                            payload: Some(serde_json::json!({ "from": "first" })),
+                        })
+                    } else {
+                        Err(crate::invoker::PluginInvokeError::new("boom"))
+                    }
+                })
+            }
+        }
+        let ctx = RunContext {
+            session_id: "test-session",
+            workspace_root: "/tmp",
+            plugin_invoker: Some(Arc::new(OnlyFirstInvoker)),
+        };
+        let mut first = plugin_spec("first-hook", HookEventName::ProviderRequest);
+        first.plugin = Some("first".into());
+        let mut second = plugin_spec("second-hook", HookEventName::ProviderRequest);
+        second.plugin = Some("second".into());
+        let registry = registry_from_specs(vec![first, second]);
+        let out = dispatch_replace(
+            &registry,
+            HookEventName::ProviderRequest,
+            &provider_request_envelope(),
+            &ctx,
+        )
+        .await;
+        assert_eq!(
+            out,
+            Some(serde_json::json!({ "from": "first" })),
+            "the failing second hook must not discard the first's substitution"
         );
     }
 }

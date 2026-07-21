@@ -151,7 +151,7 @@ impl std::fmt::Display for EventName {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Host abilities advertised to the plugin at handshake. Part of `initialize`,
-/// core→plugin. `leader_socket` is reserved (currently always `None`).
+/// core→plugin. `leader_socket` is reserved and currently `None`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
 pub struct HostCapabilities {

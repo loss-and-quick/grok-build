@@ -44,6 +44,10 @@ pub fn hook_spec_to_info(spec: &xai_grok_hooks::config::HookSpec) -> HookInfo {
         // Compaction
         HookEventName::PreCompact => HookEvent::PreCompact,
         HookEventName::PostCompact => HookEvent::PostCompact,
+        // Provider / permission (reserved seams)
+        HookEventName::ProviderRequest => HookEvent::ProviderRequest,
+        HookEventName::ProviderError => HookEvent::ProviderError,
+        HookEventName::PermissionAsk => HookEvent::PermissionAsk,
     };
 
     let handler_type = if spec.url.is_some() {

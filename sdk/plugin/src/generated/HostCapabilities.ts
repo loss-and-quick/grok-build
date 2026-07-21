@@ -2,6 +2,6 @@
 
 /**
  * Host abilities advertised to the plugin at handshake. Part of `initialize`,
- * core→plugin. `leader_socket` is reserved (currently always `None`).
+ * core→plugin. `leader_socket` is reserved and currently `None`.
  */
 export type HostCapabilities = { storage: boolean, leader_socket?: string | null, };

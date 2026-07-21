@@ -19,7 +19,7 @@ pub struct RpcError {
 }
 
 impl RpcError {
-    /// `-32601`: the requested method isn't served. Used for reserved
+    /// `-32601`: the requested method isn't served. Used for the reserved
     /// `agent_*` methods and anything unrecognized.
     pub fn method_not_found(method: &str) -> Self {
         Self {

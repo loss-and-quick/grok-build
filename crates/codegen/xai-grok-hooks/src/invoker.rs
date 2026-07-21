@@ -53,6 +53,9 @@ pub enum PluginHookResponse {
         /// Injected into the next turn's context.
         additional_context: Option<String>,
     },
+    /// Replace gate: `Some(payload)` substitutes the event payload; `None`
+    /// passes the current payload through unchanged.
+    Replace { payload: Option<serde_json::Value> },
 }
 
 /// A plugin invocation failure (transport error, plugin crash, protocol error).

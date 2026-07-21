@@ -94,6 +94,33 @@ async fn handshake_ok_routes_and_maps_results() {
 }
 
 #[tokio::test]
+async fn replace_gate_maps_replace_payload() {
+    // A Replace-gate event (`provider_request`) whose sidecar returns a `replace`
+    // result must map to `PluginHookResponse::Replace` with the substitute payload
+    // (and the payload the host forwarded round-trips back inside it).
+    let (host, _d, _w) = host_with(
+        &[
+            ("FAKE_MODE", "replace_payload".into()),
+            ("FAKE_SUBSCRIPTIONS", "provider_request".into()),
+        ],
+        Duration::from_millis(10),
+    );
+
+    let resp = host.invoke(req("provider_request", 5000)).await.unwrap();
+    match resp {
+        PluginHookResponse::Replace { payload } => {
+            let payload = payload.expect("substitute payload present");
+            assert_eq!(payload["replaced"], serde_json::json!(true));
+            // The fixture echoes the forwarded request payload back.
+            assert_eq!(payload["saw"], serde_json::json!({ "tool": "bash" }));
+        }
+        other => panic!("expected Replace, got {other:?}"),
+    }
+
+    host.dispose().await;
+}
+
+#[tokio::test]
 async fn protocol_version_mismatch_disables_plugin() {
     let (host, _d, _w) = host_with(
         &[

@@ -1,8 +1,8 @@
 # demo-hooks
 
-A minimal TypeScript **sidecar plugin** for grok-build, used as the
-end-to-end proof that plugin hooks reach the same dispatcher outcomes as native
-command hooks.
+A minimal TypeScript **sidecar plugin** for grok-build, used as the reference
+plugin and e2e-parity fixture: proof that plugin hooks reach the same dispatcher
+outcomes as native command hooks.
 
 ## What it does
 

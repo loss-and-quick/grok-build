@@ -493,7 +493,7 @@ pub fn initialize_params(
         session_id,
         capabilities: xai_grok_plugin_protocol::HostCapabilities {
             storage,
-            // Reserved: leader socket not exposed yet.
+            // Leader socket not exposed yet (reserved; not wired).
             leader_socket: None,
         },
     }

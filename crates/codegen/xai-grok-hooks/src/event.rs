@@ -32,6 +32,14 @@ pub enum HookEventName {
 
     PreCompact,
     PostCompact,
+
+    /// Intercepts the outgoing LLM request; Replace gate. Reserved; not wired yet.
+    ProviderRequest,
+    /// Provider failure → retry (model/base_url alias) or fail; Replace gate.
+    /// Reserved; not wired yet.
+    ProviderError,
+    /// Permission prompt seam; Tool gate. Reserved; not wired yet.
+    PermissionAsk,
 }
 
 impl<'de> serde::Deserialize<'de> for HookEventName {
@@ -78,12 +86,18 @@ impl<'de> serde::Deserialize<'de> for HookEventName {
             "SubagentEnd" | "subagent_end" | "subagentEnd" => Ok(Self::SubagentEnd),
             "PreCompact" | "pre_compact" | "preCompact" => Ok(Self::PreCompact),
             "PostCompact" | "post_compact" | "postCompact" => Ok(Self::PostCompact),
+            "ProviderRequest" | "provider_request" | "providerRequest" => {
+                Ok(Self::ProviderRequest)
+            }
+            "ProviderError" | "provider_error" | "providerError" => Ok(Self::ProviderError),
+            "PermissionAsk" | "permission_ask" | "permissionAsk" => Ok(Self::PermissionAsk),
             other => Err(serde::de::Error::custom(format!(
                 "unknown hook event: '{other}'. Expected one of: \
                  SessionStart, PreToolUse, PostToolUse, PostToolUseFailure, \
                  SessionEnd, Stop, StopFailure, Notification, UserPromptSubmit, \
                  PermissionDenied, SubagentStart, SubagentStop, \
-                 PreCompact, PostCompact (camelCase and per-operation aliases \
+                 PreCompact, PostCompact, ProviderRequest, ProviderError, \
+                 PermissionAsk (camelCase and per-operation aliases \
                  such as beforeShellExecution are also accepted)"
             ))),
         }
@@ -107,6 +121,9 @@ impl std::fmt::Display for HookEventName {
             Self::SubagentStop | Self::SubagentEnd => write!(f, "subagent_stop"),
             Self::PreCompact => write!(f, "pre_compact"),
             Self::PostCompact => write!(f, "post_compact"),
+            Self::ProviderRequest => write!(f, "provider_request"),
+            Self::ProviderError => write!(f, "provider_error"),
+            Self::PermissionAsk => write!(f, "permission_ask"),
         }
     }
 }
@@ -118,6 +135,11 @@ pub enum GateKind {
     Tool,
     /// Stop decision control (`block`, `continue: false`, `additionalContext`).
     Stop,
+    /// Substitute the event payload: a hook returns a transformed value that
+    /// replaces the original, or passes through to leave it unchanged. Plugin
+    /// hooks chain (each hook's output feeds the next); fail-open keeps the
+    /// current payload. Used by the provider seams.
+    Replace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +195,12 @@ impl HookEventName {
             Self::SubagentEnd => unreachable!("canonicalized above"),
             Self::PreCompact => t(Observe, Tested, true),
             Self::PostCompact => t(Observe, Tested, true),
+            // Reserved seams: plugin-only, not hub-forwarded, no natural match
+            // key (Ignored → fire-all). PermissionAsk keys on a tool but has no
+            // dispatch path yet, so Ignored is the safe default until it is wired.
+            Self::ProviderRequest => t(Replace, Ignored, false),
+            Self::ProviderError => t(Replace, Ignored, false),
+            Self::PermissionAsk => t(Tool, Ignored, false),
         }
     }
 }
@@ -535,6 +563,21 @@ mod tests {
             ("SubagentEnd", "subagent_end", HookEventName::SubagentEnd),
             ("PreCompact", "pre_compact", HookEventName::PreCompact),
             ("PostCompact", "post_compact", HookEventName::PostCompact),
+            (
+                "ProviderRequest",
+                "provider_request",
+                HookEventName::ProviderRequest,
+            ),
+            (
+                "ProviderError",
+                "provider_error",
+                HookEventName::ProviderError,
+            ),
+            (
+                "PermissionAsk",
+                "permission_ask",
+                HookEventName::PermissionAsk,
+            ),
         ];
 
         for (pascal, snake, expected) in cases {
@@ -568,6 +611,9 @@ mod tests {
             (HookEventName::SubagentEnd, "subagent_stop"), // alias collapses
             (HookEventName::PreCompact, "pre_compact"),
             (HookEventName::PostCompact, "post_compact"),
+            (HookEventName::ProviderRequest, "provider_request"),
+            (HookEventName::ProviderError, "provider_error"),
+            (HookEventName::PermissionAsk, "permission_ask"),
         ];
         for (event, expected) in cases {
             assert_eq!(&event.to_string(), expected, "Display wrong for {event:?}");
@@ -593,6 +639,9 @@ mod tests {
             ("subagentEnd", HookEventName::SubagentEnd),
             ("preCompact", HookEventName::PreCompact),
             ("stopFailure", HookEventName::StopFailure),
+            ("providerRequest", HookEventName::ProviderRequest),
+            ("providerError", HookEventName::ProviderError),
+            ("permissionAsk", HookEventName::PermissionAsk),
         ];
         for (spelling, expected) in cases {
             let parsed: HookEventName = serde_json::from_str(&format!("\"{spelling}\"")).unwrap();
@@ -619,6 +668,12 @@ mod tests {
             "alias resolves through canonical()"
         );
         assert_eq!(HookEventName::PostToolUse.traits().gate, GateKind::Observe);
+        assert_eq!(
+            HookEventName::ProviderRequest.traits().gate,
+            GateKind::Replace
+        );
+        assert_eq!(HookEventName::ProviderError.traits().gate, GateKind::Replace);
+        assert_eq!(HookEventName::PermissionAsk.traits().gate, GateKind::Tool);
 
         assert_eq!(HookEventName::Stop.traits().matcher, MatcherPolicy::Ignored);
         assert_eq!(

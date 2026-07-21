@@ -390,8 +390,21 @@ mod tests {
             HookEventName::PreCompact,
             HookEventName::PostCompact,
             HookEventName::SessionEnd,
+            // Reserved seams (below): plugin-only, no core dispatch path, so
+            // deliberately absent from the flat listing.
+            HookEventName::ProviderRequest,
+            HookEventName::ProviderError,
+            HookEventName::PermissionAsk,
         ];
         for event in every_variant {
+            // A reserved event is one the core registry does not surface in
+            // `ALL_EVENTS` yet (subscribable by plugins, but never dispatched here).
+            let reserved = matches!(
+                event,
+                HookEventName::ProviderRequest
+                    | HookEventName::ProviderError
+                    | HookEventName::PermissionAsk
+            );
             match event {
                 HookEventName::SessionStart
                 | HookEventName::UserPromptSubmit
@@ -407,12 +420,22 @@ mod tests {
                 | HookEventName::SubagentEnd
                 | HookEventName::PreCompact
                 | HookEventName::PostCompact
-                | HookEventName::SessionEnd => {}
+                | HookEventName::SessionEnd
+                | HookEventName::ProviderRequest
+                | HookEventName::ProviderError
+                | HookEventName::PermissionAsk => {}
             }
-            assert!(
-                HookRegistry::ALL_EVENTS.contains(&event),
-                "{event} is missing from ALL_EVENTS"
-            );
+            if reserved {
+                assert!(
+                    !HookRegistry::ALL_EVENTS.contains(&event),
+                    "{event} is reserved and must not appear in ALL_EVENTS yet"
+                );
+            } else {
+                assert!(
+                    HookRegistry::ALL_EVENTS.contains(&event),
+                    "{event} is missing from ALL_EVENTS"
+                );
+            }
         }
     }
 

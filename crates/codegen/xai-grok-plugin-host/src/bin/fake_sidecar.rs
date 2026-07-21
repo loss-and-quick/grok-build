@@ -12,6 +12,7 @@
 //! - `FAKE_PLUGIN_VERSION`    — informational `plugin_version`.
 //! - `FAKE_MODE`:
 //!     - `normal`             — reply per gate: Tool→deny(reason), Stop→block, else Observed.
+//!     - `replace_payload`    — reply `replace` with a substitute payload (Replace gate).
 //!     - `crash_on_invoke`    — exit(1) on the first `hook_invoke`.
 //!     - `hang_on_invoke`     — never reply to `hook_invoke`.
 //!     - `exit_after_handshake` — reply to initialize, then exit(0).
@@ -97,6 +98,12 @@ fn main() {
                 let result = if mode == "storage_probe" {
                     storage_probe(&mut reader, &mut next_id);
                     HookInvokeResult::Observed
+                } else if mode == "replace_payload" {
+                    // Echo the received payload back under a marker so the test can
+                    // confirm the host forwarded it, plus the substitution.
+                    HookInvokeResult::Replace {
+                        payload: Some(json!({ "replaced": true, "saw": params.payload })),
+                    }
                 } else {
                     match params.gate {
                         GateKindDto::Tool => HookInvokeResult::Decision {
