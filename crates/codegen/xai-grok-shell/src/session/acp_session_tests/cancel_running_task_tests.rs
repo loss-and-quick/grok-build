@@ -66,6 +66,8 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
                 header_injector: None,
+                request_interceptor: None,
+                error_hook: None,
             })
             .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
@@ -275,6 +277,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
+                provider_fallback_cooldowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
                 sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
@@ -364,6 +367,8 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
                 header_injector: None,
+                request_interceptor: None,
+                error_hook: None,
             })
             .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
@@ -498,6 +503,8 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
                 header_injector: None,
+                request_interceptor: None,
+                error_hook: None,
             })
             .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
@@ -731,6 +738,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
+                provider_fallback_cooldowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
                 sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
@@ -1021,6 +1029,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     StreamingTurnCapture::default(),
                 ),
                 turn_stream_drained: parking_lot::Mutex::new(None),
+                provider_fallback_cooldowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
                 sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
@@ -2006,6 +2015,8 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
                 header_injector: None,
+                request_interceptor: None,
+                error_hook: None,
             };
             let (sampler_event_tx, _sampler_event_rx) = tokio::sync::mpsc::unbounded_channel::<
                 xai_grok_sampler::SamplingEvent,
@@ -2254,6 +2265,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     StreamingTurnCapture::default(),
                 ),
                 turn_stream_drained: parking_lot::Mutex::new(None),
+                provider_fallback_cooldowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
                 sampler_handle: sampler_handle.clone(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),

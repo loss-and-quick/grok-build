@@ -244,6 +244,62 @@ pub fn classify_error(
     RetryDecision::Fatal(clone_error(err))
 }
 
+/// Classify a sampling error into a stable, coarse **error class** string.
+///
+/// This is the single shared vocabulary for provider failover: the
+/// built-in fallback chains match their configured classes against this
+/// output, and the error-hook payload carries it. It deliberately reuses
+/// the existing retry predicates ([`SamplingError::is_rate_limited`],
+/// [`SamplingError::is_auth_error`], the 5xx set) rather than inventing a
+/// parallel taxonomy.
+///
+/// Returned classes: `rate_limit`, `overloaded`, `5xx`, `network`,
+/// `stream`, `auth`, `other`. New classes may be added over time;
+/// consumers treat unrecognized strings as inert.
+pub fn classify_error_class(err: &SamplingError) -> &'static str {
+    // "Overloaded" is a provider-signaled capacity condition (Anthropic's
+    // 529 / `overloaded_error`, and equivalents surfaced mid-stream). It
+    // is a narrow refinement of the 5xx / stream buckets checked first, not
+    // a new predicate bolted onto `SamplingError`.
+    if is_overloaded(err) {
+        return "overloaded";
+    }
+    if err.is_rate_limited() {
+        return "rate_limit";
+    }
+    if err.is_auth_error() {
+        return "auth";
+    }
+    match err {
+        SamplingError::Api { status, .. } if status.is_server_error() => "5xx",
+        SamplingError::Http(e)
+            if e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() =>
+        {
+            "network"
+        }
+        SamplingError::EventStreamError(_) | SamplingError::StreamError { .. } => "stream",
+        _ => "other",
+    }
+}
+
+/// Detect the "overloaded" capacity signal across the shapes providers use
+/// for it (HTTP 529, or an `overloaded`-tagged stream/API message).
+fn is_overloaded(err: &SamplingError) -> bool {
+    match err {
+        SamplingError::Api {
+            status, message, ..
+        } => status.as_u16() == 529 || message.to_ascii_lowercase().contains("overloaded"),
+        SamplingError::StreamError {
+            error_type,
+            message,
+        } => {
+            error_type.to_ascii_lowercase().contains("overloaded")
+                || message.to_ascii_lowercase().contains("overloaded")
+        }
+        _ => false,
+    }
+}
+
 /// Build a human-readable, telemetry-friendly description of a sampling
 /// error.
 ///
@@ -835,6 +891,63 @@ mod tests {
                 other => panic!("expected Retry, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn error_class_covers_the_shared_vocabulary() {
+        assert_eq!(
+            classify_error_class(&api_err(StatusCode::TOO_MANY_REQUESTS, "slow")),
+            "rate_limit"
+        );
+        assert_eq!(
+            classify_error_class(&api_err(StatusCode::BAD_GATEWAY, "boom")),
+            "5xx"
+        );
+        assert_eq!(
+            classify_error_class(&api_err(StatusCode::UNAUTHORIZED, "no")),
+            "auth"
+        );
+        assert_eq!(
+            classify_error_class(&SamplingError::Auth("bad".into())),
+            "auth"
+        );
+        assert_eq!(
+            classify_error_class(&SamplingError::EventStreamError("reset".into())),
+            "stream"
+        );
+        assert_eq!(
+            classify_error_class(&SamplingError::StreamError {
+                error_type: "transient".into(),
+                message: "x".into(),
+            }),
+            "stream"
+        );
+        assert_eq!(
+            classify_error_class(&SamplingError::IdleTimeout { elapsed_secs: 1 }),
+            "other"
+        );
+    }
+
+    #[test]
+    fn error_class_detects_overloaded_across_shapes() {
+        // Anthropic 529.
+        let err = SamplingError::Api {
+            status: StatusCode::from_u16(529).unwrap(),
+            message: "overloaded_error".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert_eq!(classify_error_class(&err), "overloaded");
+        // Overloaded surfaced mid-stream.
+        let err = SamplingError::StreamError {
+            error_type: "overloaded_error".into(),
+            message: "server overloaded".into(),
+        };
+        assert_eq!(classify_error_class(&err), "overloaded");
+        // Overloaded wins over the plain 5xx bucket.
+        let err = api_err(StatusCode::SERVICE_UNAVAILABLE, "Overloaded, try later");
+        assert_eq!(classify_error_class(&err), "overloaded");
     }
 
     #[test]

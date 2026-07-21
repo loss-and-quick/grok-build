@@ -1,3 +1,5 @@
+use tracing::Instrument;
+
 use crate::config::HookSpec;
 use crate::discovery::HookRegistry;
 use crate::event::{HookEventEnvelope, HookEventName};
@@ -476,8 +478,11 @@ pub async fn dispatch_replace(
     }
 
     let span = dispatch_span(event, hooks.len());
-    let _enter = span.enter();
-
+    // Deliberately do NOT hold an `EnteredSpan` (`span.enter()`) across the
+    // `.await` below: `EnteredSpan` is `!Send`, which would make this future
+    // `!Send` and unusable from the sampler's request interceptor. Instead the
+    // per-hook span is parented to `span` and the awaited call is
+    // `.instrument`ed, preserving the same span tree while staying `Send`.
     let match_value = envelope.payload.match_value().map(str::to_string);
     // `None` means "no hook has replaced yet": the first hook sees the original
     // envelope; once a hook substitutes, later hooks see the substitute.
@@ -489,18 +494,19 @@ pub async fn dispatch_replace(
             continue;
         }
 
-        let _hook_span = tracing::info_span!(
+        let hook_span = tracing::info_span!(
+            parent: &span,
             "hook.run",
             hook_name = %spec.name,
             hook_event = %event,
-        )
-        .entered();
+        );
 
         let (result, elapsed, http_info) =
             runner::run_hook_with_payload(spec, envelope, ctx, GateKind::Replace, current.as_ref())
+                .instrument(hook_span.clone())
                 .await;
 
-        match result {
+        hook_span.in_scope(|| match result {
             HookRunnerResult::Replace(Some(payload)) => {
                 tracing::info!(
                     hook_name = %spec.name,
@@ -540,7 +546,7 @@ pub async fn dispatch_replace(
                     http_info,
                 });
             }
-        }
+        });
     }
 
     record_dispatch_counts(&span, &run_results);

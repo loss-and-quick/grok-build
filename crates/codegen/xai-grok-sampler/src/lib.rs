@@ -24,6 +24,7 @@ pub mod config;
 pub mod doom_loop;
 pub mod events;
 pub mod handle;
+pub mod intercept;
 pub mod metrics;
 pub mod retry;
 pub mod sampling_log;
@@ -44,10 +45,14 @@ pub use config::{
 pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
 pub use handle::SamplerHandle;
+pub use intercept::{
+    ErrorDirective, ErrorHook, ErrorView, RequestInterceptor, RequestReplacement, RequestView,
+    SeamFuture, SharedErrorHook, SharedRequestInterceptor,
+};
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
 pub use retry::{
     DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision, classify_error,
-    format_sampling_error, resolve_max_retries, retry_backoff_with_jitter,
+    classify_error_class, format_sampling_error, resolve_max_retries, retry_backoff_with_jitter,
 };
 pub use sampling_log::AuthInfo;
 pub use stream::{collect_response, stream_chat_completions, stream_messages, stream_responses};

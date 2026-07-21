@@ -1184,6 +1184,75 @@ pub struct MarketplaceSourceEntry {
     #[serde(default)]
     pub branch: Option<String>,
 }
+/// A single `[[model_fallbacks]]` entry: when the model named `from` fails
+/// with an error whose class is in `on_errors`, the session's failover loop
+/// re-issues the request against the models in `to` (in order), skipping any
+/// `(from, to)` pair still inside its cooldown window.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ModelFallback {
+    /// The model this chain applies to (matched against the active model id).
+    pub from: String,
+    /// Ordered replacement models to try, most-preferred first.
+    pub to: Vec<String>,
+    /// Cooldown, in seconds, before a `(from, to)` pair that just failed over
+    /// is eligible again. `0` (default) disables the cooldown.
+    pub cooldown_seconds: u64,
+    /// Error classes that trigger this chain. Compared as strings against
+    /// [`xai_grok_sampler::classify_error_class`]; an unknown or future class
+    /// parses to [`FallbackErrorClass::Unknown`] and never matches, so a
+    /// config naming a class the build does not know is inert rather than a
+    /// hard parse error.
+    pub on_errors: Vec<FallbackErrorClass>,
+}
+
+impl ModelFallback {
+    /// Whether this chain reacts to the given runtime error-class string.
+    pub fn triggers_on(&self, class: &str) -> bool {
+        self.on_errors.iter().any(|c| c.matches_class(class))
+    }
+}
+
+/// The coarse error classes a fallback chain can react to. Mirrors the
+/// vocabulary produced by [`xai_grok_sampler::classify_error_class`]. Unknown
+/// strings deserialize to [`FallbackErrorClass::Unknown`] (tolerant parsing),
+/// so the config schema tolerates classes it does not recognize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackErrorClass {
+    RateLimit,
+    Overloaded,
+    #[serde(rename = "5xx")]
+    ServerError,
+    Network,
+    Stream,
+    Auth,
+    /// Any class string the build does not recognize. Matches nothing.
+    #[serde(other)]
+    Unknown,
+}
+
+impl FallbackErrorClass {
+    /// The canonical class string this variant matches, or `None` for
+    /// [`FallbackErrorClass::Unknown`] (which matches nothing).
+    fn as_class_str(self) -> Option<&'static str> {
+        match self {
+            Self::RateLimit => Some("rate_limit"),
+            Self::Overloaded => Some("overloaded"),
+            Self::ServerError => Some("5xx"),
+            Self::Network => Some("network"),
+            Self::Stream => Some("stream"),
+            Self::Auth => Some("auth"),
+            Self::Unknown => None,
+        }
+    }
+
+    /// Whether this configured class matches a runtime error-class string from
+    /// [`xai_grok_sampler::classify_error_class`].
+    pub fn matches_class(self, class: &str) -> bool {
+        self.as_class_str() == Some(class)
+    }
+}
 /// `[suggestions]` section from config.toml.
 ///
 /// Controls the shell command suggestion pipeline (history, path, AI).
@@ -1408,6 +1477,17 @@ pub struct Config {
     /// `[marketplace]` — also read by `xai_grok_plugin_marketplace::load_sources()`.
     #[serde(default, skip_serializing)]
     pub marketplace: MarketplaceConfig,
+    /// `[[model_fallbacks]]` — declarative provider/model failover chains.
+    /// When a request fails with an error whose class is in `on_errors`, the
+    /// session's failover loop re-issues it against the models listed in `to`
+    /// (in order), honoring a per-pair cooldown. See [`ModelFallback`].
+    #[serde(default, skip_serializing)]
+    pub model_fallbacks: Vec<ModelFallback>,
+    /// Cap on provider-fallback model switches within a single turn (distinct
+    /// from the sampler's transport retry budget). `None` uses the built-in
+    /// default of 3.
+    #[serde(default, skip_serializing)]
+    pub provider_fallback_max_attempts: Option<u32>,
     /// `[diagnostics]` — crash handler toggle (`load_crash_handler_enabled_sync`).
     #[serde(default, skip_serializing)]
     pub diagnostics: DiagnosticsConfig,
@@ -1773,6 +1853,8 @@ impl Default for Config {
             storage: StorageConfig::default(),
             suggestions: SuggestionsConfig::default(),
             marketplace: MarketplaceConfig::default(),
+            model_fallbacks: Vec::new(),
+            provider_fallback_max_attempts: None,
             diagnostics: DiagnosticsConfig::default(),
             storage_mode: StorageMode::resolve(None, None),
             default_model_override: None,
@@ -4794,6 +4876,11 @@ pub fn stamp_session_local_sampler_fields(
 ) {
     cfg.client_identifier = client_identifier;
     cfg.attribution_callback = active_session_config.attribution_callback.clone();
+    // Carry the session's request interceptor and error hook onto the routed
+    // config so an aux model or a failover re-issue keeps the same outbound
+    // rewriting / error-directive behavior.
+    cfg.request_interceptor = active_session_config.request_interceptor.clone();
+    cfg.error_hook = active_session_config.error_hook.clone();
     if crate::util::is_xai_api_bearer_url(&cfg.base_url) {
         cfg.bearer_resolver = active_session_config.bearer_resolver.clone();
     }
@@ -4890,6 +4977,10 @@ pub fn sampling_config_for_model(
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
         header_injector: None,
+        // Session-local seams (interceptor / error hook) are stamped in later
+        // by the session; a bare per-model config carries neither.
+        request_interceptor: None,
+        error_hook: None,
     }
 }
 /// Fold URL-derived headers into `extra_headers`.
@@ -6884,6 +6975,41 @@ if field.as_deref() == Some("auth_provider"))
         let resolved = resolve_model_list(&cfg, None);
         let model = resolved.get("my-custom-model").expect("model should exist");
         assert_eq!(model.info.context_window, NonZeroU64::new(256_000).unwrap());
+    }
+    #[test]
+    fn parses_model_fallbacks_and_tolerates_unknown_error_class() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [[model_fallbacks]]
+            from = "grok-4.5"
+            to = ["grok-4", "claude-sonnet"]
+            cooldown_seconds = 30
+            on_errors = ["rate_limit", "overloaded", "5xx", "network", "stream", "some_future_class"]
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        assert_eq!(cfg.model_fallbacks.len(), 1);
+        let fb = &cfg.model_fallbacks[0];
+        assert_eq!(fb.from, "grok-4.5");
+        assert_eq!(fb.to, vec!["grok-4".to_string(), "claude-sonnet".to_string()]);
+        assert_eq!(fb.cooldown_seconds, 30);
+        // Known classes trigger the chain.
+        for class in ["rate_limit", "overloaded", "5xx", "network", "stream"] {
+            assert!(fb.triggers_on(class), "expected {class} to trigger");
+        }
+        // The unrecognized class parsed tolerantly to `Unknown` and matches
+        // nothing, so a config naming a future class is inert, not a load error.
+        assert!(fb.on_errors.contains(&FallbackErrorClass::Unknown));
+        assert!(!fb.triggers_on("some_future_class"));
+        // A class not listed in `on_errors` does not trigger.
+        assert!(!fb.triggers_on("auth"));
+    }
+    #[test]
+    fn model_fallbacks_default_to_empty() {
+        let raw_config: toml::Value = toml::from_str("").unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("empty config parses");
+        assert!(cfg.model_fallbacks.is_empty());
     }
     #[test]
     fn sampling_config_context_window_from_entry_or_default() {

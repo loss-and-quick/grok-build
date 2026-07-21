@@ -21,6 +21,7 @@ use xai_grok_sampling_types::{
 
 use crate::client::{ApiBackend, SamplingClient};
 use crate::config::{RetryPolicy, SamplerConfig};
+use crate::intercept::ErrorDirective;
 use crate::events::{SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
@@ -235,6 +236,18 @@ pub(crate) async fn run_request_task(
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
+                if error_hook_short_circuits(
+                    &client,
+                    &error,
+                    retry_count,
+                    &event_tx,
+                    &request_id,
+                    &mut completion_tx,
+                )
+                .await
+                {
+                    return request_id;
+                }
                 if !apply_retry_decision(
                     &error,
                     &mut retry_count,
@@ -257,6 +270,18 @@ pub(crate) async fn run_request_task(
                 return request_id;
             }
             AttemptOutcome::InitFailed { error } => {
+                if error_hook_short_circuits(
+                    &client,
+                    &error,
+                    retry_count,
+                    &event_tx,
+                    &request_id,
+                    &mut completion_tx,
+                )
+                .await
+                {
+                    return request_id;
+                }
                 if !apply_retry_decision(
                     &error,
                     &mut retry_count,
@@ -276,6 +301,39 @@ pub(crate) async fn run_request_task(
             }
         }
     }
+}
+
+/// Consult a wired error hook on a provider/stream error. Returns `true`
+/// when the hook directed [`ErrorDirective::Fail`] — in which case the
+/// error is surfaced immediately and the sampler's own retry budget is
+/// abandoned — and `false` otherwise (the default when no hook is wired,
+/// leaving the transport classifier in charge).
+///
+/// The sampler acts only on `Fail`. Model / base-URL substitution needs
+/// resolving aliases to concrete endpoints and credentials, which lives in
+/// the caller (the shell); the sampler never acts on a `Retry` directive.
+async fn error_hook_short_circuits(
+    client: &SamplingClient,
+    error: &SamplingError,
+    attempt: u32,
+    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    request_id: &RequestId,
+    completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
+) -> bool {
+    if matches!(
+        client.consult_error_hook(error, attempt).await,
+        ErrorDirective::Fail
+    ) {
+        tracing::info!(
+            target: crate::sampling_log::TARGET,
+            reason = %error,
+            "error hook directed fail: surfacing without further retries"
+        );
+        emit_failed(event_tx, request_id, error);
+        send_completion(completion_tx, Err(clone_error(error)));
+        return true;
+    }
+    false
 }
 
 /// Apply a [`RetryDecision`]. Returns `true` if the loop should

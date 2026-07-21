@@ -361,6 +361,16 @@ impl ModelsManager {
         self.inner.cfg.read().endpoints.clone()
     }
 
+    /// The configured built-in model-fallback chains (`[[model_fallbacks]]`).
+    pub fn model_fallbacks(&self) -> Vec<config::ModelFallback> {
+        self.inner.cfg.read().model_fallbacks.clone()
+    }
+
+    /// The configured cap on provider-fallback model switches per turn, if set.
+    pub fn provider_fallback_max_attempts(&self) -> Option<u32> {
+        self.inner.cfg.read().provider_fallback_max_attempts
+    }
+
     /// Does the current credential grant access to OAuth-only models?
     fn is_session_auth(&self) -> bool {
         self.inner

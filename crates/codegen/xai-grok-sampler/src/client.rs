@@ -290,6 +290,10 @@ pub struct SamplingClient {
     bearer_resolver: Option<crate::config::SharedBearerResolver>,
     /// Per-request header injection (OTel traceparent).
     header_injector: Option<crate::config::SharedHeaderInjector>,
+    /// Outbound request interceptor. See `SamplerConfig::request_interceptor`.
+    request_interceptor: Option<crate::intercept::SharedRequestInterceptor>,
+    /// Provider/stream error hook. See `SamplerConfig::error_hook`.
+    error_hook: Option<crate::intercept::SharedErrorHook>,
 }
 
 impl std::fmt::Debug for SamplingClient {
@@ -302,6 +306,11 @@ impl std::fmt::Debug for SamplingClient {
                 &self.attribution_callback.is_some(),
             )
             .field("has_bearer_resolver", &self.bearer_resolver.is_some())
+            .field(
+                "has_request_interceptor",
+                &self.request_interceptor.is_some(),
+            )
+            .field("has_error_hook", &self.error_hook.is_some())
             .finish()
     }
 }
@@ -538,6 +547,8 @@ impl SamplingClient {
             attribution_callback: config.attribution_callback,
             bearer_resolver: config.bearer_resolver,
             header_injector: config.header_injector,
+            request_interceptor: config.request_interceptor,
+            error_hook: config.error_hook,
         })
     }
 
@@ -548,7 +559,33 @@ impl SamplingClient {
 
     /// POST with default headers. Overrides auth from resolver if wired.
     fn post(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
-        let mut headers = self.default_headers.clone();
+        self.post_with_headers(url, None)
+    }
+
+    /// POST with a base set of non-auth headers. `base_non_auth` is `None`
+    /// for the common path (use the construction-time default headers) and
+    /// `Some(map)` when a [`crate::intercept::RequestInterceptor`] replaced
+    /// the non-auth headers wholesale. Either way, the construction-time
+    /// credentials and the live bearer resolver are (re-)attached here, so an
+    /// interceptor can never drop or forge auth.
+    fn post_with_headers(
+        &self,
+        url: impl reqwest::IntoUrl,
+        base_non_auth: Option<HeaderMap>,
+    ) -> reqwest::RequestBuilder {
+        let mut headers = match base_non_auth {
+            Some(mut replaced) => {
+                if let Some(a) = self.default_headers.get(AUTHORIZATION) {
+                    replaced.insert(AUTHORIZATION, a.clone());
+                }
+                let x_api_key = HeaderName::from_static("x-api-key");
+                if let Some(k) = self.default_headers.get(&x_api_key) {
+                    replaced.insert(x_api_key, k.clone());
+                }
+                replaced
+            }
+            None => self.default_headers.clone(),
+        };
         if let Some(resolver) = &self.bearer_resolver
             && let Some(fresh) = resolver.current_bearer()
         {
@@ -594,6 +631,112 @@ impl SamplingClient {
             injector.inject(&mut headers);
         }
         self.http.post(url).headers(headers)
+    }
+
+    /// Whether an outbound request interceptor is wired. Call sites use this
+    /// to keep the zero-overhead fast path (no body serialization round-trip)
+    /// when nothing is listening.
+    fn has_request_interceptor(&self) -> bool {
+        self.request_interceptor.is_some()
+    }
+
+    /// The construction-time headers with the credential headers removed,
+    /// as owned string pairs for a [`crate::intercept::RequestView`].
+    fn non_auth_headers_vec(&self) -> Vec<(String, String)> {
+        let x_api_key = HeaderName::from_static("x-api-key");
+        self.default_headers
+            .iter()
+            .filter(|(name, _)| *name != AUTHORIZATION && **name != x_api_key)
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|v| (name.as_str().to_string(), v.to_string()))
+            })
+            .collect()
+    }
+
+    /// Run the wired request interceptor over `body`. Returns the
+    /// (possibly replaced) body plus, when the interceptor rewrote them, the
+    /// non-auth headers to send. Only call this when
+    /// [`Self::has_request_interceptor`] is true; if no interceptor is wired
+    /// it is a no-op that returns the body unchanged.
+    async fn run_request_interceptor(
+        &self,
+        endpoint_path: &str,
+        body: serde_json::Value,
+    ) -> (serde_json::Value, Option<HeaderMap>) {
+        let Some(interceptor) = self.request_interceptor.clone() else {
+            return (body, None);
+        };
+        let model = body
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(self.defaults.model.as_str())
+            .to_string();
+        let view = crate::intercept::RequestView {
+            endpoint: endpoint_path.to_string(),
+            model,
+            base_url_alias: self.base_url.clone(),
+            headers: self.non_auth_headers_vec(),
+            body,
+        };
+        let replacement = interceptor.intercept(&view).await;
+        // Reclaim the original body now that the borrow of `view` has ended,
+        // so a passthrough (no body replacement) reuses it without a clone.
+        let crate::intercept::RequestView { mut body, .. } = view;
+        let Some(replacement) = replacement else {
+            return (body, None);
+        };
+        if let Some(new_body) = replacement.body {
+            body = new_body;
+        }
+        if let Some(new_model) = replacement.model
+            && let Some(obj) = body.as_object_mut()
+        {
+            obj.insert("model".to_string(), serde_json::Value::String(new_model));
+        }
+        let headers = replacement.headers.map(|pairs| {
+            let mut map = HeaderMap::new();
+            for (name, value) in pairs {
+                // Skip credential headers (defense in depth: the view never
+                // exposed them, but a hostile replacement must not smuggle
+                // auth in) and any header that fails to parse.
+                let lower = name.to_ascii_lowercase();
+                if lower == "authorization" || lower == "x-api-key" {
+                    continue;
+                }
+                if let (Ok(n), Ok(v)) = (
+                    HeaderName::from_bytes(name.as_bytes()),
+                    HeaderValue::from_str(&value),
+                ) {
+                    map.insert(n, v);
+                }
+            }
+            map
+        });
+        (body, headers)
+    }
+
+    /// Consult the wired error hook, if any, for a directive on a
+    /// provider/stream error. Returns [`crate::intercept::ErrorDirective::Passthrough`]
+    /// when no hook is wired. The client acts only on `Fail`; the caller owns
+    /// model/base-URL substitution.
+    pub(crate) async fn consult_error_hook(
+        &self,
+        err: &SamplingError,
+        attempt: u32,
+    ) -> crate::intercept::ErrorDirective {
+        let Some(hook) = self.error_hook.clone() else {
+            return crate::intercept::ErrorDirective::Passthrough;
+        };
+        let view = crate::intercept::ErrorView {
+            error_class: crate::retry::classify_error_class(err).to_string(),
+            model: self.defaults.model.clone(),
+            base_url_alias: self.base_url.clone(),
+            attempt,
+        };
+        hook.on_error(&view).await
     }
 
     /// Bearer prefix for 401 attribution. Prefers live resolver, falls back to default_headers.
@@ -792,9 +935,16 @@ impl SamplingClient {
             deployment_id: payload.x_grok_deployment_id.as_deref(),
             user_id: payload.x_grok_user_id.as_deref(),
         };
-        let http_request = grok_headers
-            .apply(self.post(self.endpoint("chat/completions")))
-            .json(&payload);
+        let endpoint = self.endpoint("chat/completions");
+        let http_request = if self.has_request_interceptor() {
+            let body = serde_json::to_value(&payload).map_err(SamplingError::Serialization)?;
+            let (body, hdrs) = self.run_request_interceptor("chat/completions", body).await;
+            grok_headers
+                .apply(self.post_with_headers(endpoint, hdrs))
+                .json(&body)
+        } else {
+            grok_headers.apply(self.post(endpoint)).json(&payload)
+        };
 
         let response = http_request.send().await.map_err(|e| {
             // Log at debug level; errors are surfaced to the caller.
@@ -850,10 +1000,21 @@ impl SamplingClient {
             deployment_id: payload.x_grok_deployment_id.as_deref(),
             user_id: payload.x_grok_user_id.as_deref(),
         };
-        let http_request = grok_headers
-            .apply(self.post(self.endpoint("chat/completions")))
-            .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-            .json(&streaming_request);
+        let endpoint = self.endpoint("chat/completions");
+        let http_request = if self.has_request_interceptor() {
+            let body =
+                serde_json::to_value(&streaming_request).map_err(SamplingError::Serialization)?;
+            let (body, hdrs) = self.run_request_interceptor("chat/completions", body).await;
+            grok_headers
+                .apply(self.post_with_headers(endpoint, hdrs))
+                .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
+                .json(&body)
+        } else {
+            grok_headers
+                .apply(self.post(endpoint))
+                .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
+                .json(&streaming_request)
+        };
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
@@ -1063,8 +1224,12 @@ impl SamplingClient {
         // it in post-serialize. This is the last surviving piece of the
         // old raw_output machinery.
         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
+        // Body is already a JSON `Value` here, so the interceptor helper adds
+        // no serialization cost on the fast path (it returns immediately when
+        // no interceptor is wired).
+        let (request_body, hdrs) = self.run_request_interceptor("responses", request_body).await;
         let http_request = grok_headers
-            .apply(self.post(self.endpoint("responses")))
+            .apply(self.post_with_headers(self.endpoint("responses"), hdrs))
             .json(&request_body);
 
         let response = http_request.send().await.map_err(|e| {
@@ -1205,8 +1370,9 @@ impl SamplingClient {
             .defaults
             .doom_loop_recovery
             .map(crate::doom_loop::DoomLoopSignalCollector::new);
+        let (request_body, hdrs) = self.run_request_interceptor("responses", request_body).await;
         let mut http_request = grok_headers
-            .apply(self.post(self.endpoint("responses")))
+            .apply(self.post_with_headers(self.endpoint("responses"), hdrs))
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
         if doom_loop.is_some() {
             // Presence opts in; the server ignores the value.
@@ -1402,9 +1568,16 @@ impl SamplingClient {
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
         };
-        let http_request = grok_headers
-            .apply(self.post(self.endpoint("messages")))
-            .json(&request.inner);
+        let endpoint = self.endpoint("messages");
+        let http_request = if self.has_request_interceptor() {
+            let body = serde_json::to_value(&request.inner).map_err(SamplingError::Serialization)?;
+            let (body, hdrs) = self.run_request_interceptor("messages", body).await;
+            grok_headers
+                .apply(self.post_with_headers(endpoint, hdrs))
+                .json(&body)
+        } else {
+            grok_headers.apply(self.post(endpoint)).json(&request.inner)
+        };
 
         let response = http_request.send().await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
@@ -1509,10 +1682,20 @@ impl SamplingClient {
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
         };
-        let http_request = grok_headers
-            .apply(self.post(self.endpoint("messages")))
-            .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-            .json(&request.inner);
+        let endpoint = self.endpoint("messages");
+        let http_request = if self.has_request_interceptor() {
+            let body = serde_json::to_value(&request.inner).map_err(SamplingError::Serialization)?;
+            let (body, hdrs) = self.run_request_interceptor("messages", body).await;
+            grok_headers
+                .apply(self.post_with_headers(endpoint, hdrs))
+                .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
+                .json(&body)
+        } else {
+            grok_headers
+                .apply(self.post(endpoint))
+                .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
+                .json(&request.inner)
+        };
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
@@ -1925,6 +2108,8 @@ mod tests {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
             header_injector: None,
+            request_interceptor: None,
+            error_hook: None,
         }
     }
 

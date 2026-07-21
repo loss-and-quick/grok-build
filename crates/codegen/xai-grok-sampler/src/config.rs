@@ -13,6 +13,7 @@ use xai_grok_sampling_types::{
 };
 
 use crate::attribution::SharedAttributionCallback;
+use crate::intercept::{SharedErrorHook, SharedRequestInterceptor};
 use crate::retry::{DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -124,6 +125,25 @@ pub struct SamplerConfig {
     /// Per-request header injector (e.g. OTel traceparent). Called in `post()`.
     #[serde(skip)]
     pub header_injector: Option<SharedHeaderInjector>,
+
+    /// Outbound request interceptor. When wired, it is invoked just before
+    /// each request is built and may rewrite the body, model, and non-auth
+    /// headers. Credentials are re-attached by the client afterwards, so
+    /// the interceptor never sees or forges a bearer. `None` (default) is a
+    /// no-op and keeps the zero-overhead fast path (no body serialization
+    /// round-trip). Like the other callbacks, it is dropped by serde
+    /// round-trips and must be re-attached by the caller.
+    #[serde(skip)]
+    pub request_interceptor: Option<SharedRequestInterceptor>,
+
+    /// Error hook consulted on a provider/stream error. When wired, the
+    /// client honors an [`crate::intercept::ErrorDirective::Fail`] directive
+    /// by surfacing the error without further internal retries; model/base-URL
+    /// substitution is the caller's responsibility (the sampler cannot resolve
+    /// aliases to concrete endpoints/credentials). `None` (default) leaves the
+    /// sampler's own retry classification in charge.
+    #[serde(skip)]
+    pub error_hook: Option<SharedErrorHook>,
 }
 
 impl Default for SamplerConfig {
@@ -158,6 +178,8 @@ impl Default for SamplerConfig {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
             header_injector: None,
+            request_interceptor: None,
+            error_hook: None,
         }
     }
 }

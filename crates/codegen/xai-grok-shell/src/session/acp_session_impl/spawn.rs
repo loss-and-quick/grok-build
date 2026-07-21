@@ -1357,6 +1357,7 @@ pub(crate) async fn spawn_session_actor(
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
+        provider_fallback_cooldowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
         sampler_handle,
         rebuild_spec: rebuild_spec.clone(),
         image_description_model,

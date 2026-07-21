@@ -445,6 +445,13 @@ impl SessionActor {
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
+            // Attach the `provider_request` interceptor only when a hook is
+            // subscribed, keeping the hot path free of a body-serialization
+            // round-trip otherwise. Built-in failover consults `provider_error`
+            // directly from the turn loop, so the sampler's error hook stays
+            // unset here.
+            request_interceptor: self.build_hook_request_interceptor(),
+            error_hook: None,
         }
     }
     /// Install auto-mode permission classifier with a live LLM side-query
@@ -984,52 +991,85 @@ impl SessionActor {
         request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
         self.prepare_sampler_for_turn().await;
-        let stream_drained_rx = {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            *self.turn_stream_drained.lock() = Some(tx);
-            rx
-        };
-        let request_id = xai_grok_sampler::RequestId::random();
-        let request_id_str = request_id.as_str().to_string();
-        match self
-            .sampler_handle
-            .submit_and_collect(request_id, request)
-            .await
-        {
-            Ok((response, metrics)) => {
-                let span = tracing::Span::current();
-                span.record("request_id", request_id_str.as_str());
-                if let Some(ttft) = metrics.time_to_first_token_ms {
-                    span.record("ttft_ms", ttft as i64);
+        // Snapshot the active config so failover can build model-substituted
+        // variants that keep the session's auth/interceptor wiring.
+        let mut active_config = self.reconstruct_full_config().await;
+        active_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
+        let mut current_model = active_config.model.clone();
+        let max_attempts = self.provider_fallback_max_attempts();
+        // Counts model/provider switches only; the sampler owns its own
+        // transport retry budget independently.
+        let mut fallback_attempt: u32 = 0;
+
+        loop {
+            let stream_drained_rx = {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                *self.turn_stream_drained.lock() = Some(tx);
+                rx
+            };
+            let request_id = xai_grok_sampler::RequestId::random();
+            let request_id_str = request_id.as_str().to_string();
+            match self
+                .sampler_handle
+                .submit_and_collect(request_id, request.clone())
+                .await
+            {
+                Ok((response, metrics)) => {
+                    let span = tracing::Span::current();
+                    span.record("request_id", request_id_str.as_str());
+                    if let Some(ttft) = metrics.time_to_first_token_ms {
+                        span.record("ttft_ms", ttft as i64);
+                    }
+                    if metrics.attempts > 0 {
+                        span.record("attempt", i64::from(metrics.attempts));
+                    }
+                    if tokio::time::timeout(std::time::Duration::from_secs(5), stream_drained_rx)
+                        .await
+                        .is_err()
+                    {
+                        self.turn_stream_drained.lock().take();
+                        tracing::warn!(
+                            "stream-drain barrier timed out; proceeding to emit tool \
+                             calls (eventId ordering may be imperfect this turn)"
+                        );
+                    }
+                    return Ok(SamplerTurnOutcome::Response(
+                        Box::new(response),
+                        Box::new(metrics),
+                    ));
                 }
-                if metrics.attempts > 0 {
-                    span.record("attempt", i64::from(metrics.attempts));
-                }
-                if tokio::time::timeout(std::time::Duration::from_secs(5), stream_drained_rx)
-                    .await
-                    .is_err()
-                {
+                Err(rich_err) => {
                     self.turn_stream_drained.lock().take();
-                    tracing::warn!(
-                        "stream-drain barrier timed out; proceeding to emit tool \
-                         calls (eventId ordering may be imperfect this turn)"
-                    );
-                }
-                Ok(SamplerTurnOutcome::Response(
-                    Box::new(response),
-                    Box::new(metrics),
-                ))
-            }
-            Err(rich_err) => {
-                self.turn_stream_drained.lock().take();
-                let info = xai_grok_sampler::SamplingErrorInfo::from(&rich_err);
-                match self.handle_sampling_failure(info).await? {
-                    SamplerFailureRecovery::CompactAndResubmit => {
-                        Ok(SamplerTurnOutcome::CompactAndResubmit)
+                    // Provider/model failover: the `provider_error` hook decides
+                    // first, then the built-in `[[model_fallbacks]]` chains. On a
+                    // switch, re-issue the same request against the new model.
+                    if fallback_attempt + 1 < max_attempts {
+                        fallback_attempt += 1;
+                        let error_class = xai_grok_sampler::classify_error_class(&rich_err);
+                        if let Some(new_config) = self
+                            .try_provider_failover(
+                                error_class,
+                                &active_config,
+                                &current_model,
+                                fallback_attempt,
+                                max_attempts,
+                            )
+                            .await
+                        {
+                            current_model = new_config.model.clone();
+                            active_config = new_config;
+                            continue;
+                        }
                     }
-                    SamplerFailureRecovery::RefreshAuthAndResubmit => {
-                        Ok(SamplerTurnOutcome::RefreshAuthAndResubmit)
-                    }
+                    let info = xai_grok_sampler::SamplingErrorInfo::from(&rich_err);
+                    return match self.handle_sampling_failure(info).await? {
+                        SamplerFailureRecovery::CompactAndResubmit => {
+                            Ok(SamplerTurnOutcome::CompactAndResubmit)
+                        }
+                        SamplerFailureRecovery::RefreshAuthAndResubmit => {
+                            Ok(SamplerTurnOutcome::RefreshAuthAndResubmit)
+                        }
+                    };
                 }
             }
         }

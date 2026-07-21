@@ -161,6 +161,9 @@ pub(crate) use goal_support::*;
 #[path = "acp_session_impl/hook_dispatch.rs"]
 mod hook_dispatch;
 use hook_dispatch::*;
+#[path = "acp_session_impl/provider_control.rs"]
+mod provider_control;
+use provider_control::*;
 #[path = "acp_session_impl/stop_gate.rs"]
 mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
@@ -1028,6 +1031,12 @@ pub(crate) struct SessionActor {
     /// terminal `SamplingEvent::Completed` (every text/thought chunk has been
     /// `send_update`d by then). `None` between turns.
     pub(crate) turn_stream_drained: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Per-`(from, to)` model-fallback cooldown timestamps. A pair is written
+    /// when a built-in fallback chain fails over from `from` to `to`; the chain
+    /// then skips that pair until its configured cooldown elapses. In-memory
+    /// per session; empty when no fallback has fired.
+    pub(crate) provider_fallback_cooldowns:
+        parking_lot::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
     /// Handle to the per-session `xai-grok-sampler` actor.
     ///
     /// Live sessions get a real handle from `spawn_session_actor`;

@@ -6,8 +6,8 @@
 //! payloads come from `xai_grok_test_support::sse`.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
@@ -21,8 +21,9 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
 use xai_grok_sampler::{
-    ApiBackend, RequestId, RetryPolicy, SamplerActor, SamplerConfig, SamplingChannel,
-    SamplingErrorKind, SamplingEvent,
+    ApiBackend, ErrorDirective, ErrorHook, ErrorView, RequestId, RequestInterceptor,
+    RequestReplacement, RequestView, RetryPolicy, SamplerActor, SamplerConfig, SamplingChannel,
+    SamplingErrorKind, SamplingEvent, SeamFuture,
 };
 use xai_grok_sampling_types::{
     ConversationItem, ConversationRequest, DoomLoopRecoveryPolicy, UserItem,
@@ -98,6 +99,8 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         compaction_at_tokens: None,
         doom_loop_recovery: None,
         header_injector: None,
+        request_interceptor: None,
+        error_hook: None,
     }
 }
 
@@ -948,4 +951,162 @@ async fn await_event_matching(
             Err(_) => return None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Request interceptor + error hook seams
+// ---------------------------------------------------------------------------
+
+/// Rewrites the outbound model and records whether the view leaked any
+/// credential header (it must not).
+#[derive(Debug)]
+struct ModelRewriteInterceptor {
+    saw_auth_in_view: Arc<AtomicBool>,
+}
+
+impl RequestInterceptor for ModelRewriteInterceptor {
+    fn intercept<'a>(
+        &'a self,
+        view: &'a RequestView,
+    ) -> SeamFuture<'a, Option<RequestReplacement>> {
+        let leaked = view.headers.iter().any(|(name, _)| {
+            let lower = name.to_ascii_lowercase();
+            lower == "authorization" || lower == "x-api-key"
+        });
+        self.saw_auth_in_view.store(leaked, Ordering::SeqCst);
+        Box::pin(async move {
+            Some(RequestReplacement {
+                model: Some("switched-model".to_string()),
+                ..Default::default()
+            })
+        })
+    }
+}
+
+/// Always directs the sampler to fail fast, recording the class it saw.
+#[derive(Debug)]
+struct FailHook {
+    calls: Arc<AtomicU32>,
+    last_class: Arc<Mutex<Option<String>>>,
+}
+
+impl ErrorHook for FailHook {
+    fn on_error<'a>(&'a self, view: &'a ErrorView) -> SeamFuture<'a, ErrorDirective> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        *self.last_class.lock().unwrap() = Some(view.error_class.clone());
+        Box::pin(async move { ErrorDirective::Fail })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_interceptor_rewrites_model_and_reattaches_auth() {
+    let captured_model = Arc::new(Mutex::new(None::<String>));
+    let captured_auth = Arc::new(Mutex::new(None::<String>));
+    let cm = Arc::clone(&captured_model);
+    let ca = Arc::clone(&captured_auth);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(
+            move |headers: axum::http::HeaderMap, body: String| {
+                let cm = Arc::clone(&cm);
+                let ca = Arc::clone(&ca);
+                async move {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
+                    *cm.lock().unwrap() = parsed
+                        .get("model")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string);
+                    *ca.lock().unwrap() = headers
+                        .get("authorization")
+                        .and_then(|h| h.to_str().ok())
+                        .map(str::to_string);
+                    let events = sse::chat_completion_events("ok", "switched-model");
+                    Sse::new(stream::iter(
+                        events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                    ))
+                }
+            },
+        ),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "original-model");
+    let saw_auth_in_view = Arc::new(AtomicBool::new(true));
+    cfg.request_interceptor = Some(Arc::new(ModelRewriteInterceptor {
+        saw_auth_in_view: Arc::clone(&saw_auth_in_view),
+    }));
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    handle
+        .submit_and_collect(RequestId::from("req-icept"), user_request("hi"))
+        .await
+        .expect("collected ok");
+    server.shutdown();
+
+    assert_eq!(
+        captured_model.lock().unwrap().as_deref(),
+        Some("switched-model"),
+        "the interceptor's replacement model must reach the wire"
+    );
+    assert!(
+        captured_auth.lock().unwrap().is_some(),
+        "credentials must be re-attached after interception"
+    );
+    assert!(
+        !saw_auth_in_view.load(Ordering::SeqCst),
+        "the request view handed to the interceptor must not expose a bearer"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn error_hook_fail_directive_short_circuits_internal_retries() {
+    let req_count = Arc::new(AtomicU32::new(0));
+    let rc = Arc::clone(&req_count);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let rc = Arc::clone(&rc);
+            async move {
+                rc.fetch_add(1, Ordering::SeqCst);
+                // A retryable 503 would normally be retried by the sampler's
+                // internal budget; the Fail directive must stop that.
+                (axum::http::StatusCode::SERVICE_UNAVAILABLE, "temporary outage")
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    let hook_calls = Arc::new(AtomicU32::new(0));
+    let last_class = Arc::new(Mutex::new(None::<String>));
+    cfg.error_hook = Some(Arc::new(FailHook {
+        calls: Arc::clone(&hook_calls),
+        last_class: Arc::clone(&last_class),
+    }));
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    let result = handle
+        .submit_and_collect(RequestId::from("req-fail"), user_request("hi"))
+        .await;
+    server.shutdown();
+
+    assert!(
+        result.is_err(),
+        "the Fail directive must surface the error to the caller"
+    );
+    assert_eq!(
+        req_count.load(Ordering::SeqCst),
+        1,
+        "Fail must prevent any internal retry (exactly one request reached the server)"
+    );
+    assert!(
+        hook_calls.load(Ordering::SeqCst) >= 1,
+        "the error hook must be consulted on the provider error"
+    );
+    assert_eq!(
+        last_class.lock().unwrap().as_deref(),
+        Some("5xx"),
+        "the hook must receive the shared error-class string for a 503"
+    );
 }

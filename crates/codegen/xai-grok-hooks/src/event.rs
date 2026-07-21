@@ -38,7 +38,11 @@ pub enum HookEventName {
     /// Provider failure → retry (model/base_url alias) or fail; Replace gate.
     /// Reserved; not wired yet.
     ProviderError,
-    /// Permission prompt seam; Tool gate. Reserved; not wired yet.
+    /// Permission prompt seam; Tool gate. Fired by the permission manager's
+    /// `permission_ask` seam (in `xai-grok-workspace`) rather than the hook
+    /// dispatcher, so it has no `HookPayload` variant and is not part of the
+    /// dispatcher-routed sidecar event set. Fail-open: no/late/invalid response
+    /// falls back to the interactive prompt.
     PermissionAsk,
 }
 
@@ -86,9 +90,7 @@ impl<'de> serde::Deserialize<'de> for HookEventName {
             "SubagentEnd" | "subagent_end" | "subagentEnd" => Ok(Self::SubagentEnd),
             "PreCompact" | "pre_compact" | "preCompact" => Ok(Self::PreCompact),
             "PostCompact" | "post_compact" | "postCompact" => Ok(Self::PostCompact),
-            "ProviderRequest" | "provider_request" | "providerRequest" => {
-                Ok(Self::ProviderRequest)
-            }
+            "ProviderRequest" | "provider_request" | "providerRequest" => Ok(Self::ProviderRequest),
             "ProviderError" | "provider_error" | "providerError" => Ok(Self::ProviderError),
             "PermissionAsk" | "permission_ask" | "permissionAsk" => Ok(Self::PermissionAsk),
             other => Err(serde::de::Error::custom(format!(
@@ -195,9 +197,10 @@ impl HookEventName {
             Self::SubagentEnd => unreachable!("canonicalized above"),
             Self::PreCompact => t(Observe, Tested, true),
             Self::PostCompact => t(Observe, Tested, true),
-            // Reserved seams: plugin-only, not hub-forwarded, no natural match
-            // key (Ignored → fire-all). PermissionAsk keys on a tool but has no
-            // dispatch path yet, so Ignored is the safe default until it is wired.
+            // Plugin-only seams, not hub-forwarded. ProviderRequest/ProviderError
+            // are reserved (not wired yet). PermissionAsk is now wired, but via the
+            // permission manager's bespoke seam rather than this dispatcher, so it
+            // keeps the fire-all `Ignored` matcher and stays plugin-only.
             Self::ProviderRequest => t(Replace, Ignored, false),
             Self::ProviderError => t(Replace, Ignored, false),
             Self::PermissionAsk => t(Tool, Ignored, false),
@@ -476,6 +479,29 @@ pub enum HookPayload {
         /// "manual" or "auto".
         source: String,
     },
+    /// Outgoing LLM request, offered to a `provider_request` Replace hook.
+    /// Credential headers are stripped before this crosses the wire; the core
+    /// re-attaches them after any replacement.
+    ProviderRequest {
+        /// The API path (`chat/completions`, `responses`, `messages`).
+        endpoint: String,
+        model: String,
+        #[serde(rename = "baseUrlAlias")]
+        base_url_alias: String,
+        /// Request headers with the credential values removed.
+        headers: Vec<(String, String)>,
+        body: serde_json::Value,
+    },
+    /// A provider/stream failure, offered to a `provider_error` Replace hook
+    /// which may return a retry directive (model / base-URL substitution).
+    ProviderError {
+        #[serde(rename = "errorClass")]
+        error_class: String,
+        model: String,
+        attempt: u32,
+        #[serde(rename = "baseUrlAlias")]
+        base_url_alias: String,
+    },
 }
 
 impl HookPayload {
@@ -499,7 +525,10 @@ impl HookPayload {
             // Always a non-empty name, unlike the free-text arms above.
             Self::StopFailure { error, .. } => return Some(error.as_str()),
             // Ignored events listed explicitly so a new Tested event can't silently return None.
-            Self::Stop { .. } | Self::UserPromptSubmit { .. } => return None,
+            Self::Stop { .. }
+            | Self::UserPromptSubmit { .. }
+            | Self::ProviderRequest { .. }
+            | Self::ProviderError { .. } => return None,
         };
         Some(value.as_str()).filter(|v| !v.is_empty())
     }
@@ -672,7 +701,10 @@ mod tests {
             HookEventName::ProviderRequest.traits().gate,
             GateKind::Replace
         );
-        assert_eq!(HookEventName::ProviderError.traits().gate, GateKind::Replace);
+        assert_eq!(
+            HookEventName::ProviderError.traits().gate,
+            GateKind::Replace
+        );
         assert_eq!(HookEventName::PermissionAsk.traits().gate, GateKind::Tool);
 
         assert_eq!(HookEventName::Stop.traits().matcher, MatcherPolicy::Ignored);
@@ -843,5 +875,81 @@ mod tests {
         for key in ["hook_event_name", "session_id", "model_id"] {
             assert!(value.get(key).is_none(), "leaked snake_case key {key}");
         }
+    }
+
+    #[test]
+    fn provider_request_payload_flattens_into_envelope() {
+        let envelope = HookEventEnvelope {
+            hook_event_name: HookEventName::ProviderRequest,
+            session_id: "s".into(),
+            cwd: "/tmp".into(),
+            workspace_root: "/tmp".into(),
+            timestamp: "2025-01-01T00:00:00Z".into(),
+            transcript_path: None,
+            client_identifier: None,
+            prompt_id: None,
+            permission_mode: None,
+            payload: HookPayload::ProviderRequest {
+                endpoint: "chat/completions".into(),
+                model: "grok-4.5".into(),
+                base_url_alias: "https://api.x.ai/v1".into(),
+                headers: vec![("accept".into(), "text/event-stream".into())],
+                body: serde_json::json!({ "model": "grok-4.5" }),
+            },
+        };
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(
+            value.get("hookEventName").and_then(|v| v.as_str()),
+            Some("provider_request")
+        );
+        assert_eq!(
+            value.get("model").and_then(|v| v.as_str()),
+            Some("grok-4.5")
+        );
+        assert_eq!(
+            value.get("baseUrlAlias").and_then(|v| v.as_str()),
+            Some("https://api.x.ai/v1")
+        );
+        assert!(value.get("body").is_some());
+        // No credential header must be present (the fire site strips it).
+        assert!(value.get("headers").is_some());
+    }
+
+    #[test]
+    fn provider_error_payload_flattens_into_envelope() {
+        let envelope = HookEventEnvelope {
+            hook_event_name: HookEventName::ProviderError,
+            session_id: "s".into(),
+            cwd: "/tmp".into(),
+            workspace_root: "/tmp".into(),
+            timestamp: "2025-01-01T00:00:00Z".into(),
+            transcript_path: None,
+            client_identifier: None,
+            prompt_id: None,
+            permission_mode: None,
+            payload: HookPayload::ProviderError {
+                error_class: "5xx".into(),
+                model: "grok-4.5".into(),
+                attempt: 2,
+                base_url_alias: "https://api.x.ai/v1".into(),
+            },
+        };
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(
+            value.get("errorClass").and_then(|v| v.as_str()),
+            Some("5xx")
+        );
+        assert_eq!(value.get("attempt").and_then(|v| v.as_u64()), Some(2));
+        // These reserved events carry no matcher selector.
+        assert_eq!(
+            HookPayload::ProviderError {
+                error_class: "5xx".into(),
+                model: "m".into(),
+                attempt: 0,
+                base_url_alias: "b".into(),
+            }
+            .match_value(),
+            None
+        );
     }
 }
