@@ -292,6 +292,11 @@ pub(crate) struct SubagentSpawnContext {
     /// GCS upload method (direct or proxy).
     pub gcs_upload_method: Option<crate::session::repo_changes::UploadMethod>,
     pub hook_registry: Option<std::sync::Arc<xai_grok_hooks::discovery::HookRegistry>>,
+    /// The parent session's plugin sidecar invoker (see
+    /// `SessionHandle::plugin_invoker`). Drives the pre-spawn
+    /// `subagent_resolve` Replace dispatch; `None` fails open (plugin hook
+    /// specs then pass through, exactly as with no host wired).
+    pub plugin_invoker: Option<std::sync::Arc<dyn xai_grok_hooks::invoker::PluginHookInvoker>>,
     #[expect(
         dead_code,
         reason = "unused in production; remove expect when wired or delete the item"

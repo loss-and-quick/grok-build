@@ -390,19 +390,22 @@ mod tests {
             HookEventName::PreCompact,
             HookEventName::PostCompact,
             HookEventName::SessionEnd,
-            // Reserved seams (below): plugin-only, no core dispatch path, so
-            // deliberately absent from the flat listing.
+            // Reserved seams (below): plugin-only, so deliberately absent from
+            // the flat listing.
             HookEventName::ProviderRequest,
             HookEventName::ProviderError,
+            HookEventName::SubagentResolve,
             HookEventName::PermissionAsk,
         ];
         for event in every_variant {
             // A reserved event is one the core registry does not surface in
-            // `ALL_EVENTS` yet (subscribable by plugins, but never dispatched here).
+            // `ALL_EVENTS` yet (subscribable by plugins; the provider and
+            // subagent-resolve seams dispatch, but stay out of the listing).
             let reserved = matches!(
                 event,
                 HookEventName::ProviderRequest
                     | HookEventName::ProviderError
+                    | HookEventName::SubagentResolve
                     | HookEventName::PermissionAsk
             );
             match event {
@@ -423,6 +426,7 @@ mod tests {
                 | HookEventName::SessionEnd
                 | HookEventName::ProviderRequest
                 | HookEventName::ProviderError
+                | HookEventName::SubagentResolve
                 | HookEventName::PermissionAsk => {}
             }
             if reserved {

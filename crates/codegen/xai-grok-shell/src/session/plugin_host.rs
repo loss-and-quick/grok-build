@@ -28,6 +28,12 @@ use xai_grok_plugin_host::{PluginHost, RegisteredPlugin, RuntimeKind};
 /// so listing both would fire a subscribed plugin twice for one event). The
 /// host short-circuits events a plugin didn't actually subscribe to (known
 /// post-handshake), so registering the full set costs nothing at runtime.
+///
+/// `SubagentResolve` is included so an SDK plugin's `hooks: { subagent_resolve }`
+/// works without a hooks.json declaration; the provider seams stay out because
+/// their dispatch sits on the per-request hot path and must remain opt-in
+/// (declared hooks only) — a spec here would arm the interceptor for every
+/// session with any sidecar plugin.
 pub(crate) const SIDECAR_HOOK_EVENTS: &[HookEventName] = &[
     HookEventName::SessionStart,
     HookEventName::SessionEnd,
@@ -43,6 +49,7 @@ pub(crate) const SIDECAR_HOOK_EVENTS: &[HookEventName] = &[
     HookEventName::SubagentStop,
     HookEventName::PreCompact,
     HookEventName::PostCompact,
+    HookEventName::SubagentResolve,
 ];
 
 /// Map the agent-side runtime selection onto the host's runtime enum. Both are

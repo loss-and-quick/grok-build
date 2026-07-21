@@ -44,9 +44,10 @@ pub fn hook_spec_to_info(spec: &xai_grok_hooks::config::HookSpec) -> HookInfo {
         // Compaction
         HookEventName::PreCompact => HookEvent::PreCompact,
         HookEventName::PostCompact => HookEvent::PostCompact,
-        // Provider / permission (reserved seams)
+        // Provider / subagent-resolve / permission (plugin-only seams)
         HookEventName::ProviderRequest => HookEvent::ProviderRequest,
         HookEventName::ProviderError => HookEvent::ProviderError,
+        HookEventName::SubagentResolve => HookEvent::SubagentResolve,
         HookEventName::PermissionAsk => HookEvent::PermissionAsk,
     };
 

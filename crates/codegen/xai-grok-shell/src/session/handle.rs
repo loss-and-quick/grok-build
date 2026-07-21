@@ -148,6 +148,12 @@ pub struct SessionHandle {
     pub allowed_subagent_types: Option<Vec<String>>,
     /// Hook registry for this session (snapshot from spawn time).
     pub hook_registry: Option<std::sync::Arc<xai_grok_hooks::discovery::HookRegistry>>,
+    /// The session's TS plugin sidecar host, coerced to the hook-runner seam
+    /// (snapshot from spawn time; `None` when the session has no sidecar
+    /// plugins). Lets pre-spawn seams that run outside the session actor —
+    /// the coordinator's `subagent_resolve` dispatch — reach the same sidecars
+    /// as in-actor dispatches.
+    pub plugin_invoker: Option<std::sync::Arc<dyn xai_grok_hooks::invoker::PluginHookInvoker>>,
     /// Typed workspace operations handle (agent sessions use local ops).
     pub workspace_ops: xai_grok_workspace::WorkspaceOps,
     /// Terminal backend for this session. Subagents inherit the parent's

@@ -1224,6 +1224,7 @@ if hook_name == "crasher"),
         assert_eq!(hub_hook_kind(HookEventName::PreToolUse), None);
         assert_eq!(hub_hook_kind(HookEventName::ProviderRequest), None);
         assert_eq!(hub_hook_kind(HookEventName::ProviderError), None);
+        assert_eq!(hub_hook_kind(HookEventName::SubagentResolve), None);
         assert_eq!(hub_hook_kind(HookEventName::PermissionAsk), None);
 
         let cases: &[(HookEventName, &str)] = &[
@@ -1267,13 +1268,15 @@ if hook_name == "crasher"),
                 | HookEventName::PostCompact
                 | HookEventName::ProviderRequest
                 | HookEventName::ProviderError
-                | HookEventName::PermissionAsk => 18,
+                | HookEventName::SubagentResolve
+                | HookEventName::PermissionAsk => 19,
             }
         };
         assert_eq!(
-            // +4 non-forwarded: PreToolUse (blocking) plus the three reserved
-            // seams (ProviderRequest/ProviderError/PermissionAsk), tested above.
-            cases.len() + 4,
+            // +5 non-forwarded: PreToolUse (blocking) plus the four plugin-only
+            // seams (ProviderRequest/ProviderError/SubagentResolve/
+            // PermissionAsk), tested above.
+            cases.len() + 5,
             total_variants(HookEventName::SessionStart),
             "update hub_hook_kind test when new HookEventName variants are added"
         );

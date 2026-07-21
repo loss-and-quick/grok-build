@@ -40,9 +40,10 @@ const SUPPORTED_EVENTS: &[&str] = &[
     "SubagentEnd",
     "PreCompact",
     "PostCompact",
-    // Provider / permission events — PascalCase and snake_case
+    // Provider / subagent-resolve / permission events — PascalCase and snake_case
     "ProviderRequest",
     "ProviderError",
+    "SubagentResolve",
     "PermissionAsk",
     "notification",
     "stop",
@@ -57,6 +58,7 @@ const SUPPORTED_EVENTS: &[&str] = &[
     "post_compact",
     "provider_request",
     "provider_error",
+    "subagent_resolve",
     "permission_ask",
 ];
 

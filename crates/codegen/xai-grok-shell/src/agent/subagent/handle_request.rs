@@ -60,6 +60,90 @@ pub(super) fn task_model_override_error(
         is_session_auth,
     )
 }
+/// Max chars of the spawn prompt forwarded in the `subagent_resolve` payload.
+const SUBAGENT_RESOLVE_PROMPT_PREVIEW_CHARS: usize = 4000;
+/// Fire the `subagent_resolve` Replace hook and apply any directive to
+/// `request` in place. Returns extra system-prompt text for the child (the
+/// directive's `extra_system_prompt`), or `None`.
+///
+/// Dispatch is gated on a registered enabled hook (sidecar plugins register a
+/// synthetic spec per event; the host then short-circuits plugins without a
+/// live `subagent_resolve` subscription), so spawns in hook-less sessions pay
+/// nothing. Every failure mode is fail-open: the requested spec is kept.
+async fn apply_subagent_resolve_hook(
+    request: &mut SubagentRequest,
+    ctx: &SubagentSpawnContext,
+) -> Option<String> {
+    use xai_grok_hooks::event::{HookEventEnvelope, HookEventName, HookPayload, clip_text};
+    let registry = ctx.hook_registry.clone()?;
+    if !registry.has_enabled_hooks_for_canonical(HookEventName::SubagentResolve) {
+        return None;
+    }
+    let cwd = ctx.parent_cwd.display().to_string();
+    let envelope = HookEventEnvelope {
+        hook_event_name: HookEventName::SubagentResolve,
+        session_id: ctx.parent_session_id.clone(),
+        cwd: cwd.clone(),
+        workspace_root: cwd.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        transcript_path: None,
+        client_identifier: None,
+        prompt_id: request.parent_prompt_id.clone(),
+        permission_mode: None,
+        payload: HookPayload::SubagentResolve {
+            subagent_id: request.id.clone(),
+            subagent_type: request.subagent_type.clone(),
+            description: request.description.clone(),
+            prompt_preview: clip_text(&request.prompt, SUBAGENT_RESOLVE_PROMPT_PREVIEW_CHARS),
+            model: request.runtime_overrides.model.clone(),
+            parent_model: ctx.model_id.0.as_ref().to_string(),
+        },
+    };
+    let run_ctx = xai_grok_hooks::runner::RunContext {
+        session_id: &ctx.parent_session_id,
+        workspace_root: &cwd,
+        plugin_invoker: ctx.plugin_invoker.clone(),
+    };
+    let replaced = xai_grok_hooks::dispatcher::dispatch_replace(
+        &registry,
+        HookEventName::SubagentResolve,
+        &envelope,
+        &run_ctx,
+    )
+    .await?;
+    let directive: xai_grok_subagent_resolution::SubagentResolveDirective =
+        match serde_json::from_value(replaced) {
+            Ok(d) => d,
+            Err(err) => {
+                tracing::warn!(
+                    subagent_id = % request.id, % err,
+                    "subagent_resolve replacement did not parse; ignoring"
+                );
+                return None;
+            }
+        };
+    if let Some(new_type) = directive
+        .subagent_type
+        .filter(|t| !t.trim().is_empty() && *t != request.subagent_type)
+    {
+        tracing::info!(
+            subagent_id = % request.id, from = % request.subagent_type, to = % new_type,
+            "subagent_resolve hook replaced the agent type"
+        );
+        request.subagent_type = new_type;
+    }
+    if let Some(model) = directive.model.filter(|m| !m.trim().is_empty()) {
+        tracing::info!(
+            subagent_id = % request.id, model = % model,
+            "subagent_resolve hook set a model override"
+        );
+        request.runtime_overrides.model = Some(model);
+        // Tool provenance so the catalog validation below applies to the
+        // plugin-supplied slug just as it does to a model-emitted `Task.model`.
+        request.runtime_overrides.model_override_provenance = ModelOverrideProvenance::Tool;
+    }
+    directive.extra_system_prompt.filter(|s| !s.trim().is_empty())
+}
 /// This is a free async function, NOT a method on MvpAgent. It receives
 /// a `SubagentSpawnContext` with everything it needs, and a mutable
 /// reference to the coordinator for tracking.
@@ -85,6 +169,12 @@ pub(crate) async fn handle_subagent_request(
         .then(|| crate::tools::tool_context::BlockingWaitGuard::enter(
             ctx.parent_blocking_wait_depth.clone(),
         ));
+    // `subagent_resolve` Replace seam: a subscribed plugin may substitute the
+    // requested agent type / model or append system-prompt text BEFORE the
+    // definition resolves (so validation and allow-list gating below apply to
+    // the substituted type). Fail-open: no hook, passthrough, timeout, or an
+    // unparseable directive keeps the requested spec.
+    let resolve_extra_system_prompt = apply_subagent_resolve_hook(&mut request, &ctx).await;
     let Some(mut definition) = resolve_agent_definition(&request.subagent_type, &ctx)
     else {
         let msg = format!("Unknown subagent type: {}", request.subagent_type);
@@ -180,6 +270,14 @@ pub(crate) async fn handle_subagent_request(
         {
             effective_runtime.isolation = SubagentIsolationMode::Worktree;
         }
+    }
+    if let Some(extra) = resolve_extra_system_prompt {
+        // Deliver the hook's extra system prompt through the role-prompt slot
+        // (appended, never replacing role/persona instructions).
+        effective_runtime.role_prompt = Some(match effective_runtime.role_prompt.take() {
+            Some(existing) => format!("{existing}\n\n{extra}"),
+            None => extra,
+        });
     }
     let prompt = request.prompt.clone();
     if let Some(ref err) = effective_runtime.persona_error {

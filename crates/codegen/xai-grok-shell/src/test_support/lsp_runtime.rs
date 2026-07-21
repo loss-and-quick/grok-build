@@ -117,6 +117,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         gcs_bucket_url: None,
         gcs_upload_method: None,
         hook_registry: None,
+        plugin_invoker: None,
         hook_workspace_root: String::new(),
         parent_depth: 0,
         inference_idle_timeout_secs: 600,

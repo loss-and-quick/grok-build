@@ -561,6 +561,12 @@ impl MvpAgent {
             agent_config: Some(self.cfg.borrow().clone()),
             gcs_upload_method,
             hook_registry: parent_hook_registry,
+            plugin_invoker: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .and_then(|h| h.plugin_invoker.clone())
+            },
             hook_workspace_root: String::new(),
             permission_handle: {
                 let sessions = self.sessions.borrow();

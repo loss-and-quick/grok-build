@@ -90,6 +90,7 @@ pub enum HookEventNameWire {
     PostCompact,
     ProviderRequest,
     ProviderError,
+    SubagentResolve,
     PermissionAsk,
     /// An event string this client does not know, preserved verbatim.
     Unknown(String),
@@ -116,6 +117,7 @@ impl HookEventNameWire {
             Self::PostCompact => "post_compact",
             Self::ProviderRequest => "provider_request",
             Self::ProviderError => "provider_error",
+            Self::SubagentResolve => "subagent_resolve",
             Self::PermissionAsk => "permission_ask",
             Self::Unknown(s) => s,
         }
@@ -152,6 +154,7 @@ impl<'de> Deserialize<'de> for HookEventNameWire {
             "post_compact" => Self::PostCompact,
             "provider_request" => Self::ProviderRequest,
             "provider_error" => Self::ProviderError,
+            "subagent_resolve" => Self::SubagentResolve,
             "permission_ask" => Self::PermissionAsk,
             // Forward-tolerant: preserve an unknown event verbatim.
             _ => Self::Unknown(s),
@@ -192,6 +195,7 @@ mod tests {
             (HookEventNameWire::PostCompact, "post_compact"),
             (HookEventNameWire::ProviderRequest, "provider_request"),
             (HookEventNameWire::ProviderError, "provider_error"),
+            (HookEventNameWire::SubagentResolve, "subagent_resolve"),
             (HookEventNameWire::PermissionAsk, "permission_ask"),
         ] {
             assert_eq!(

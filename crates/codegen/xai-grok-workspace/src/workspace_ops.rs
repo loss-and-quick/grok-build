@@ -1810,6 +1810,7 @@ mod tests {
                 E::PostCompact => HookEventNameWire::PostCompact,
                 E::ProviderRequest => HookEventNameWire::ProviderRequest,
                 E::ProviderError => HookEventNameWire::ProviderError,
+                E::SubagentResolve => HookEventNameWire::SubagentResolve,
                 E::PermissionAsk => HookEventNameWire::PermissionAsk,
             }
         }
@@ -1831,6 +1832,7 @@ mod tests {
             E::PostCompact,
             E::ProviderRequest,
             E::ProviderError,
+            E::SubagentResolve,
             E::PermissionAsk,
         ] {
             assert_eq!(

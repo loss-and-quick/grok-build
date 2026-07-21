@@ -38,6 +38,11 @@ pub enum HookEventName {
     /// Provider failure → retry (model/base_url alias) or fail; Replace gate.
     /// Reserved; not wired yet.
     ProviderError,
+    /// Subagent spec resolution seam; Replace gate. Fired just before a
+    /// subagent spawn resolves its definition, so a plugin can substitute the
+    /// agent type / model or append system-prompt text. Fail-open: no/late/
+    /// unparseable response keeps the requested spec.
+    SubagentResolve,
     /// Permission prompt seam; Tool gate. Fired by the permission manager's
     /// `permission_ask` seam (in `xai-grok-workspace`) rather than the hook
     /// dispatcher, so it has no `HookPayload` variant and is not part of the
@@ -92,6 +97,9 @@ impl<'de> serde::Deserialize<'de> for HookEventName {
             "PostCompact" | "post_compact" | "postCompact" => Ok(Self::PostCompact),
             "ProviderRequest" | "provider_request" | "providerRequest" => Ok(Self::ProviderRequest),
             "ProviderError" | "provider_error" | "providerError" => Ok(Self::ProviderError),
+            "SubagentResolve" | "subagent_resolve" | "subagentResolve" => {
+                Ok(Self::SubagentResolve)
+            }
             "PermissionAsk" | "permission_ask" | "permissionAsk" => Ok(Self::PermissionAsk),
             other => Err(serde::de::Error::custom(format!(
                 "unknown hook event: '{other}'. Expected one of: \
@@ -99,7 +107,7 @@ impl<'de> serde::Deserialize<'de> for HookEventName {
                  SessionEnd, Stop, StopFailure, Notification, UserPromptSubmit, \
                  PermissionDenied, SubagentStart, SubagentStop, \
                  PreCompact, PostCompact, ProviderRequest, ProviderError, \
-                 PermissionAsk (camelCase and per-operation aliases \
+                 SubagentResolve, PermissionAsk (camelCase and per-operation aliases \
                  such as beforeShellExecution are also accepted)"
             ))),
         }
@@ -125,6 +133,7 @@ impl std::fmt::Display for HookEventName {
             Self::PostCompact => write!(f, "post_compact"),
             Self::ProviderRequest => write!(f, "provider_request"),
             Self::ProviderError => write!(f, "provider_error"),
+            Self::SubagentResolve => write!(f, "subagent_resolve"),
             Self::PermissionAsk => write!(f, "permission_ask"),
         }
     }
@@ -203,6 +212,7 @@ impl HookEventName {
             // keeps the fire-all `Ignored` matcher and stays plugin-only.
             Self::ProviderRequest => t(Replace, Ignored, false),
             Self::ProviderError => t(Replace, Ignored, false),
+            Self::SubagentResolve => t(Replace, Ignored, false),
             Self::PermissionAsk => t(Tool, Ignored, false),
         }
     }
@@ -502,6 +512,28 @@ pub enum HookPayload {
         #[serde(rename = "baseUrlAlias")]
         base_url_alias: String,
     },
+    /// A subagent spawn about to resolve, offered to a `subagent_resolve`
+    /// Replace hook which may return a
+    /// `xai_grok_subagent_resolution::SubagentResolveDirective`
+    /// (agent type / model substitution, extra system prompt).
+    SubagentResolve {
+        #[serde(rename = "subagentId")]
+        subagent_id: String,
+        /// The requested agent type, pre-resolution.
+        #[serde(rename = "subagentType")]
+        subagent_type: String,
+        description: String,
+        /// Clipped preview of the spawn prompt (see [`clip_text`]).
+        #[serde(rename = "promptPreview")]
+        prompt_preview: String,
+        /// The explicit spawn-time model override, if any.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// The parent session's model, the inheritance default when no
+        /// override or role/persona model applies.
+        #[serde(rename = "parentModel")]
+        parent_model: String,
+    },
 }
 
 impl HookPayload {
@@ -528,7 +560,8 @@ impl HookPayload {
             Self::Stop { .. }
             | Self::UserPromptSubmit { .. }
             | Self::ProviderRequest { .. }
-            | Self::ProviderError { .. } => return None,
+            | Self::ProviderError { .. }
+            | Self::SubagentResolve { .. } => return None,
         };
         Some(value.as_str()).filter(|v| !v.is_empty())
     }
@@ -603,6 +636,11 @@ mod tests {
                 HookEventName::ProviderError,
             ),
             (
+                "SubagentResolve",
+                "subagent_resolve",
+                HookEventName::SubagentResolve,
+            ),
+            (
                 "PermissionAsk",
                 "permission_ask",
                 HookEventName::PermissionAsk,
@@ -642,6 +680,7 @@ mod tests {
             (HookEventName::PostCompact, "post_compact"),
             (HookEventName::ProviderRequest, "provider_request"),
             (HookEventName::ProviderError, "provider_error"),
+            (HookEventName::SubagentResolve, "subagent_resolve"),
             (HookEventName::PermissionAsk, "permission_ask"),
         ];
         for (event, expected) in cases {
@@ -670,6 +709,7 @@ mod tests {
             ("stopFailure", HookEventName::StopFailure),
             ("providerRequest", HookEventName::ProviderRequest),
             ("providerError", HookEventName::ProviderError),
+            ("subagentResolve", HookEventName::SubagentResolve),
             ("permissionAsk", HookEventName::PermissionAsk),
         ];
         for (spelling, expected) in cases {
@@ -703,6 +743,10 @@ mod tests {
         );
         assert_eq!(
             HookEventName::ProviderError.traits().gate,
+            GateKind::Replace
+        );
+        assert_eq!(
+            HookEventName::SubagentResolve.traits().gate,
             GateKind::Replace
         );
         assert_eq!(HookEventName::PermissionAsk.traits().gate, GateKind::Tool);
@@ -913,6 +957,65 @@ mod tests {
         assert!(value.get("body").is_some());
         // No credential header must be present (the fire site strips it).
         assert!(value.get("headers").is_some());
+    }
+
+    #[test]
+    fn subagent_resolve_payload_flattens_into_envelope() {
+        let envelope = HookEventEnvelope {
+            hook_event_name: HookEventName::SubagentResolve,
+            session_id: "parent-1".into(),
+            cwd: "/ws".into(),
+            workspace_root: "/ws".into(),
+            timestamp: "2025-01-01T00:00:00Z".into(),
+            transcript_path: None,
+            client_identifier: None,
+            prompt_id: None,
+            permission_mode: None,
+            payload: HookPayload::SubagentResolve {
+                subagent_id: "sub-1".into(),
+                subagent_type: "explore".into(),
+                description: "scan the repo".into(),
+                prompt_preview: "find all callers of foo".into(),
+                model: None,
+                parent_model: "grok-4.5".into(),
+            },
+        };
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(
+            value.get("hookEventName").and_then(|v| v.as_str()),
+            Some("subagent_resolve")
+        );
+        assert_eq!(
+            value.get("subagentType").and_then(|v| v.as_str()),
+            Some("explore")
+        );
+        assert_eq!(
+            value.get("promptPreview").and_then(|v| v.as_str()),
+            Some("find all callers of foo")
+        );
+        assert_eq!(
+            value.get("parentModel").and_then(|v| v.as_str()),
+            Some("grok-4.5")
+        );
+        // Explicit override absent -> key omitted, not null.
+        assert!(value.get("model").is_none());
+        // No leaked snake_case spellings.
+        for key in ["subagent_type", "prompt_preview", "parent_model"] {
+            assert!(value.get(key).is_none(), "leaked snake_case key {key}");
+        }
+        // Fires-all matcher: no selector value.
+        assert_eq!(
+            HookPayload::SubagentResolve {
+                subagent_id: "s".into(),
+                subagent_type: "t".into(),
+                description: String::new(),
+                prompt_preview: String::new(),
+                model: Some("m".into()),
+                parent_model: "p".into(),
+            }
+            .match_value(),
+            None
+        );
     }
 
     #[test]

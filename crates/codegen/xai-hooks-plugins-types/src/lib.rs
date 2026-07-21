@@ -101,9 +101,10 @@ pub enum HookEvent {
     // Compaction
     PreCompact,
     PostCompact,
-    // Provider / permission (reserved seams)
+    // Provider / subagent-resolve / permission (plugin-only seams)
     ProviderRequest,
     ProviderError,
+    SubagentResolve,
     PermissionAsk,
 }
 
@@ -126,6 +127,7 @@ impl std::fmt::Display for HookEvent {
             Self::PostCompact => write!(f, "Post-Compact"),
             Self::ProviderRequest => write!(f, "Provider Request"),
             Self::ProviderError => write!(f, "Provider Error"),
+            Self::SubagentResolve => write!(f, "Subagent Resolve"),
             Self::PermissionAsk => write!(f, "Permission Ask"),
         }
     }

@@ -1160,6 +1160,11 @@ pub(crate) async fn spawn_session_actor(
         slot.attach(host.clone(), plugin_names);
     }
     let workspace_ops_for_handle = workspace_ops.clone();
+    // Snapshot for `SessionHandle`: the coordinator-side `subagent_resolve`
+    // seam dispatches through this invoker (the actor keeps the owning Arc).
+    let plugin_invoker_for_handle = built_plugin_host
+        .clone()
+        .map(|h| h as Arc<dyn xai_grok_hooks::invoker::PluginHookInvoker>);
     #[allow(clippy::arc_with_non_send_sync)]
     let mut _hook_load_errors: Vec<String> = hook_discovery_errors
         .iter()
@@ -1723,6 +1728,7 @@ pub(crate) async fn spawn_session_actor(
             session_default_agent_profile,
             allowed_subagent_types: allowed_subagent_types_for_handle,
             hook_registry: hook_registry_for_handle,
+            plugin_invoker: plugin_invoker_for_handle,
             workspace_ops: workspace_ops_for_handle,
             terminal_backend: Some(terminal_backend.clone()),
             tools_notification_handle: Some(tools_notification_handle.clone()),
