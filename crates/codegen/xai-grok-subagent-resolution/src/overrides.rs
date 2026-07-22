@@ -90,8 +90,23 @@ pub fn resolve_effective_overrides(
     // Persona model/reasoning cascade after role
     let model =
         model_from_override_or_role.or_else(|| resolved_persona.and_then(|p| p.model.clone()));
+    // Resolve the winning effort string by precedence, then parse it once into
+    // the typed enum. An unrecognized value is warned and dropped to `None`
+    // (never aborts the spawn) — matching how the shell previously ignored a
+    // reasoning_effort that failed to parse.
     let reasoning_effort = reasoning_from_override_or_role
-        .or_else(|| resolved_persona.and_then(|p| p.reasoning_effort.clone()));
+        .or_else(|| resolved_persona.and_then(|p| p.reasoning_effort.clone()))
+        .and_then(|raw| match raw.parse::<xai_grok_sampling_types::ReasoningEffort>() {
+            Ok(effort) => Some(effort),
+            Err(err) => {
+                tracing::warn!(
+                    value = %raw,
+                    error = %err,
+                    "subagent reasoning_effort: unrecognized value, ignoring"
+                );
+                None
+            }
+        });
 
     // ── Persona instructions loading ─────────────────────────────
     // Fail-closed: if persona resolution produces an error (file unreadable,
@@ -373,7 +388,10 @@ mod tests {
             },
         );
         let result = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
-        assert_eq!(result.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(
+            result.reasoning_effort,
+            Some(xai_grok_sampling_types::ReasoningEffort::Low)
+        );
     }
 
     #[test]
@@ -393,7 +411,10 @@ mod tests {
             },
         );
         let result = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
-        assert_eq!(result.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            result.reasoning_effort,
+            Some(xai_grok_sampling_types::ReasoningEffort::High)
+        );
     }
 
     #[test]
@@ -409,7 +430,20 @@ mod tests {
             },
         );
         let result = resolve_effective_overrides(&overrides, None, &personas, None, None);
-        assert_eq!(result.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(
+            result.reasoning_effort,
+            Some(xai_grok_sampling_types::ReasoningEffort::Medium)
+        );
+    }
+
+    #[test]
+    fn unrecognized_reasoning_effort_resolves_to_none_without_panicking() {
+        let overrides = make_overrides(None, None, None, None, Some("turbo"));
+        let result = resolve_effective_overrides(&overrides, None, &empty_personas(), None, None);
+        assert!(
+            result.reasoning_effort.is_none(),
+            "an unknown effort string must be dropped, not retained or panicked on"
+        );
     }
 
     // ── Isolation precedence ─────────────────────────────────────

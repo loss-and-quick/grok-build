@@ -1534,7 +1534,10 @@ fn reasoning_effort_explicit_overrides_role() {
         None,
         None,
     );
-    assert_eq!(resolved.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(
+        resolved.reasoning_effort,
+        Some(xai_grok_sampling_types::ReasoningEffort::High)
+    );
 }
 #[test]
 fn reasoning_effort_falls_back_to_role() {
@@ -1551,7 +1554,10 @@ fn reasoning_effort_falls_back_to_role() {
         None,
         None,
     );
-    assert_eq!(resolved.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(
+        resolved.reasoning_effort,
+        Some(xai_grok_sampling_types::ReasoningEffort::Medium)
+    );
 }
 #[test]
 fn invalid_role_capability_mode_ignored() {
@@ -1704,13 +1710,19 @@ fn reasoning_effort_precedence_explicit_over_role_over_persona() {
         ..Default::default()
     };
     let r = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
-    assert_eq!(r.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(
+        r.reasoning_effort,
+        Some(xai_grok_sampling_types::ReasoningEffort::High)
+    );
     let overrides = SubagentRuntimeOverrides {
         persona: Some("dev".into()),
         ..Default::default()
     };
     let r = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
-    assert_eq!(r.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(
+        r.reasoning_effort,
+        Some(xai_grok_sampling_types::ReasoningEffort::Medium)
+    );
     let role_no_re = xai_grok_subagent_resolution::config::SubagentRole {
         description: "test".into(),
         ..Default::default()
@@ -1722,7 +1734,10 @@ fn reasoning_effort_precedence_explicit_over_role_over_persona() {
         None,
         None,
     );
-    assert_eq!(r.reasoning_effort.as_deref(), Some("low"));
+    assert_eq!(
+        r.reasoning_effort,
+        Some(xai_grok_sampling_types::ReasoningEffort::Low)
+    );
     let overrides = SubagentRuntimeOverrides::default();
     let r = resolve_effective_overrides(&overrides, None, &HashMap::new(), None, None);
     assert!(r.reasoning_effort.is_none());

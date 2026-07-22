@@ -277,7 +277,7 @@ pub(crate) async fn handle_subagent_request(
     if effective_runtime.reasoning_effort.is_none() {
         effective_runtime.reasoning_effort = definition
             .effort
-            .map(|e| <&str>::from(e).to_string());
+            .and_then(|e| <&str>::from(e).parse().ok());
     }
     {
         use xai_tool_types::SubagentIsolationMode;
@@ -611,21 +611,12 @@ pub(crate) async fn handle_subagent_request(
             return;
         }
     }
-    if let Some(raw) = effective_runtime.reasoning_effort.as_deref()
+    if let Some(eff) = effective_runtime.reasoning_effort
         && ctx
             .models_manager
             .model_supports_reasoning_effort(effective_model_id.0.as_ref())
     {
-        use xai_grok_sampling_types::ReasoningEffort;
-        match raw.parse::<ReasoningEffort>() {
-            Ok(eff) => effective_sampling_config.reasoning_effort = Some(eff),
-            Err(err) => {
-                tracing::warn!(
-                    value = raw, error = % err,
-                    "subagent reasoning_effort: parse failed, ignoring override"
-                )
-            }
-        }
+        effective_sampling_config.reasoning_effort = Some(eff);
     }
     let subagent_id = request.id.clone();
     let child_session_id = acp::SessionId::new(subagent_id.clone());
@@ -740,7 +731,7 @@ pub(crate) async fn handle_subagent_request(
             None,
             None,
             None,
-            effective_runtime.reasoning_effort.as_deref(),
+            effective_runtime.reasoning_effort.map(|e| e.as_str()),
             effective_runtime.role_name.as_deref(),
             request.parent_prompt_id.as_deref(),
             0,
@@ -757,7 +748,7 @@ pub(crate) async fn handle_subagent_request(
         upload_method: ctx.gcs_upload_method.clone(),
         model_id: Some(effective_model_id.0.to_string()),
         cwd: Some(child_session_info.cwd.clone()),
-        reasoning_effort: effective_runtime.reasoning_effort.clone(),
+        reasoning_effort: effective_runtime.reasoning_effort.map(|e| e.as_str().to_string()),
         role_name: effective_runtime.role_name.clone(),
         parent_prompt_id: request.parent_prompt_id.clone(),
         auth_manager: ctx.auth_manager.clone(),
@@ -802,7 +793,7 @@ pub(crate) async fn handle_subagent_request(
         cwd: None,
         isolation_mode: None,
         capability_mode: None,
-        reasoning_effort: effective_runtime.reasoning_effort.clone(),
+        reasoning_effort: effective_runtime.reasoning_effort.map(|e| e.as_str().to_string()),
         role_name: effective_runtime.role_name.clone(),
         parent_prompt_id: request.parent_prompt_id.clone(),
         depth: 0,
