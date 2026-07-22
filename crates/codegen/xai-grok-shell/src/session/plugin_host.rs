@@ -451,7 +451,10 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
         })
     }
 
-    fn list_agent_types<'a>(&'a self) -> xai_grok_plugin_host::OrchestratorFuture<'a, Vec<String>> {
+    fn list_agent_types<'a>(
+        &'a self,
+    ) -> xai_grok_plugin_host::OrchestratorFuture<'a, Vec<xai_grok_plugin_host::AgentDescriptor>>
+    {
         use xai_grok_tools::implementations::grok_build::task::types::{
             SubagentEvent, SubagentListTypesRequest,
         };
@@ -467,7 +470,15 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
             {
                 return Vec::new();
             }
-            rx.await.unwrap_or_default()
+            rx.await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|name| xai_grok_plugin_host::AgentDescriptor {
+                    name,
+                    description: String::new(),
+                    model: None,
+                })
+                .collect()
         })
     }
 }

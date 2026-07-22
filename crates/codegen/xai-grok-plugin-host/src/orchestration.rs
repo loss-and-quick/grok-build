@@ -79,6 +79,17 @@ pub struct AgentProgress {
     pub elapsed_ms: u64,
 }
 
+/// One spawnable agent type's metadata, as the orchestrator reports it. The
+/// host maps this to the wire `AgentDescriptorDto`; keeping it a plain core
+/// type (like [`SpawnedSubagent`]) keeps this crate free of shell types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentDescriptor {
+    pub name: String,
+    pub description: String,
+    /// Explicit model id; `None` when the agent inherits the session's model.
+    pub model: Option<String>,
+}
+
 /// Cancellation outcome, mirroring the coordinator's vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrchestratorCancel {
@@ -103,6 +114,7 @@ pub trait AgentOrchestrator: Send + Sync {
     /// Cancel a subagent by id.
     fn cancel<'a>(&'a self, id: &'a str) -> OrchestratorFuture<'a, OrchestratorCancel>;
 
-    /// Spawnable agent types for this session (sorted, toggle-filtered).
-    fn list_agent_types<'a>(&'a self) -> OrchestratorFuture<'a, Vec<String>>;
+    /// Spawnable agent types for this session (sorted, toggle-filtered), each
+    /// with its name, description, and explicit model override.
+    fn list_agent_types<'a>(&'a self) -> OrchestratorFuture<'a, Vec<AgentDescriptor>>;
 }

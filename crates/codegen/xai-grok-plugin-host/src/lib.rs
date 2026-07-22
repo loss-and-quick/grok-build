@@ -40,8 +40,8 @@ pub mod supervisor;
 use std::path::PathBuf;
 
 pub use orchestration::{
-    AgentOrchestrator, AgentOutcome, AgentProgress, AgentSpawnSpec, AgentStatusDto,
-    OrchestratorCancel, OrchestratorFuture, SpawnedSubagent,
+    AgentDescriptor, AgentOrchestrator, AgentOutcome, AgentProgress, AgentSpawnSpec,
+    AgentStatusDto, OrchestratorCancel, OrchestratorFuture, SpawnedSubagent,
 };
 pub use runtime::RuntimeKind;
 pub use supervisor::{PluginHost, SpawnHardener};

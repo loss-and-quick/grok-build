@@ -270,10 +270,10 @@ impl PluginCapabilities {
             .list_agent_types()
             .await
             .into_iter()
-            .map(|name| AgentDescriptorDto {
-                name,
-                description: String::new(),
-                model: None,
+            .map(|d| AgentDescriptorDto {
+                name: d.name,
+                description: d.description,
+                model: d.model,
             })
             .collect();
         to_result(&AgentListResult { agents })
@@ -725,8 +725,8 @@ mod tests {
     // ── agent_* orchestration over a mock orchestrator ──────────────────────
 
     use crate::orchestration::{
-        AgentOrchestrator, AgentOutcome, AgentProgress, AgentSpawnSpec, OrchestratorCancel,
-        OrchestratorFuture, SpawnedSubagent,
+        AgentDescriptor, AgentOrchestrator, AgentOutcome, AgentProgress, AgentSpawnSpec,
+        OrchestratorCancel, OrchestratorFuture, SpawnedSubagent,
     };
     use std::collections::HashMap;
     use xai_grok_plugin_protocol::AgentStatusDto;
@@ -797,8 +797,21 @@ mod tests {
             })
         }
 
-        fn list_agent_types<'a>(&'a self) -> OrchestratorFuture<'a, Vec<String>> {
-            Box::pin(async move { vec!["Explore".to_string(), "general-purpose".to_string()] })
+        fn list_agent_types<'a>(&'a self) -> OrchestratorFuture<'a, Vec<AgentDescriptor>> {
+            Box::pin(async move {
+                vec![
+                    AgentDescriptor {
+                        name: "Explore".to_string(),
+                        description: "search the repo".to_string(),
+                        model: Some("grok-code-fast-1".to_string()),
+                    },
+                    AgentDescriptor {
+                        name: "general-purpose".to_string(),
+                        description: "general tasks".to_string(),
+                        model: None,
+                    },
+                ]
+            })
         }
     }
 
@@ -965,7 +978,13 @@ mod tests {
         let (c, _orch) = caps_with_orchestrator(dir.path());
 
         let r = c.handle_request("agent_list", &json!({})).await.unwrap();
-        assert_eq!(r, json!({ "agents": ["Explore", "general-purpose"] }));
+        assert_eq!(
+            r,
+            json!({ "agents": [
+                { "name": "Explore", "description": "search the repo", "model": "grok-code-fast-1" },
+                { "name": "general-purpose", "description": "general tasks" },
+            ] })
+        );
 
         // wait/events on a foreign id -> invalid params; cancel -> not_found.
         for m in ["agent_wait", "agent_events"] {
