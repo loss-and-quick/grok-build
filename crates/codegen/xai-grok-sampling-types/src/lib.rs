@@ -9,11 +9,13 @@
 pub mod conversation;
 pub mod doom_loop;
 pub mod error;
+pub mod gemini;
 pub mod messages;
 pub mod serde_helpers;
 pub mod types;
 
 pub use self::conversation::*;
+pub use self::gemini::build_gemini_request;
 pub use self::doom_loop::{
     DOOM_LOOP_CHECK_EVENT_TYPE, DOOM_LOOP_CHECK_HEADER, DoomLoopPeek, DoomLoopRecoveryPolicy,
     DoomLoopSignal, DoomLoopSignalKind, is_check_event, peek_doom_loop,

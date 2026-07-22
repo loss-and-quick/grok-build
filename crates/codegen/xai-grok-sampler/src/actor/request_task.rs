@@ -27,7 +27,7 @@ use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
     self as retry_mod, RetryDecision, classify_error, clone_error, resolve_max_retries,
 };
-use crate::stream::{stream_chat_completions, stream_messages, stream_responses};
+use crate::stream::{stream_chat_completions, stream_gemini, stream_messages, stream_responses};
 use crate::types::RequestId;
 
 /// Default per-chunk idle timeout when neither config nor caller
@@ -515,6 +515,15 @@ async fn run_one_attempt(
             };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_messages(teed, metadata, request_id.clone(), idle_timeout);
+            drive_l2(l2, request_id, event_tx, cancel_token, captured, None).await
+        }
+        ApiBackend::Gemini => {
+            let (raw, metadata) = match client.conversation_stream_gemini(request).await {
+                Ok(pair) => pair,
+                Err(e) => return AttemptOutcome::InitFailed { error: e },
+            };
+            let (teed, captured) = tee_errors(raw);
+            let l2 = stream_gemini(teed, metadata, request_id.clone(), idle_timeout);
             drive_l2(l2, request_id, event_tx, cancel_token, captured, None).await
         }
     }

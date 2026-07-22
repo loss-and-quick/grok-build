@@ -1018,12 +1018,15 @@ pub enum ApiBackend {
     Responses,
     /// Use the Anthropic Messages API (/v1/messages)
     Messages,
+    /// Use the Google Gemini API (/v1beta/models/<model>:streamGenerateContent)
+    Gemini,
 }
 
 impl ApiBackend {
     /// Whether the backend enforces a response JSON schema natively alongside
     /// tool calls. The Messages API does not (a schema there blocks tool use),
     /// so structured output there goes through the StructuredOutput tool.
+    /// Gemini likewise routes structured output through the tool path.
     pub fn supports_native_schema(&self) -> bool {
         matches!(self, Self::ChatCompletions | Self::Responses)
     }

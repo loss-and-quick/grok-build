@@ -21,11 +21,12 @@ use reqwest::header::{
 use serde::Serialize;
 
 use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_error_message};
+use xai_grok_sampling_types::gemini::{GeminiRequest, GeminiStreamChunk};
 use xai_grok_sampling_types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
     ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper,
-    ResponseModelMetadata, Result, SamplingError, build_messages_request, is_check_event, messages,
-    rs,
+    ResponseModelMetadata, Result, SamplingError, build_gemini_request, build_messages_request,
+    is_check_event, messages, rs,
 };
 
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
@@ -425,6 +426,19 @@ impl SamplingClient {
                     })?;
                     headers.insert(HeaderName::from_static("x-api-key"), header_value);
                 }
+                AuthScheme::GoogleApiKey => {
+                    let header_value = HeaderValue::from_str(api_key).map_err(|_| {
+                        tracing::debug!(
+                            api_key = %api_key,
+                            "Invalid api_key: cannot be converted to a valid HTTP header"
+                        );
+                        SamplingError::Auth(
+                            "Invalid api_key: cannot be converted to a valid HTTP header"
+                                .to_string(),
+                        )
+                    })?;
+                    headers.insert(HeaderName::from_static("x-goog-api-key"), header_value);
+                }
                 AuthScheme::Bearer => {
                     let bearer = format!("Bearer {}", api_key);
                     let header_value = HeaderValue::from_str(&bearer).map_err(|_| {
@@ -596,6 +610,12 @@ impl SamplingClient {
                         headers.insert(HeaderName::from_static("x-api-key"), v);
                     }
                 }
+                AuthScheme::GoogleApiKey => {
+                    headers.remove(AUTHORIZATION);
+                    if let Ok(v) = HeaderValue::from_str(&fresh) {
+                        headers.insert(HeaderName::from_static("x-goog-api-key"), v);
+                    }
+                }
                 AuthScheme::Bearer => {
                     headers.remove(HeaderName::from_static("x-api-key"));
                     if let Ok(v) = HeaderValue::from_str(&format!("Bearer {fresh}")) {
@@ -760,6 +780,11 @@ impl SamplingClient {
                 .get(HeaderName::from_static("x-api-key"))
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string()),
+            AuthScheme::GoogleApiKey => self
+                .default_headers
+                .get(HeaderName::from_static("x-goog-api-key"))
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
             AuthScheme::Bearer => self
                 .default_headers
                 .get(AUTHORIZATION)
@@ -802,6 +827,7 @@ impl SamplingClient {
         let auth_prefix = self.current_sent_bearer_prefix();
         let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
             (AuthScheme::XApiKey, Some(_)) => "x-api-key",
+            (AuthScheme::GoogleApiKey, Some(_)) => "x-goog-api-key",
             (AuthScheme::Bearer, Some(_)) => "bearer",
             (_, None) => "none",
         };
@@ -2000,6 +2026,172 @@ impl SamplingClient {
         self.create_message_stream(wrapper).await
     }
 
+    /// Send a conversation request using the Google Gemini API (streaming).
+    ///
+    /// Converts the `ConversationRequest` to Gemini format internally and
+    /// streams `streamGenerateContent` SSE chunks.
+    pub async fn conversation_stream_gemini(
+        &self,
+        mut request: ConversationRequest,
+    ) -> Result<(
+        BoxStream<'static, Result<GeminiStreamChunk>>,
+        Option<ResponseModelMetadata>,
+    )> {
+        self.apply_conversation_defaults(&mut request)?;
+        request.trace.take();
+        let model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| self.defaults.model.clone());
+        let gemini_request = build_gemini_request(&request);
+        self.create_gemini_stream(model, gemini_request).await
+    }
+
+    /// POST a Gemini `streamGenerateContent` request and decode the SSE body
+    /// into a stream of [`GeminiStreamChunk`]s. The model is carried in the URL
+    /// path (`/models/<model>:streamGenerateContent?alt=sse`), unlike the other
+    /// backends where it rides in the request body.
+    #[tracing::instrument(
+        skip(self, gemini_request),
+        fields(status_code, success, error)
+    )]
+    async fn create_gemini_stream(
+        &self,
+        model: String,
+        gemini_request: GeminiRequest,
+    ) -> Result<(
+        BoxStream<'static, Result<GeminiStreamChunk>>,
+        Option<ResponseModelMetadata>,
+    )> {
+        let base = self.base_url.trim_end_matches('/');
+        let endpoint = format!("{base}/models/{model}:streamGenerateContent?alt=sse");
+
+        tracing::debug!(
+            base_url = %self.base_url,
+            model_id = %model,
+            "Sending Gemini API stream request"
+        );
+
+        let http_request = if self.has_request_interceptor() {
+            let body = serde_json::to_value(&gemini_request).map_err(SamplingError::Serialization)?;
+            let (body, hdrs) = self.run_request_interceptor("gemini", body).await;
+            self.post_with_headers(&endpoint, hdrs)
+                .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
+                .json(&body)
+        } else {
+            self.post(&endpoint)
+                .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
+                .json(&gemini_request)
+        };
+
+        let built_request = http_request.build().map_err(|e| {
+            tracing::error!("Failed to build HTTP request: {}", e);
+            SamplingError::Http(e)
+        })?;
+        Self::log_request_headers(&built_request, "gemini");
+
+        let response = self.http.execute(built_request).await.map_err(|e| {
+            tracing::debug!("HTTP request failed: {}", e);
+            record_stream_request_failure(&e);
+            e
+        })?;
+
+        let status = response.status();
+        let span = tracing::Span::current();
+        span.record("status_code", status.as_u16() as i64);
+        span.record("success", status.is_success());
+        if !status.is_success() {
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                span.record("error", "unauthorized (401)");
+                self.record_401_attribution(crate::attribution::SamplingConsumer::MessagesStream);
+                let body = response.bytes().await.unwrap_or_default();
+                let server_message = user_facing_api_error_message(status, body.as_ref());
+                return Err(SamplingError::Auth(format!(
+                    "Unauthorized (401) from {endpoint}: {server_message}"
+                )));
+            }
+            let model_metadata = extract_model_metadata(response.headers());
+            let retry_after_secs = extract_retry_after(response.headers());
+            let should_retry = extract_should_retry(response.headers());
+            let bytes = response.bytes().await?;
+            let message = user_facing_api_error_message(status, bytes.as_ref());
+            span.record("error", message.as_str());
+            tracing::error!(
+                status = %status,
+                error_message = %message,
+                body_preview = %Self::body_preview(bytes.as_ref()),
+                model_id = %model,
+                "Gemini API error"
+            );
+            return Err(SamplingError::Api {
+                status,
+                message,
+                model_metadata,
+                retry_after_secs,
+                should_retry,
+            });
+        }
+
+        let model_metadata = extract_model_metadata(response.headers());
+
+        const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+        let mut is_first = true;
+        let byte_stream = response.bytes_stream().map(move |result| {
+            result.map(|bytes| {
+                if is_first {
+                    is_first = false;
+                    if bytes.starts_with(UTF8_BOM) {
+                        return bytes.slice(UTF8_BOM.len()..);
+                    }
+                }
+                bytes
+            })
+        });
+
+        let event_stream = byte_stream.eventsource();
+
+        let events = event_stream
+            .scan(false, |had_transport_error, event_res| {
+                if *had_transport_error {
+                    return std::future::ready(None);
+                }
+                let item = match event_res {
+                    Ok(event) => {
+                        let data = &event.data;
+                        if data == "[DONE]" {
+                            return std::future::ready(None);
+                        }
+                        tracing::info!(
+                            target: crate::sampling_log::TARGET,
+                            event = "sse_chunk",
+                            backend = "gemini",
+                            data = %data,
+                        );
+                        if let Some(stream_error) = try_parse_stream_error(data) {
+                            Some(Err(stream_error))
+                        } else {
+                            Some(serde_json::from_str::<GeminiStreamChunk>(data).map_err(|e| {
+                                tracing::error!(
+                                    error = %e,
+                                    raw_data = %data,
+                                    "Failed to deserialize GeminiStreamChunk from stream"
+                                );
+                                SamplingError::Serialization(e)
+                            }))
+                        }
+                    }
+                    Err(e) => {
+                        *had_transport_error = true;
+                        Some(Err(SamplingError::EventStreamError(e.to_string())))
+                    }
+                };
+                std::future::ready(item)
+            })
+            .boxed();
+
+        Ok((events, model_metadata))
+    }
+
     /// Send a conversation request using the Anthropic Messages API (non-streaming).
     ///
     /// Converts the `ConversationRequest` to Messages API format internally.
@@ -2055,6 +2247,11 @@ impl SamplingClient {
             ApiBackend::Messages => {
                 let (raw, meta) = self.conversation_stream_messages(request).await?;
                 let events = crate::stream::stream_messages(raw, meta, request_id, idle_timeout);
+                crate::stream::collect_response(events).await
+            }
+            ApiBackend::Gemini => {
+                let (raw, meta) = self.conversation_stream_gemini(request).await?;
+                let events = crate::stream::stream_gemini(raw, meta, request_id, idle_timeout);
                 crate::stream::collect_response(events).await
             }
         };

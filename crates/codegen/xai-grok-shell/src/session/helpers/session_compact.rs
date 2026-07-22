@@ -722,6 +722,12 @@ pub(crate) async fn generate_session_compact(
                 itl_max_ms: timing.itl_max_ms(),
             }
         }
+        ApiBackend::Gemini => {
+            return Err(CompactFailure::Deterministic(
+                acp::Error::internal_error()
+                    .data("compact failed: Gemini backend is not yet supported"),
+            ));
+        }
     };
     if output.content.is_empty() {
         Err(CompactFailure::Transient(

@@ -22,6 +22,9 @@ pub enum AuthScheme {
     #[default]
     Bearer,
     XApiKey,
+    /// Google Gemini: credential sent in the `x-goog-api-key` header (kept out
+    /// of the URL so it never lands in request logs).
+    GoogleApiKey,
 }
 
 /// All knobs that control a single sampling request.

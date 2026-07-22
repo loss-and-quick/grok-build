@@ -43,6 +43,34 @@ pub fn messages_api_events(text: &str, model: &str, stop_reason: &str) -> Vec<Ev
     ]
 }
 
+/// Generate Google Gemini `streamGenerateContent` SSE events: one text part
+/// chunk followed by a terminal chunk carrying `finishReason` + usage.
+pub fn gemini_api_events(text: &str, model: &str) -> Vec<Event> {
+    vec![
+        Event::default().data(
+            json!({
+                "candidates": [{
+                    "content": { "role": "model", "parts": [{ "text": text }] }
+                }],
+                "modelVersion": model
+            })
+            .to_string(),
+        ),
+        Event::default().data(
+            json!({
+                "candidates": [{ "content": { "role": "model", "parts": [] }, "finishReason": "STOP" }],
+                "usageMetadata": {
+                    "promptTokenCount": 11,
+                    "candidatesTokenCount": 7,
+                    "totalTokenCount": 18
+                },
+                "modelVersion": model
+            })
+            .to_string(),
+        ),
+    ]
+}
+
 /// Generate ChatCompletions SSE events that stream `text` word-by-word
 /// (whitespace-collapsing; use [`chat_completion_events_exact`] when the
 /// receiver must reconstruct `text` byte-for-byte).

@@ -551,6 +551,10 @@ impl SessionActor {
                 let events = xai_grok_sampler::stream_messages(raw, meta, request_id, idle_timeout);
                 xai_grok_sampler::collect_response(events).await
             }
+            crate::sampling::ApiBackend::Gemini => {
+                tracing::debug!("AI suggest: Gemini backend is not yet supported");
+                return None;
+            }
         };
 
         match result {
