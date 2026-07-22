@@ -1158,10 +1158,20 @@ pub(crate) async fn spawn_session_actor(
     // first matching hook; the synthetic `Plugin` hook specs that route events
     // here are appended by the hooks_adapter merge path (see
     // `session::plugin_host::sidecar_plugin_hook_specs`).
+    // Per-plugin config source: `[plugins.<name>]` tables from the effective
+    // config.toml. Merged over each plugin's manifest `config` defaults inside
+    // `build_session_plugin_host`. Only the user/global tiers contribute here
+    // (project configs extend disabled only), so an untrusted repo can't inject
+    // a plugin's config; and only active (enabled + trusted) sidecar plugins
+    // ever read it.
+    let session_plugin_config =
+        crate::config::resolve_effective_plugins_config(std::path::Path::new(&session_info.cwd))
+            .config;
     let built_plugin_host = crate::session::plugin_host::build_session_plugin_host(
         plugin_registry.as_deref(),
         &session_info.id.0,
         &resolved_workspace_root,
+        &session_plugin_config,
         // Arms the plugin `agent_*` orchestration RPCs: plugin spawns route
         // through this session's subagent coordinator like any Task spawn.
         tool_context.subagent_event_tx.clone(),

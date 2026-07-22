@@ -64,6 +64,28 @@ pub(crate) const SIDECAR_HOOK_EVENTS: &[HookEventName] = &[
 /// plugin can't hang forever. Bounded below the hook-timeout cap.
 const DEFAULT_INTERACTIVE_GATE_TIMEOUT_MS: u64 = 300_000;
 
+/// Shallow-merge a plugin's user config (`[plugins.<name>]` in config.toml)
+/// over its manifest `config` defaults.
+///
+/// Merge depth is one level: every top-level key present in `user` replaces the
+/// same key in `defaults` wholesale — nested objects/arrays are taken from
+/// `user` as-is, not recursively merged — while keys only in `defaults` are
+/// preserved. A non-object on either side contributes nothing (coerced to an
+/// empty object), so the result is always a JSON object and the SDK's
+/// `ctx.config()` never observes a non-object value.
+fn merge_plugin_config(
+    defaults: &serde_json::Value,
+    user: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut out = defaults.as_object().cloned().unwrap_or_default();
+    if let Some(user_obj) = user.and_then(|v| v.as_object()) {
+        for (key, value) in user_obj {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
 /// Map the agent-side runtime selection onto the host's runtime enum. Both are
 /// `auto|bun|node|deno`; kept as an explicit match so a future variant on either
 /// side fails to compile until it's mapped, rather than drifting silently.
@@ -122,6 +144,7 @@ pub(crate) fn build_session_plugin_host(
     plugin_registry: Option<&PluginRegistry>,
     session_id: &str,
     workspace_root: &str,
+    plugin_config: &std::collections::BTreeMap<String, serde_json::Value>,
     subagent_event_tx: Option<
         tokio::sync::mpsc::UnboundedSender<
             xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
@@ -136,28 +159,13 @@ pub(crate) fn build_session_plugin_host(
     let leader_socket = crate::leader::active_leader_socket()
         .map(|p| p.to_string_lossy().into_owned());
 
-    let sidecar_plugins: Vec<RegisteredPlugin> = registry
-        .active_plugins()
-        .iter()
-        .filter_map(|plugin| {
-            let spec = plugin.sidecar_spec()?;
-            Some(RegisteredPlugin {
-                name: plugin.name.clone(),
-                entry: spec.entry,
-                runtime: runtime_kind(spec.runtime),
-                network: spec.network,
-                // TODO(plugin-config): plugins have no per-plugin settings
-                // mechanism today (`PluginManifest` carries only mcp/lsp config
-                // paths). When one lands, forward it here so `initialize` and
-                // `config_get` see the plugin's own config instead of `{}`.
-                config: serde_json::json!({}),
-                declared_tools: spec.tools.iter().map(|t| t.name.clone()).collect(),
-                workspace_root: workspace_root.clone(),
-                session_id: session_id.to_string(),
-                leader_socket: leader_socket.clone(),
-            })
-        })
-        .collect();
+    let sidecar_plugins = registered_sidecar_plugins(
+        registry,
+        session_id,
+        &workspace_root,
+        plugin_config,
+        leader_socket.as_deref(),
+    );
 
     if sidecar_plugins.is_empty() {
         return None;
@@ -186,6 +194,41 @@ pub(crate) fn build_session_plugin_host(
         host.register_plugin(spec.clone());
     }
     Some(Arc::new(host))
+}
+
+/// Build the [`RegisteredPlugin`] list for a registry's active sidecar plugins,
+/// stamping each with its merged per-plugin config
+/// (`merge_plugin_config(manifest_defaults, user[name])`). Pure (no host side
+/// effects) so the config wiring is unit-testable; `build_session_plugin_host`
+/// feeds the result to the host.
+fn registered_sidecar_plugins(
+    registry: &PluginRegistry,
+    session_id: &str,
+    workspace_root: &std::path::Path,
+    plugin_config: &std::collections::BTreeMap<String, serde_json::Value>,
+    leader_socket: Option<&str>,
+) -> Vec<RegisteredPlugin> {
+    registry
+        .active_plugins()
+        .iter()
+        .filter_map(|plugin| {
+            let spec = plugin.sidecar_spec()?;
+            Some(RegisteredPlugin {
+                name: plugin.name.clone(),
+                entry: spec.entry,
+                runtime: runtime_kind(spec.runtime),
+                network: spec.network,
+                // Per-plugin config the sidecar sees at `initialize` and via
+                // `config_get`: the manifest's `config` defaults with the user's
+                // `[plugins.<name>]` config.toml entries shallow-merged on top.
+                config: merge_plugin_config(&spec.config, plugin_config.get(&plugin.name)),
+                declared_tools: spec.tools.iter().map(|t| t.name.clone()).collect(),
+                workspace_root: workspace_root.to_path_buf(),
+                session_id: session_id.to_string(),
+                leader_socket: leader_socket.map(|s| s.to_string()),
+            })
+        })
+        .collect()
 }
 
 /// Synthesize the [`HandlerType::Plugin`] hook specs for one sidecar plugin —
@@ -761,6 +804,129 @@ mod tests {
             .find(|s| s.event == HookEventName::StartOauthFlow)
             .unwrap();
         assert_eq!(oauth.timeout_ms, DEFAULT_INTERACTIVE_GATE_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn merge_plugin_config_user_overrides_manifest_defaults() {
+        let defaults = serde_json::json!({
+            "participants": ["default"],
+            "rounds": 1,
+            "keep": true,
+        });
+        let user = serde_json::json!({
+            "participants": ["grok", "claude"],
+            "rounds": 3,
+        });
+        let merged = merge_plugin_config(&defaults, Some(&user));
+        // User keys win wholesale (the array is replaced, not concatenated).
+        assert_eq!(merged["participants"], serde_json::json!(["grok", "claude"]));
+        assert_eq!(merged["rounds"], 3);
+        // Manifest-only keys survive.
+        assert_eq!(merged["keep"], true);
+    }
+
+    #[test]
+    fn merge_plugin_config_is_shallow_not_deep() {
+        // Nested objects are replaced wholesale (depth = 1), not deep-merged:
+        // `a` is taken entirely from the user, so the default `a.y` is dropped.
+        let defaults = serde_json::json!({ "a": { "x": 1, "y": 2 } });
+        let user = serde_json::json!({ "a": { "x": 9 } });
+        let merged = merge_plugin_config(&defaults, Some(&user));
+        assert_eq!(merged["a"], serde_json::json!({ "x": 9 }));
+    }
+
+    #[test]
+    fn merge_plugin_config_no_user_returns_defaults() {
+        let defaults = serde_json::json!({ "rounds": 2 });
+        assert_eq!(merge_plugin_config(&defaults, None), defaults);
+    }
+
+    #[test]
+    fn merge_plugin_config_always_yields_object() {
+        // Non-object defaults / non-object user both coerce to `{}` so the
+        // sidecar's `ctx.config()` never sees a non-object.
+        assert_eq!(
+            merge_plugin_config(&serde_json::json!([1, 2]), None),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            merge_plugin_config(&serde_json::json!({}), Some(&serde_json::json!("nope"))),
+            serde_json::json!({})
+        );
+    }
+
+    /// End-to-end wiring: a registry's active sidecar plugin gets its manifest
+    /// `config` defaults merged with the user's `[plugins.<name>]` map, and the
+    /// result lands on `RegisteredPlugin.config` (the value `config_get` returns).
+    #[test]
+    fn registered_sidecar_plugins_stamp_merged_config() {
+        use xai_grok_agent::plugins::PluginRegistry;
+        use xai_grok_agent::plugins::discovery::{DiscoveredPlugin, PluginId};
+        use xai_grok_agent::plugins::{PluginOrigin, PluginScope};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("council");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.ts"), "export default {};").unwrap();
+
+        let manifest = xai_grok_agent::plugins::PluginManifest {
+            name: "council".to_string(),
+            version: None,
+            description: None,
+            author: None,
+            homepage: None,
+            repository: None,
+            license: None,
+            keywords: vec![],
+            skills: None,
+            commands: None,
+            agents: None,
+            hooks: None,
+            mcp_servers: None,
+            lsp_servers: None,
+            plugin: Some("./index.ts".to_string()),
+            runtime: None,
+            network: None,
+            tools: None,
+            config: Some(serde_json::json!({ "participants": ["default"], "rounds": 1 })),
+        };
+
+        let dp = DiscoveredPlugin {
+            manifest,
+            id: PluginId::new(PluginScope::User, &root, "council"),
+            root: root.clone(),
+            canonical_root: root.clone(),
+            scope: PluginScope::User,
+            origin: PluginOrigin::UserGrok,
+            trusted: true,
+            skill_dirs: vec![],
+            command_dirs: vec![],
+            agent_dirs: vec![],
+            hooks_path: None,
+            mcp_config_path: None,
+            lsp_config_path: None,
+            conflict: None,
+        };
+        let registry = PluginRegistry::from_discovered(vec![dp], &[], &["council".to_string()]);
+
+        let mut user_config = std::collections::BTreeMap::new();
+        user_config.insert(
+            "council".to_string(),
+            serde_json::json!({ "participants": ["grok", "claude"] }),
+        );
+
+        let registered = registered_sidecar_plugins(
+            &registry,
+            "sess-1",
+            std::path::Path::new("/ws"),
+            &user_config,
+            None,
+        );
+        assert_eq!(registered.len(), 1);
+        let cfg = &registered[0].config;
+        // User overrides participants; manifest default `rounds` survives.
+        assert_eq!(cfg["participants"], serde_json::json!(["grok", "claude"]));
+        assert_eq!(cfg["rounds"], 1);
     }
 
     #[test]
