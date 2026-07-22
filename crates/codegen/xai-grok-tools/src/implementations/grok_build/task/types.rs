@@ -625,16 +625,27 @@ pub struct SubagentValidateTypeRequest {
     pub respond_to: oneshot::Sender<SubagentValidateTypeOutcome>,
 }
 
+/// One spawnable subagent type's metadata for the `ListTypes` reply. Kept as a
+/// plain struct here (the neutral seam between the coordinator and the plugin
+/// host) so neither side depends on the other's descriptor type. `model` is the
+/// agent's explicit model override id, `None` when it inherits the session's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentTypeDescriptor {
+    pub name: String,
+    pub description: String,
+    pub model: Option<String>,
+}
+
 /// Request to list the spawnable subagent types for a parent session
-/// (sorted, `[subagents.toggle]`-filtered). Sent by the plugin host's
-/// `agent_list` orchestration RPC; handled by the coordinator drain with the
-/// same validation context `ValidateType` uses.
+/// (sorted, `[subagents.toggle]`-filtered), each with description and model.
+/// Sent by the plugin host's `agent_list` orchestration RPC; handled by the
+/// coordinator drain with the same validation context `ValidateType` uses.
 #[derive(Educe)]
 #[educe(Debug)]
 pub struct SubagentListTypesRequest {
     pub parent_session_id: String,
     #[educe(Debug(ignore))]
-    pub respond_to: oneshot::Sender<Vec<String>>,
+    pub respond_to: oneshot::Sender<Vec<SubagentTypeDescriptor>>,
 }
 
 // Describe-type protocol

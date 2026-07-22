@@ -1684,6 +1684,50 @@ pub(crate) fn available_subagent_types(ctx: &SubagentValidationContext) -> Vec<S
     available.sort();
     available
 }
+/// The spawnable subagent types for `ctx`, each resolved to its
+/// [`SubagentTypeDescriptor`] (name + description + explicit model). Order
+/// matches [`available_subagent_types`] (sorted). Each name is resolved to its
+/// `AgentDefinition` via `by_name_in_cwd_with_plugins`, falling back to the
+/// session's `cli_agents` (mirroring [`resolve_agent_definition`]'s lookup) so
+/// CLI-registered agents keep their metadata too. A name that resolves to no
+/// definition (should not happen post-filter) degrades to name-only.
+///
+/// `model` is `None` when the definition inherits the session's model
+/// (`ModelOverride::Inherit`) and `Some(id)` for an explicit override — the
+/// wire descriptor omits the field entirely in the inherit case.
+pub(crate) fn available_subagent_descriptors(
+    ctx: &SubagentValidationContext,
+    cli_agents: &[xai_grok_agent::config::AgentDefinition],
+) -> Vec<xai_grok_tools::implementations::grok_build::task::types::SubagentTypeDescriptor> {
+    use xai_grok_agent::config::ModelOverride;
+    use xai_grok_tools::implementations::grok_build::task::types::SubagentTypeDescriptor;
+    available_subagent_types(ctx)
+        .into_iter()
+        .map(|name| {
+            let def = xai_grok_agent::discovery::by_name_in_cwd_with_plugins(
+                &name,
+                &ctx.parent_cwd,
+                ctx.plugin_registry.as_deref(),
+            )
+            .or_else(|| cli_agents.iter().find(|d| d.name == name).cloned());
+            match def {
+                Some(def) => SubagentTypeDescriptor {
+                    name,
+                    description: def.description,
+                    model: match def.model {
+                        ModelOverride::Inherit => None,
+                        ModelOverride::Override(id) => Some(id),
+                    },
+                },
+                None => SubagentTypeDescriptor {
+                    name,
+                    description: String::new(),
+                    model: None,
+                },
+            }
+        })
+        .collect()
+}
 /// Synchronously validate a subagent type against discovery + toggle + allow-list.
 /// `Unknown { available }` is sorted by `str::cmp` for stable rendering.
 pub(crate) fn validate_subagent_type(

@@ -279,8 +279,12 @@ impl MvpAgent {
                                 let this = agent_ref.get();
                                 let ctx = this
                                     .build_subagent_validation_context(&request.parent_session_id);
+                                let cli_agents = this.cfg.borrow().cli_agents.clone();
                                 let available =
-                                    crate::agent::subagent::available_subagent_types(&ctx);
+                                    crate::agent::subagent::available_subagent_descriptors(
+                                        &ctx,
+                                        &cli_agents,
+                                    );
                                 let _ = request.respond_to.send(available);
                             });
                         }

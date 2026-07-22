@@ -473,10 +473,10 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
             rx.await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|name| xai_grok_plugin_host::AgentDescriptor {
-                    name,
-                    description: String::new(),
-                    model: None,
+                .map(|d| xai_grok_plugin_host::AgentDescriptor {
+                    name: d.name,
+                    description: d.description,
+                    model: d.model,
                 })
                 .collect()
         })

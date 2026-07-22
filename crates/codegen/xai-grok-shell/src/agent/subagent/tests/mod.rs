@@ -2587,6 +2587,49 @@ fn validate_subagent_type_recognizes_cli_agent_by_name() {
     );
 }
 #[test]
+fn available_subagent_descriptors_populates_description_and_model() {
+    use crate::agent::subagent::available_subagent_descriptors;
+    use xai_grok_agent::config::AgentDefinition;
+
+    // A CLI agent with an explicit model override; resolved via the cli_agents
+    // fallback (it lives on no discovery path).
+    let cli_def = AgentDefinition::parse(
+        "---\nname: my-cli-agent\ndescription: does cli things\nmodel: grok-3-fast\n---\nbody\n",
+    )
+    .unwrap();
+
+    let mut ctx = make_validation_ctx(HashMap::new());
+    ctx.cli_agent_names = vec!["my-cli-agent".to_string()];
+
+    let descriptors = available_subagent_descriptors(&ctx, std::slice::from_ref(&cli_def));
+
+    // Built-ins carry their frontmatter description and inherit the session
+    // model (`model: None`).
+    let explore = descriptors
+        .iter()
+        .find(|d| d.name == "explore")
+        .expect("explore built-in present");
+    assert!(
+        !explore.description.is_empty(),
+        "built-in description must be populated: {explore:?}",
+    );
+    assert_eq!(explore.model, None, "built-in inherits the session model");
+
+    // The CLI agent keeps its description and explicit model override.
+    let cli = descriptors
+        .iter()
+        .find(|d| d.name == "my-cli-agent")
+        .expect("cli agent present");
+    assert_eq!(cli.description, "does cli things");
+    assert_eq!(cli.model.as_deref(), Some("grok-3-fast"));
+
+    // Order matches available_subagent_types (sorted).
+    let names: Vec<&str> = descriptors.iter().map(|d| d.name.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "descriptors must be sorted by name");
+}
+#[test]
 #[serial_test::serial]
 fn subagent_await_budget_default_and_override() {
     unsafe { std::env::remove_var("GROK_SUBAGENT_AWAIT_BUDGET_MS") };
