@@ -340,7 +340,11 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
             // whichever turn happens to be running (turn cancellation must not
             // reap it; the per-spawn timeout and agent_cancel do).
             parent_prompt_id: None,
-            resume_from: None,
+            // `agent_send` sets this to a prior terminal subagent id: the
+            // coordinator resumes that conversation into this child (raw
+            // transcript, tool state, model), then runs `prompt`. A plain
+            // `agent_spawn` leaves it `None`.
+            resume_from: spec.resume_from,
             cwd: spec.cwd,
             runtime_overrides: SubagentRuntimeOverrides {
                 model: spec.model,

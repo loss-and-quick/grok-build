@@ -24,11 +24,11 @@ use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
 use xai_grok_plugin_protocol::{
     AgentCancelOutcomeDto, AgentCancelParams, AgentCancelResult, AgentDescriptorDto, AgentEventDto,
-    AgentEventKindDto, AgentEventsParams, AgentEventsResult, AgentListResult, AgentSpawnParams,
-    AgentSpawnResult,
-    AgentStatusDto, AgentWaitParams, AgentWaitResult, ConfigGetResult, LogEmitParams, LogLevelDto,
-    StorageDeleteParams, StorageDeleteResult, StorageGetParams, StorageGetResult,
-    StorageListParams, StorageListResult, StorageSetParams, StorageSetResult,
+    AgentEventKindDto, AgentEventsParams, AgentEventsResult, AgentListResult, AgentSendParams,
+    AgentSendResult, AgentSpawnParams, AgentSpawnResult, AgentStatusDto, AgentWaitParams,
+    AgentWaitResult, ConfigGetResult, LogEmitParams, LogLevelDto, StorageDeleteParams,
+    StorageDeleteResult, StorageGetParams, StorageGetResult, StorageListParams, StorageListResult,
+    StorageSetParams, StorageSetResult,
 };
 
 use crate::orchestration::{
@@ -113,6 +113,7 @@ impl PluginCapabilities {
                 value: self.config.clone(),
             }),
             "agent_spawn" => self.agent_spawn(params).await,
+            "agent_send" => self.agent_send(params).await,
             "agent_wait" => self.agent_wait(params).await,
             "agent_events" => self.agent_events(params).await,
             "agent_list" => self.agent_list().await,
@@ -159,6 +160,7 @@ impl PluginCapabilities {
             description: p.description,
             model: p.model,
             cwd: p.cwd,
+            resume_from: None,
         };
         let spawn_data = json!({
             "agent_type": spec.agent_type,
@@ -168,21 +170,82 @@ impl PluginCapabilities {
             "prompt_chars": spec.prompt.chars().count(),
             "timeout_ms": p.timeout_ms,
         });
+        let agent_type = spec.agent_type.clone();
         let spawned = orchestrator.spawn(spec).map_err(RpcError::internal)?;
-        let handle = Arc::new(AgentHandle::default());
+        let id = self.register_and_watch(orchestrator, spawned, spawn_data, p.timeout_ms, agent_type);
+        to_result(&AgentSpawnResult { id })
+    }
+
+    /// Continue a prior terminal subagent with a follow-up prompt. Resumes its
+    /// conversation into a fresh child (a new id, tracked exactly like an
+    /// `agent_spawn`), so `wait`/`events`/`cancel` and `timeout_ms` all apply
+    /// to the returned id. The resumed id must be one of this plugin's own
+    /// spawns (foreign/unknown ids are invalid params, matching `agent_wait`).
+    async fn agent_send(&self, params: &Value) -> Result<Value, RpcError> {
+        let orchestrator = self.orchestrator_for("agent_send")?;
+        let p: AgentSendParams = parse_params(params)?;
+        // The resumed id must be one of this plugin's own spawns; carry its
+        // requested agent type forward so the continuation's resume identity
+        // matches the source (the coordinator fails closed on a type mismatch).
+        let agent_type = {
+            let agents = self.agents.lock().expect("agents map poisoned");
+            match agents.get(&p.id) {
+                Some(handle) => handle.agent_type.clone(),
+                None => {
+                    return Err(RpcError::invalid_params(format!(
+                        "unknown subagent id '{}' for this plugin",
+                        p.id
+                    )));
+                }
+            }
+        };
+        let spec = AgentSpawnSpec {
+            plugin: self.name.clone(),
+            // Same requested type as the resumed spawn (so resume identity
+            // matches); the model is pinned from the resumed conversation.
+            agent_type: agent_type.clone(),
+            prompt: p.prompt,
+            description: None,
+            model: None,
+            cwd: None,
+            resume_from: Some(p.id.clone()),
+        };
+        let spawn_data = json!({
+            "resume_from": p.id,
+            "agent_type": agent_type,
+            "prompt_chars": spec.prompt.chars().count(),
+            "timeout_ms": p.timeout_ms,
+        });
+        let spawned = orchestrator.spawn(spec).map_err(RpcError::internal)?;
+        let id = self.register_and_watch(orchestrator, spawned, spawn_data, p.timeout_ms, agent_type);
+        to_result(&AgentSendResult { id })
+    }
+
+    /// Register a freshly submitted spawn under its id (a new [`AgentHandle`]
+    /// seeded with the `Spawned` event) and start its terminal-result watcher.
+    /// `agent_type` is the plugin-requested type, remembered so `agent_send`
+    /// can preserve resume identity. Returns the subagent id. Shared by
+    /// `agent_spawn` and `agent_send`.
+    fn register_and_watch(
+        &self,
+        orchestrator: Arc<dyn AgentOrchestrator>,
+        spawned: crate::orchestration::SpawnedSubagent,
+        spawn_data: Value,
+        timeout_ms: Option<u64>,
+        agent_type: Option<String>,
+    ) -> String {
+        let handle = Arc::new(AgentHandle {
+            agent_type,
+            ..Default::default()
+        });
         handle.push_event(AgentEventKindDto::Spawned, spawn_data);
         self.agents
             .lock()
             .expect("agents map poisoned")
             .insert(spawned.id.clone(), Arc::clone(&handle));
-        spawn_outcome_watcher(
-            orchestrator,
-            spawned.id.clone(),
-            spawned.result_rx,
-            handle,
-            p.timeout_ms,
-        );
-        to_result(&AgentSpawnResult { id: spawned.id })
+        let id = spawned.id.clone();
+        spawn_outcome_watcher(orchestrator, spawned.id, spawned.result_rx, handle, timeout_ms);
+        id
     }
 
     async fn agent_wait(&self, params: &Value) -> Result<Value, RpcError> {
@@ -345,6 +408,14 @@ struct AgentHandle {
     events: std::sync::Mutex<AgentEventLog>,
     last_progress: std::sync::Mutex<Option<AgentProgress>>,
     notify: tokio::sync::Notify,
+    /// The agent type the plugin requested at spawn (verbatim, so `None` stays
+    /// `None`). `agent_send` re-supplies it when resuming so the continuation's
+    /// requested type matches the resume source's — the coordinator validates
+    /// resume identity by exact type match and fails closed otherwise. Passing
+    /// the same value the original spawn used (the orchestrator applies the same
+    /// default deterministically) preserves the match for both a named type and
+    /// the defaulted one. Set once at construction; read-only after.
+    agent_type: Option<String>,
 }
 
 #[derive(Default)]
@@ -722,6 +793,7 @@ mod tests {
         let c = caps(dir.path(), Value::Null);
         for m in [
             "agent_spawn",
+            "agent_send",
             "agent_wait",
             "agent_events",
             "agent_list",
@@ -926,6 +998,101 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r["outcome"], "already_finished");
+    }
+
+    /// `agent_send` continues a prior subagent: it resumes that id (recorded on
+    /// the spec's `resume_from`), returns a fresh id, and the full wait surface
+    /// applies to the continuation.
+    #[tokio::test]
+    async fn agent_send_resumes_prior_subagent_and_returns_new_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, orch) = caps_with_orchestrator(dir.path());
+
+        // A NON-default type, so the resume-identity threading is exercised:
+        // send must re-supply "Explore", not the general-purpose default.
+        let first = spawn_one(&c, json!({ "agent_type": "Explore", "prompt": "draft it" })).await;
+        assert_eq!(first, "agent-1");
+        orch.complete(&first, done_outcome());
+
+        // Continue with a follow-up prompt.
+        let r = c
+            .handle_request(
+                "agent_send",
+                &json!({ "id": first, "prompt": "now review it" }),
+            )
+            .await
+            .unwrap();
+        let second = r["id"].as_str().expect("send returns a new id").to_string();
+        assert_eq!(second, "agent-2", "continuation is a fresh subagent id");
+
+        // The continuation resumed the first subagent (stateless-continue) and
+        // carried its type forward so the coordinator's resume-identity check
+        // (exact type match, else fail-closed) passes.
+        {
+            let specs = orch.seen_specs.lock().unwrap();
+            assert_eq!(specs.len(), 2);
+            assert_eq!(specs[1].resume_from.as_deref(), Some(first.as_str()));
+            assert_eq!(specs[1].agent_type.as_deref(), Some("Explore"));
+            assert_eq!(specs[1].prompt, "now review it");
+            assert_eq!(specs[1].plugin, "my.plugin");
+        }
+
+        // The wait surface works on the new id: complete it, then wait returns
+        // the terminal inline.
+        orch.complete(&second, done_outcome());
+        let r = c
+            .handle_request("agent_wait", &json!({ "id": second, "timeout_ms": 5000 }))
+            .await
+            .unwrap();
+        assert_eq!(r["status"], "completed");
+
+        // Chained continue preserves the type across hops.
+        let r = c
+            .handle_request("agent_send", &json!({ "id": second, "prompt": "again" }))
+            .await
+            .unwrap();
+        let third = r["id"].as_str().unwrap().to_string();
+        {
+            let specs = orch.seen_specs.lock().unwrap();
+            assert_eq!(specs[2].resume_from.as_deref(), Some(second.as_str()));
+            assert_eq!(specs[2].agent_type.as_deref(), Some("Explore"));
+        }
+        orch.complete(&third, done_outcome());
+
+        // Sending to an id this plugin never spawned is invalid params.
+        let err = c
+            .handle_request("agent_send", &json!({ "id": "not-mine", "prompt": "x" }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, -32602);
+    }
+
+    /// A `timeout_ms` on `agent_send` bounds the continuation exactly like a
+    /// spawn timeout: an uncompleted resume is force-finalized as cancelled.
+    #[tokio::test]
+    async fn agent_send_honors_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, orch) = caps_with_orchestrator(dir.path());
+        let first = spawn_one(&c, json!({ "prompt": "draft" })).await;
+        orch.complete(&first, done_outcome());
+
+        let r = c
+            .handle_request(
+                "agent_send",
+                &json!({ "id": first, "prompt": "review", "timeout_ms": 30 }),
+            )
+            .await
+            .unwrap();
+        let second = r["id"].as_str().unwrap().to_string();
+
+        // The mock never completes the continuation on its own; the per-spawn
+        // timeout cancels it and reports a cancelled terminal.
+        let r = c
+            .handle_request("agent_wait", &json!({ "id": second, "timeout_ms": 5000 }))
+            .await
+            .unwrap();
+        assert_eq!(r["status"], "cancelled");
+        assert!(orch.cancelled.lock().unwrap().contains(&second));
     }
 
     #[tokio::test]

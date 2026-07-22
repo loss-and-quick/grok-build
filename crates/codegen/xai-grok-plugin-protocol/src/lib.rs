@@ -661,6 +661,37 @@ pub struct AgentCancelResult {
     pub outcome: AgentCancelOutcomeDto,
 }
 
+/// `agent_send` request params. Plugin→core. Continues a prior subagent with a
+/// follow-up `prompt`: `id` is a terminal subagent this plugin spawned, whose
+/// conversation (raw transcript, tool state, model) is resumed into a fresh
+/// child that runs `prompt` and produces the next terminal result. The child
+/// is stateless-continued via resume — a new subagent with a new id — so the
+/// full `agent_*` surface (`wait`/`events`/`cancel`, and `timeout_ms`) applies
+/// to the returned id exactly as for `agent_spawn`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+pub struct AgentSendParams {
+    /// A terminal subagent id previously returned by `agent_spawn`/`agent_send`
+    /// for this plugin.
+    pub id: String,
+    /// The follow-up prompt for the resumed child.
+    pub prompt: String,
+    /// Per-spawn budget for the continuation, same semantics as
+    /// [`AgentSpawnParams::timeout_ms`].
+    #[serde(default)]
+    #[ts(type = "number | null", optional = nullable)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// `agent_send` reply. Plugin→core. `id` is the NEW subagent id for the
+/// continuation (the prior id stays terminal); key subsequent `agent_*` calls
+/// on it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AgentSendResult {
+    pub id: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ts-rs export
 // ─────────────────────────────────────────────────────────────────────────────
@@ -724,6 +755,8 @@ mod bindings_export {
             AgentCancelParams,
             AgentCancelOutcomeDto,
             AgentCancelResult,
+            AgentSendParams,
+            AgentSendResult,
         );
     }
 }
@@ -1118,6 +1151,19 @@ mod tests {
             },
             json!({ "outcome": "already_finished" }),
         );
+        round_trip(
+            &AgentSendParams {
+                id: "a-1".into(),
+                prompt: "and now review it".into(),
+                timeout_ms: Some(60_000),
+            },
+            json!({ "id": "a-1", "prompt": "and now review it", "timeout_ms": 60000 }),
+        );
+        // `timeout_ms` defaults to absent.
+        let p: AgentSendParams =
+            serde_json::from_value(json!({ "id": "a-2", "prompt": "go" })).unwrap();
+        assert_eq!(p.timeout_ms, None);
+        round_trip(&AgentSendResult { id: "a-9".into() }, json!({ "id": "a-9" }));
     }
 
     /// An agent descriptor deserializes from just a `name`: `description`

@@ -29,6 +29,10 @@ pub struct AgentSpawnSpec {
     pub description: Option<String>,
     pub model: Option<String>,
     pub cwd: Option<String>,
+    /// Continue a prior terminal subagent: resume its conversation (raw
+    /// transcript, tool state, model) into this fresh child, which then runs
+    /// `prompt`. `None` for a plain spawn. Set by `agent_send`.
+    pub resume_from: Option<String>,
 }
 
 /// A successfully submitted spawn: its id plus the terminal-result channel.
