@@ -451,7 +451,7 @@ impl SessionActor {
             // round-trip otherwise. Built-in failover consults `provider_error`
             // directly from the turn loop, so the sampler's error hook stays
             // unset here.
-            request_interceptor: self.build_hook_request_interceptor(),
+            request_interceptor: self.build_hook_request_interceptor().await,
             error_hook: None,
         }
     }

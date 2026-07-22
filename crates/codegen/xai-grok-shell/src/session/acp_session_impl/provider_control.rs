@@ -80,6 +80,14 @@ pub(crate) struct HookRequestInterceptor {
     workspace_root: String,
     transcript_path: Option<String>,
     permission_mode: Option<String>,
+    /// Identity of the session issuing the request: `main` for the top-level
+    /// session, otherwise the subagent type. Captured per session at build time
+    /// (the interceptor runs off the session thread, so `self` is unavailable
+    /// inside `intercept`).
+    agent: String,
+    /// Normalized names of the tools available to `agent`, snapshotted from the
+    /// session tool catalog at build time (same reason as `agent`).
+    tools: Vec<String>,
     registry: Arc<HookRegistry>,
     plugin_invoker: Option<Arc<dyn PluginHookInvoker>>,
 }
@@ -88,6 +96,8 @@ impl std::fmt::Debug for HookRequestInterceptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HookRequestInterceptor")
             .field("session_id", &self.session_id)
+            .field("agent", &self.agent)
+            .field("tools", &self.tools)
             .field("has_plugin_invoker", &self.plugin_invoker.is_some())
             .finish()
     }
@@ -113,8 +123,8 @@ impl RequestInterceptor for HookRequestInterceptor {
                     endpoint: view.endpoint.clone(),
                     model: view.model.clone(),
                     base_url_alias: view.base_url_alias.clone(),
-                    agent: String::new(),
-                    tools: Vec::new(),
+                    agent: self.agent.clone(),
+                    tools: self.tools.clone(),
                     headers: view.headers.clone(),
                     body: view.body.clone(),
                 },
@@ -152,24 +162,61 @@ impl SessionActor {
     /// Build a `provider_request` interceptor for the current turn, or `None`
     /// when no hook is subscribed. Gating here keeps the hot path free of any
     /// body-serialization round-trip when nothing is listening.
-    pub(super) fn build_hook_request_interceptor(&self) -> Option<SharedRequestInterceptor> {
+    ///
+    /// The agent identity and tool catalog are snapshotted here, on the session
+    /// thread, because the interceptor runs off it (the sampler invokes it from
+    /// a background task) where neither `self` nor the tool bridge is reachable.
+    /// Capturing per session also gives a subagent's turns its own type rather
+    /// than the parent's `main` — the parent-inherited seed interceptor is
+    /// replaced on every turn by this rebuild.
+    pub(super) async fn build_hook_request_interceptor(&self) -> Option<SharedRequestInterceptor> {
         let registry = self.hook_registry.borrow().clone()?;
         if !registry.has_enabled_hooks_for_canonical(HookEventName::ProviderRequest) {
             return None;
         }
+        Some(Arc::new(self.assemble_request_interceptor(registry).await))
+    }
+
+    /// Assemble the interceptor with the identity and tool catalog snapshotted
+    /// from this session. Factored out of the gate above so the population is
+    /// unit-testable without wiring a live `provider_request` hook.
+    async fn assemble_request_interceptor(
+        &self,
+        registry: Arc<HookRegistry>,
+    ) -> HookRequestInterceptor {
         let plugin_invoker = self
             .plugin_host
             .clone()
             .map(|h| h as Arc<dyn PluginHookInvoker>);
-        Some(Arc::new(HookRequestInterceptor {
+        // `main` for the root session, else the subagent type — the same
+        // identity the tool-surface and permission layers key on.
+        let agent = self
+            .subagent_type_label()
+            .unwrap_or_else(|| "main".to_string());
+        // Names of the tools available to this agent, from the session catalog
+        // (the single, format-agnostic source), rather than re-parsing the
+        // per-format request body. Includes MCP/plugin tools (`plugin__tool`),
+        // which the wire-facing builtin list hides — an injector gating on a
+        // companion tool needs to see it. Clone the bridge Arc before the await
+        // so no `RefCell` borrow is held across it.
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let tools = bridge
+            .tool_definitions()
+            .await
+            .into_iter()
+            .map(|d| d.function.name)
+            .collect();
+        HookRequestInterceptor {
             session_id: self.session_id_string(),
             cwd: self.session_info.cwd.clone(),
             workspace_root: self.hook_workspace_root(),
             transcript_path: self.get_transcript_path(),
             permission_mode: Some(self.permission_mode_label().to_string()),
+            agent,
+            tools,
             registry,
             plugin_invoker,
-        }))
+        }
     }
 
     /// Consult the `provider_error` Replace hook for a directive on a failed
@@ -483,6 +530,63 @@ mod tests {
                     .builtin_fallback_target("primary", "5xx")
                     .expect("second target after first cools down");
                 assert_eq!(target, "tertiary");
+            })
+            .await;
+    }
+
+    // ── Interceptor population: agent identity + tool catalog snapshot. ─────
+
+    fn empty_registry() -> Arc<HookRegistry> {
+        Arc::new(xai_grok_hooks::discovery::load_hooks_from_sources(&[], &[]).0)
+    }
+
+    async fn session_catalog(actor: &SessionActor) -> Vec<String> {
+        let bridge = actor.agent.borrow().tool_bridge().clone();
+        bridge
+            .tool_definitions()
+            .await
+            .into_iter()
+            .map(|d| d.function.name)
+            .collect()
+    }
+
+    /// A root session reports `main` and snapshots the live session tool
+    /// catalog (not the empty placeholder the constructor previously emitted).
+    #[tokio::test(flavor = "current_thread")]
+    async fn interceptor_root_session_is_main_and_mirrors_catalog() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let actor = make_actor(models_manager_with(vec![])).await;
+                // Swap in an agent with real tools so the snapshot is non-empty
+                // and provably sourced from the catalog, not the old placeholder.
+                *actor.agent.borrow_mut() =
+                    crate::session::acp_session::support::test_agent_with_plan_tools().await;
+                let interceptor = actor.assemble_request_interceptor(empty_registry()).await;
+
+                assert_eq!(interceptor.agent, "main");
+                let catalog = session_catalog(&actor).await;
+                assert!(!catalog.is_empty(), "agent with plan tools registers tools");
+                assert_eq!(interceptor.tools, catalog);
+            })
+            .await;
+    }
+
+    /// A subagent session reports its task `subagent_type` — the same identity
+    /// the tool-surface and permission layers key on — not the parent's `main`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn interceptor_subagent_reports_its_type() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let mut actor = make_actor(models_manager_with(vec![])).await;
+                actor.startup_hints.is_subagent = true;
+                actor.startup_hints.subagent_type = Some("reviewer".to_string());
+                let interceptor = actor.assemble_request_interceptor(empty_registry()).await;
+
+                assert_eq!(interceptor.agent, "reviewer");
+                // Tools still come from this session's own catalog.
+                assert_eq!(interceptor.tools, session_catalog(&actor).await);
             })
             .await;
     }
