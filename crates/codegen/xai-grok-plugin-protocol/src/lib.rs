@@ -246,6 +246,38 @@ pub enum HookInvokeResult {
     },
 }
 
+/// A credential a plugin supplies to the core. Returned as the `Replace`
+/// payload of `resolve_credential` / `refresh_credential`, and as the
+/// `start_oauth_flow` (Intercept) outcome. The core stores the bearer, masks it
+/// in logs, and mirrors the metadata onto outbound requests. Shared vocabulary,
+/// plugin→core.
+///
+/// The masking of outbound requests (rewriting the credential onto the wire) is
+/// handled by the existing `provider_request` seam, not by this type.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+pub struct PluginCredentialDto {
+    /// The bearer token to send on outbound requests.
+    pub token: String,
+    /// Whether the token-auth marker header accompanies the bearer. Defaults to
+    /// `true`; set `false` for bare-bearer credentials.
+    #[serde(default = "default_true")]
+    pub needs_token_auth_header: bool,
+    /// Absolute expiry as a Unix-epoch millisecond timestamp; `None` for a
+    /// credential with no known expiry (the core will not pre-emptively refresh).
+    #[serde(default)]
+    #[ts(type = "number | null", optional = nullable)]
+    pub expires_at_ms: Option<i64>,
+    /// Stable identifier of the credential's owner (account/subject id), echoed
+    /// back on a later `refresh_credential`; `None` when the plugin has none.
+    #[serde(default)]
+    pub owner_id: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // tool_invoke (core→plugin request) — model-visible plugin tools.
 //
@@ -630,6 +662,7 @@ mod bindings_export {
             InitializeResult,
             HookInvokeParams,
             HookInvokeResult,
+            PluginCredentialDto,
             ToolDescriptorDto,
             ToolCallContextDto,
             ToolInvokeParams,
@@ -780,6 +813,34 @@ mod tests {
         let r: ToolInvokeResult = serde_json::from_value(json!({ "content": "ok" })).unwrap();
         assert!(!r.is_error);
         assert_eq!(r.content, "ok");
+    }
+
+    #[test]
+    fn plugin_credential_round_trip() {
+        round_trip(
+            &PluginCredentialDto {
+                token: "bearer-xyz".into(),
+                needs_token_auth_header: false,
+                expires_at_ms: Some(1_700_000_000_000),
+                owner_id: Some("acct-1".into()),
+            },
+            json!({
+                "token": "bearer-xyz",
+                "needs_token_auth_header": false,
+                "expires_at_ms": 1_700_000_000_000_i64,
+                "owner_id": "acct-1",
+            }),
+        );
+
+        // Minimal shape: only `token` present. `needs_token_auth_header`
+        // defaults to true; expiry/owner default to absent. Unknown future
+        // fields tolerated (no deny_unknown_fields).
+        let c: PluginCredentialDto =
+            serde_json::from_value(json!({ "token": "t", "future": 1 })).unwrap();
+        assert_eq!(c.token, "t");
+        assert!(c.needs_token_auth_header);
+        assert_eq!(c.expires_at_ms, None);
+        assert_eq!(c.owner_id, None);
     }
 
     #[test]

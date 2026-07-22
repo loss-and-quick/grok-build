@@ -396,17 +396,24 @@ mod tests {
             HookEventName::ProviderError,
             HookEventName::SubagentResolve,
             HookEventName::PermissionAsk,
+            HookEventName::ResolveCredential,
+            HookEventName::RefreshCredential,
+            HookEventName::StartOauthFlow,
         ];
         for event in every_variant {
             // A reserved event is one the core registry does not surface in
-            // `ALL_EVENTS` yet (subscribable by plugins; the provider and
-            // subagent-resolve seams dispatch, but stay out of the listing).
+            // `ALL_EVENTS` yet (subscribable by plugins; the provider,
+            // subagent-resolve, and credential seams dispatch, but stay out of
+            // the listing).
             let reserved = matches!(
                 event,
                 HookEventName::ProviderRequest
                     | HookEventName::ProviderError
                     | HookEventName::SubagentResolve
                     | HookEventName::PermissionAsk
+                    | HookEventName::ResolveCredential
+                    | HookEventName::RefreshCredential
+                    | HookEventName::StartOauthFlow
             );
             match event {
                 HookEventName::SessionStart
@@ -427,7 +434,10 @@ mod tests {
                 | HookEventName::ProviderRequest
                 | HookEventName::ProviderError
                 | HookEventName::SubagentResolve
-                | HookEventName::PermissionAsk => {}
+                | HookEventName::PermissionAsk
+                | HookEventName::ResolveCredential
+                | HookEventName::RefreshCredential
+                | HookEventName::StartOauthFlow => {}
             }
             if reserved {
                 assert!(

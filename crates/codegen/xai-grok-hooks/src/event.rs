@@ -49,6 +49,22 @@ pub enum HookEventName {
     /// dispatcher-routed sidecar event set. Fail-open: no/late/invalid response
     /// falls back to the interactive prompt.
     PermissionAsk,
+    /// Credential resolution seam; Replace gate. Fired at the credential
+    /// boundary before the built-in resolution, so a plugin can supply a
+    /// bearer from an external identity provider. Fail-open: no/late/
+    /// passthrough response keeps the built-in resolution.
+    ResolveCredential,
+    /// Credential refresh seam; Replace gate. Fired on a `401`/expiry before
+    /// the built-in refresh, so a plugin can return a freshly minted bearer.
+    /// Fail-open: no/late/passthrough response falls back to the built-in
+    /// refresh path, which stays available independently of the plugin channel.
+    RefreshCredential,
+    /// Interactive first-time authorization seam; Intercept gate. Fired when no
+    /// usable credential exists (or on an explicit sign-in), a plugin drives the
+    /// whole interactive flow (authorize URL / device code / callback / token
+    /// exchange) and returns the final bearer for the core to persist. Fail-open:
+    /// no/late/passthrough response leaves the core without a plugin credential.
+    StartOauthFlow,
 }
 
 impl<'de> serde::Deserialize<'de> for HookEventName {
@@ -101,13 +117,21 @@ impl<'de> serde::Deserialize<'de> for HookEventName {
                 Ok(Self::SubagentResolve)
             }
             "PermissionAsk" | "permission_ask" | "permissionAsk" => Ok(Self::PermissionAsk),
+            "ResolveCredential" | "resolve_credential" | "resolveCredential" => {
+                Ok(Self::ResolveCredential)
+            }
+            "RefreshCredential" | "refresh_credential" | "refreshCredential" => {
+                Ok(Self::RefreshCredential)
+            }
+            "StartOauthFlow" | "start_oauth_flow" | "startOauthFlow" => Ok(Self::StartOauthFlow),
             other => Err(serde::de::Error::custom(format!(
                 "unknown hook event: '{other}'. Expected one of: \
                  SessionStart, PreToolUse, PostToolUse, PostToolUseFailure, \
                  SessionEnd, Stop, StopFailure, Notification, UserPromptSubmit, \
                  PermissionDenied, SubagentStart, SubagentStop, \
                  PreCompact, PostCompact, ProviderRequest, ProviderError, \
-                 SubagentResolve, PermissionAsk (camelCase and per-operation aliases \
+                 SubagentResolve, PermissionAsk, ResolveCredential, \
+                 RefreshCredential, StartOauthFlow (camelCase and per-operation aliases \
                  such as beforeShellExecution are also accepted)"
             ))),
         }
@@ -135,6 +159,9 @@ impl std::fmt::Display for HookEventName {
             Self::ProviderError => write!(f, "provider_error"),
             Self::SubagentResolve => write!(f, "subagent_resolve"),
             Self::PermissionAsk => write!(f, "permission_ask"),
+            Self::ResolveCredential => write!(f, "resolve_credential"),
+            Self::RefreshCredential => write!(f, "refresh_credential"),
+            Self::StartOauthFlow => write!(f, "start_oauth_flow"),
         }
     }
 }
@@ -151,6 +178,13 @@ pub enum GateKind {
     /// hooks chain (each hook's output feeds the next); fail-open keeps the
     /// current payload. Used by the provider seams.
     Replace,
+    /// Hand the operation to a plugin entirely: the plugin performs the whole
+    /// (possibly long, interactive) action and returns its result, or passes
+    /// through to leave the operation unhandled. Unlike [`Self::Replace`], the
+    /// reply is the operation's outcome rather than a substituted input. The
+    /// first subscribed plugin that returns a result wins; fail-open leaves the
+    /// operation unhandled. Used by the interactive authorization seam.
+    Intercept,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +248,12 @@ impl HookEventName {
             Self::ProviderError => t(Replace, Ignored, false),
             Self::SubagentResolve => t(Replace, Ignored, false),
             Self::PermissionAsk => t(Tool, Ignored, false),
+            // Credential seams: plugin-only, not hub-forwarded. resolve/refresh
+            // substitute the resolved bearer (Replace); the interactive
+            // authorization flow is handed to the plugin wholesale (Intercept).
+            Self::ResolveCredential => t(Replace, Ignored, false),
+            Self::RefreshCredential => t(Replace, Ignored, false),
+            Self::StartOauthFlow => t(Intercept, Ignored, false),
         }
     }
 }
@@ -534,6 +574,37 @@ pub enum HookPayload {
         #[serde(rename = "parentModel")]
         parent_model: String,
     },
+    /// A credential resolution about to run, offered to a `resolve_credential`
+    /// Replace hook which may return a credential (a `PluginCredentialDto` JSON
+    /// object) to use instead of the built-in resolution.
+    ResolveCredential {
+        /// Why the credential is being resolved (`bootstrap`, `outbound`, …).
+        reason: String,
+        /// Hint identifying which credential the core expects (e.g. an account
+        /// label); `None` when the core has no expectation.
+        #[serde(rename = "ownerHint", skip_serializing_if = "Option::is_none")]
+        owner_hint: Option<String>,
+    },
+    /// A credential refresh about to run, offered to a `refresh_credential`
+    /// Replace hook which may return a freshly minted credential (a
+    /// `PluginCredentialDto` JSON object) instead of the built-in refresh.
+    RefreshCredential {
+        /// Why the refresh fired (`unauthorized`, `expired`, …).
+        reason: String,
+        /// The owner id of the credential being refreshed, if known.
+        #[serde(rename = "ownerId", skip_serializing_if = "Option::is_none")]
+        owner_id: Option<String>,
+    },
+    /// An interactive authorization about to start, offered to a
+    /// `start_oauth_flow` Intercept hook which drives the whole flow and returns
+    /// the final credential (a `PluginCredentialDto` JSON object).
+    StartOauthFlow {
+        /// Why the flow started (`missing_credential`, `sign_in`, …).
+        reason: String,
+        /// Hint identifying which credential to authorize; `None` when unset.
+        #[serde(rename = "ownerHint", skip_serializing_if = "Option::is_none")]
+        owner_hint: Option<String>,
+    },
 }
 
 impl HookPayload {
@@ -561,7 +632,10 @@ impl HookPayload {
             | Self::UserPromptSubmit { .. }
             | Self::ProviderRequest { .. }
             | Self::ProviderError { .. }
-            | Self::SubagentResolve { .. } => return None,
+            | Self::SubagentResolve { .. }
+            | Self::ResolveCredential { .. }
+            | Self::RefreshCredential { .. }
+            | Self::StartOauthFlow { .. } => return None,
         };
         Some(value.as_str()).filter(|v| !v.is_empty())
     }
@@ -645,6 +719,21 @@ mod tests {
                 "permission_ask",
                 HookEventName::PermissionAsk,
             ),
+            (
+                "ResolveCredential",
+                "resolve_credential",
+                HookEventName::ResolveCredential,
+            ),
+            (
+                "RefreshCredential",
+                "refresh_credential",
+                HookEventName::RefreshCredential,
+            ),
+            (
+                "StartOauthFlow",
+                "start_oauth_flow",
+                HookEventName::StartOauthFlow,
+            ),
         ];
 
         for (pascal, snake, expected) in cases {
@@ -682,6 +771,9 @@ mod tests {
             (HookEventName::ProviderError, "provider_error"),
             (HookEventName::SubagentResolve, "subagent_resolve"),
             (HookEventName::PermissionAsk, "permission_ask"),
+            (HookEventName::ResolveCredential, "resolve_credential"),
+            (HookEventName::RefreshCredential, "refresh_credential"),
+            (HookEventName::StartOauthFlow, "start_oauth_flow"),
         ];
         for (event, expected) in cases {
             assert_eq!(&event.to_string(), expected, "Display wrong for {event:?}");
@@ -711,6 +803,9 @@ mod tests {
             ("providerError", HookEventName::ProviderError),
             ("subagentResolve", HookEventName::SubagentResolve),
             ("permissionAsk", HookEventName::PermissionAsk),
+            ("resolveCredential", HookEventName::ResolveCredential),
+            ("refreshCredential", HookEventName::RefreshCredential),
+            ("startOauthFlow", HookEventName::StartOauthFlow),
         ];
         for (spelling, expected) in cases {
             let parsed: HookEventName = serde_json::from_str(&format!("\"{spelling}\"")).unwrap();
@@ -750,6 +845,18 @@ mod tests {
             GateKind::Replace
         );
         assert_eq!(HookEventName::PermissionAsk.traits().gate, GateKind::Tool);
+        assert_eq!(
+            HookEventName::ResolveCredential.traits().gate,
+            GateKind::Replace
+        );
+        assert_eq!(
+            HookEventName::RefreshCredential.traits().gate,
+            GateKind::Replace
+        );
+        assert_eq!(
+            HookEventName::StartOauthFlow.traits().gate,
+            GateKind::Intercept
+        );
 
         assert_eq!(HookEventName::Stop.traits().matcher, MatcherPolicy::Ignored);
         assert_eq!(
@@ -1015,6 +1122,59 @@ mod tests {
             }
             .match_value(),
             None
+        );
+    }
+
+    #[test]
+    fn credential_payloads_flatten_into_envelope() {
+        let resolve = HookEventEnvelope {
+            hook_event_name: HookEventName::ResolveCredential,
+            session_id: "s".into(),
+            cwd: "/tmp".into(),
+            workspace_root: "/tmp".into(),
+            timestamp: "2025-01-01T00:00:00Z".into(),
+            transcript_path: None,
+            client_identifier: None,
+            prompt_id: None,
+            permission_mode: None,
+            payload: HookPayload::ResolveCredential {
+                reason: "outbound".into(),
+                owner_hint: Some("primary".into()),
+            },
+        };
+        let value = serde_json::to_value(&resolve).unwrap();
+        assert_eq!(
+            value.get("hookEventName").and_then(|v| v.as_str()),
+            Some("resolve_credential")
+        );
+        assert_eq!(value.get("reason").and_then(|v| v.as_str()), Some("outbound"));
+        assert_eq!(
+            value.get("ownerHint").and_then(|v| v.as_str()),
+            Some("primary")
+        );
+        assert!(value.get("owner_hint").is_none(), "leaked snake_case key");
+
+        // Absent owner id/hint omitted (not null); no matcher selector.
+        let refresh = HookPayload::RefreshCredential {
+            reason: "unauthorized".into(),
+            owner_id: None,
+        };
+        let value = serde_json::to_value(&refresh).unwrap();
+        assert_eq!(
+            value.get("reason").and_then(|v| v.as_str()),
+            Some("unauthorized")
+        );
+        assert!(value.get("ownerId").is_none());
+        assert_eq!(refresh.match_value(), None);
+
+        let oauth = HookPayload::StartOauthFlow {
+            reason: "missing_credential".into(),
+            owner_hint: None,
+        };
+        assert_eq!(oauth.match_value(), None);
+        assert_eq!(
+            serde_json::to_value(&oauth).unwrap().get("reason").unwrap(),
+            "missing_credential"
         );
     }
 

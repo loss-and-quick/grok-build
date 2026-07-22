@@ -45,6 +45,9 @@ const SUPPORTED_EVENTS: &[&str] = &[
     "ProviderError",
     "SubagentResolve",
     "PermissionAsk",
+    "ResolveCredential",
+    "RefreshCredential",
+    "StartOauthFlow",
     "notification",
     "stop",
     "stop_failure",
@@ -60,6 +63,9 @@ const SUPPORTED_EVENTS: &[&str] = &[
     "provider_error",
     "subagent_resolve",
     "permission_ask",
+    "resolve_credential",
+    "refresh_credential",
+    "start_oauth_flow",
 ];
 
 /// Parse plugin hook files with pre-filtering and env injection.

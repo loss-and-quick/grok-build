@@ -553,6 +553,109 @@ pub async fn dispatch_replace(
     current
 }
 
+/// Dispatch an [`GateKind::Intercept`] event: hand the operation to the
+/// subscribed plugins in order and return the first non-passthrough result.
+///
+/// Unlike [`dispatch_replace`], the reply is the operation's *outcome*, not a
+/// substituted input, so there is no chaining: the first plugin that returns a
+/// result wins and the rest are skipped. Fail-open — a failing, passing-through,
+/// or absent plugin leaves the operation unhandled (`None`), so the built-in
+/// path stays available. The reply reuses the Replace reply shape on the wire
+/// (`{ "kind": "replace", "payload": … }`); the payload is the outcome value.
+pub async fn dispatch_intercept(
+    registry: &HookRegistry,
+    event: HookEventName,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> Option<serde_json::Value> {
+    if event.traits().gate != GateKind::Intercept {
+        debug_assert!(
+            false,
+            "dispatch_intercept called with non-intercept event {event:?}"
+        );
+        tracing::error!(%event, "dispatch_intercept called with a non-intercept event; ignoring");
+        return None;
+    }
+    let event = event.canonical();
+    let hooks = registry.hooks_for_canonical(event);
+    if hooks.is_empty() {
+        return None;
+    }
+
+    let span = dispatch_span(event, hooks.len());
+    let match_value = envelope.payload.match_value().map(str::to_string);
+    let mut outcome: Option<serde_json::Value> = None;
+    let mut run_results = Vec::new();
+
+    for spec in hooks {
+        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut run_results) {
+            continue;
+        }
+
+        let hook_span = tracing::info_span!(
+            parent: &span,
+            "hook.run",
+            hook_name = %spec.name,
+            hook_event = %event,
+        );
+
+        let (result, elapsed, http_info) =
+            runner::run_hook_with_payload(spec, envelope, ctx, GateKind::Intercept, None)
+                .instrument(hook_span.clone())
+                .await;
+
+        let handled = hook_span.in_scope(|| match result {
+            HookRunnerResult::Replace(Some(payload)) => {
+                tracing::info!(
+                    hook_name = %spec.name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "intercept hook handled the operation"
+                );
+                outcome = Some(payload);
+                run_results.push(HookRunResult::Success {
+                    hook_name: spec.name.clone(),
+                    elapsed,
+                    http_info,
+                });
+                true
+            }
+            HookRunnerResult::Replace(None)
+            | HookRunnerResult::Success
+            | HookRunnerResult::Decision(_)
+            | HookRunnerResult::Stop(_) => {
+                run_results.push(HookRunResult::Success {
+                    hook_name: spec.name.clone(),
+                    elapsed,
+                    http_info,
+                });
+                false
+            }
+            HookRunnerResult::Failed(err) => {
+                tracing::warn!(
+                    hook_name = %spec.name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    error = %err,
+                    "intercept hook failed; leaving the operation unhandled (fail-open)"
+                );
+                run_results.push(HookRunResult::Failed {
+                    hook_name: spec.name.clone(),
+                    error: err,
+                    elapsed,
+                    http_info,
+                });
+                false
+            }
+        });
+        // First plugin to handle the operation wins; stop consulting the rest.
+        if handled {
+            break;
+        }
+    }
+
+    record_dispatch_counts(&span, &run_results);
+    outcome
+}
+
 fn record_dispatch_counts(span: &tracing::Span, results: &[HookRunResult]) {
     let mut num_success = 0i64;
     let mut num_failed = 0i64;
@@ -1226,6 +1329,9 @@ if hook_name == "crasher"),
         assert_eq!(hub_hook_kind(HookEventName::ProviderError), None);
         assert_eq!(hub_hook_kind(HookEventName::SubagentResolve), None);
         assert_eq!(hub_hook_kind(HookEventName::PermissionAsk), None);
+        assert_eq!(hub_hook_kind(HookEventName::ResolveCredential), None);
+        assert_eq!(hub_hook_kind(HookEventName::RefreshCredential), None);
+        assert_eq!(hub_hook_kind(HookEventName::StartOauthFlow), None);
 
         let cases: &[(HookEventName, &str)] = &[
             (HookEventName::SessionStart, "hook.session_start"),
@@ -1269,14 +1375,17 @@ if hook_name == "crasher"),
                 | HookEventName::ProviderRequest
                 | HookEventName::ProviderError
                 | HookEventName::SubagentResolve
-                | HookEventName::PermissionAsk => 19,
+                | HookEventName::PermissionAsk
+                | HookEventName::ResolveCredential
+                | HookEventName::RefreshCredential
+                | HookEventName::StartOauthFlow => 22,
             }
         };
         assert_eq!(
-            // +5 non-forwarded: PreToolUse (blocking) plus the four plugin-only
-            // seams (ProviderRequest/ProviderError/SubagentResolve/
-            // PermissionAsk), tested above.
-            cases.len() + 5,
+            // +8 non-forwarded: PreToolUse (blocking) plus the seven plugin-only
+            // seams (ProviderRequest/ProviderError/SubagentResolve/PermissionAsk/
+            // ResolveCredential/RefreshCredential/StartOauthFlow), tested above.
+            cases.len() + 8,
             total_variants(HookEventName::SessionStart),
             "update hub_hook_kind test when new HookEventName variants are added"
         );
@@ -1572,6 +1681,121 @@ if hook_name == "crasher"),
             out,
             Some(serde_json::json!({ "from": "first" })),
             "the failing second hook must not discard the first's substitution"
+        );
+    }
+
+    // --- Intercept-gate dispatch (`start_oauth_flow`). The plugin drives the
+    // whole operation and returns its outcome; the first plugin to handle it
+    // wins, and passthrough/absence leaves the operation unhandled.
+
+    fn start_oauth_flow_envelope() -> HookEventEnvelope {
+        HookEventEnvelope {
+            hook_event_name: HookEventName::StartOauthFlow,
+            session_id: "test-session".into(),
+            cwd: "/tmp".into(),
+            workspace_root: "/tmp".into(),
+            timestamp: "2025-01-01T00:00:00Z".into(),
+            transcript_path: None,
+            client_identifier: None,
+            prompt_id: None,
+            permission_mode: None,
+            payload: HookPayload::StartOauthFlow {
+                reason: "missing_credential".into(),
+                owner_hint: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn intercept_empty_registry_leaves_unhandled() {
+        let registry = registry_from_specs(vec![]);
+        let out = dispatch_intercept(
+            &registry,
+            HookEventName::StartOauthFlow,
+            &start_oauth_flow_envelope(),
+            &run_ctx(),
+        )
+        .await;
+        assert_eq!(out, None, "no hooks -> operation unhandled");
+    }
+
+    #[tokio::test]
+    async fn intercept_returns_plugin_outcome() {
+        let registry =
+            registry_from_specs(vec![plugin_spec("flow", HookEventName::StartOauthFlow)]);
+        let ctx = plugin_ctx(PluginHookResponse::Replace {
+            payload: Some(serde_json::json!({ "token": "minted", "needs_token_auth_header": true })),
+        });
+        let out = dispatch_intercept(
+            &registry,
+            HookEventName::StartOauthFlow,
+            &start_oauth_flow_envelope(),
+            &ctx,
+        )
+        .await;
+        assert_eq!(
+            out,
+            Some(serde_json::json!({ "token": "minted", "needs_token_auth_header": true }))
+        );
+    }
+
+    #[tokio::test]
+    async fn intercept_passthrough_leaves_unhandled() {
+        let registry =
+            registry_from_specs(vec![plugin_spec("noop", HookEventName::StartOauthFlow)]);
+        let ctx = plugin_ctx(PluginHookResponse::Replace { payload: None });
+        let out = dispatch_intercept(
+            &registry,
+            HookEventName::StartOauthFlow,
+            &start_oauth_flow_envelope(),
+            &ctx,
+        )
+        .await;
+        assert_eq!(out, None, "passthrough leaves the operation unhandled");
+    }
+
+    #[tokio::test]
+    async fn intercept_first_handler_wins_and_stops() {
+        // The first plugin handles the operation; the second must never be
+        // consulted (Intercept does not chain).
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        struct CountingInvoker {
+            calls: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        impl PluginHookInvoker for CountingInvoker {
+            fn invoke<'a>(&'a self, req: PluginHookRequest) -> PluginHookFuture<'a> {
+                self.calls.lock().unwrap().push(req.plugin.clone());
+                Box::pin(async move {
+                    Ok(PluginHookResponse::Replace {
+                        payload: Some(serde_json::json!({ "by": req.plugin })),
+                    })
+                })
+            }
+        }
+        let ctx = RunContext {
+            session_id: "test-session",
+            workspace_root: "/tmp",
+            plugin_invoker: Some(Arc::new(CountingInvoker {
+                calls: Arc::clone(&calls),
+            })),
+        };
+        let mut first = plugin_spec("first-hook", HookEventName::StartOauthFlow);
+        first.plugin = Some("first".into());
+        let mut second = plugin_spec("second-hook", HookEventName::StartOauthFlow);
+        second.plugin = Some("second".into());
+        let registry = registry_from_specs(vec![first, second]);
+        let out = dispatch_intercept(
+            &registry,
+            HookEventName::StartOauthFlow,
+            &start_oauth_flow_envelope(),
+            &ctx,
+        )
+        .await;
+        assert_eq!(out, Some(serde_json::json!({ "by": "first" })));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["first".to_string()],
+            "second plugin must not be consulted once the first handles it"
         );
     }
 }

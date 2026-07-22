@@ -1812,6 +1812,9 @@ mod tests {
                 E::ProviderError => HookEventNameWire::ProviderError,
                 E::SubagentResolve => HookEventNameWire::SubagentResolve,
                 E::PermissionAsk => HookEventNameWire::PermissionAsk,
+                E::ResolveCredential => HookEventNameWire::ResolveCredential,
+                E::RefreshCredential => HookEventNameWire::RefreshCredential,
+                E::StartOauthFlow => HookEventNameWire::StartOauthFlow,
             }
         }
         for e in [
@@ -1834,6 +1837,9 @@ mod tests {
             E::ProviderError,
             E::SubagentResolve,
             E::PermissionAsk,
+            E::ResolveCredential,
+            E::RefreshCredential,
+            E::StartOauthFlow,
         ] {
             assert_eq!(
                 serde_json::to_value(e).unwrap(),

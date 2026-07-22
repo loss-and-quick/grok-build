@@ -49,6 +49,10 @@ pub fn hook_spec_to_info(spec: &xai_grok_hooks::config::HookSpec) -> HookInfo {
         HookEventName::ProviderError => HookEvent::ProviderError,
         HookEventName::SubagentResolve => HookEvent::SubagentResolve,
         HookEventName::PermissionAsk => HookEvent::PermissionAsk,
+        // Credential seams (plugin-only)
+        HookEventName::ResolveCredential => HookEvent::ResolveCredential,
+        HookEventName::RefreshCredential => HookEvent::RefreshCredential,
+        HookEventName::StartOauthFlow => HookEvent::StartOauthFlow,
     };
 
     let handler_type = if spec.url.is_some() {

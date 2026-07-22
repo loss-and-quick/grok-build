@@ -200,16 +200,21 @@ fn response_to_result(
                 HookRunnerResult::Stop(StopHookOutcome::default())
             }
         },
-        GateKind::Replace => match response {
-            // The transformed payload (Some) or an explicit passthrough (None).
+        // Replace substitutes the payload; Intercept hands the operation to the
+        // plugin and carries its outcome. Both use the same reply shape: a
+        // `Replace` reply carries the value (substitute / outcome), and any
+        // other reply passes through (`None`).
+        GateKind::Replace | GateKind::Intercept => match response {
+            // The transformed payload / operation outcome (Some) or an explicit
+            // passthrough (None).
             PluginHookResponse::Replace { payload } => HookRunnerResult::Replace(payload),
-            // A non-replace reply to a Replace gate carries no substitution:
-            // pass the current payload through, warning on the clear mismatch.
+            // A non-replace reply to a Replace/Intercept gate carries no value:
+            // pass through, warning on the clear mismatch.
             PluginHookResponse::Observed => HookRunnerResult::Replace(None),
             PluginHookResponse::Decision { .. } | PluginHookResponse::Stop { .. } => {
                 tracing::warn!(
                     hook_name,
-                    "plugin returned a decision/stop for a replace gate; passing through"
+                    "plugin returned a decision/stop for a replace/intercept gate; passing through"
                 );
                 HookRunnerResult::Replace(None)
             }

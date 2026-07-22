@@ -241,8 +241,11 @@ pub async fn run_command_hook(
                 GateKind::Stop => {
                     parse_stop_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
                 }
-                // A command hook cannot substitute a payload: always passthrough.
-                GateKind::Replace => (HookRunnerResult::Replace(None), elapsed),
+                // A command hook cannot substitute a payload or drive an
+                // interactive flow: always passthrough.
+                GateKind::Replace | GateKind::Intercept => {
+                    (HookRunnerResult::Replace(None), elapsed)
+                }
             }
         }
     }

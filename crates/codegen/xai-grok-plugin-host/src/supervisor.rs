@@ -630,6 +630,7 @@ fn event_gate(event: &str) -> GateKindDto {
             GateKind::Tool => GateKindDto::Tool,
             GateKind::Stop => GateKindDto::Stop,
             GateKind::Replace => GateKindDto::Replace,
+            GateKind::Intercept => GateKindDto::Intercept,
         },
         Err(_) => GateKindDto::Observe,
     }

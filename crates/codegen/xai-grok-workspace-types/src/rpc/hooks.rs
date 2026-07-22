@@ -92,6 +92,9 @@ pub enum HookEventNameWire {
     ProviderError,
     SubagentResolve,
     PermissionAsk,
+    ResolveCredential,
+    RefreshCredential,
+    StartOauthFlow,
     /// An event string this client does not know, preserved verbatim.
     Unknown(String),
 }
@@ -119,6 +122,9 @@ impl HookEventNameWire {
             Self::ProviderError => "provider_error",
             Self::SubagentResolve => "subagent_resolve",
             Self::PermissionAsk => "permission_ask",
+            Self::ResolveCredential => "resolve_credential",
+            Self::RefreshCredential => "refresh_credential",
+            Self::StartOauthFlow => "start_oauth_flow",
             Self::Unknown(s) => s,
         }
     }
@@ -156,6 +162,9 @@ impl<'de> Deserialize<'de> for HookEventNameWire {
             "provider_error" => Self::ProviderError,
             "subagent_resolve" => Self::SubagentResolve,
             "permission_ask" => Self::PermissionAsk,
+            "resolve_credential" => Self::ResolveCredential,
+            "refresh_credential" => Self::RefreshCredential,
+            "start_oauth_flow" => Self::StartOauthFlow,
             // Forward-tolerant: preserve an unknown event verbatim.
             _ => Self::Unknown(s),
         })
@@ -197,6 +206,9 @@ mod tests {
             (HookEventNameWire::ProviderError, "provider_error"),
             (HookEventNameWire::SubagentResolve, "subagent_resolve"),
             (HookEventNameWire::PermissionAsk, "permission_ask"),
+            (HookEventNameWire::ResolveCredential, "resolve_credential"),
+            (HookEventNameWire::RefreshCredential, "refresh_credential"),
+            (HookEventNameWire::StartOauthFlow, "start_oauth_flow"),
         ] {
             assert_eq!(
                 serde_json::to_value(&variant).unwrap(),

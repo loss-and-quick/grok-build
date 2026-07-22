@@ -106,6 +106,10 @@ pub enum HookEvent {
     ProviderError,
     SubagentResolve,
     PermissionAsk,
+    // Credential seams (plugin-only)
+    ResolveCredential,
+    RefreshCredential,
+    StartOauthFlow,
 }
 
 impl std::fmt::Display for HookEvent {
@@ -129,6 +133,9 @@ impl std::fmt::Display for HookEvent {
             Self::ProviderError => write!(f, "Provider Error"),
             Self::SubagentResolve => write!(f, "Subagent Resolve"),
             Self::PermissionAsk => write!(f, "Permission Ask"),
+            Self::ResolveCredential => write!(f, "Resolve Credential"),
+            Self::RefreshCredential => write!(f, "Refresh Credential"),
+            Self::StartOauthFlow => write!(f, "Start OAuth Flow"),
         }
     }
 }
