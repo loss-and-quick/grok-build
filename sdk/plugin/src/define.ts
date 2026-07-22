@@ -87,11 +87,15 @@ export interface PluginDefinition {
   tools?: Record<string, ToolDefinition>;
   /** Fires when the user activates a button in a panel this plugin published
    * (via `ctx.ui.publishPanel`). `panelId`/`buttonId` are the panel's and
-   * button's ids. Best-effort, like the host's `panel_action` notification —
-   * a throw is logged and swallowed, never crashing the sidecar. */
+   * button's ids; `inputs` maps each editable Input field's id to its current
+   * value at press time (so an interactive panel can act on typed input, e.g.
+   * an OAuth authorization code). Best-effort, like the host's `panel_action`
+   * notification — a throw is logged and swallowed, never crashing the
+   * sidecar. */
   onPanelAction?: (
     panelId: string,
     buttonId: string,
+    inputs: Record<string, string>,
     ctx: PluginContext,
   ) => void | Promise<void>;
   setup?: (ctx: PluginContext) => Promise<void | Teardown> | void | Teardown;
@@ -302,7 +306,12 @@ export function definePlugin(
       // never crashing the sidecar.
       if (!ctx) return;
       try {
-        await def.onPanelAction?.(params.panel_id, params.button_id, ctx);
+        await def.onPanelAction?.(
+          params.panel_id,
+          params.button_id,
+          params.inputs,
+          ctx,
+        );
       } catch (err) {
         host.logEmit({
           level: "error",

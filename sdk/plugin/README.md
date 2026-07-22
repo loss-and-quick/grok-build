@@ -122,22 +122,34 @@ replaces the panel (latest-wins). Button presses come back as
 `panel_action` notifications, delivered to the definition's
 `onPanelAction` handler:
 
+Panels can also be interactive: an `input` block renders an editable field,
+and its current value is delivered to `onPanelAction` in the `inputs` map
+(keyed by the field's `id`) whenever a button is pressed. This is enough to
+build an OAuth-style flow — show instructions, collect the authorization
+code, exchange it on submit:
+
 ```ts
 definePlugin({
   async setup(ctx) {
     await ctx.ui.publishPanel({
-      id: "build-status",
-      title: "Build",
+      id: "connect-account",
+      title: "Connect account",
       blocks: [
-        { kind: "status", items: [{ label: "Tests", value: "passing", tone: "success" }] },
-        { kind: "markdown", text: "Last run **2m ago**." },
-        { kind: "actions", buttons: [{ id: "rerun", label: "Re-run" }] },
+        {
+          kind: "markdown",
+          text: "Open the authorization URL, then paste the code below.",
+        },
+        { kind: "input", id: "code", label: "Authorization code" },
+        { kind: "actions", buttons: [{ id: "submit", label: "Submit" }] },
       ],
     });
   },
-  async onPanelAction(panelId, buttonId, ctx) {
-    if (buttonId === "rerun") {
-      ctx.log.info(`rerun requested from ${panelId}`);
+  async onPanelAction(panelId, buttonId, inputs, ctx) {
+    if (buttonId === "submit") {
+      const code = inputs.code ?? "";
+      // exchange the code with an external identity provider
+      ctx.log.info(`exchanging authorization code from ${panelId}`);
+      await ctx.storage.set("oauth:code", code);
       await ctx.ui.closePanel(panelId);
     }
   },
@@ -145,7 +157,9 @@ definePlugin({
 ```
 
 `publishPanel`/`closePanel` are plugin→core requests (the SDK awaits the
-host's ack and discards the empty result). `onPanelAction` is best-effort,
+host's ack and discards the empty result). `onPanelAction` receives the
+`inputs` map (every Input block's current value, keyed by field id) as its
+third argument and the `PluginContext` as its fourth. It is best-effort,
 like the host's notification: a throw is logged and swallowed, never
 crashing the sidecar.
 

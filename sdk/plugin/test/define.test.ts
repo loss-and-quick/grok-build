@@ -587,16 +587,18 @@ describe("definePlugin — tools", () => {
 });
 
 describe("definePlugin — panel_action dispatch", () => {
-  test("a panel_action notification fires onPanelAction with the ids and ctx", async () => {
+  test("a panel_action notification fires onPanelAction with the ids, inputs, and ctx", async () => {
     const { reader, writer } = setUpEndpoint();
     let seenPanelId = "";
     let seenButtonId = "";
+    let seenCode = "";
     let seenSessionId = "";
     definePlugin(
       {
-        onPanelAction(panelId, buttonId, ctx) {
+        onPanelAction(panelId, buttonId, inputs, ctx) {
           seenPanelId = panelId;
           seenButtonId = buttonId;
+          seenCode = inputs.code ?? "";
           seenSessionId = ctx.sessionId;
         },
       },
@@ -607,7 +609,7 @@ describe("definePlugin — panel_action dispatch", () => {
     reader.pushLine({
       jsonrpc: "2.0",
       method: "panel_action",
-      params: { panel_id: "p1", button_id: "ok" },
+      params: { panel_id: "p1", button_id: "ok", inputs: { code: "abc-123" } },
     });
 
     // No reply is written for a notification; poll until the handler ran.
@@ -616,6 +618,7 @@ describe("definePlugin — panel_action dispatch", () => {
     }
     expect(seenPanelId).toBe("p1");
     expect(seenButtonId).toBe("ok");
+    expect(seenCode).toBe("abc-123");
     expect(seenSessionId).toBe("session-123");
   });
 });
