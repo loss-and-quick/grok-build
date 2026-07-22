@@ -569,6 +569,32 @@ impl SessionHandle {
         rx.await
             .unwrap_or_else(|_| Err("session closed".to_string()))
     }
+    /// Route a panel button activation back to the owning plugin via the
+    /// session's plugin host. Returns `true` when the actor had a plugin host to
+    /// receive it, `false` otherwise (no host, or the session actor is gone).
+    pub async fn deliver_panel_action(
+        &self,
+        plugin: String,
+        panel_id: String,
+        button_id: String,
+        inputs: std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCommand::PanelAction {
+                plugin,
+                panel_id,
+                button_id,
+                inputs,
+                respond_to: tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
     /// Emit a PluginUpdatesInstalled notification to the session.
     /// Fire-and-forget — no response expected.
     pub async fn notify_plugin_updates(&self, updates: Vec<(String, String, String)>) {

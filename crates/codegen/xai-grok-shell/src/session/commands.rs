@@ -484,6 +484,28 @@ pub enum SessionCommand {
     NotifyPluginUpdates {
         updates: Vec<(String, String, String)>,
     },
+    /// A sidecar plugin published (or replaced) a UI panel. The actor emits a
+    /// `plugin_panel` session notification carrying the publishing plugin.
+    EmitPluginPanel {
+        plugin: String,
+        view_model: xai_grok_plugin_protocol::PanelViewModel,
+    },
+    /// A sidecar plugin closed a previously published panel. The actor emits a
+    /// `panel_closed` session notification keyed by (plugin, panel_id).
+    ClosePluginPanel {
+        plugin: String,
+        panel_id: String,
+    },
+    /// The pager activated a panel button. The actor routes it back to the
+    /// owning plugin via the host's `deliver_panel_action`. `respond_to` gets
+    /// `true` when a plugin host is present to receive it, else `false`.
+    PanelAction {
+        plugin: String,
+        panel_id: String,
+        button_id: String,
+        inputs: std::collections::BTreeMap<String, String>,
+        respond_to: oneshot::Sender<bool>,
+    },
     /// Execute a plugins management action from the pager modal.
     PluginsAction {
         action: xai_hooks_plugins_types::PluginsAction,

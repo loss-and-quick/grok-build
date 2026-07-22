@@ -473,7 +473,19 @@ if let Some(ref tp)
             .handle_hooks_action(action). await; let _ = respond_to.send(outcome); }
             SessionCommand::NotifyPluginUpdates { updates } => { session
             .send_xai_notification(XaiSessionUpdate::PluginUpdatesInstalled { updates },)
-            . await; } SessionCommand::PluginsAction { action, respond_to } => { let
+            . await; }
+            SessionCommand::EmitPluginPanel { plugin, view_model } => { session
+            .send_xai_notification(XaiSessionUpdate::PluginPanel { plugin, view_model },)
+            . await; }
+            SessionCommand::ClosePluginPanel { plugin, panel_id } => { session
+            .send_xai_notification(XaiSessionUpdate::PanelClosed { plugin, id : panel_id },)
+            . await; }
+            SessionCommand::PanelAction { plugin, panel_id, button_id, inputs, respond_to } => {
+            let delivered = if let Some(host) = & session.plugin_host { host
+            .deliver_panel_action(& plugin, xai_grok_plugin_protocol::PanelActionParams {
+            panel_id, button_id, inputs }). await; true } else { false }; let _ = respond_to
+            .send(delivered); }
+            SessionCommand::PluginsAction { action, respond_to } => { let
             outcome = session.handle_plugins_action(action). await; let _ = respond_to
             .send(outcome); } SessionCommand::PluginsList { respond_to } => { let _ =
             respond_to.send(session.plugin_registry.borrow().clone()); }

@@ -609,6 +609,25 @@ pub enum PluginsAction {
     },
 }
 
+/// Request wrapper for `x.ai/plugins/panel_action`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelActionRequest {
+    pub session_id: String,
+    pub plugin: String,
+    pub panel_id: String,
+    pub button_id: String,
+    #[serde(default)]
+    pub inputs: std::collections::BTreeMap<String, String>,
+}
+
+/// Response for `x.ai/plugins/panel_action`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelActionResponse {
+    pub delivered: bool,
+}
+
 /// Shared action response for both `x.ai/hooks/action` and `x.ai/plugins/action`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -649,6 +668,42 @@ mod tests {
         let json = serde_json::to_string(&action).unwrap();
         let parsed: PluginsAction = serde_json::from_str(&json).unwrap();
         assert_eq!(action, parsed);
+    }
+
+    #[test]
+    fn panel_action_request_serde_roundtrip() {
+        let mut inputs = std::collections::BTreeMap::new();
+        inputs.insert("name".to_string(), "grok".to_string());
+        inputs.insert("count".to_string(), "3".to_string());
+        let req = PanelActionRequest {
+            session_id: "sess-1".into(),
+            plugin: "council".into(),
+            panel_id: "panel-1".into(),
+            button_id: "submit".into(),
+            inputs,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: PanelActionRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+
+        // camelCase wire keys, and `inputs` defaults to empty when absent.
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["sessionId"], "sess-1");
+        assert_eq!(value["panelId"], "panel-1");
+        assert_eq!(value["buttonId"], "submit");
+        let sparse: PanelActionRequest = serde_json::from_value(serde_json::json!({
+            "sessionId": "s",
+            "plugin": "p",
+            "panelId": "pid",
+            "buttonId": "b",
+        }))
+        .unwrap();
+        assert!(sparse.inputs.is_empty());
+
+        let resp = PanelActionResponse { delivered: true };
+        let resp_json = serde_json::to_string(&resp).unwrap();
+        let resp_parsed: PanelActionResponse = serde_json::from_str(&resp_json).unwrap();
+        assert_eq!(resp, resp_parsed);
     }
 
     #[test]

@@ -150,6 +150,7 @@ pub(crate) fn build_session_plugin_host(
             xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
         >,
     >,
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
 ) -> Option<Arc<PluginHost>> {
     let registry = plugin_registry?;
     let workspace_root = PathBuf::from(workspace_root);
@@ -184,6 +185,11 @@ pub(crate) fn build_session_plugin_host(
             tx,
         }));
     }
+    // UI panels: route `ui_publish_panel` / `ui_close_panel` from any sidecar
+    // onto this session's command channel, where the actor emits the
+    // corresponding `plugin_panel` / `panel_closed` session notification (and
+    // `panel_action` presses flow back the other way).
+    host.set_panel_sink(Arc::new(SessionPanelSink { cmd_tx }));
     for spec in &sidecar_plugins {
         tracing::info!(
             plugin = %spec.name,
@@ -484,6 +490,37 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
                 })
                 .collect()
         })
+    }
+}
+
+/// The shell's [`xai_grok_plugin_host::PanelSink`]: forwards a sidecar's
+/// `ui_publish_panel` / `ui_close_panel` onto the session command channel, where
+/// the actor turns them into `plugin_panel` / `panel_closed` session
+/// notifications (the same `send_xai_notification` path every other update
+/// rides). Fire-and-forget: a closed channel (session tearing down) drops the
+/// emit rather than erroring — a late panel update must never wedge a plugin.
+pub(crate) struct SessionPanelSink {
+    pub(crate) cmd_tx:
+        tokio::sync::mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
+}
+
+impl xai_grok_plugin_host::PanelSink for SessionPanelSink {
+    fn publish_panel(&self, plugin: &str, view_model: xai_grok_plugin_protocol::PanelViewModel) {
+        let _ = self
+            .cmd_tx
+            .send(crate::session::commands::SessionCommand::EmitPluginPanel {
+                plugin: plugin.to_string(),
+                view_model,
+            });
+    }
+
+    fn close_panel(&self, plugin: &str, panel_id: &str) {
+        let _ = self
+            .cmd_tx
+            .send(crate::session::commands::SessionCommand::ClosePluginPanel {
+                plugin: plugin.to_string(),
+                panel_id: panel_id.to_string(),
+            });
     }
 }
 

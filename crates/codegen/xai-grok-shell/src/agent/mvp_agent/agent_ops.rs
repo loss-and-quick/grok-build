@@ -2115,6 +2115,24 @@ impl MvpAgent {
         }
         outcome
     }
+    /// Deliver a panel button activation to the owning plugin (for
+    /// `x.ai/plugins/panel_action`). Returns `false` when the session is
+    /// unknown or has no plugin host to receive it.
+    pub async fn deliver_panel_action(
+        &self,
+        session_id: &acp::SessionId,
+        plugin: String,
+        panel_id: String,
+        button_id: String,
+        inputs: std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        let Some(handle) = self.get_session_handle(session_id) else {
+            return false;
+        };
+        handle
+            .deliver_panel_action(plugin, panel_id, button_id, inputs)
+            .await
+    }
     /// Get a snapshot of the shared plugin registry (for `x.ai/plugins/list`).
     pub fn plugin_registry_snapshot(
         &self,

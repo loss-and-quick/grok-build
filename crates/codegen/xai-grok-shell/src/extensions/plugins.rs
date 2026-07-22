@@ -168,6 +168,16 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 .ok_or_else(|| anyhow::anyhow!("session not found"));
             super::to_ext_response(result)
         }
+        "x.ai/plugins/panel_action" => {
+            let req: xai_hooks_plugins_types::PanelActionRequest = super::parse_params(args)?;
+            let sid = acp::SessionId::new(req.session_id);
+            let delivered = agent
+                .deliver_panel_action(&sid, req.plugin, req.panel_id, req.button_id, req.inputs)
+                .await;
+            super::to_ext_response(Ok::<_, anyhow::Error>(
+                xai_hooks_plugins_types::PanelActionResponse { delivered },
+            ))
+        }
         "x.ai/plugins/notify-updates" => {
             // Broadcast a PluginUpdatesInstalled notification to the session.
             #[derive(serde::Deserialize)]

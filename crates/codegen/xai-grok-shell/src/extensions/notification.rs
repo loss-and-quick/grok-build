@@ -513,6 +513,19 @@ pub enum SessionUpdate {
     PluginsChanged {
         plugins: Vec<xai_hooks_plugins_types::PluginInfo>,
     },
+    /// A plugin published (or replaced) a declarative UI panel. Carries the
+    /// publishing plugin name so the pager can key panels by (plugin, id) —
+    /// panel ids are only plugin-local, not globally unique — and echo the
+    /// plugin back on a button action.
+    PluginPanel {
+        plugin: String,
+        view_model: xai_grok_plugin_protocol::PanelViewModel,
+    },
+    /// A plugin closed a previously published panel, keyed by (plugin, id).
+    PanelClosed {
+        plugin: String,
+        id: String,
+    },
     /// Marketplace plugin updates were auto-installed on session start.
     /// Sent so desktop/pager can show a notification to the user.
     PluginUpdatesInstalled {
@@ -1472,6 +1485,58 @@ mod tests {
         let json_str = serde_json::to_string(&update).unwrap();
         let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
         assert_eq!(update, parsed);
+    }
+
+    #[test]
+    fn plugin_panel_serializes_snake_case_tag() {
+        let update = SessionUpdate::PluginPanel {
+            plugin: "council".into(),
+            view_model: xai_grok_plugin_protocol::PanelViewModel {
+                id: "panel-1".into(),
+                title: "Council".into(),
+                blocks: vec![],
+            },
+        };
+        let json = serde_json::to_value(&update).unwrap();
+        assert_eq!(json["sessionUpdate"], "plugin_panel");
+        // Raw snake_case fields (the enum `rename_all` applies only to the tag),
+        // and the publishing plugin rides alongside the view model — the exact
+        // shape the pager keys panels by.
+        assert_eq!(json["plugin"], "council");
+        assert!(json["view_model"].is_object());
+        assert_eq!(json["view_model"]["id"], "panel-1");
+
+        let closed = SessionUpdate::PanelClosed {
+            plugin: "council".into(),
+            id: "panel-1".into(),
+        };
+        let cjson = serde_json::to_value(&closed).unwrap();
+        assert_eq!(cjson["sessionUpdate"], "panel_closed");
+        assert_eq!(cjson["plugin"], "council");
+        assert_eq!(cjson["id"], "panel-1");
+    }
+
+    #[test]
+    fn plugin_panel_roundtrips_through_json() {
+        let update = SessionUpdate::PluginPanel {
+            plugin: "council".into(),
+            view_model: xai_grok_plugin_protocol::PanelViewModel {
+                id: "panel-rt".into(),
+                title: "Council".into(),
+                blocks: vec![],
+            },
+        };
+        let json_str = serde_json::to_string(&update).unwrap();
+        let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(update, parsed);
+
+        let closed = SessionUpdate::PanelClosed {
+            plugin: "council".into(),
+            id: "panel-rt".into(),
+        };
+        let cstr = serde_json::to_string(&closed).unwrap();
+        let cparsed: SessionUpdate = serde_json::from_str(&cstr).unwrap();
+        assert_eq!(closed, cparsed);
     }
 
     #[test]
