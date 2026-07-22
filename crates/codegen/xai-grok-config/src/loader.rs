@@ -461,6 +461,86 @@ pub fn expand_env_vars_in_string(input: &str) -> String {
     shellexpand::env_with_context_no_errors(input, context).into_owned()
 }
 
+/// Failure resolving a `{file:PATH}` secret reference.
+///
+/// The error deliberately carries only the path and the underlying I/O error,
+/// never the file *contents*, so a resolution failure is safe to log and to
+/// surface to a client without leaking a secret.
+#[derive(Debug)]
+pub enum SecretRefError {
+    /// The referenced file could not be read.
+    Read {
+        path: String,
+        source: std::io::Error,
+    },
+}
+
+impl std::fmt::Display for SecretRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SecretRefError::Read { path, source } => {
+                write!(f, "cannot read secret file `{path}`: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SecretRefError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SecretRefError::Read { source, .. } => Some(source),
+        }
+    }
+}
+
+/// Resolve secret references in a single config string.
+///
+/// First expands `$VAR` / `${VAR}` (so a `{file:$HOME/secret}` path may itself
+/// use env), then replaces every `{file:PATH}` token with the contents of PATH
+/// with a single trailing newline stripped. Unlike [`expand_env_vars_in_string`]
+/// this is **fallible**: a missing or unreadable file is a hard error whose
+/// message names the path but never the secret contents.
+///
+/// Scoped to provider credential fields (`api_key`, `base_url`, header values,
+/// `proxy`); the global TOML walk stays infallible so an unrelated `{...}`
+/// literal elsewhere in config never gates parsing.
+pub fn resolve_secret_refs(input: &str) -> Result<String, SecretRefError> {
+    let env_expanded = expand_env_vars_in_string(input);
+    resolve_file_refs(&env_expanded)
+}
+
+/// Replace `{file:PATH}` tokens with file contents. An unterminated `{file:`
+/// (no closing `}`) is passed through as a literal rather than treated as a ref.
+fn resolve_file_refs(input: &str) -> Result<String, SecretRefError> {
+    const OPEN: &str = "{file:";
+    if !input.contains(OPEN) {
+        return Ok(input.to_owned());
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + OPEN.len()..];
+        let Some(end) = after.find('}') else {
+            out.push_str(&rest[start..]);
+            return Ok(out);
+        };
+        let path = &after[..end];
+        let contents = std::fs::read_to_string(path).map_err(|source| SecretRefError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+        // Strip a single trailing newline (`\n` or `\r\n`), as secret files
+        // commonly end with one; interior whitespace is preserved verbatim.
+        let trimmed = contents.strip_suffix('\n').unwrap_or(&contents);
+        let trimmed = trimmed.strip_suffix('\r').unwrap_or(trimmed);
+        out.push_str(trimmed);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,5 +785,74 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("GROK_CAMPAIGNS", v) },
             None => unsafe { std::env::remove_var("GROK_CAMPAIGNS") },
         }
+    }
+
+    #[test]
+    fn resolve_secret_refs_reads_file_and_trims_one_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token");
+        std::fs::write(&path, "sk-abc123\n").unwrap();
+        let input = format!("{{file:{}}}", path.display());
+        assert_eq!(resolve_secret_refs(&input).unwrap(), "sk-abc123");
+
+        // No trailing newline: contents used verbatim.
+        std::fs::write(&path, "sk-nonewline").unwrap();
+        assert_eq!(resolve_secret_refs(&input).unwrap(), "sk-nonewline");
+
+        // CRLF line ending: strip both.
+        std::fs::write(&path, "sk-crlf\r\n").unwrap();
+        assert_eq!(resolve_secret_refs(&input).unwrap(), "sk-crlf");
+    }
+
+    #[test]
+    fn resolve_secret_refs_missing_file_is_clear_error_without_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        let input = format!("{{file:{}}}", missing.display());
+        let err = resolve_secret_refs(&input).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cannot read secret file"), "want context: {msg}");
+        assert!(msg.contains("nope"), "want path in message: {msg}");
+    }
+
+    #[test]
+    fn resolve_secret_refs_env_and_file_together() {
+        static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        std::fs::write(&path, "file-secret\n").unwrap();
+
+        let prior = std::env::var_os("GROK_TEST_PROVIDER_DIR");
+        // SAFETY: guarded by ENV_GUARD; no other test reads this var.
+        unsafe { std::env::set_var("GROK_TEST_PROVIDER_DIR", dir.path()) };
+
+        // `$VAR` inside the file path is expanded before the file is read,
+        // and a plain `$VAR` and a `{file:}` ref coexist in one string.
+        let input = "Bearer $GROK_TEST_PROVIDER_DIR|{file:${GROK_TEST_PROVIDER_DIR}/secret}";
+        let resolved = resolve_secret_refs(input).unwrap();
+        assert_eq!(
+            resolved,
+            format!("Bearer {}|file-secret", dir.path().display())
+        );
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("GROK_TEST_PROVIDER_DIR", v) },
+            None => unsafe { std::env::remove_var("GROK_TEST_PROVIDER_DIR") },
+        }
+    }
+
+    #[test]
+    fn resolve_secret_refs_unterminated_is_literal() {
+        // No closing brace → passed through unchanged, not treated as a ref.
+        assert_eq!(
+            resolve_secret_refs("prefix {file:/no/close").unwrap(),
+            "prefix {file:/no/close"
+        );
+    }
+
+    #[test]
+    fn resolve_secret_refs_no_ref_is_identity_for_plain_text() {
+        assert_eq!(resolve_secret_refs("plain-value").unwrap(), "plain-value");
     }
 }

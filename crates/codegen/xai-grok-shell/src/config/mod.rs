@@ -1413,7 +1413,10 @@ pub fn resolve_effective_plugins_config(
     plugins_cfg.merge_claude_enabled_plugins(Some(cwd));
     plugins_cfg
 }
-pub use xai_grok_config::{deep_merge_toml, expand_env_vars_in_string, expand_env_vars_in_toml};
+pub use xai_grok_config::{
+    SecretRefError, deep_merge_toml, expand_env_vars_in_string, expand_env_vars_in_toml,
+    resolve_secret_refs,
+};
 /// Add a plugin path to `[plugins].paths` in `~/.grok/config.toml`.
 ///
 /// Creates the `[plugins]` section and `paths` array if they don't exist.

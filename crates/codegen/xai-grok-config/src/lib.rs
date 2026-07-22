@@ -33,10 +33,11 @@ pub use campaigns::{
 pub use loader::{
     CampaignsState, ConfigLayers, MANAGED_CONFIG_FILENAME, ManagedConfigLayer,
     REQUIREMENTS_FILENAME, apply_version_overrides_with_registered, campaigns_application_disabled,
-    campaigns_state_path, deep_merge_toml, expand_env_vars_in_string, expand_env_vars_in_toml,
-    load_config_file, load_dismissed_ids_from_home, load_effective_config_disk_only,
-    load_from_disk, load_managed_config, load_system_managed_config, load_toml_file,
-    managed_config_layers, managed_config_layers_at, toml_error_detail,
+    SecretRefError, campaigns_state_path, deep_merge_toml, expand_env_vars_in_string,
+    expand_env_vars_in_toml, load_config_file, load_dismissed_ids_from_home,
+    load_effective_config_disk_only, load_from_disk, load_managed_config,
+    load_system_managed_config, load_toml_file, managed_config_layers, managed_config_layers_at,
+    resolve_secret_refs, toml_error_detail,
 };
 pub use macos_managed::MDM_REQUIREMENTS_SOURCE;
 pub use managed_cache::{
