@@ -145,6 +145,12 @@ fn main() {
                         while reader.read_line(&mut line).unwrap_or(0) != 0 {}
                         return;
                     }
+                    "hang_record_cancel" => {
+                        // Never reply, but keep the main loop running so the
+                        // host's `tool_cancel` notification (fired when it
+                        // abandons this call) is observed and recorded below.
+                        continue;
+                    }
                     _ => {}
                 }
                 let params: ToolInvokeParams =
@@ -193,6 +199,23 @@ fn main() {
                     },
                 };
                 reply_ok(&id, serde_json::to_value(result).unwrap());
+            }
+            Some("tool_cancel") => {
+                // The host abandoned an in-flight `tool_invoke` (parent turn
+                // aborted). Record the cancelled invocation via a plugin→core
+                // storage_set so the test can assert the notification arrived.
+                let inv = msg
+                    .get("params")
+                    .and_then(|p| p.get("invocation_id"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let set_id = alloc(&mut next_id);
+                request(
+                    set_id,
+                    "storage_set",
+                    json!({ "key": "tool_cancel_seen", "value": inv }),
+                );
+                let _ = read_response_for(&mut reader, set_id);
             }
             Some("shutdown") => std::process::exit(0),
             Some(_other) => {

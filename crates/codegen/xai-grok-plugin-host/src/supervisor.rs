@@ -551,14 +551,27 @@ impl PluginHost {
             Duration::from_millis(timeout_ms)
         };
         let params = json!({
-            "invocation_id": invocation_id,
+            "invocation_id": invocation_id.clone(),
             "tool": tool,
             "arguments": arguments,
             "context": context,
             "timeout_ms": timeout.as_millis() as u64,
         });
 
-        match sidecar.call("tool_invoke", params, timeout).await {
+        // Abandon-on-abort: if this future is dropped before the call resolves
+        // (the parent turn was aborted mid-tool-call — the shell aborts the
+        // turn task, dropping this `invoke_tool` await), tell the plugin so its
+        // handler's `AbortSignal` fires and it can cancel invocation-scoped
+        // work (e.g. the subagents it spawned). Disarmed the moment the call
+        // returns, so a normal completion or timeout sends nothing.
+        let cancel_guard = ToolInvokeAbortGuard {
+            sidecar: Arc::clone(&sidecar),
+            invocation_id,
+            armed: true,
+        };
+        let call_result = sidecar.call("tool_invoke", params, timeout).await;
+        cancel_guard.disarm();
+        match call_result {
             Ok(value) => {
                 self.reset_crashes(&entry).await;
                 serde_json::from_value::<ToolInvokeResult>(value).map_err(|e| {
@@ -581,6 +594,30 @@ impl PluginHost {
             Err(crate::sidecar::SidecarError::Rpc(e)) => Err(PluginInvokeError::new(format!(
                 "plugin '{plugin}' tool '{tool}' failed: {e}"
             ))),
+        }
+    }
+}
+
+/// Drop guard that fires a `tool_cancel` notification to the plugin when an
+/// in-flight `tool_invoke` is abandoned (the awaiting future is dropped before
+/// the call resolves). [`Self::disarm`] on normal return/timeout suppresses it.
+struct ToolInvokeAbortGuard {
+    sidecar: Arc<crate::sidecar::PluginSidecar>,
+    invocation_id: String,
+    armed: bool,
+}
+
+impl ToolInvokeAbortGuard {
+    /// Consume the guard without notifying (the call resolved on its own).
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ToolInvokeAbortGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.sidecar.notify_tool_cancel(&self.invocation_id);
         }
     }
 }

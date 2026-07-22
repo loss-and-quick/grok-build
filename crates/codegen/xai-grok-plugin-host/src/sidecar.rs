@@ -31,7 +31,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 use xai_grok_plugin_protocol::{
-    InitializeParams, InitializeResult, PROTOCOL_VERSION, ShutdownParams,
+    InitializeParams, InitializeResult, PROTOCOL_VERSION, ShutdownParams, ToolCancelParams,
 };
 use xai_tty_utils::ProcessGroup;
 
@@ -222,6 +222,24 @@ impl PluginSidecar {
         let _ = self
             .writer_tx
             .send(rpc::notification_frame(method, &params));
+    }
+
+    /// Tell the plugin an in-flight `tool_invoke` was abandoned (parent turn
+    /// aborted while the session stays alive), so its handler's `AbortSignal`
+    /// fires and it can wind down invocation-scoped work. Fire-and-forget: the
+    /// host has already stopped awaiting the reply. Only sends while the
+    /// transport is alive (a dead sidecar has nothing to cancel).
+    pub(crate) fn notify_tool_cancel(&self, invocation_id: &str) {
+        if !self.is_alive() {
+            return;
+        }
+        self.notify(
+            "tool_cancel",
+            serde_json::to_value(ToolCancelParams {
+                invocation_id: invocation_id.to_string(),
+            })
+            .unwrap_or(Value::Null),
+        );
     }
 
     /// Run the `initialize` handshake and validate the protocol version.

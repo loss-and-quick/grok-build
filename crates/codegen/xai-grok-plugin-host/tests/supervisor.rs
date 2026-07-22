@@ -389,6 +389,58 @@ async fn tool_invoke_times_out_without_counting_a_crash() {
     host.dispose().await;
 }
 
+/// Abandon-on-abort: when the `invoke_tool` future is dropped before the call
+/// resolves (the parent turn was aborted mid-tool-call), the host fires a
+/// `tool_cancel` notification to the plugin so its handler can wind down. The
+/// fixture records the cancelled invocation via storage; assert it lands.
+#[tokio::test]
+async fn dropping_tool_invoke_notifies_plugin_tool_cancel() {
+    let (host, data_dir, _w) = host_with(
+        &[
+            ("FAKE_MODE", "normal".into()),
+            ("FAKE_TOOL_MODE", "hang_record_cancel".into()),
+        ],
+        Duration::from_millis(10),
+    );
+
+    // The fixture never replies; drop the future (as the aborted turn task
+    // would) by letting a short timeout elapse. That fires the abort guard.
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(400),
+        host.invoke_tool("p", "echo", serde_json::json!({}), test_ctx(), 5_000),
+    )
+    .await;
+    assert!(dropped.is_err(), "hang fixture should keep the call pending");
+
+    // The plugin recorded the cancelled invocation (plugin→core storage_set,
+    // served by the still-live host). Poll the on-disk store briefly.
+    let store = data_dir.path().join("p.json");
+    let mut seen = None;
+    for _ in 0..50 {
+        if let Ok(bytes) = std::fs::read(&store)
+            && let Ok(map) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(
+                &bytes,
+            )
+            && let Some(v) = map.get("tool_cancel_seen")
+        {
+            seen = Some(v.clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let seen = seen.expect("plugin should record the tool_cancel invocation id");
+    assert!(
+        seen.as_str().is_some_and(|s| s.starts_with("tinv-")),
+        "recorded invocation id should be the host's tool_invoke id: {seen}"
+    );
+
+    // A cancelled (abandoned) call is not a crash.
+    let status = host.status().await;
+    assert_eq!(status[0].consecutive_crashes, 0);
+
+    host.dispose().await;
+}
+
 #[tokio::test]
 async fn tool_invoke_sidecar_crash_is_an_error_not_a_hang() {
     let (host, _d, _w) = host_with(

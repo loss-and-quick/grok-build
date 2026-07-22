@@ -342,6 +342,19 @@ pub struct ToolInvokeResult {
     pub is_error: bool,
 }
 
+/// `tool_cancel` notification params. Core→plugin. Fired when an in-flight
+/// `tool_invoke` is abandoned — the parent turn was aborted (Esc) while the
+/// session stays alive — so the plugin can wind down invocation-scoped work
+/// (e.g. cancel the subagents it spawned). `invocation_id` matches the
+/// [`ToolInvokeParams::invocation_id`] of the call being cancelled; the SDK
+/// aborts that handler's `AbortSignal`. Best-effort: the host does not wait
+/// for a reply and the tool result (if any) is discarded.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct ToolCancelParams {
+    pub invocation_id: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // shutdown (core→plugin notification)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -683,6 +696,7 @@ mod bindings_export {
             ToolCallContextDto,
             ToolInvokeParams,
             ToolInvokeResult,
+            ToolCancelParams,
             ShutdownParams,
             LogEmitParams,
             StorageGetParams,
@@ -830,6 +844,13 @@ mod tests {
         let r: ToolInvokeResult = serde_json::from_value(json!({ "content": "ok" })).unwrap();
         assert!(!r.is_error);
         assert_eq!(r.content, "ok");
+
+        round_trip(
+            &ToolCancelParams {
+                invocation_id: "tinv-1".into(),
+            },
+            json!({ "invocation_id": "tinv-1" }),
+        );
     }
 
     #[test]
