@@ -1,5 +1,7 @@
 use crate::auth::AuthManager;
+use crate::auth::credential_seam::{PluginCredential, PluginCredentialSeam};
 use crate::util::grok_auth_credentials::GrokAuthCredentials;
+use arc_swap::ArcSwap;
 use reqwest::RequestBuilder;
 use std::sync::Arc;
 use xai_grok_auth::{
@@ -13,9 +15,21 @@ fn api_key_id_for(auth: Option<&crate::auth::GrokAuth>) -> Option<String> {
 }
 /// Production impl: wraps the live `AuthManager`. 401 recovery
 /// delegates to `AuthManager::unauthorized_recovery`.
+///
+/// When a [`PluginCredentialSeam`] is injected (session-aware construction), a
+/// plugin-supplied credential takes precedence over the built-in resolution:
+/// [`resolve_credential`](Self::resolve_credential) caches it, and every wire
+/// path (`apply`/`snapshot`/`needs_token_auth_header`) prefers the cache. The
+/// built-in `AuthManager` path stays fully available and is used whenever the
+/// cache is empty — the plugin channel is fail-open, never a hard dependency.
 pub struct ShellAuthCredentialProvider {
     auth_manager: Arc<AuthManager>,
     static_credentials: GrokAuthCredentials,
+    /// Injected plugin seam; `None` outside session-aware construction.
+    credential_seam: Option<Arc<dyn PluginCredentialSeam>>,
+    /// The most recent plugin-supplied credential, preferred on the wire while
+    /// present. Empty until a resolve/refresh/oauth seam call succeeds.
+    plugin_credential: ArcSwap<Option<PluginCredential>>,
 }
 impl ShellAuthCredentialProvider {
     pub(crate) fn new(
@@ -29,6 +43,63 @@ impl ShellAuthCredentialProvider {
         Self {
             auth_manager,
             static_credentials,
+            credential_seam: None,
+            plugin_credential: ArcSwap::from_pointee(None),
+        }
+    }
+
+    /// Inject the plugin credential seam. Session-aware callers build a
+    /// [`HookCredentialSeam`](crate::auth::credential_seam::HookCredentialSeam)
+    /// from the session's hook registry + plugin invoker and pass it here so a
+    /// plugin can supply/refresh/authorize the outbound bearer.
+    pub(crate) fn with_credential_seam(mut self, seam: Arc<dyn PluginCredentialSeam>) -> Self {
+        self.credential_seam = Some(seam);
+        self
+    }
+
+    /// The cached plugin credential, if one is present and unexpired.
+    fn active_plugin_credential(&self) -> Option<Arc<PluginCredential>> {
+        let guard = self.plugin_credential.load();
+        let cred = guard.as_ref().as_ref()?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        cred.is_unexpired(now_ms).then(|| {
+            // Clone into an Arc so the caller holds it past the guard's lifetime.
+            Arc::new(cred.clone())
+        })
+    }
+
+    /// Ask the plugin seam to resolve a credential before the built-in
+    /// resolution runs, caching it so subsequent wire paths prefer it. Returns
+    /// `true` when a plugin credential was obtained. No-op (returns `false`)
+    /// when no seam is injected or the plugin passes through — the built-in
+    /// resolution then applies. Fired at session bootstrap and whenever no
+    /// usable credential is cached.
+    pub(crate) async fn resolve_credential(&self, reason: &str) -> bool {
+        let Some(seam) = self.credential_seam.as_ref() else {
+            return false;
+        };
+        match seam.resolve(reason).await {
+            Some(cred) => {
+                self.plugin_credential.store(Arc::new(Some(cred)));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drive the plugin's interactive authorization flow, caching the final
+    /// credential. Returns `true` when the flow produced one. Triggered on an
+    /// explicit sign-in or when no usable credential exists.
+    pub(crate) async fn start_oauth_flow(&self, reason: &str) -> bool {
+        let Some(seam) = self.credential_seam.as_ref() else {
+            return false;
+        };
+        match seam.start_oauth_flow(reason).await {
+            Some(cred) => {
+                self.plugin_credential.store(Arc::new(Some(cred)));
+                true
+            }
+            None => false,
         }
     }
 }
@@ -36,11 +107,29 @@ impl std::fmt::Debug for ShellAuthCredentialProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShellAuthCredentialProvider")
             .field("auth_manager", &"<configured>")
+            .field("credential_seam", &self.credential_seam.is_some())
+            .field(
+                "has_plugin_credential",
+                &self.plugin_credential.load().is_some(),
+            )
             .finish()
     }
 }
 impl HttpAuth for ShellAuthCredentialProvider {
     fn apply(&self, builder: RequestBuilder, base_url: &str) -> RequestBuilder {
+        // A plugin-supplied credential wins over the built-in resolution: send
+        // it as a user token (Bearer + token-auth marker) or a bare Bearer,
+        // per its `needs_token_auth_header` flag.
+        if let Some(cred) = self.active_plugin_credential() {
+            let mut creds = GrokAuthCredentials::new(None);
+            if cred.needs_token_auth_header {
+                creds.user_token = Some(cred.token.clone());
+            } else {
+                creds.deployment_key = Some(cred.token.clone());
+            }
+            creds.alpha_test_key = self.static_credentials.alpha_test_key.clone();
+            return creds.apply(builder, base_url);
+        }
         let mut creds = self.static_credentials.clone();
         if creds.deployment_key.is_none()
             && let Some(auth) = self.auth_manager.current_or_expired()
@@ -53,6 +142,13 @@ impl HttpAuth for ShellAuthCredentialProvider {
 #[async_trait::async_trait]
 impl AuthCredentialProvider for ShellAuthCredentialProvider {
     fn snapshot(&self) -> CredentialSnapshot {
+        if let Some(cred) = self.active_plugin_credential() {
+            return CredentialSnapshot {
+                token: Some(cred.token.clone()),
+                user_id: cred.owner_id.clone(),
+                ..Default::default()
+            };
+        }
         if let Some(ref dk) = self.static_credentials.deployment_key {
             return CredentialSnapshot {
                 token: Some(dk.clone()),
@@ -76,6 +172,28 @@ impl AuthCredentialProvider for ShellAuthCredentialProvider {
         }
     }
     async fn refresh_after_unauthorized(&self) -> bool {
+        // The plugin refresh seam runs first: a plugin credential means the
+        // built-in `AuthManager` may hold nothing at all, so its recovery would
+        // no-op. On passthrough/absence, fall back to the built-in refresh,
+        // which stays available independently of the plugin channel.
+        if let Some(seam) = self.credential_seam.as_ref() {
+            let owner = self
+                .plugin_credential
+                .load()
+                .as_ref()
+                .as_ref()
+                .and_then(|c| c.owner_id.clone());
+            if let Some(cred) = seam.refresh("unauthorized", owner.as_deref()).await {
+                self.plugin_credential.store(Arc::new(Some(cred)));
+                return true;
+            }
+            // A cached plugin credential the plugin declined to refresh: the
+            // built-in `AuthManager` path is not its owner, so don't claim a
+            // recovery it can't perform.
+            if self.plugin_credential.load().is_some() {
+                return false;
+            }
+        }
         if self.static_credentials.deployment_key.is_some() {
             return false;
         }
@@ -84,6 +202,9 @@ impl AuthCredentialProvider for ShellAuthCredentialProvider {
             .await
     }
     fn needs_token_auth_header(&self) -> bool {
+        if let Some(cred) = self.active_plugin_credential() {
+            return cred.needs_token_auth_header;
+        }
         self.static_credentials.deployment_key.is_none()
     }
 }
@@ -880,5 +1001,161 @@ mod tests {
         let snap = provider.snapshot();
         assert_eq!(snap.token.as_deref(), Some("deployment-key-12345"));
         assert!(snap.user_id.is_none());
+    }
+
+    /// A configurable [`PluginCredentialSeam`] for the seam-precedence tests.
+    #[derive(Debug, Default)]
+    struct MockSeam {
+        resolve: Option<PluginCredential>,
+        refresh: Option<PluginCredential>,
+        oauth: Option<PluginCredential>,
+    }
+    #[async_trait::async_trait]
+    impl PluginCredentialSeam for MockSeam {
+        async fn resolve(&self, _reason: &str) -> Option<PluginCredential> {
+            self.resolve.clone()
+        }
+        async fn refresh(
+            &self,
+            _reason: &str,
+            _owner_id: Option<&str>,
+        ) -> Option<PluginCredential> {
+            self.refresh.clone()
+        }
+        async fn start_oauth_flow(&self, _reason: &str) -> Option<PluginCredential> {
+            self.oauth.clone()
+        }
+    }
+
+    fn plugin_cred(token: &str, header: bool) -> PluginCredential {
+        PluginCredential {
+            token: token.into(),
+            needs_token_auth_header: header,
+            expires_at_ms: None,
+            owner_id: Some("plugin-owner".into()),
+        }
+    }
+
+    /// resolve_credential caches the plugin bearer and every wire path prefers
+    /// it over the built-in `AuthManager` token.
+    #[tokio::test]
+    async fn seam_resolve_feeds_snapshot_and_wire() {
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(
+            &dir,
+            Some(make_auth("builtin-token", ChronoDuration::hours(1))),
+        );
+        let provider = ShellAuthCredentialProvider::new(mgr, None, None).with_credential_seam(
+            Arc::new(MockSeam {
+                resolve: Some(plugin_cred("plugin-token", false)),
+                ..Default::default()
+            }),
+        );
+
+        // Before resolve: the built-in token is used.
+        assert_eq!(provider.snapshot().token.as_deref(), Some("builtin-token"));
+
+        assert!(provider.resolve_credential("bootstrap").await);
+        let snap = provider.snapshot();
+        assert_eq!(snap.token.as_deref(), Some("plugin-token"));
+        assert_eq!(snap.user_id.as_deref(), Some("plugin-owner"));
+        // A bare-Bearer plugin credential clears the token-auth marker.
+        assert!(!provider.needs_token_auth_header());
+    }
+
+    /// Passthrough (the plugin declines) leaves the built-in resolution intact.
+    #[tokio::test]
+    async fn seam_resolve_passthrough_keeps_builtin() {
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(
+            &dir,
+            Some(make_auth("builtin-token", ChronoDuration::hours(1))),
+        );
+        let provider = ShellAuthCredentialProvider::new(mgr, None, None)
+            .with_credential_seam(Arc::new(MockSeam::default()));
+
+        assert!(!provider.resolve_credential("bootstrap").await);
+        assert_eq!(provider.snapshot().token.as_deref(), Some("builtin-token"));
+        assert!(provider.needs_token_auth_header());
+    }
+
+    /// No seam injected → the built-in path is untouched (fail-open default).
+    #[tokio::test]
+    async fn no_seam_uses_builtin_only() {
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(
+            &dir,
+            Some(make_auth("builtin-token", ChronoDuration::hours(1))),
+        );
+        let provider = ShellAuthCredentialProvider::new(mgr, None, None);
+        assert!(!provider.resolve_credential("bootstrap").await);
+        assert!(!provider.start_oauth_flow("sign_in").await);
+        assert_eq!(provider.snapshot().token.as_deref(), Some("builtin-token"));
+    }
+
+    /// On a 401, the refresh seam mints a fresh plugin bearer that the next
+    /// snapshot reflects (so the retry sends it).
+    #[tokio::test]
+    async fn seam_refresh_updates_snapshot() {
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir, None);
+        let provider = ShellAuthCredentialProvider::new(mgr, None, None).with_credential_seam(
+            Arc::new(MockSeam {
+                refresh: Some(plugin_cred("refreshed-plugin-token", true)),
+                ..Default::default()
+            }),
+        );
+        assert!(provider.refresh_after_unauthorized().await);
+        assert_eq!(
+            provider.snapshot().token.as_deref(),
+            Some("refreshed-plugin-token")
+        );
+    }
+
+    /// The interactive flow's final bearer is cached and preferred on the wire.
+    #[tokio::test]
+    async fn seam_oauth_flow_caches_final_credential() {
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir, None);
+        let provider = ShellAuthCredentialProvider::new(mgr, None, None).with_credential_seam(
+            Arc::new(MockSeam {
+                oauth: Some(plugin_cred("oauth-token", true)),
+                ..Default::default()
+            }),
+        );
+        assert!(provider.snapshot().token.is_none());
+        assert!(provider.start_oauth_flow("missing_credential").await);
+        assert_eq!(provider.snapshot().token.as_deref(), Some("oauth-token"));
+    }
+
+    /// An expired plugin credential is ignored: the wire falls back to the
+    /// built-in path until a refresh replaces it.
+    #[tokio::test]
+    async fn expired_plugin_credential_falls_back() {
+        let _guard = EarlyInvalidationGuard::pin_to_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(
+            &dir,
+            Some(make_auth("builtin-token", ChronoDuration::hours(1))),
+        );
+        let provider = ShellAuthCredentialProvider::new(mgr, None, None).with_credential_seam(
+            Arc::new(MockSeam {
+                resolve: Some(PluginCredential {
+                    token: "stale-plugin".into(),
+                    needs_token_auth_header: true,
+                    expires_at_ms: Some(1),
+                    owner_id: None,
+                }),
+                ..Default::default()
+            }),
+        );
+        assert!(provider.resolve_credential("bootstrap").await);
+        // Cached but already expired -> snapshot falls back to the built-in token.
+        assert_eq!(provider.snapshot().token.as_deref(), Some("builtin-token"));
     }
 }

@@ -50,7 +50,19 @@ pub(crate) const SIDECAR_HOOK_EVENTS: &[HookEventName] = &[
     HookEventName::PreCompact,
     HookEventName::PostCompact,
     HookEventName::SubagentResolve,
+    // Credential seams (dispatched from the auth boundary, not a session fire
+    // site). resolve/refresh are Replace; the interactive authorization flow is
+    // Intercept and gets a longer deadline (below).
+    HookEventName::ResolveCredential,
+    HookEventName::RefreshCredential,
+    HookEventName::StartOauthFlow,
 ];
+
+/// Per-hook deadline for the interactive authorization flow (`start_oauth_flow`,
+/// an Intercept gate). Far longer than [`DEFAULT_TIMEOUT_MS`] because the flow
+/// waits on a human (browser sign-in / code paste); still bounded so a stuck
+/// plugin can't hang forever. Bounded below the hook-timeout cap.
+const DEFAULT_INTERACTIVE_GATE_TIMEOUT_MS: u64 = 300_000;
 
 /// Map the agent-side runtime selection onto the host's runtime enum. Both are
 /// `auto|bun|node|deno`; kept as an explicit match so a future variant on either
@@ -190,10 +202,10 @@ pub(crate) fn sidecar_plugin_hook_specs(
     SIDECAR_HOOK_EVENTS
         .iter()
         .map(|&event| {
-            let timeout_ms = if event.traits().gate == GateKind::Stop {
-                DEFAULT_STOP_GATE_TIMEOUT_MS
-            } else {
-                DEFAULT_TIMEOUT_MS
+            let timeout_ms = match event.traits().gate {
+                GateKind::Stop => DEFAULT_STOP_GATE_TIMEOUT_MS,
+                GateKind::Intercept => DEFAULT_INTERACTIVE_GATE_TIMEOUT_MS,
+                _ => DEFAULT_TIMEOUT_MS,
             };
             HookSpec {
                 name: format!("plugin/{plugin_name}/sidecar:{event}"),
@@ -736,6 +748,12 @@ mod tests {
             .find(|s| s.event == HookEventName::PreToolUse)
             .unwrap();
         assert_eq!(pre.timeout_ms, DEFAULT_TIMEOUT_MS);
+        // The interactive authorization flow (Intercept) gets the long deadline.
+        let oauth = specs
+            .iter()
+            .find(|s| s.event == HookEventName::StartOauthFlow)
+            .unwrap();
+        assert_eq!(oauth.timeout_ms, DEFAULT_INTERACTIVE_GATE_TIMEOUT_MS);
     }
 
     #[test]
