@@ -455,11 +455,23 @@ fn spawn_outcome_watcher(
                     Ok(Ok(outcome)) => outcome,
                     Ok(Err(_)) => AgentOutcome::infra_failure(AgentStatusDto::Failed, TORN_DOWN),
                     Err(_elapsed) => {
-                        let _ = orchestrator.cancel(&id).await;
                         let timeout_note = format!("per-spawn timeout after {ms} ms; cancelled");
-                        match tokio::time::timeout(AGENT_TIMEOUT_CANCEL_GRACE, &mut result_rx)
-                            .await
-                        {
+                        // Force-finalize by the deadline regardless of whether the
+                        // cancel round-trip or the coordinator ever complete: the
+                        // whole "cancel, then collect the real cancelled result"
+                        // step is bounded by the grace window. A coordinator that
+                        // never answers the cancel (or a subagent that ignores its
+                        // token) therefore cannot wedge the watcher — the terminal
+                        // is synthesized when the grace elapses. This is the
+                        // core-owned guarantee behind `agent_wait`: a spawn with a
+                        // `timeout_ms` reaches a terminal within
+                        // `timeout_ms + AGENT_TIMEOUT_CANCEL_GRACE`, never relying
+                        // on the plugin's defensive wait budget.
+                        let collect = async {
+                            let _ = orchestrator.cancel(&id).await;
+                            (&mut result_rx).await
+                        };
+                        match tokio::time::timeout(AGENT_TIMEOUT_CANCEL_GRACE, collect).await {
                             // Keep the real counters, but the status is the
                             // timeout's: cancelled, with the budget recorded.
                             Ok(Ok(real)) => AgentOutcome {
@@ -741,6 +753,11 @@ mod tests {
         progress: std::sync::Mutex<Option<AgentProgress>>,
         cancelled: std::sync::Mutex<Vec<String>>,
         seen_specs: std::sync::Mutex<Vec<AgentSpawnSpec>>,
+        /// When set, `cancel` records the id but then hangs forever without
+        /// resolving the spawn's result — models a coordinator that never
+        /// answers a cancel (or a subagent that ignores its token). The
+        /// watcher must still force-finalize by the grace deadline.
+        cancel_hangs: std::sync::atomic::AtomicBool,
     }
 
     impl MockOrchestrator {
@@ -779,6 +796,11 @@ mod tests {
         fn cancel<'a>(&'a self, id: &'a str) -> OrchestratorFuture<'a, OrchestratorCancel> {
             Box::pin(async move {
                 self.cancelled.lock().unwrap().push(id.to_string());
+                if self.cancel_hangs.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Never resolves: exercises the watcher's grace-deadline
+                    // force-finalization path.
+                    std::future::pending::<()>().await;
+                }
                 match self.pending.lock().unwrap().remove(id) {
                     Some(tx) => {
                         let _ = tx.send(AgentOutcome {
@@ -970,6 +992,41 @@ mod tests {
             .unwrap();
         assert_eq!(r["events"][0]["kind"], "cancelled");
         assert_eq!(r["done"], true);
+    }
+
+    /// The timeout guarantee holds even when the coordinator never answers the
+    /// cancel: the watcher force-finalizes at `timeout_ms + grace`, so
+    /// `agent_wait` returns a terminal (`cancelled`) rather than hanging. Uses
+    /// paused time so the 10 s grace resolves instantly.
+    #[tokio::test(start_paused = true)]
+    async fn agent_wait_force_finalizes_when_cancel_never_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, orch) = caps_with_orchestrator(dir.path());
+        orch.cancel_hangs
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // 30 ms spawn budget; the mock never completes and its cancel hangs.
+        let id = spawn_one(&c, json!({ "prompt": "wedged", "timeout_ms": 30 })).await;
+
+        // Wait budget spans timeout + grace so the wait observes the terminal
+        // the watcher synthesizes (rather than reporting `running`).
+        let r = c
+            .handle_request("agent_wait", &json!({ "id": id, "timeout_ms": 60_000 }))
+            .await
+            .unwrap();
+        assert_eq!(r["status"], "cancelled", "must terminate, not hang: {r}");
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("per-spawn timeout after 30 ms"),
+            "error should record the budget: {r}"
+        );
+        // The cancel was attempted even though it never resolved.
+        assert_eq!(
+            orch.cancelled.lock().unwrap().as_slice(),
+            std::slice::from_ref(&id)
+        );
     }
 
     #[tokio::test]

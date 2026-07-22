@@ -32,6 +32,11 @@ tempfile = { workspace = true }
 # tracing forwarding test; the workspace default set omits it.
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 
+# `test-util` enables `#[tokio::test(start_paused = true)]` (paused virtual
+# time) so the `agent_wait` timeout-grace guarantee is asserted without a
+# real 10 s wait.
+tokio = { workspace = true, features = ["test-util"] }
+
 # The `fake_sidecar` fixture bin talks the wire protocol over stdio so the
 # supervisor/sidecar tests never need a real bun/node/deno. Cargo builds all
 # unguarded bins before integration tests and exports `CARGO_BIN_EXE_fake_sidecar`.
