@@ -10,6 +10,9 @@
 //   • session_start     — an *Observe* event: log that the session began.
 //   • resolve_credential — a *Replace* gate: hand the core a fixed bearer
 //                         instead of its built-in credential resolution.
+//   • provider_request  — a *Replace* gate: observe the issuing `agent` and the
+//                         available `tools` on the outbound request, then pass
+//                         through (a real plugin would gate injection on them).
 //
 // …plus one model-visible tool (`echo`), declared in plugin.json's `tools`
 // array (the catalog's source of truth) and served here via `tool_invoke`.
@@ -111,6 +114,21 @@ definePlugin({
         owner_id: "demo-hooks",
       };
       return replace(credential);
+    },
+
+    // Replace gate (provider seam): the outbound-request payload now carries the
+    // issuing `agent` identity (`main` for the root session, else the subagent
+    // type) and `tools` — the normalized names of the tools available to that
+    // agent for this request. A context-injecting plugin can gate on both:
+    // only act for the root agent, and only when a relevant tool is reachable.
+    // This demo just observes them and passes through (returns nothing).
+    provider_request(payload, ctx): HookInvokeResult | void {
+      const { agent, tools } = payload as { agent?: string; tools?: string[] };
+      ctx.log.info("demo-hooks: provider_request", {
+        agent: agent ?? "",
+        toolCount: (tools ?? []).length,
+      });
+      return observed();
     },
   },
 });

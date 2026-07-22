@@ -113,6 +113,8 @@ impl RequestInterceptor for HookRequestInterceptor {
                     endpoint: view.endpoint.clone(),
                     model: view.model.clone(),
                     base_url_alias: view.base_url_alias.clone(),
+                    agent: String::new(),
+                    tools: Vec::new(),
                     headers: view.headers.clone(),
                     body: view.body.clone(),
                 },

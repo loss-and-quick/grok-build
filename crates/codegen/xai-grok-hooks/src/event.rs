@@ -538,6 +538,14 @@ pub enum HookPayload {
         model: String,
         #[serde(rename = "baseUrlAlias")]
         base_url_alias: String,
+        /// The identity of the agent issuing the request: `main` for the
+        /// top-level session, otherwise the subagent type. Lets a plugin gate
+        /// its behaviour on which agent is active (e.g. only the root agent).
+        agent: String,
+        /// Normalized names of the tools available to `agent` for this request,
+        /// snapshotted from the session tool catalog. Lets a plugin condition
+        /// on whether a relevant tool is reachable before acting.
+        tools: Vec<String>,
         /// Request headers with the credential values removed.
         headers: Vec<(String, String)>,
         body: serde_json::Value,
@@ -1044,6 +1052,8 @@ mod tests {
                 endpoint: "chat/completions".into(),
                 model: "grok-4.5".into(),
                 base_url_alias: "https://api.x.ai/v1".into(),
+                agent: "reviewer".into(),
+                tools: vec!["read_file".into(), "memory__recall".into()],
                 headers: vec![("accept".into(), "text/event-stream".into())],
                 body: serde_json::json!({ "model": "grok-4.5" }),
             },
@@ -1060,6 +1070,15 @@ mod tests {
         assert_eq!(
             value.get("baseUrlAlias").and_then(|v| v.as_str()),
             Some("https://api.x.ai/v1")
+        );
+        // Agent identity and the resolved tool catalog ride alongside the body.
+        assert_eq!(value.get("agent").and_then(|v| v.as_str()), Some("reviewer"));
+        assert_eq!(
+            value
+                .get("tools")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+            Some(vec!["read_file", "memory__recall"])
         );
         assert!(value.get("body").is_some());
         // No credential header must be present (the fire site strips it).
