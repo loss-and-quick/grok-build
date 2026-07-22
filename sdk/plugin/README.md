@@ -114,6 +114,41 @@ not as an RPC error. In sessions without orchestration wiring every
 `ctx.agents` call rejects with JSON-RPC `method_not_found` (-32601) —
 catch it to feature-detect.
 
+## UI panels (`ctx.ui`)
+
+A plugin can publish a declarative panel the host renders in its pager.
+Publishing is keyed by the panel's own `id` — re-publishing the same `id`
+replaces the panel (latest-wins). Button presses come back as
+`panel_action` notifications, delivered to the definition's
+`onPanelAction` handler:
+
+```ts
+definePlugin({
+  async setup(ctx) {
+    await ctx.ui.publishPanel({
+      id: "build-status",
+      title: "Build",
+      blocks: [
+        { kind: "status", items: [{ label: "Tests", value: "passing", tone: "success" }] },
+        { kind: "markdown", text: "Last run **2m ago**." },
+        { kind: "actions", buttons: [{ id: "rerun", label: "Re-run" }] },
+      ],
+    });
+  },
+  async onPanelAction(panelId, buttonId, ctx) {
+    if (buttonId === "rerun") {
+      ctx.log.info(`rerun requested from ${panelId}`);
+      await ctx.ui.closePanel(panelId);
+    }
+  },
+});
+```
+
+`publishPanel`/`closePanel` are plugin→core requests (the SDK awaits the
+host's ack and discards the empty result). `onPanelAction` is best-effort,
+like the host's notification: a throw is logged and swallowed, never
+crashing the sidecar.
+
 ## Leader socket (headless ACP access)
 
 When the host process runs in leader mode, each sidecar is told where the
@@ -164,10 +199,12 @@ for editor/typecheck support) are devDependencies only.
   outgoing call (e.g. `ctx.storage.get`) must not block the loop that would
   deliver its response.
 - `src/rpc.ts` — typed wrappers over the wire methods: `initialize` /
-  `hook_invoke` / `tool_invoke` / `shutdown` handlers, and `HostClient` for
-  `log_emit`/`storage_*`/`config_get`.
-- `src/context.ts` — `PluginContext` (`log`, `storage`, `config()`,
-  `workspaceRoot`, `sessionId`) and the per-call `ToolCallContext`.
+  `hook_invoke` / `tool_invoke` / `tool_cancel` / `panel_action` / `shutdown`
+  handlers, and `HostClient` for
+  `log_emit`/`storage_*`/`config_get`/`agent_*`/`ui_publish_panel`/`ui_close_panel`.
+- `src/context.ts` — `PluginContext` (`log`, `storage`, `agents`, `ui`,
+  `config()`, `workspaceRoot`, `sessionId`) and the per-call
+  `ToolCallContext`.
 - `src/define.ts` — `definePlugin()` (hooks + tools) and the gate-aware
   result helpers (`allow`, `deny`, `stopBlock`, `forceStop`, `observed`,
   `replace`).

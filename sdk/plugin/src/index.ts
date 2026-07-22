@@ -30,6 +30,15 @@ export type { InitializeParams } from "./generated/InitializeParams.ts";
 export type { InitializeResult } from "./generated/InitializeResult.ts";
 export type { LogEmitParams } from "./generated/LogEmitParams.ts";
 export type { LogLevelDto } from "./generated/LogLevelDto.ts";
+export type { PanelActionParams } from "./generated/PanelActionParams.ts";
+export type { PanelBlock } from "./generated/PanelBlock.ts";
+export type { PanelButton } from "./generated/PanelButton.ts";
+export type { PanelCloseParams } from "./generated/PanelCloseParams.ts";
+export type { PanelCloseResult } from "./generated/PanelCloseResult.ts";
+export type { PanelPublishResult } from "./generated/PanelPublishResult.ts";
+export type { PanelStatusItem } from "./generated/PanelStatusItem.ts";
+export type { PanelTone } from "./generated/PanelTone.ts";
+export type { PanelViewModel } from "./generated/PanelViewModel.ts";
 export type { PluginCredentialDto } from "./generated/PluginCredentialDto.ts";
 export type { ShutdownParams } from "./generated/ShutdownParams.ts";
 export type { StorageDeleteParams } from "./generated/StorageDeleteParams.ts";
@@ -88,6 +97,7 @@ export type {
   PluginContext,
   PluginLogger,
   PluginStorage,
+  PluginUi,
   ToolCallContext,
 } from "./context.ts";
 

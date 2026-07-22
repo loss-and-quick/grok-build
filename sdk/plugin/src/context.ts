@@ -10,6 +10,7 @@ import type { AgentWaitResult } from "./generated/AgentWaitResult.ts";
 import type { AgentEventsResult } from "./generated/AgentEventsResult.ts";
 import type { AgentCancelOutcomeDto } from "./generated/AgentCancelOutcomeDto.ts";
 import type { AgentDescriptorDto } from "./generated/AgentDescriptorDto.ts";
+import type { PanelViewModel } from "./generated/PanelViewModel.ts";
 
 export interface PluginLogger {
   debug(message: string, fields?: unknown): void;
@@ -23,6 +24,19 @@ export interface PluginStorage {
   set(key: string, value: unknown): Promise<void>;
   delete(key: string): Promise<boolean>;
   list(prefix?: string): Promise<string[]>;
+}
+
+/**
+ * Declarative UI panels (`ctx.ui`). A plugin publishes a `PanelViewModel`
+ * the host renders in its pager; re-publishing the same `id` replaces it
+ * (latest-wins). Button activations come back as `panel_action`
+ * notifications, dispatched to the plugin's `onPanelAction` handler.
+ */
+export interface PluginUi {
+  /** Publishes (or replaces) a panel keyed by `vm.id`. */
+  publishPanel(vm: PanelViewModel): Promise<void>;
+  /** Removes the panel with this `id`; a no-op when unknown. */
+  closePanel(id: string): Promise<void>;
 }
 
 /**
@@ -85,6 +99,7 @@ export interface PluginContext {
   readonly log: PluginLogger;
   readonly storage: PluginStorage;
   readonly agents: PluginAgents;
+  readonly ui: PluginUi;
   /** Fetches the plugin's config from the manifest/settings via `config_get`. */
   config<T = unknown>(): Promise<T>;
 }
@@ -116,6 +131,17 @@ function createStorage(host: HostClient): PluginStorage {
     async list(prefix) {
       const { keys } = await host.storageList({ prefix: prefix ?? null });
       return keys;
+    },
+  };
+}
+
+function createUi(host: HostClient): PluginUi {
+  return {
+    async publishPanel(vm) {
+      await host.uiPublishPanel(vm);
+    },
+    async closePanel(id) {
+      await host.uiClosePanel({ id });
     },
   };
 }
@@ -176,6 +202,7 @@ export function createPluginContext(
     log: createLogger(host),
     storage: createStorage(host),
     agents: createAgents(host),
+    ui: createUi(host),
     async config<T = unknown>(): Promise<T> {
       const { value } = await host.configGet();
       return value as T;

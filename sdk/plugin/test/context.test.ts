@@ -4,6 +4,7 @@ import { createPluginContext } from "../src/context.ts";
 import { HostClient } from "../src/rpc.ts";
 import { JsonRpcEndpoint } from "../src/stdio.ts";
 import type { InitializeParams } from "../src/generated/InitializeParams.ts";
+import type { PanelViewModel } from "../src/generated/PanelViewModel.ts";
 import { MemoryByteReader, MemoryByteWriter } from "./helpers/memory-stream.ts";
 
 const INIT_PARAMS: InitializeParams = {
@@ -190,6 +191,35 @@ describe("PluginContext", () => {
       prompt: "and again",
       timeout_ms: null,
     });
+
+    await endpoint.stop();
+  });
+
+  test("ui.publishPanel/closePanel round-trip through the ui_* RPCs", async () => {
+    const reader = new MemoryByteReader();
+    const writer = new MemoryByteWriter();
+    const endpoint = new JsonRpcEndpoint({ reader, writer });
+    endpoint.start();
+    const ctx = createPluginContext(new HostClient(endpoint), INIT_PARAMS);
+
+    const vm: PanelViewModel = {
+      id: "panel-1",
+      title: "Status",
+      blocks: [{ kind: "markdown", text: "hello" }],
+    };
+    const publishP = ctx.ui.publishPanel(vm);
+    await respondToNext(writer, reader, 1, {});
+    await publishP;
+    const publishReq = writer.messages[0] as { method: string; params: unknown };
+    expect(publishReq.method).toBe("ui_publish_panel");
+    expect(publishReq.params).toEqual(vm);
+
+    const closeP = ctx.ui.closePanel("panel-1");
+    await respondToNext(writer, reader, 2, {});
+    await closeP;
+    const closeReq = writer.messages[1] as { method: string; params: unknown };
+    expect(closeReq.method).toBe("ui_close_panel");
+    expect(closeReq.params).toEqual({ id: "panel-1" });
 
     await endpoint.stop();
   });

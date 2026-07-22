@@ -34,6 +34,11 @@ import type { AgentCancelParams } from "./generated/AgentCancelParams.ts";
 import type { AgentCancelResult } from "./generated/AgentCancelResult.ts";
 import type { AgentSendParams } from "./generated/AgentSendParams.ts";
 import type { AgentSendResult } from "./generated/AgentSendResult.ts";
+import type { PanelViewModel } from "./generated/PanelViewModel.ts";
+import type { PanelPublishResult } from "./generated/PanelPublishResult.ts";
+import type { PanelCloseParams } from "./generated/PanelCloseParams.ts";
+import type { PanelCloseResult } from "./generated/PanelCloseResult.ts";
+import type { PanelActionParams } from "./generated/PanelActionParams.ts";
 
 /** Core→plugin method names, v1 (see wire-contract-v1.md). */
 export const CoreToPluginMethod = {
@@ -41,6 +46,7 @@ export const CoreToPluginMethod = {
   HookInvoke: "hook_invoke",
   ToolInvoke: "tool_invoke",
   ToolCancel: "tool_cancel",
+  PanelAction: "panel_action",
   Shutdown: "shutdown",
 } as const;
 
@@ -58,6 +64,8 @@ export const PluginToCoreMethod = {
   AgentEvents: "agent_events",
   AgentList: "agent_list",
   AgentCancel: "agent_cancel",
+  UiPublishPanel: "ui_publish_panel",
+  UiClosePanel: "ui_close_panel",
 } as const;
 
 /** Handlers for the core→plugin methods a plugin must serve. */
@@ -74,6 +82,9 @@ export interface IncomingHandlers {
   /** Notification: the host abandoned an in-flight `tool_invoke` (parent turn
    * aborted). No reply; the SDK aborts the matching handler's signal. */
   toolCancel(params: ToolCancelParams): void;
+  /** Notification: the user activated a button in a panel this plugin
+   * published. No reply; the SDK dispatches to `onPanelAction`. */
+  panelAction(params: PanelActionParams): void;
   shutdown(params: ShutdownParams): Promise<void> | void;
 }
 
@@ -93,6 +104,9 @@ export function registerIncomingHandlers(
   );
   endpoint.setNotificationHandler(CoreToPluginMethod.ToolCancel, (params) =>
     handlers.toolCancel(params as ToolCancelParams),
+  );
+  endpoint.setNotificationHandler(CoreToPluginMethod.PanelAction, (params) =>
+    handlers.panelAction(params as PanelActionParams),
   );
   endpoint.setNotificationHandler(CoreToPluginMethod.Shutdown, (params) =>
     handlers.shutdown(params as ShutdownParams),
@@ -197,6 +211,20 @@ export class HostClient {
   agentCancel(params: AgentCancelParams): Promise<AgentCancelResult> {
     return this.endpoint.request<AgentCancelResult>(
       PluginToCoreMethod.AgentCancel,
+      params,
+    );
+  }
+
+  uiPublishPanel(params: PanelViewModel): Promise<PanelPublishResult> {
+    return this.endpoint.request<PanelPublishResult>(
+      PluginToCoreMethod.UiPublishPanel,
+      params,
+    );
+  }
+
+  uiClosePanel(params: PanelCloseParams): Promise<PanelCloseResult> {
+    return this.endpoint.request<PanelCloseResult>(
+      PluginToCoreMethod.UiClosePanel,
       params,
     );
   }

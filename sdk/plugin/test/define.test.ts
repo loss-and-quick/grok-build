@@ -586,6 +586,40 @@ describe("definePlugin — tools", () => {
   });
 });
 
+describe("definePlugin — panel_action dispatch", () => {
+  test("a panel_action notification fires onPanelAction with the ids and ctx", async () => {
+    const { reader, writer } = setUpEndpoint();
+    let seenPanelId = "";
+    let seenButtonId = "";
+    let seenSessionId = "";
+    definePlugin(
+      {
+        onPanelAction(panelId, buttonId, ctx) {
+          seenPanelId = panelId;
+          seenButtonId = buttonId;
+          seenSessionId = ctx.sessionId;
+        },
+      },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    reader.pushLine({
+      jsonrpc: "2.0",
+      method: "panel_action",
+      params: { panel_id: "p1", button_id: "ok" },
+    });
+
+    // No reply is written for a notification; poll until the handler ran.
+    for (let i = 0; i < 50 && seenPanelId === ""; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(seenPanelId).toBe("p1");
+    expect(seenButtonId).toBe("ok");
+    expect(seenSessionId).toBe("session-123");
+  });
+});
+
 describe("definePlugin — shutdown", () => {
   test("runs the teardown callback returned by setup() and resolves whenShutdown", async () => {
     const { reader, writer } = setUpEndpoint();

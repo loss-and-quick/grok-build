@@ -85,6 +85,15 @@ export interface PluginDefinition {
   name?: string;
   hooks?: { [E in EventName]?: HookHandler<E> };
   tools?: Record<string, ToolDefinition>;
+  /** Fires when the user activates a button in a panel this plugin published
+   * (via `ctx.ui.publishPanel`). `panelId`/`buttonId` are the panel's and
+   * button's ids. Best-effort, like the host's `panel_action` notification —
+   * a throw is logged and swallowed, never crashing the sidecar. */
+  onPanelAction?: (
+    panelId: string,
+    buttonId: string,
+    ctx: PluginContext,
+  ) => void | Promise<void>;
   setup?: (ctx: PluginContext) => Promise<void | Teardown> | void | Teardown;
 }
 
@@ -285,6 +294,22 @@ export function definePlugin(
       // invocation-scoped work (e.g. cancel spawned subagents). Unknown ids
       // (already finished) are a no-op.
       activeToolCalls.get(params.invocation_id)?.abort();
+    },
+
+    async panelAction(params): Promise<void> {
+      // Only dispatch once initialize built the context; a stray action
+      // before then is dropped. Fail-open: a throwing handler is logged,
+      // never crashing the sidecar.
+      if (!ctx) return;
+      try {
+        await def.onPanelAction?.(params.panel_id, params.button_id, ctx);
+      } catch (err) {
+        host.logEmit({
+          level: "error",
+          message: `onPanelAction for panel "${params.panel_id}" threw`,
+          fields: { error: err instanceof Error ? err.message : String(err) },
+        });
+      }
     },
 
     async shutdown(): Promise<void> {
