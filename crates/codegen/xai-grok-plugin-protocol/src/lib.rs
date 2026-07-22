@@ -693,6 +693,122 @@ pub struct AgentSendResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ui_publish_panel / ui_close_panel (plugin→core requests) and panel_action
+// (core→plugin notification) — the generic plugin UI panel surface.
+//
+// A plugin pushes a declarative [`PanelViewModel`] to the host; the pager renders
+// it both as a full-screen overlay (opened with Ctrl+P) and as a compact sidebar
+// widget. The pager owns all interaction state — Table row selection/scroll and
+// button focus — so the view model is pure data, re-published wholesale on every
+// change (latest-wins, keyed by `id`). When a button is activated the pager
+// routes it back to the publishing plugin as a [`PanelActionParams`] notification.
+//
+// The host maps each `id` to the sidecar that published it; `id` is the plugin's
+// own local string and carries no plugin identity of its own.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Tone of a status chip, driving its colour in the pager. Shared vocabulary,
+/// plugin→core. Defaults to `neutral` when a plugin omits it.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub enum PanelTone {
+    #[default]
+    Neutral,
+    Success,
+    Warning,
+    Error,
+}
+
+/// One key/value chip in a [`PanelBlock::Status`] block. Plugin→core.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct PanelStatusItem {
+    pub label: String,
+    pub value: String,
+    #[serde(default)]
+    pub tone: PanelTone,
+}
+
+/// One button in a [`PanelBlock::Actions`] block. Plugin→core. `key` is an
+/// optional single-character keybind the pager binds while the panel is focused;
+/// activating any button routes [`PanelActionParams`] back to the plugin.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+pub struct PanelButton {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+/// One block of panel content. Internally tagged on `kind` (mirrors
+/// [`HookInvokeResult`]). Plugin→core. The pager renders every block of a panel
+/// at once, top to bottom.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub enum PanelBlock {
+    /// A row of status chips, each `label: value` coloured by its `tone`.
+    Status { items: Vec<PanelStatusItem> },
+    /// Markdown, rendered by the pager's own markdown renderer (headings,
+    /// lists, tables, code — the same one used for model output).
+    Markdown { text: String },
+    /// A table the pager owns: it windows the `rows` and, when `selectable`,
+    /// tracks the highlighted row with its own up/down navigation. The plugin
+    /// supplies only the data.
+    Table {
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+        #[serde(default)]
+        selectable: bool,
+    },
+    /// A row of focusable buttons; activation routes back to the plugin.
+    Actions { buttons: Vec<PanelButton> },
+}
+
+/// A declarative UI panel a plugin publishes to the host. Plugin→core; this is
+/// the `ui_publish_panel` request params. `id` is the plugin's own stable key
+/// for the panel (re-publishing the same `id` replaces it, latest-wins).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct PanelViewModel {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub blocks: Vec<PanelBlock>,
+}
+
+/// `ui_publish_panel` reply (empty). Plugin→core.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct PanelPublishResult {}
+
+/// `ui_close_panel` request params. Plugin→core. Removes the panel with this
+/// `id`; no-op when unknown.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct PanelCloseParams {
+    pub id: String,
+}
+
+/// `ui_close_panel` reply (empty). Plugin→core.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct PanelCloseResult {}
+
+/// `panel_action` notification params. Core→plugin. Fired when the user
+/// activates a button in a panel this plugin published: `panel_id` is the
+/// [`PanelViewModel::id`], `button_id` the [`PanelButton::id`]. Best-effort,
+/// like `tool_cancel` — the host does not wait for a reply.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct PanelActionParams {
+    pub panel_id: String,
+    pub button_id: String,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ts-rs export
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -757,6 +873,15 @@ mod bindings_export {
             AgentCancelResult,
             AgentSendParams,
             AgentSendResult,
+            PanelTone,
+            PanelStatusItem,
+            PanelButton,
+            PanelBlock,
+            PanelViewModel,
+            PanelPublishResult,
+            PanelCloseParams,
+            PanelCloseResult,
+            PanelActionParams,
         );
     }
 }
@@ -1224,6 +1349,152 @@ mod tests {
                 fields: Some(json!({ "n": 1 })),
             },
             json!({ "level": "warn", "message": "hi", "fields": { "n": 1 } }),
+        );
+    }
+
+    #[test]
+    fn panel_view_model_round_trip() {
+        round_trip(
+            &PanelViewModel {
+                id: "review".into(),
+                title: "Code Review".into(),
+                blocks: vec![
+                    PanelBlock::Status {
+                        items: vec![
+                            PanelStatusItem {
+                                label: "status".into(),
+                                value: "green".into(),
+                                tone: PanelTone::Success,
+                            },
+                            // tone defaults to neutral when omitted (below).
+                            PanelStatusItem {
+                                label: "files".into(),
+                                value: "3".into(),
+                                tone: PanelTone::Neutral,
+                            },
+                        ],
+                    },
+                    PanelBlock::Markdown {
+                        text: "# Summary\nLooks good.".into(),
+                    },
+                    PanelBlock::Table {
+                        columns: vec!["file".into(), "risk".into()],
+                        rows: vec![
+                            vec!["a.rs".into(), "low".into()],
+                            vec!["b.rs".into(), "high".into()],
+                        ],
+                        selectable: true,
+                    },
+                    PanelBlock::Actions {
+                        buttons: vec![PanelButton {
+                            id: "approve".into(),
+                            label: "Approve".into(),
+                            key: Some("a".into()),
+                        }],
+                    },
+                ],
+            },
+            json!({
+                "id": "review",
+                "title": "Code Review",
+                "blocks": [
+                    {
+                        "kind": "status",
+                        "items": [
+                            { "label": "status", "value": "green", "tone": "success" },
+                            { "label": "files", "value": "3", "tone": "neutral" },
+                        ],
+                    },
+                    { "kind": "markdown", "text": "# Summary\nLooks good." },
+                    {
+                        "kind": "table",
+                        "columns": ["file", "risk"],
+                        "rows": [["a.rs", "low"], ["b.rs", "high"]],
+                        "selectable": true,
+                    },
+                    {
+                        "kind": "actions",
+                        "buttons": [{ "id": "approve", "label": "Approve", "key": "a" }],
+                    },
+                ],
+            }),
+        );
+
+        // Empty view model: no blocks. `blocks` defaults to `[]`, and a bare
+        // status item omits `tone` (defaults to neutral).
+        let vm: PanelViewModel =
+            serde_json::from_value(json!({ "id": "p1", "title": "T", "future": 1 })).unwrap();
+        assert_eq!(vm.blocks, Vec::<PanelBlock>::new());
+        let item: PanelStatusItem =
+            serde_json::from_value(json!({ "label": "l", "value": "v" })).unwrap();
+        assert_eq!(item.tone, PanelTone::Neutral);
+        let btn: PanelButton =
+            serde_json::from_value(json!({ "id": "b", "label": "L" })).unwrap();
+        assert_eq!(btn.key, None);
+    }
+
+    /// Each internally-tagged `PanelBlock` variant serializes with a `kind`
+    /// discriminator and round-trips (mirrors `hook_invoke_result_variants`).
+    #[test]
+    fn panel_block_variants_round_trip() {
+        round_trip(
+            &PanelBlock::Status {
+                items: vec![PanelStatusItem {
+                    label: "l".into(),
+                    value: "v".into(),
+                    tone: PanelTone::Warning,
+                }],
+            },
+            json!({ "kind": "status", "items": [{ "label": "l", "value": "v", "tone": "warning" }] }),
+        );
+        round_trip(
+            &PanelBlock::Markdown { text: "hi".into() },
+            json!({ "kind": "markdown", "text": "hi" }),
+        );
+        round_trip(
+            &PanelBlock::Table {
+                columns: vec!["c".into()],
+                rows: vec![vec!["r".into()]],
+                selectable: false,
+            },
+            json!({ "kind": "table", "columns": ["c"], "rows": [["r"]], "selectable": false }),
+        );
+        round_trip(
+            &PanelBlock::Actions {
+                buttons: vec![PanelButton {
+                    id: "b".into(),
+                    label: "B".into(),
+                    key: None,
+                }],
+            },
+            json!({ "kind": "actions", "buttons": [{ "id": "b", "label": "B", "key": null }] }),
+        );
+    }
+
+    #[test]
+    fn panel_tone_wire_forms() {
+        for (v, s) in [
+            (PanelTone::Neutral, "neutral"),
+            (PanelTone::Success, "success"),
+            (PanelTone::Warning, "warning"),
+            (PanelTone::Error, "error"),
+        ] {
+            assert_eq!(serde_json::to_value(v).unwrap(), json!(s));
+        }
+        assert_eq!(PanelTone::default(), PanelTone::Neutral);
+    }
+
+    #[test]
+    fn panel_rpc_round_trip() {
+        round_trip(&PanelPublishResult {}, json!({}));
+        round_trip(&PanelCloseParams { id: "p1".into() }, json!({ "id": "p1" }));
+        round_trip(&PanelCloseResult {}, json!({}));
+        round_trip(
+            &PanelActionParams {
+                panel_id: "review".into(),
+                button_id: "approve".into(),
+            },
+            json!({ "panel_id": "review", "button_id": "approve" }),
         );
     }
 
