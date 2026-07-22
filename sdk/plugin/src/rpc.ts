@@ -32,6 +32,8 @@ import type { AgentEventsResult } from "./generated/AgentEventsResult.ts";
 import type { AgentListResult } from "./generated/AgentListResult.ts";
 import type { AgentCancelParams } from "./generated/AgentCancelParams.ts";
 import type { AgentCancelResult } from "./generated/AgentCancelResult.ts";
+import type { AgentSendParams } from "./generated/AgentSendParams.ts";
+import type { AgentSendResult } from "./generated/AgentSendResult.ts";
 
 /** Core→plugin method names, v1 (see wire-contract-v1.md). */
 export const CoreToPluginMethod = {
@@ -51,6 +53,7 @@ export const PluginToCoreMethod = {
   StorageList: "storage_list",
   ConfigGet: "config_get",
   AgentSpawn: "agent_spawn",
+  AgentSend: "agent_send",
   AgentWait: "agent_wait",
   AgentEvents: "agent_events",
   AgentList: "agent_list",
@@ -151,6 +154,13 @@ export class HostClient {
   agentSpawn(params: AgentSpawnParams): Promise<AgentSpawnResult> {
     return this.endpoint.request<AgentSpawnResult>(
       PluginToCoreMethod.AgentSpawn,
+      params,
+    );
+  }
+
+  agentSend(params: AgentSendParams): Promise<AgentSendResult> {
+    return this.endpoint.request<AgentSendResult>(
+      PluginToCoreMethod.AgentSend,
       params,
     );
   }

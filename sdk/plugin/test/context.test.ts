@@ -162,6 +162,38 @@ describe("PluginContext", () => {
     await endpoint.stop();
   });
 
+  test("agents.send continues a prior subagent and resolves the new id", async () => {
+    const reader = new MemoryByteReader();
+    const writer = new MemoryByteWriter();
+    const endpoint = new JsonRpcEndpoint({ reader, writer });
+    endpoint.start();
+    const ctx = createPluginContext(new HostClient(endpoint), INIT_PARAMS);
+
+    const sendP = ctx.agents.send("agent-1", "now review it", 30_000);
+    await respondToNext(writer, reader, 1, { id: "agent-2" });
+    expect(await sendP).toBe("agent-2");
+    const sendReq = writer.messages[0] as { method: string; params: unknown };
+    expect(sendReq.method).toBe("agent_send");
+    expect(sendReq.params).toEqual({
+      id: "agent-1",
+      prompt: "now review it",
+      timeout_ms: 30_000,
+    });
+
+    // Omitted timeout serializes as null.
+    const sendP2 = ctx.agents.send("agent-2", "and again");
+    await respondToNext(writer, reader, 2, { id: "agent-3" });
+    expect(await sendP2).toBe("agent-3");
+    const sendReq2 = writer.messages[1] as { params: unknown };
+    expect(sendReq2.params).toEqual({
+      id: "agent-2",
+      prompt: "and again",
+      timeout_ms: null,
+    });
+
+    await endpoint.stop();
+  });
+
   test("config<T>() calls config_get and returns its value", async () => {
     const reader = new MemoryByteReader();
     const writer = new MemoryByteWriter();

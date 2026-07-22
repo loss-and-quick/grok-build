@@ -36,6 +36,12 @@ export interface PluginAgents {
   /** Spawns a subagent; resolves with its id. Validation failures (unknown
    * type, bad model) surface as the terminal result of `wait()`. */
   spawn(spec: AgentSpawnParams): Promise<string>;
+  /** Continues a prior terminal subagent with a follow-up `prompt`: resolves
+   * with a NEW id (a fresh child that resumes `id`'s conversation, then runs
+   * `prompt`). Multi-turn via stateless-continue; the prior id stays terminal.
+   * Wait/events/cancel on the returned id. `timeoutMs` bounds the
+   * continuation like a spawn timeout. */
+  send(id: string, prompt: string, timeoutMs?: number): Promise<string>;
   /** Waits up to `timeoutMs` (default 30 000) for the terminal result; a
    * still-running subagent resolves with `status: "running"`. */
   wait(id: string, timeoutMs?: number): Promise<AgentWaitResult>;
@@ -125,6 +131,14 @@ function createAgents(host: HostClient): PluginAgents {
     async spawn(spec) {
       const { id } = await host.agentSpawn(spec);
       return id;
+    },
+    async send(id, prompt, timeoutMs) {
+      const { id: nextId } = await host.agentSend({
+        id,
+        prompt,
+        timeout_ms: timeoutMs ?? null,
+      });
+      return nextId;
     },
     async wait(id, timeoutMs) {
       const budget = timeoutMs ?? AGENT_WAIT_DEFAULT_TIMEOUT_MS;
