@@ -15,6 +15,8 @@ pub mod permission;
 pub use permission::*;
 mod pool;
 pub use pool::*;
+pub mod provider;
+pub use provider::*;
 use serde::{Deserialize, Serialize};
 use xai_grok_announcements::RemoteAnnouncement;
 /// A remote `campaigns[]` entry: an `id` gate plus a full-power
