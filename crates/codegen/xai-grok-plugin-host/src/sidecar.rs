@@ -31,7 +31,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 use xai_grok_plugin_protocol::{
-    InitializeParams, InitializeResult, PROTOCOL_VERSION, ShutdownParams, ToolCancelParams,
+    InitializeParams, InitializeResult, PROTOCOL_VERSION, PanelActionParams, ShutdownParams,
+    ToolCancelParams,
 };
 use xai_tty_utils::ProcessGroup;
 
@@ -239,6 +240,20 @@ impl PluginSidecar {
                 invocation_id: invocation_id.to_string(),
             })
             .unwrap_or(Value::Null),
+        );
+    }
+
+    /// Deliver a `panel_action` notification to the plugin (a button in one of
+    /// its published panels was activated). Fire-and-forget, like
+    /// [`Self::notify_tool_cancel`]: the host does not await a reply. Only sends
+    /// while the transport is alive (a dead sidecar has no panel to act on).
+    pub(crate) fn notify_panel_action(&self, params: &PanelActionParams) {
+        if !self.is_alive() {
+            return;
+        }
+        self.notify(
+            "panel_action",
+            serde_json::to_value(params).unwrap_or(Value::Null),
         );
     }
 

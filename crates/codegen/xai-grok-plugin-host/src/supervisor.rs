@@ -89,8 +89,11 @@ pub struct PluginHost {
     /// The injected subagent-orchestration seam, fanned out to every plugin's
     /// capability server (current and future registrations). `None` keeps the
     /// `agent_*` methods answering `method_not_found`.
-    agent_orchestrator:
-        std::sync::Mutex<Option<Arc<dyn crate::orchestration::AgentOrchestrator>>>,
+    agent_orchestrator: std::sync::Mutex<Option<Arc<dyn crate::orchestration::AgentOrchestrator>>>,
+    /// The injected UI-panel seam, fanned out to every plugin's capability
+    /// server (current and future registrations). `None` keeps
+    /// `ui_publish_panel`/`ui_close_panel` answering `method_not_found`.
+    panel_sink: std::sync::Mutex<Option<Arc<dyn crate::orchestration::PanelSink>>>,
 }
 
 /// One registered plugin: its spec, capability server (shared across restarts),
@@ -132,6 +135,7 @@ impl PluginHost {
             next_invocation: AtomicU64::new(1),
             plugins: std::sync::Mutex::new(HashMap::new()),
             agent_orchestrator: std::sync::Mutex::new(None),
+            panel_sink: std::sync::Mutex::new(None),
         }
     }
 
@@ -160,6 +164,7 @@ impl PluginHost {
             next_invocation: AtomicU64::new(1),
             plugins: std::sync::Mutex::new(HashMap::new()),
             agent_orchestrator: std::sync::Mutex::new(None),
+            panel_sink: std::sync::Mutex::new(None),
         }
     }
 
@@ -181,6 +186,18 @@ impl PluginHost {
         }
     }
 
+    /// Install the UI-panel seam, fanning it out to every registered plugin's
+    /// capability server; plugins registered later inherit it too. Takes
+    /// `&self`: the shell wires it after the host is built (the pager channel
+    /// may not exist yet at construction).
+    pub fn set_panel_sink(&self, sink: Arc<dyn crate::orchestration::PanelSink>) {
+        *self.panel_sink.lock().expect("panel sink slot poisoned") = Some(Arc::clone(&sink));
+        let plugins = self.plugins.lock().expect("registry poisoned");
+        for entry in plugins.values() {
+            entry.caps.set_panel_sink(Arc::clone(&sink));
+        }
+    }
+
     /// Register a plugin. Idempotent per name (a re-register replaces the entry,
     /// dropping any prior sidecar on next access).
     pub fn register_plugin(&self, spec: RegisteredPlugin) {
@@ -196,6 +213,14 @@ impl PluginHost {
             .as_ref()
         {
             caps.set_orchestrator(Arc::clone(orchestrator));
+        }
+        if let Some(sink) = self
+            .panel_sink
+            .lock()
+            .expect("panel sink slot poisoned")
+            .as_ref()
+        {
+            caps.set_panel_sink(Arc::clone(sink));
         }
         let entry = Arc::new(PluginEntry {
             caps,
@@ -595,6 +620,38 @@ impl PluginHost {
                 "plugin '{plugin}' tool '{tool}' failed: {e}"
             ))),
         }
+    }
+
+    /// Deliver a `panel_action` notification to a named plugin (the panel's
+    /// owner). Best-effort, fire-and-forget, like tool_cancel: an unregistered
+    /// plugin or a sidecar that won't start is logged and dropped, never a
+    /// panic — a stale button press must not wedge the UI.
+    pub async fn deliver_panel_action(
+        &self,
+        plugin: &str,
+        params: xai_grok_plugin_protocol::PanelActionParams,
+    ) {
+        let entry = {
+            let plugins = self.plugins.lock().expect("registry poisoned");
+            plugins.get(plugin).cloned()
+        };
+        let Some(entry) = entry else {
+            tracing::debug!(plugin = %plugin, "panel_action for unregistered plugin; dropping");
+            return;
+        };
+        // Same locking discipline as invoke_tool: obtain a live sidecar under
+        // the state guard, then drop it before touching the wire.
+        let sidecar = {
+            let mut state = entry.state.lock().await;
+            match self.ensure_alive(&entry, &mut state).await {
+                Ok(sidecar) => sidecar,
+                Err(e) => {
+                    tracing::debug!(plugin = %plugin, "panel_action undeliverable: {e}");
+                    return;
+                }
+            }
+        };
+        sidecar.notify_panel_action(&params);
     }
 }
 

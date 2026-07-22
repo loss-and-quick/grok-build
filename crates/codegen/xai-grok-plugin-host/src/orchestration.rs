@@ -14,6 +14,15 @@ use std::pin::Pin;
 // Re-exported so orchestrator implementations (the shell) can name the wire
 // status without a direct protocol dependency.
 pub use xai_grok_plugin_protocol::AgentStatusDto;
+use xai_grok_plugin_protocol::PanelViewModel;
+
+/// Seam the shell implements to surface plugin-published UI panels in the TUI.
+/// Fire-and-forget: the host calls these from request tasks; the shell forwards
+/// them onto its session channel. `plugin` is the publishing sidecar's name.
+pub trait PanelSink: Send + Sync {
+    fn publish_panel(&self, plugin: &str, view_model: PanelViewModel);
+    fn close_panel(&self, plugin: &str, panel_id: &str);
+}
 
 /// Boxed future for the async orchestrator methods (object safety).
 pub type OrchestratorFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

@@ -26,13 +26,14 @@ use xai_grok_plugin_protocol::{
     AgentCancelOutcomeDto, AgentCancelParams, AgentCancelResult, AgentDescriptorDto, AgentEventDto,
     AgentEventKindDto, AgentEventsParams, AgentEventsResult, AgentListResult, AgentSendParams,
     AgentSendResult, AgentSpawnParams, AgentSpawnResult, AgentStatusDto, AgentWaitParams,
-    AgentWaitResult, ConfigGetResult, LogEmitParams, LogLevelDto, StorageDeleteParams,
-    StorageDeleteResult, StorageGetParams, StorageGetResult, StorageListParams, StorageListResult,
-    StorageSetParams, StorageSetResult,
+    AgentWaitResult, ConfigGetResult, LogEmitParams, LogLevelDto, PanelCloseParams,
+    PanelCloseResult, PanelPublishResult, PanelViewModel, StorageDeleteParams, StorageDeleteResult,
+    StorageGetParams, StorageGetResult, StorageListParams, StorageListResult, StorageSetParams,
+    StorageSetResult,
 };
 
 use crate::orchestration::{
-    AgentOrchestrator, AgentOutcome, AgentProgress, AgentSpawnSpec, OrchestratorCancel,
+    AgentOrchestrator, AgentOutcome, AgentProgress, AgentSpawnSpec, OrchestratorCancel, PanelSink,
 };
 use crate::rpc::RpcError;
 
@@ -56,6 +57,10 @@ pub struct PluginCapabilities {
     /// which case every `agent_*` method answers `method_not_found` (exactly
     /// the pre-wiring behavior, so plugins can feature-detect).
     orchestrator: std::sync::OnceLock<Arc<dyn AgentOrchestrator>>,
+    /// The injected UI-panel seam; unset until the shell wires one, in which
+    /// case `ui_publish_panel`/`ui_close_panel` answer `method_not_found`
+    /// (exactly the pre-wiring behavior, so plugins can feature-detect).
+    panel_sink: std::sync::OnceLock<std::sync::Arc<dyn PanelSink>>,
     /// Subagents spawned by THIS plugin, keyed by id. Lives here (not on the
     /// sidecar) so wait/events state survives a sidecar crash-restart, and so
     /// one plugin can never wait on or cancel another plugin's spawns.
@@ -69,6 +74,7 @@ impl PluginCapabilities {
             config,
             storage: PluginStorage::new(storage_path),
             orchestrator: std::sync::OnceLock::new(),
+            panel_sink: std::sync::OnceLock::new(),
             agents: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -77,6 +83,12 @@ impl PluginCapabilities {
     /// ignored (one session, one coordinator).
     pub fn set_orchestrator(&self, orchestrator: Arc<dyn AgentOrchestrator>) {
         let _ = self.orchestrator.set(orchestrator);
+    }
+
+    /// Install the UI-panel seam. First call wins; later calls are ignored
+    /// (one session, one pager).
+    pub fn set_panel_sink(&self, sink: Arc<dyn PanelSink>) {
+        let _ = self.panel_sink.set(sink);
     }
 
     /// Serve a plugin request, returning the JSON `result` or a JSON-RPC error.
@@ -118,6 +130,8 @@ impl PluginCapabilities {
             "agent_events" => self.agent_events(params).await,
             "agent_list" => self.agent_list().await,
             "agent_cancel" => self.agent_cancel(params).await,
+            "ui_publish_panel" => self.ui_publish_panel(params).await,
+            "ui_close_panel" => self.ui_close_panel(params).await,
             // Reserved: superseded by the cursor-based `agent_events` poll
             // (request/reply framing; state survives sidecar restarts).
             "agent_events_subscribe" => Err(RpcError::method_not_found(method)),
@@ -132,6 +146,29 @@ impl PluginCapabilities {
             .get()
             .cloned()
             .ok_or_else(|| RpcError::method_not_found(method))
+    }
+
+    /// The panel sink, or the pre-wiring `method_not_found` answer that lets
+    /// plugins feature-detect UI-panel support.
+    fn panel_sink_for(&self, method: &str) -> Result<Arc<dyn PanelSink>, RpcError> {
+        self.panel_sink
+            .get()
+            .cloned()
+            .ok_or_else(|| RpcError::method_not_found(method))
+    }
+
+    async fn ui_publish_panel(&self, params: &Value) -> Result<Value, RpcError> {
+        let sink = self.panel_sink_for("ui_publish_panel")?;
+        let vm: PanelViewModel = parse_params(params)?;
+        sink.publish_panel(&self.name, vm);
+        to_result(&PanelPublishResult {})
+    }
+
+    async fn ui_close_panel(&self, params: &Value) -> Result<Value, RpcError> {
+        let sink = self.panel_sink_for("ui_close_panel")?;
+        let p: PanelCloseParams = parse_params(params)?;
+        sink.close_panel(&self.name, &p.id);
+        to_result(&PanelCloseResult {})
     }
 
     /// A handle for one of THIS plugin's spawns; foreign/unknown ids are
@@ -172,7 +209,8 @@ impl PluginCapabilities {
         });
         let agent_type = spec.agent_type.clone();
         let spawned = orchestrator.spawn(spec).map_err(RpcError::internal)?;
-        let id = self.register_and_watch(orchestrator, spawned, spawn_data, p.timeout_ms, agent_type);
+        let id =
+            self.register_and_watch(orchestrator, spawned, spawn_data, p.timeout_ms, agent_type);
         to_result(&AgentSpawnResult { id })
     }
 
@@ -217,7 +255,8 @@ impl PluginCapabilities {
             "timeout_ms": p.timeout_ms,
         });
         let spawned = orchestrator.spawn(spec).map_err(RpcError::internal)?;
-        let id = self.register_and_watch(orchestrator, spawned, spawn_data, p.timeout_ms, agent_type);
+        let id =
+            self.register_and_watch(orchestrator, spawned, spawn_data, p.timeout_ms, agent_type);
         to_result(&AgentSendResult { id })
     }
 
@@ -244,7 +283,13 @@ impl PluginCapabilities {
             .expect("agents map poisoned")
             .insert(spawned.id.clone(), Arc::clone(&handle));
         let id = spawned.id.clone();
-        spawn_outcome_watcher(orchestrator, spawned.id, spawned.result_rx, handle, timeout_ms);
+        spawn_outcome_watcher(
+            orchestrator,
+            spawned.id,
+            spawned.result_rx,
+            handle,
+            timeout_ms,
+        );
         id
     }
 
@@ -550,10 +595,9 @@ fn spawn_outcome_watcher(
                                 error: Some(timeout_note),
                                 ..real
                             },
-                            _ => AgentOutcome::infra_failure(
-                                AgentStatusDto::Cancelled,
-                                timeout_note,
-                            ),
+                            _ => {
+                                AgentOutcome::infra_failure(AgentStatusDto::Cancelled, timeout_note)
+                            }
                         }
                     }
                 }
@@ -799,6 +843,8 @@ mod tests {
             "agent_list",
             "agent_cancel",
             "agent_events_subscribe",
+            "ui_publish_panel",
+            "ui_close_panel",
             "totally_unknown",
         ] {
             let err = c.handle_request(m, &json!({})).await.unwrap_err();
@@ -916,6 +962,90 @@ mod tests {
         let orch = Arc::new(MockOrchestrator::default());
         c.set_orchestrator(Arc::clone(&orch) as Arc<dyn AgentOrchestrator>);
         (c, orch)
+    }
+
+    // ── UI-panel seam over a mock sink ──────────────────────────────────────
+
+    /// Records every published view model and every close, each tagged with the
+    /// publishing plugin name, so tests can assert the host routed them.
+    #[derive(Default)]
+    struct MockPanelSink {
+        published: std::sync::Mutex<Vec<(String, PanelViewModel)>>,
+        closed: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl PanelSink for MockPanelSink {
+        fn publish_panel(&self, plugin: &str, view_model: PanelViewModel) {
+            self.published
+                .lock()
+                .unwrap()
+                .push((plugin.to_string(), view_model));
+        }
+        fn close_panel(&self, plugin: &str, panel_id: &str) {
+            self.closed
+                .lock()
+                .unwrap()
+                .push((plugin.to_string(), panel_id.to_string()));
+        }
+    }
+
+    fn caps_with_panel_sink(dir: &std::path::Path) -> (PluginCapabilities, Arc<MockPanelSink>) {
+        let c = caps(dir, Value::Null);
+        let sink = Arc::new(MockPanelSink::default());
+        c.set_panel_sink(Arc::clone(&sink) as Arc<dyn PanelSink>);
+        (c, sink)
+    }
+
+    /// `ui_publish_panel` parses the view model, routes it to the sink tagged
+    /// with this caps' plugin name, and returns an empty result.
+    #[tokio::test]
+    async fn ui_publish_panel_routes_to_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, sink) = caps_with_panel_sink(dir.path());
+
+        let r = c
+            .handle_request(
+                "ui_publish_panel",
+                &json!({
+                    "id": "status",
+                    "title": "Build status",
+                    "blocks": [
+                        { "kind": "markdown", "text": "all green" },
+                        { "kind": "actions", "buttons": [
+                            { "id": "rerun", "label": "Re-run", "tone": "neutral" }
+                        ] },
+                    ],
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r, json!({}));
+
+        let published = sink.published.lock().unwrap();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].0, "my.plugin");
+        assert_eq!(published[0].1.id, "status");
+        assert_eq!(published[0].1.title, "Build status");
+        assert_eq!(published[0].1.blocks.len(), 2);
+    }
+
+    /// `ui_close_panel` routes the id to the sink and returns an empty result.
+    #[tokio::test]
+    async fn ui_close_panel_routes_to_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, sink) = caps_with_panel_sink(dir.path());
+
+        let r = c
+            .handle_request("ui_close_panel", &json!({ "id": "status" }))
+            .await
+            .unwrap();
+        assert_eq!(r, json!({}));
+
+        let closed = sink.closed.lock().unwrap();
+        assert_eq!(
+            closed.as_slice(),
+            &[("my.plugin".to_string(), "status".to_string())]
+        );
     }
 
     async fn spawn_one(c: &PluginCapabilities, params: Value) -> String {
