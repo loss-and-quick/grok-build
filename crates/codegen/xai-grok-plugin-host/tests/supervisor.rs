@@ -6,6 +6,7 @@
 //! are unit-tested inside the crate.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -57,6 +58,53 @@ fn req(event: &str, timeout_ms: u64) -> PluginHookRequest {
         payload: serde_json::json!({ "tool": "bash" }),
         timeout_ms,
     }
+}
+
+#[tokio::test]
+async fn spawn_hardener_runs_with_the_plugin_network_flag() {
+    // The seccomp network confinement for `network: false` sidecars is applied
+    // through the injected SpawnHardener. Assert it actually runs on the real
+    // spawn path, carrying the plugin's network flag. The test hardener only
+    // records the flag — it never installs seccomp — so it stays host-agnostic.
+    let data_dir = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_fake_sidecar");
+    let factory = Box::new(move |_spec: &RegisteredPlugin| {
+        let mut cmd = tokio::process::Command::new(bin);
+        cmd.env("FAKE_MODE", "normal");
+        cmd.env("FAKE_SUBSCRIPTIONS", "pre_tool_use");
+        Ok(cmd)
+    });
+    let seen = Arc::new(Mutex::new(Vec::<bool>::new()));
+    let rec = Arc::clone(&seen);
+    let mut host = PluginHost::new_for_test(
+        data_dir.path().to_path_buf(),
+        factory,
+        Duration::from_millis(10),
+    );
+    host.set_spawn_hardener(Arc::new(move |_cmd, network| {
+        rec.lock().unwrap().push(network);
+    }));
+    host.register_plugin(RegisteredPlugin {
+        name: "p".to_string(),
+        entry: PathBuf::from("/does/not/matter.ts"),
+        runtime: RuntimeKind::Auto,
+        network: false,
+        config: serde_json::json!({}),
+        declared_tools: vec![],
+        workspace_root: ws.path().to_path_buf(),
+        session_id: "sess-1".to_string(),
+        leader_socket: None,
+    });
+    // Drive the spawn → handshake path so the hardener is exercised.
+    let _ = host.invoke(req("pre_tool_use", 5000)).await;
+    host.dispose().await;
+    let seen = seen.lock().unwrap();
+    assert!(!seen.is_empty(), "spawn hardener never ran");
+    assert!(
+        seen.iter().all(|&network| !network),
+        "hardener saw network=true for a network:false plugin: {seen:?}"
+    );
 }
 
 #[tokio::test]

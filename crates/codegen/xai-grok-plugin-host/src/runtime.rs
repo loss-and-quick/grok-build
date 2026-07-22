@@ -247,12 +247,13 @@ fn discover_node() -> Result<ResolvedRuntime, RuntimeDiscoveryError> {
 /// Build the spawn `Command` for a plugin: discover its runtime, construct the
 /// argv, and set the working directory + env.
 ///
-/// TODO(sandbox-wiring): when `spec.network == false` the child must run under
-/// the per-child seccomp network filter (`xai-grok-sandbox::child_net`, applied
-/// via an `unsafe pre_exec`). That belongs to the shell-integration task, which
-/// owns the `xai-grok-sandbox` dependency and the trust flow; this crate only
-/// records the intent so the seam is obvious. Landlock/Seatbelt confinement is
-/// inherited automatically (plugins are children of the sandboxed process).
+/// Network confinement for `network: false` sidecars is not applied here: the
+/// child runs under the per-child seccomp network filter
+/// (`xai-grok-sandbox::child_net`, an `unsafe pre_exec`) installed by the
+/// [`crate::SpawnHardener`] the shell injects — the shell owns the
+/// `xai-grok-sandbox` dependency and the trust flow, so this crate stays
+/// sandbox-free. Landlock/Seatbelt confinement is inherited automatically
+/// (plugins are children of the sandboxed process).
 pub fn build_command(
     spec: &RegisteredPlugin,
 ) -> Result<tokio::process::Command, RuntimeDiscoveryError> {

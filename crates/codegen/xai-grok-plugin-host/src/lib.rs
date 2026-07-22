@@ -26,9 +26,9 @@
 //!
 //! Plugins inherit the parent's Landlock/Seatbelt confinement automatically (they
 //! are children of the sandboxed process). The per-child seccomp network filter
-//! for `network: false` plugins is *not* wired here — see the `TODO` in
-//! [`runtime::build_command`]; that `unsafe pre_exec` belongs to the
-//! shell-integration task which owns `xai-grok-sandbox`.
+//! for `network: false` plugins is not applied in this crate — the shell injects
+//! it through [`SpawnHardener`] (it owns `xai-grok-sandbox`), and [`PluginHost`]
+//! applies that `unsafe pre_exec` to each sidecar's spawn `Command`.
 
 mod capabilities;
 pub mod orchestration;
@@ -60,8 +60,8 @@ pub struct RegisteredPlugin {
     pub entry: PathBuf,
     /// Declared or auto runtime.
     pub runtime: RuntimeKind,
-    /// Network access. `false` (default) is the seccomp-filtered case; see the
-    /// `TODO` in [`runtime::build_command`].
+    /// Network access. `false` (default) is the seccomp-filtered case, applied
+    /// via the [`SpawnHardener`] seam.
     pub network: bool,
     /// Opaque config forwarded verbatim at `initialize` and via `config_get`.
     pub config: serde_json::Value,
