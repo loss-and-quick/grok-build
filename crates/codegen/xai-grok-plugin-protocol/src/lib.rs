@@ -599,13 +599,29 @@ pub struct AgentEventsResult {
 #[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentListParams {}
 
+/// One spawnable agent type, with the metadata a plugin needs to present a
+/// "who's who" table in a multi-agent scenario. `description` mirrors the
+/// agent's `.md` frontmatter; `model` is the agent's explicit model override
+/// (absent when the agent inherits the parent session's model).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AgentDescriptorDto {
+    /// The spawnable type name (qualified `plugin:agent` for plugin agents).
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Explicit model id; omitted when the agent inherits the session's model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 /// `agent_list` reply. Plugin→core. Spawnable agent types for this session
-/// (sorted; filtered by config toggles).
+/// (sorted; filtered by config toggles), each with name/description/model.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentListResult {
     #[serde(default)]
-    pub agents: Vec<String>,
+    pub agents: Vec<AgentDescriptorDto>,
 }
 
 /// `agent_cancel` request params. Plugin→core.
@@ -682,6 +698,7 @@ mod bindings_export {
             AgentSpawnParams,
             AgentSpawnResult,
             AgentStatusDto,
+            AgentDescriptorDto,
             AgentWaitParams,
             AgentWaitResult,
             AgentEventsParams,
@@ -1049,9 +1066,26 @@ mod tests {
         round_trip(&AgentListParams {}, json!({}));
         round_trip(
             &AgentListResult {
-                agents: vec!["Explore".into(), "general-purpose".into()],
+                agents: vec![
+                    AgentDescriptorDto {
+                        name: "Explore".into(),
+                        description: "search the repo".into(),
+                        model: Some("grok-code-fast-1".into()),
+                    },
+                    // `model: None` must omit the key entirely (skip_serializing_if).
+                    AgentDescriptorDto {
+                        name: "general-purpose".into(),
+                        description: String::new(),
+                        model: None,
+                    },
+                ],
             },
-            json!({ "agents": ["Explore", "general-purpose"] }),
+            json!({
+                "agents": [
+                    { "name": "Explore", "description": "search the repo", "model": "grok-code-fast-1" },
+                    { "name": "general-purpose", "description": "" },
+                ],
+            }),
         );
         round_trip(
             &AgentCancelParams { id: "a-1".into() },
@@ -1063,6 +1097,19 @@ mod tests {
             },
             json!({ "outcome": "already_finished" }),
         );
+    }
+
+    /// An agent descriptor deserializes from just a `name`: `description`
+    /// defaults to `""` and `model` to `None` (forward-compat with older cores
+    /// that only sent names).
+    #[test]
+    fn agent_descriptor_tolerates_missing_optionals() {
+        let d: AgentDescriptorDto =
+            serde_json::from_value(json!({ "name": "Explore", "future": 1 }))
+                .expect("deserialize name-only descriptor");
+        assert_eq!(d.name, "Explore");
+        assert_eq!(d.description, "");
+        assert_eq!(d.model, None);
     }
 
     /// Spawn params tolerate a minimal `{ prompt }` object (all other fields

@@ -23,8 +23,9 @@ use std::time::Duration;
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
 use xai_grok_plugin_protocol::{
-    AgentCancelOutcomeDto, AgentCancelParams, AgentCancelResult, AgentEventDto, AgentEventKindDto,
-    AgentEventsParams, AgentEventsResult, AgentListResult, AgentSpawnParams, AgentSpawnResult,
+    AgentCancelOutcomeDto, AgentCancelParams, AgentCancelResult, AgentDescriptorDto, AgentEventDto,
+    AgentEventKindDto, AgentEventsParams, AgentEventsResult, AgentListResult, AgentSpawnParams,
+    AgentSpawnResult,
     AgentStatusDto, AgentWaitParams, AgentWaitResult, ConfigGetResult, LogEmitParams, LogLevelDto,
     StorageDeleteParams, StorageDeleteResult, StorageGetParams, StorageGetResult,
     StorageListParams, StorageListResult, StorageSetParams, StorageSetResult,
@@ -265,7 +266,16 @@ impl PluginCapabilities {
 
     async fn agent_list(&self) -> Result<Value, RpcError> {
         let orchestrator = self.orchestrator_for("agent_list")?;
-        let agents = orchestrator.list_agent_types().await;
+        let agents = orchestrator
+            .list_agent_types()
+            .await
+            .into_iter()
+            .map(|name| AgentDescriptorDto {
+                name,
+                description: String::new(),
+                model: None,
+            })
+            .collect();
         to_result(&AgentListResult { agents })
     }
 
