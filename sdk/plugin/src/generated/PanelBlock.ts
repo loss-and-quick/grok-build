@@ -7,4 +7,4 @@ import type { PanelStatusItem } from "./PanelStatusItem";
  * [`HookInvokeResult`]). Plugin→core. The pager renders every block of a panel
  * at once, top to bottom.
  */
-export type PanelBlock = { "kind": "status", items: Array<PanelStatusItem>, } | { "kind": "markdown", text: string, } | { "kind": "table", columns: Array<string>, rows: Array<Array<string>>, selectable: boolean, } | { "kind": "actions", buttons: Array<PanelButton>, };
+export type PanelBlock = { "kind": "status", items: Array<PanelStatusItem>, } | { "kind": "markdown", text: string, } | { "kind": "table", columns: Array<string>, rows: Array<Array<string>>, selectable: boolean, } | { "kind": "input", id: string, label: string, placeholder: string | null, value: string | null, secret: boolean, } | { "kind": "actions", buttons: Array<PanelButton>, };

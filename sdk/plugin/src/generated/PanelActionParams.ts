@@ -3,7 +3,10 @@
 /**
  * `panel_action` notification params. Core→plugin. Fired when the user
  * activates a button in a panel this plugin published: `panel_id` is the
- * [`PanelViewModel::id`], `button_id` the [`PanelButton::id`]. Best-effort,
- * like `tool_cancel` — the host does not wait for a reply.
+ * [`PanelViewModel::id`], `button_id` the [`PanelButton::id`]. `inputs` carries
+ * the current value of every [`PanelBlock::Input`] field in the panel, keyed by
+ * the field's `id` — so a button press delivers, say, a typed OAuth code
+ * alongside the button. Best-effort, like `tool_cancel` — the host does not
+ * wait for a reply.
  */
-export type PanelActionParams = { panel_id: string, button_id: string, };
+export type PanelActionParams = { panel_id: string, button_id: string, inputs: { [key in string]: string }, };

@@ -763,6 +763,21 @@ pub enum PanelBlock {
         #[serde(default)]
         selectable: bool,
     },
+    /// A single-line editable field the pager owns. The plugin supplies the
+    /// initial `value`; the pager tracks edits and, when a button is activated,
+    /// returns the current field values (keyed by `id`) in the action's
+    /// `inputs`. `secret` masks the field like a password. Enables flows such as
+    /// pasting an OAuth authorization code back to the plugin.
+    Input {
+        id: String,
+        label: String,
+        #[serde(default)]
+        placeholder: Option<String>,
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(default)]
+        secret: bool,
+    },
     /// A row of focusable buttons; activation routes back to the plugin.
     Actions { buttons: Vec<PanelButton> },
 }
@@ -799,13 +814,18 @@ pub struct PanelCloseResult {}
 
 /// `panel_action` notification params. Core→plugin. Fired when the user
 /// activates a button in a panel this plugin published: `panel_id` is the
-/// [`PanelViewModel::id`], `button_id` the [`PanelButton::id`]. Best-effort,
-/// like `tool_cancel` — the host does not wait for a reply.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+/// [`PanelViewModel::id`], `button_id` the [`PanelButton::id`]. `inputs` carries
+/// the current value of every [`PanelBlock::Input`] field in the panel, keyed by
+/// the field's `id` — so a button press delivers, say, a typed OAuth code
+/// alongside the button. Best-effort, like `tool_cancel` — the host does not
+/// wait for a reply.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, TS)]
 #[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PanelActionParams {
     pub panel_id: String,
     pub button_id: String,
+    #[serde(default)]
+    pub inputs: std::collections::BTreeMap<String, String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1460,6 +1480,37 @@ mod tests {
             json!({ "kind": "table", "columns": ["c"], "rows": [["r"]], "selectable": false }),
         );
         round_trip(
+            &PanelBlock::Input {
+                id: "code".into(),
+                label: "Authorization code".into(),
+                placeholder: Some("paste here".into()),
+                value: None,
+                secret: false,
+            },
+            json!({
+                "kind": "input",
+                "id": "code",
+                "label": "Authorization code",
+                "placeholder": "paste here",
+                "value": null,
+                "secret": false,
+            }),
+        );
+        // A minimal Input tolerates missing optionals (placeholder/value/secret).
+        let b: PanelBlock =
+            serde_json::from_value(json!({ "kind": "input", "id": "t", "label": "Token" }))
+                .unwrap();
+        assert_eq!(
+            b,
+            PanelBlock::Input {
+                id: "t".into(),
+                label: "Token".into(),
+                placeholder: None,
+                value: None,
+                secret: false,
+            }
+        );
+        round_trip(
             &PanelBlock::Actions {
                 buttons: vec![PanelButton {
                     id: "b".into(),
@@ -1491,11 +1542,29 @@ mod tests {
         round_trip(&PanelCloseResult {}, json!({}));
         round_trip(
             &PanelActionParams {
+                panel_id: "oauth".into(),
+                button_id: "submit".into(),
+                inputs: std::collections::BTreeMap::from([("code".into(), "abc-123".into())]),
+            },
+            json!({
+                "panel_id": "oauth",
+                "button_id": "submit",
+                "inputs": { "code": "abc-123" },
+            }),
+        );
+        // A button with no input fields serializes an empty `inputs` map, and
+        // `inputs` defaults to empty when an older core omits it.
+        round_trip(
+            &PanelActionParams {
                 panel_id: "review".into(),
                 button_id: "approve".into(),
+                inputs: std::collections::BTreeMap::new(),
             },
-            json!({ "panel_id": "review", "button_id": "approve" }),
+            json!({ "panel_id": "review", "button_id": "approve", "inputs": {} }),
         );
+        let p: PanelActionParams =
+            serde_json::from_value(json!({ "panel_id": "p", "button_id": "b" })).unwrap();
+        assert!(p.inputs.is_empty());
     }
 
     #[test]
