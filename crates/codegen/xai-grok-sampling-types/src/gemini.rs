@@ -158,6 +158,13 @@ pub struct GeminiUsageMetadata {
 pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
     let mut contents: Vec<GeminiContent> = Vec::new();
     let mut system_text = String::new();
+    // Maps a tool-call id to the function name it invoked. Gemini pairs a
+    // `functionResponse` to its `functionCall` by name, not id, but the unified
+    // `ToolResultItem` only carries the call id. We recover the name from the
+    // preceding assistant `functionCall` parts, which the builder sees first
+    // because conversation items are processed in order.
+    let mut call_id_to_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     let push_turn = |contents: &mut Vec<GeminiContent>, role: &str, parts: Vec<GeminiPart>| {
         if !parts.is_empty() {
@@ -188,6 +195,7 @@ pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
                     });
                 }
                 for tc in &a.tool_calls {
+                    call_id_to_name.insert(tc.id.as_ref().to_owned(), tc.name.clone());
                     parts.push(GeminiPart {
                         function_call: Some(GeminiFunctionCall {
                             name: tc.name.clone(),
@@ -201,17 +209,20 @@ pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
             }
             ConversationItem::ToolResult(t) => {
                 // Gemini carries tool output as a `functionResponse` part in a
-                // user turn. The call id doubles as the function name for
-                // pairing (the unified item does not retain the tool name).
+                // user turn and pairs it to its `functionCall` by function name.
+                // Recover the name from the preceding call; fall back to the id
+                // when no matching call was seen (degraded, but preserves the
+                // prior behavior rather than dropping the response).
+                let name = call_id_to_name
+                    .get(&t.tool_call_id)
+                    .cloned()
+                    .unwrap_or_else(|| t.tool_call_id.clone());
                 let response = serde_json::json!({ "content": t.content.as_ref() });
                 push_turn(
                     &mut contents,
                     "user",
                     vec![GeminiPart {
-                        function_response: Some(GeminiFunctionResponse {
-                            name: t.tool_call_id.clone(),
-                            response,
-                        }),
+                        function_response: Some(GeminiFunctionResponse { name, response }),
                         ..Default::default()
                     }],
                 );
@@ -365,5 +376,60 @@ mod tests {
         let fc = g.contents[0].parts[0].function_call.as_ref().unwrap();
         assert_eq!(fc.name, "search");
         assert_eq!(fc.args.as_ref().unwrap()["q"], "x");
+    }
+
+    #[test]
+    fn tool_result_function_response_name_is_the_function_not_the_call_id() {
+        use crate::conversation::{AssistantItem, ToolCall, ToolResultItem};
+        let req = ConversationRequest {
+            items: vec![
+                ConversationItem::user("read it".to_owned()),
+                ConversationItem::Assistant(AssistantItem {
+                    content: std::sync::Arc::from(""),
+                    tool_calls: vec![ToolCall {
+                        id: std::sync::Arc::from("call_abc"),
+                        name: "read_file".to_owned(),
+                        arguments: std::sync::Arc::from("{}"),
+                    }],
+                    model_id: None,
+                    model_fingerprint: None,
+                    reasoning_effort: None,
+                }),
+                ConversationItem::ToolResult(ToolResultItem {
+                    tool_call_id: "call_abc".to_owned(),
+                    content: std::sync::Arc::from("file body"),
+                    images: Vec::new(),
+                }),
+            ],
+            ..Default::default()
+        };
+        let g = build_gemini_request(&req);
+        // contents = [user, model, user(functionResponse)]
+        assert_eq!(g.contents.len(), 3);
+        let fr = g.contents[2].parts[0].function_response.as_ref().unwrap();
+        assert_eq!(
+            fr.name, "read_file",
+            "functionResponse must pair by function name, not the call id"
+        );
+        assert_ne!(fr.name, "call_abc");
+    }
+
+    #[test]
+    fn tool_result_without_preceding_call_falls_back_to_call_id() {
+        use crate::conversation::ToolResultItem;
+        let req = ConversationRequest {
+            items: vec![ConversationItem::ToolResult(ToolResultItem {
+                tool_call_id: "orphan_call".to_owned(),
+                content: std::sync::Arc::from("stray result"),
+                images: Vec::new(),
+            })],
+            ..Default::default()
+        };
+        let g = build_gemini_request(&req);
+        let fr = g.contents[0].parts[0].function_response.as_ref().unwrap();
+        assert_eq!(
+            fr.name, "orphan_call",
+            "with no matching call, degrade to the id rather than dropping the response"
+        );
     }
 }
