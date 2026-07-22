@@ -4295,6 +4295,11 @@ pub struct ModelEntry {
     pub auth_provider: Option<crate::auth::AuthProviderRef>,
     /// When set, `base_url` is used for session auth, `api_base_url` for API-key auth.
     pub api_base_url: Option<String>,
+    /// Per-provider HTTP(S) proxy URL. Set only for `[[provider]]`-synthesized
+    /// entries (transport-only, like `api_base_url`); threaded into the
+    /// sampler's dedicated proxied client. `None` uses the shared client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 impl ModelEntry {
     /// Minimal fallback entry for an unknown model slug.
@@ -4307,6 +4312,7 @@ impl ModelEntry {
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         }
     }
     pub fn info(&self) -> &ModelInfo {
@@ -4319,6 +4325,7 @@ impl ModelEntry {
             env_key: entry.env_key.clone(),
             auth_provider: None,
             api_base_url: entry.api_base_url.clone(),
+            proxy: None,
         }
     }
     /// Non-empty `api_key`, else first non-empty resolved `env_key`.
@@ -4834,10 +4841,14 @@ pub fn try_resolve_model_credentials(
 }
 /// Per-model auth facts (BYOK status + auth scheme) from one effective-config
 /// load, memoized by the session actor.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ModelAuthFacts {
     pub byok: ModelByok,
     pub auth_scheme: AuthScheme,
+    /// Per-provider proxy for this model, if any. Sourced from the catalog
+    /// entry so the main turn path (`reconstruct_full_config`) threads a
+    /// `[[provider]]` proxy into the sampler without widening `SamplingConfig`.
+    pub proxy: Option<String>,
 }
 /// Resolve `model_id` to its auth facts and auth-provider reference from one
 /// effective-config load; both ride the same memo (see
@@ -4853,6 +4864,7 @@ pub fn resolve_model_auth_facts_and_provider(
             ModelAuthFacts {
                 byok: ModelByok::Unknown,
                 auth_scheme: AuthScheme::default(),
+                proxy: None,
             },
             None,
         );
@@ -4863,6 +4875,10 @@ pub fn resolve_model_auth_facts_and_provider(
             auth_scheme: match lookup {
                 ModelLookup::Loaded(Some(e)) => e.info().auth_scheme,
                 _ => AuthScheme::default(),
+            },
+            proxy: match &lookup {
+                ModelLookup::Loaded(Some(e)) => e.proxy.clone(),
+                _ => None,
             },
         };
         let provider = match lookup {
@@ -4982,6 +4998,7 @@ pub fn resolve_aux_model_sampling_config(
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         };
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
         let sampler = sampling_config_for_model(
@@ -5135,7 +5152,11 @@ fn expand_providers_into_catalog(
                 context_window,
                 ..ModelEntryConfig::minimal_for_provider(model)
             };
-            resolved.insert(key, ModelEntry::from_config_entry(&entry_config));
+            let mut model_entry = ModelEntry::from_config_entry(&entry_config);
+            // Proxy is transport-only, so it rides the runtime wrapper rather
+            // than the config/`ModelInfo` schema.
+            model_entry.proxy = provider.proxy.clone();
+            resolved.insert(key, model_entry);
         }
     }
 }
@@ -5171,6 +5192,7 @@ pub fn sampling_config_for_model(
         auth_scheme: credentials.auth_scheme,
         extra_headers,
         context_window: info.context_window.get(),
+        proxy: model.proxy.clone(),
         client_version,
         reasoning_effort: info.reasoning_effort,
         force_http1: false,
@@ -5292,6 +5314,7 @@ fn resolve_hidden_default_web_search_sampling_config(
         env_key: None,
         auth_provider: None,
         api_base_url: None,
+        proxy: None,
     };
     let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
     sampling_config_for_model(
@@ -6396,6 +6419,7 @@ if field.as_deref() == Some("auth_provider"))
             env_key: env_key.map(EnvKeys::single),
             auth_provider: None,
             api_base_url: api_base_url.map(|s| s.to_string()),
+            proxy: None,
         }
     }
     /// The effective-model RE-support lookup must use the model ACTUALLY used:
@@ -11622,6 +11646,7 @@ default = "grok-4.5"
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         }
     }
     #[test]
@@ -12476,6 +12501,62 @@ default = "grok-4.5"
             ApiBackend::ChatCompletions,
             "provider wire format must survive the slug-donor loop"
         );
+    }
+
+    /// A provider `proxy` threads through expansion and
+    /// `sampling_config_for_model` into `SamplerConfig.proxy`; a provider
+    /// without one leaves it unset.
+    #[test]
+    fn provider_proxy_threads_into_sampler_config() {
+        use xai_grok_config_types::{ProviderConfig, ProviderFormat};
+        let providers = vec![
+            ProviderConfig {
+                id: "prox".to_owned(),
+                format: ProviderFormat::ChatCompletions,
+                base_url: "https://prox.test/v1".to_owned(),
+                api_key: Some("k".to_owned()),
+                headers: IndexMap::new(),
+                proxy: Some("http://proxy.test:3128".to_owned()),
+                models: vec!["m".to_owned()],
+                context_window: None,
+            },
+            ProviderConfig {
+                id: "direct".to_owned(),
+                format: ProviderFormat::ChatCompletions,
+                base_url: "https://direct.test/v1".to_owned(),
+                api_key: Some("k".to_owned()),
+                headers: IndexMap::new(),
+                proxy: None,
+                models: vec!["m".to_owned()],
+                context_window: None,
+            },
+        ];
+        let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+        expand_providers_into_catalog(&mut catalog, &providers);
+
+        let proxied = catalog.get("prox/m").expect("proxied entry");
+        assert_eq!(proxied.proxy.as_deref(), Some("http://proxy.test:3128"));
+        let config = sampling_config_for_model(
+            proxied,
+            resolve_credentials(proxied, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(config.proxy.as_deref(), Some("http://proxy.test:3128"));
+
+        let direct = catalog.get("direct/m").expect("direct entry");
+        assert!(direct.proxy.is_none());
+        let direct_config = sampling_config_for_model(
+            direct,
+            resolve_credentials(direct, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(direct_config.proxy.is_none());
     }
 
     /// Per-format auth scheme flows from a synthesized provider entry all the

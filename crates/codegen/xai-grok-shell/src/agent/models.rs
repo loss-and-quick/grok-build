@@ -1400,6 +1400,7 @@ fn build_prefetched_map(
             env_key: None,
             auth_provider: None,
             api_base_url: m.api_base_url.clone().or(api_base_url_override.clone()),
+            proxy: None,
         };
         map.insert(key, entry);
     }
@@ -2028,6 +2029,7 @@ mod tests {
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         };
         flagged.info.show_model_fingerprint = true;
         mgr.insert_test_entry("fp-model", flagged);
@@ -2041,6 +2043,7 @@ mod tests {
                 env_key: None,
                 auth_provider: None,
                 api_base_url: None,
+                proxy: None,
             },
         );
 
@@ -2052,6 +2055,7 @@ mod tests {
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         };
         custom.info.show_model_fingerprint = true;
         mgr.insert_test_entry("enterprise-key", custom);
@@ -2223,6 +2227,7 @@ mod tests {
                 env_key: None,
                 auth_provider: None,
                 api_base_url: None,
+                proxy: None,
             },
         );
 
@@ -2278,6 +2283,7 @@ mod tests {
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         };
         reasoning_entry.info.supports_reasoning_effort = true;
         prefetched.insert("reasoning-model".to_string(), reasoning_entry);
@@ -2301,6 +2307,7 @@ mod tests {
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         };
         prefetched.insert("plain-model".to_string(), plain_entry);
 
@@ -2329,6 +2336,7 @@ mod tests {
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         };
         no_none.info.supports_reasoning_effort = true;
         no_none.info.reasoning_efforts = vec![ReasoningEffortOption {
@@ -2348,6 +2356,7 @@ mod tests {
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         };
         with_none.info.supports_reasoning_effort = true;
         with_none.info.reasoning_efforts = vec![ReasoningEffortOption {
@@ -2455,6 +2464,7 @@ mod tests {
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         };
         reasoning_entry.info.supports_reasoning_effort = true;
         prefetched.insert("reasoning-model".to_string(), reasoning_entry);
@@ -2465,6 +2475,7 @@ mod tests {
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         };
         prefetched.insert("plain-model".to_string(), plain_entry);
 
@@ -2508,6 +2519,7 @@ mod tests {
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         }
     }
 
@@ -3292,6 +3304,7 @@ mod tests {
                 env_key: None,
                 auth_provider: None,
                 api_base_url: None,
+                proxy: None,
             },
         );
 
@@ -3320,6 +3333,7 @@ mod tests {
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         };
         oauth_only.info.supported_in_api = false;
         catalog.insert("oauth-only".to_string(), oauth_only);
@@ -3330,6 +3344,7 @@ mod tests {
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            proxy: None,
         };
         catalog.insert("public-model".to_string(), public);
 

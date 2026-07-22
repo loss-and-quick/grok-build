@@ -12,6 +12,14 @@
 //! fallback, kill switch) is pinned by the `shared_http_wire` and
 //! `shared_http_kill_switch` integration binaries, which own their process
 //! environment.
+//!
+//! Proxying: reqwest already honors the `HTTP_PROXY` / `HTTPS_PROXY` /
+//! `NO_PROXY` environment variables by default (the shared builders never call
+//! `.no_proxy()`), so an ambient proxy applies to every sampling request. A
+//! per-provider proxy from config is an explicit override on top: it is applied
+//! via [`client_with_proxy`], which builds a fresh, NON-cached client (a
+//! config-derived proxy must never contaminate the process-wide shared clients,
+//! which are keyed on "no config-derived input").
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -67,9 +75,37 @@ pub(crate) fn client_http1() -> Result<reqwest::Client, reqwest::Error> {
     shared(&SHARED_HTTP1, build_http_client_http1, sharing_disabled())
 }
 
+/// Build a fresh, non-shared client routed through `proxy` (an HTTP(S) proxy
+/// URL). `http1_only` mirrors [`SamplerConfig::force_http1`]. The result is
+/// never cached: a config-derived proxy must not leak into the shared clients.
+pub(crate) fn client_with_proxy(
+    proxy: &str,
+    http1_only: bool,
+) -> Result<reqwest::Client, reqwest::Error> {
+    let builder = if http1_only {
+        base_http1_builder()
+    } else {
+        base_h2_builder()
+    };
+    builder.proxy(reqwest::Proxy::all(proxy)?).build()
+}
+
 /// Build a `reqwest::Client` for sampling with HTTP/2 + connection pooling.
 /// Env knobs are read once, when the shared client is first built.
 fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    base_h2_builder().build()
+}
+
+/// Build a `reqwest::Client` constrained to HTTP/1.1 with pooling disabled.
+/// Used as a fallback after HTTP/2 transport failures.
+fn build_http_client_http1() -> Result<reqwest::Client, reqwest::Error> {
+    base_http1_builder().build()
+}
+
+/// Shared HTTP/2 builder config (pool + keep-alive knobs). Reused by the
+/// process-wide shared client and the per-provider proxied client so both keep
+/// identical transport tuning.
+fn base_h2_builder() -> reqwest::ClientBuilder {
     let pool_max_idle: usize = std::env::var("GROK_POOL_MAX_IDLE")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -92,12 +128,11 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .http2_keep_alive_interval(Duration::from_secs(15))
         .http2_keep_alive_timeout(Duration::from_secs(5))
         .http2_keep_alive_while_idle(true)
-        .build()
 }
 
-/// Build a `reqwest::Client` constrained to HTTP/1.1 with pooling disabled.
-/// Used as a fallback after HTTP/2 transport failures.
-fn build_http_client_http1() -> Result<reqwest::Client, reqwest::Error> {
+/// Shared HTTP/1.1 builder config (pool-less). Reused by the shared fallback
+/// client and the per-provider proxied client.
+fn base_http1_builder() -> reqwest::ClientBuilder {
     let connect_timeout_secs: u64 = std::env::var("GROK_CONNECT_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -109,7 +144,6 @@ fn build_http_client_http1() -> Result<reqwest::Client, reqwest::Error> {
         .connect_timeout(Duration::from_secs(connect_timeout_secs))
         .tcp_nodelay(true)
         .http1_only()
-        .build()
 }
 
 #[cfg(test)]

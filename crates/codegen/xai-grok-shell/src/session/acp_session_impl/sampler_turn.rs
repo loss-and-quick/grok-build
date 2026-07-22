@@ -179,7 +179,7 @@ impl SessionActor {
             && memo.model_id == model_id
             && memo.facts.byok != ModelByok::Unknown
         {
-            return (memo.facts, memo.provider.clone());
+            return (memo.facts.clone(), memo.provider.clone());
         }
         let (fresh, provider) =
             crate::agent::config::resolve_model_auth_facts_and_provider(model_id);
@@ -187,13 +187,13 @@ impl SessionActor {
             if let Some(memo) = self.model_auth_memo.borrow().as_ref()
                 && memo.model_id == model_id
             {
-                return (memo.facts, memo.provider.clone());
+                return (memo.facts.clone(), memo.provider.clone());
             }
             return (fresh, provider);
         }
         *self.model_auth_memo.borrow_mut() = Some(ModelAuthMemo {
             model_id: model_id.to_string(),
-            facts: fresh,
+            facts: fresh.clone(),
             provider: provider.clone(),
         });
         (fresh, provider)
@@ -413,6 +413,7 @@ impl SessionActor {
             auth_scheme,
             extra_headers,
             context_window: cfg.context_window.get(),
+            proxy: model_facts.proxy.clone(),
             client_version: creds.client_version,
             reasoning_effort: cfg.reasoning_effort,
             force_http1: false,

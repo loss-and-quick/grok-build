@@ -73,6 +73,13 @@ pub struct SamplerConfig {
     pub stream_tool_calls: bool,
     pub idle_timeout_secs: Option<u64>,
 
+    /// Optional per-request HTTP(S) proxy URL. When set, the client is built
+    /// with a dedicated (non-shared) `reqwest` client routed through this
+    /// proxy; when `None`, the process-wide shared client is used and reqwest's
+    /// own `HTTP(S)_PROXY` / `NO_PROXY` env handling still applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+
     // Reasoning effort
     pub reasoning_effort: Option<ReasoningEffort>,
 
@@ -168,6 +175,7 @@ impl Default for SamplerConfig {
             max_retries: None,
             stream_tool_calls: false,
             idle_timeout_secs: None,
+            proxy: None,
             reasoning_effort: None,
             origin_client: None,
             client_identifier: None,

@@ -227,6 +227,7 @@ impl ShellToolsetConfig {
             max_retries: None,
             stream_tool_calls: false,
             idle_timeout_secs: None,
+            proxy: None,
             client_identifier: None,
             deployment_id: None,
             user_id: None,

@@ -1615,6 +1615,7 @@ mod reasoning_compaction_regression_tests {
             max_retries: None,
             stream_tool_calls: false,
             idle_timeout_secs: None,
+            proxy: None,
             client_identifier: None,
             reasoning_effort: None,
             deployment_id: None,

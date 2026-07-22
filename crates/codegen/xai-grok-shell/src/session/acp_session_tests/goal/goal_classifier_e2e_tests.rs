@@ -2716,6 +2716,7 @@ fn catalog_with(
                 env_key: None,
                 auth_provider: None,
                 api_base_url: None,
+                proxy: None,
             },
         );
     }

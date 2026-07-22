@@ -925,6 +925,7 @@ async fn model_auth_memo_serves_cached_status_and_keys_on_model() {
                     facts: ModelAuthFacts {
                         byok: ModelByok::Byok,
                         auth_scheme: Default::default(),
+proxy: None,
                     },
                     provider: None,
                 }));
@@ -969,6 +970,7 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
                     facts: ModelAuthFacts {
                         byok: ModelByok::Byok,
                         auth_scheme: Default::default(),
+proxy: None,
                     },
                     provider: None,
                 }));
@@ -1017,6 +1019,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                     facts: ModelAuthFacts {
                         byok: ModelByok::NotByok,
                         auth_scheme: Default::default(),
+proxy: None,
                     },
                     provider: None,
                 }));
@@ -1039,6 +1042,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 max_retries: None,
                 stream_tool_calls: false,
                 idle_timeout_secs: None,
+                proxy: None,
                 client_identifier: None,
                 reasoning_effort: None,
                 deployment_id: None,
@@ -1085,6 +1089,7 @@ async fn seed_provider_memo(actor: &Arc<SessionActor>, provider: crate::auth::Au
             facts: crate::agent::config::ModelAuthFacts {
                 byok: crate::agent::auth_method::ModelByok::Byok,
                 auth_scheme: Default::default(),
+proxy: None,
             },
             provider: Some(provider),
         }));
@@ -1132,6 +1137,7 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 max_retries: None,
                 stream_tool_calls: false,
                 idle_timeout_secs: None,
+                proxy: None,
                 client_identifier: None,
                 reasoning_effort: None,
                 deployment_id: None,

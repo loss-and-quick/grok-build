@@ -95,6 +95,7 @@ mod tests {
             max_retries: None,
             stream_tool_calls: false,
             idle_timeout_secs: None,
+            proxy: None,
             reasoning_effort: None,
             origin_client: None,
             client_identifier: None,

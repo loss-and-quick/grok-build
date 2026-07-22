@@ -519,7 +519,16 @@ impl SamplingClient {
             }
         }
 
-        let http = if config.force_http1 {
+        let http = if let Some(proxy) = config.proxy.as_deref() {
+            // A config-derived proxy needs a dedicated (non-shared) client so it
+            // never contaminates the process-wide shared clients.
+            tracing::info!(
+                force_http1 = config.force_http1,
+                "Using a dedicated proxied sampling client"
+            );
+            crate::shared_http::client_with_proxy(proxy, config.force_http1)
+                .map_err(SamplingError::Http)?
+        } else if config.force_http1 {
             tracing::info!("Using HTTP/1.1 for sampling client (force_http1=true)");
             crate::shared_http::client_http1().map_err(SamplingError::Http)?
         } else {
@@ -2292,6 +2301,7 @@ mod tests {
             max_retries: None,
             stream_tool_calls: false,
             idle_timeout_secs: None,
+            proxy: None,
             reasoning_effort: None,
             origin_client: None,
             client_identifier: None,
@@ -2449,6 +2459,27 @@ mod tests {
     fn new_with_minimal_config_succeeds() {
         let client = SamplingClient::new(minimal_config()).expect("client should construct");
         assert_eq!(client.api_backend(), ApiBackend::ChatCompletions);
+    }
+
+    #[test]
+    fn new_with_proxy_builds_a_dedicated_client() {
+        // `reqwest::Proxy::all` validates the URL at build time, so a
+        // successful construction exercises the real per-provider proxy path
+        // (no network I/O).
+        let mut cfg = minimal_config();
+        cfg.proxy = Some("http://proxy.test:8080".to_string());
+        let client = SamplingClient::new(cfg).expect("proxied client should build");
+        assert_eq!(client.api_backend(), ApiBackend::ChatCompletions);
+    }
+
+    #[test]
+    fn new_with_invalid_proxy_url_fails() {
+        let mut cfg = minimal_config();
+        cfg.proxy = Some("not a valid proxy url".to_string());
+        assert!(
+            SamplingClient::new(cfg).is_err(),
+            "an unparseable proxy URL must fail client construction"
+        );
     }
 
     #[test]
