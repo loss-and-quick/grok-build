@@ -144,8 +144,16 @@ describe("PluginContext", () => {
     expect(eventsReq.params).toEqual({ id: "agent-1", cursor: 1, timeout_ms: 0 });
 
     const listP = ctx.agents.list();
-    await respondToNext(writer, reader, 4, { agents: ["Explore"] });
-    expect(await listP).toEqual(["Explore"]);
+    await respondToNext(writer, reader, 4, {
+      agents: [
+        { name: "Explore", description: "search the repo", model: "grok-code-fast-1" },
+        { name: "general-purpose", description: "" },
+      ],
+    });
+    expect(await listP).toEqual([
+      { name: "Explore", description: "search the repo", model: "grok-code-fast-1" },
+      { name: "general-purpose", description: "" },
+    ]);
 
     const cancelP = ctx.agents.cancel("agent-1");
     await respondToNext(writer, reader, 5, { outcome: "already_finished" });

@@ -9,6 +9,7 @@ import type { AgentSpawnParams } from "./generated/AgentSpawnParams.ts";
 import type { AgentWaitResult } from "./generated/AgentWaitResult.ts";
 import type { AgentEventsResult } from "./generated/AgentEventsResult.ts";
 import type { AgentCancelOutcomeDto } from "./generated/AgentCancelOutcomeDto.ts";
+import type { AgentDescriptorDto } from "./generated/AgentDescriptorDto.ts";
 
 export interface PluginLogger {
   debug(message: string, fields?: unknown): void;
@@ -42,8 +43,10 @@ export interface PluginAgents {
    * `timeoutMs` (default 0) long-polls until a new event or the deadline.
    * Stop polling once `done` is true. */
   events(id: string, cursor?: number, timeoutMs?: number): Promise<AgentEventsResult>;
-  /** Spawnable agent types for this session (sorted, config-filtered). */
-  list(): Promise<string[]>;
+  /** Spawnable agent types for this session (sorted, config-filtered), each
+   * with its name, description, and explicit model (absent when the agent
+   * inherits the session's model). */
+  list(): Promise<AgentDescriptorDto[]>;
   /** Cancels a subagent spawned by this plugin. */
   cancel(id: string): Promise<AgentCancelOutcomeDto>;
 }

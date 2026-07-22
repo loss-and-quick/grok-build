@@ -101,7 +101,7 @@ for (;;) {
 const result = await ctx.agents.wait(id, 30_000); // "running" on timeout
 if (result.status === "completed") ctx.log.info(result.output ?? "");
 
-await ctx.agents.list();   // spawnable agent types
+await ctx.agents.list();   // [{ name, description, model? }] per spawnable type
 await ctx.agents.cancel(id);
 ```
 
