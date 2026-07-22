@@ -413,6 +413,67 @@ describe("definePlugin — tools", () => {
     expect(resp.result.content).toContain("ws=/workspace");
   });
 
+  test("tool_cancel aborts the in-flight handler's signal", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      {
+        tools: {
+          waiter: {
+            // Resolve only once the signal aborts, so the reply proves the
+            // handler observed the cancellation.
+            handler: (_input, _ctx, call) =>
+              new Promise<string>((resolve) => {
+                if (call.signal.aborted) resolve("aborted-immediately");
+                call.signal.addEventListener("abort", () => resolve("saw-abort"));
+              }),
+          },
+        },
+      },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    // Start the call: the handler parks on its signal, no reply yet.
+    reader.pushLine(TOOL_INVOKE_PARAMS("waiter", {}));
+    // Host abandons the call (parent turn aborted) via the notification.
+    reader.pushLine({
+      jsonrpc: "2.0",
+      method: "tool_cancel",
+      params: { invocation_id: "tinv-1" },
+    });
+
+    await writer.waitForCount(2);
+    const resp = writer.messages[1] as {
+      result: { content: string; is_error: boolean };
+    };
+    expect(resp.result.content).toBe("saw-abort");
+    expect(resp.result.is_error).toBe(false);
+  });
+
+  test("tool_cancel for an unknown/finished invocation is a harmless no-op", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      { tools: { echo: { handler: () => "ok" } } },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    // Complete a call, then cancel it: the entry is already gone.
+    reader.pushLine(TOOL_INVOKE_PARAMS("echo", {}));
+    await writer.waitForCount(2);
+    reader.pushLine({
+      jsonrpc: "2.0",
+      method: "tool_cancel",
+      params: { invocation_id: "tinv-1" },
+    });
+
+    // A fresh call still works (the endpoint did not choke on the stray cancel).
+    reader.pushLine({ ...TOOL_INVOKE_PARAMS("echo", {}), id: 56 });
+    await writer.waitForCount(3);
+    const resp = writer.messages[2] as { result: { content: string } };
+    expect(resp.result.content).toBe("ok");
+  });
+
   test("a rich ToolResult maps isError onto the wire", async () => {
     const { reader, writer } = setUpEndpoint();
     definePlugin(

@@ -62,6 +62,15 @@ export interface ToolCallContext {
   readonly sessionId: string;
   readonly cwd: string;
   readonly agent: string;
+  /**
+   * Fires when the host abandons this tool call — the parent turn was aborted
+   * (Esc) while the session stays alive. A handler that spawned subagents
+   * (`ctx.agents.spawn`) should react by cancelling them, e.g.
+   * `call.signal.addEventListener("abort", () => ctx.agents.cancel(id))`, or
+   * by racing its own `await`s against the signal. Not an error on its own:
+   * the handler still returns a (discarded) result normally.
+   */
+  readonly signal: AbortSignal;
 }
 
 export interface PluginContext {

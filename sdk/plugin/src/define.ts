@@ -180,6 +180,10 @@ export function definePlugin(
 
   let ctx: PluginContext | undefined;
   let teardown: Teardown | undefined;
+  // In-flight tool calls keyed by invocation_id, so a `tool_cancel`
+  // notification (parent turn aborted mid-call) can abort the matching
+  // handler's `AbortSignal`.
+  const activeToolCalls = new Map<string, AbortController>();
   let resolveReady!: () => void;
   let resolveShutdown!: () => void;
   const whenReady = new Promise<void>((resolve) => {
@@ -243,10 +247,13 @@ export function definePlugin(
           is_error: true,
         };
       }
+      const controller = new AbortController();
+      activeToolCalls.set(params.invocation_id, controller);
       const call: ToolCallContext = {
         sessionId: params.context.session_id,
         cwd: params.context.cwd,
         agent: params.context.agent,
+        signal: controller.signal,
       };
       try {
         const result = await tool.handler(params.arguments, ctx, call);
@@ -267,7 +274,17 @@ export function definePlugin(
         // An uncaught handler error is an error tool result for the model,
         // never a sidecar crash.
         return { content: message, is_error: true };
+      } finally {
+        activeToolCalls.delete(params.invocation_id);
       }
+    },
+
+    toolCancel(params): void {
+      // The host abandoned this call (parent turn aborted). Abort its signal
+      // so a handler awaiting on it — or listening for "abort" — can wind down
+      // invocation-scoped work (e.g. cancel spawned subagents). Unknown ids
+      // (already finished) are a no-op.
+      activeToolCalls.get(params.invocation_id)?.abort();
     },
 
     async shutdown(): Promise<void> {

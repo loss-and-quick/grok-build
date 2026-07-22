@@ -12,6 +12,7 @@ import type { HookInvokeResult } from "./generated/HookInvokeResult.ts";
 import type { ShutdownParams } from "./generated/ShutdownParams.ts";
 import type { ToolInvokeParams } from "./generated/ToolInvokeParams.ts";
 import type { ToolInvokeResult } from "./generated/ToolInvokeResult.ts";
+import type { ToolCancelParams } from "./generated/ToolCancelParams.ts";
 import type { LogEmitParams } from "./generated/LogEmitParams.ts";
 import type { ConfigGetResult } from "./generated/ConfigGetResult.ts";
 import type { StorageGetParams } from "./generated/StorageGetParams.ts";
@@ -37,6 +38,7 @@ export const CoreToPluginMethod = {
   Initialize: "initialize",
   HookInvoke: "hook_invoke",
   ToolInvoke: "tool_invoke",
+  ToolCancel: "tool_cancel",
   Shutdown: "shutdown",
 } as const;
 
@@ -66,6 +68,9 @@ export interface IncomingHandlers {
   toolInvoke(
     params: ToolInvokeParams,
   ): Promise<ToolInvokeResult> | ToolInvokeResult;
+  /** Notification: the host abandoned an in-flight `tool_invoke` (parent turn
+   * aborted). No reply; the SDK aborts the matching handler's signal. */
+  toolCancel(params: ToolCancelParams): void;
   shutdown(params: ShutdownParams): Promise<void> | void;
 }
 
@@ -82,6 +87,9 @@ export function registerIncomingHandlers(
   );
   endpoint.setRequestHandler(CoreToPluginMethod.ToolInvoke, (params) =>
     handlers.toolInvoke(params as ToolInvokeParams),
+  );
+  endpoint.setNotificationHandler(CoreToPluginMethod.ToolCancel, (params) =>
+    handlers.toolCancel(params as ToolCancelParams),
   );
   endpoint.setNotificationHandler(CoreToPluginMethod.Shutdown, (params) =>
     handlers.shutdown(params as ShutdownParams),
