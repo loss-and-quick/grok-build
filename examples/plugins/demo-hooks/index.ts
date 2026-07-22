@@ -1,13 +1,15 @@
 // demo-hooks — a minimal TypeScript sidecar plugin for grok-build.
 //
-// Demonstrates the three hook shapes a plugin can drive through the sidecar
+// Demonstrates the hook shapes a plugin can drive through the sidecar
 // wire contract:
 //
-//   • pre_tool_use  — a *Tool* gate: deny a tool call whose input carries a
-//                     marker string (parity target for the e2e test).
-//   • stop          — a *Stop* gate: inject `additionalContext` into the next
-//                     turn without blocking the stop.
-//   • session_start — an *Observe* event: log that the session began.
+//   • pre_tool_use      — a *Tool* gate: deny a tool call whose input carries a
+//                         marker string (parity target for the e2e test).
+//   • stop              — a *Stop* gate: inject `additionalContext` into the
+//                         next turn without blocking the stop.
+//   • session_start     — an *Observe* event: log that the session began.
+//   • resolve_credential — a *Replace* gate: hand the core a fixed bearer
+//                         instead of its built-in credential resolution.
 //
 // …plus one model-visible tool (`echo`), declared in plugin.json's `tools`
 // array (the catalog's source of truth) and served here via `tool_invoke`.
@@ -27,7 +29,9 @@ import {
   definePlugin,
   deny,
   observed,
+  replace,
   type HookInvokeResult,
+  type PluginCredentialDto,
 } from "../../../sdk/plugin/src/index.ts";
 
 /** Tool inputs containing this marker are denied by `pre_tool_use`. */
@@ -40,6 +44,10 @@ export const DENY_REASON =
 /** Context injected on `stop` (the e2e test asserts parity on this string). */
 export const STOP_CONTEXT =
   "demo-hooks: remember to run the demo checklist before stopping";
+
+/** A fixed bearer this demo hands the core via `resolve_credential`. Not a real
+ * provider token — it just shows the Replace credential shape end to end. */
+export const STATIC_TOKEN = "demo-static-bearer-0123456789";
 
 definePlugin({
   name: "demo-hooks",
@@ -87,6 +95,22 @@ definePlugin({
         block: false,
         additional_context: STOP_CONTEXT,
       };
+    },
+
+    // Replace gate (credential seam): supply a fixed bearer instead of the
+    // core's built-in resolution. A real plugin would fetch this from an
+    // external identity provider; here it is a static token so the wire shape
+    // is exercised without any real credentials. Return the credential via
+    // `replace(...)`; returning `observed()` (or nothing) passes through and
+    // the core keeps its built-in resolution.
+    resolve_credential(): HookInvokeResult {
+      const credential: PluginCredentialDto = {
+        token: STATIC_TOKEN,
+        needs_token_auth_header: true,
+        expires_at_ms: null,
+        owner_id: "demo-hooks",
+      };
+      return replace(credential);
     },
   },
 });

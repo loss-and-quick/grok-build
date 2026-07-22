@@ -30,6 +30,7 @@ export type { InitializeParams } from "./generated/InitializeParams.ts";
 export type { InitializeResult } from "./generated/InitializeResult.ts";
 export type { LogEmitParams } from "./generated/LogEmitParams.ts";
 export type { LogLevelDto } from "./generated/LogLevelDto.ts";
+export type { PluginCredentialDto } from "./generated/PluginCredentialDto.ts";
 export type { ShutdownParams } from "./generated/ShutdownParams.ts";
 export type { StorageDeleteParams } from "./generated/StorageDeleteParams.ts";
 export type { StorageDeleteResult } from "./generated/StorageDeleteResult.ts";
