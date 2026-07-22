@@ -1377,6 +1377,11 @@ pub struct Config {
     /// [`parse_auth_providers`] from trusted config layers only.
     #[serde(skip)]
     pub auth_providers: IndexMap<String, crate::auth::AuthProviderConfig>,
+    /// `[[provider]]` custom-LLM-provider registry, populated by
+    /// [`parse_providers`]. Each entry expands into synthesized catalog
+    /// entries in `resolve_model_list`.
+    #[serde(skip)]
+    pub providers: Vec<xai_grok_config_types::ProviderConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortcuts: Option<toml::Value>,
     /// Written by the client via `config_toml_edit`; absorbed so it isn't
@@ -1812,6 +1817,7 @@ impl Default for Config {
             doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings::default(),
             auto_mode: AutoModeConfig::default(),
             config_models: IndexMap::new(),
+            providers: Vec::new(),
             config_warnings: Vec::new(),
             grok_com_config: GrokComConfig::default(),
             auth_providers: IndexMap::new(),
@@ -1994,6 +2000,91 @@ fn parse_auth_providers(
     }
     (providers, warnings)
 }
+
+/// Resolve `{file:/path}` / `$VAR` references in a provider's secret-bearing
+/// fields (`base_url`, `api_key`, `proxy`, header values). On failure returns
+/// the field name and the resolver error — neither of which carries the
+/// resolved secret value.
+fn resolve_provider_secret_refs(
+    p: &mut xai_grok_config_types::ProviderConfig,
+) -> Result<(), (&'static str, crate::config::SecretRefError)> {
+    p.base_url =
+        crate::config::resolve_secret_refs(&p.base_url).map_err(|e| ("base_url", e))?;
+    if let Some(key) = p.api_key.take() {
+        p.api_key = Some(crate::config::resolve_secret_refs(&key).map_err(|e| ("api_key", e))?);
+    }
+    if let Some(proxy) = p.proxy.take() {
+        p.proxy = Some(crate::config::resolve_secret_refs(&proxy).map_err(|e| ("proxy", e))?);
+    }
+    for value in p.headers.values_mut() {
+        let resolved = crate::config::resolve_secret_refs(value.as_str())
+            .map_err(|e| ("headers", e))?;
+        *value = resolved;
+    }
+    Ok(())
+}
+
+/// Parse the `[[provider]]` custom-LLM-provider registry.
+///
+/// Each entry's secret-bearing fields are run through
+/// [`resolve_provider_secret_refs`] so `{file:/path}` and `$VAR` references
+/// resolve. An entry that fails to parse, is missing `id`/`base_url`, or whose
+/// secret ref cannot be resolved is dropped with a warning that never carries
+/// the resolved value; the rest of the config still loads.
+fn parse_providers(raw_config: &toml::Value) -> Vec<xai_grok_config_types::ProviderConfig> {
+    use xai_grok_config_types::ProviderConfig;
+    let Some(section) = raw_config.get("provider") else {
+        return Vec::new();
+    };
+    let Some(array) = section.as_array() else {
+        tracing::warn!(
+            "`provider` must be an array of [[provider]] tables, got {}; all custom providers ignored",
+            section.type_str()
+        );
+        return Vec::new();
+    };
+    let mut providers = Vec::with_capacity(array.len());
+    for (idx, value) in array.iter().enumerate() {
+        let mut provider: ProviderConfig = match value.clone().try_into() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("[[provider]] #{idx}: failed to parse ({e}); entry skipped");
+                continue;
+            }
+        };
+        if provider.id.trim().is_empty() {
+            tracing::warn!("[[provider]] #{idx}: empty `id`; entry skipped");
+            continue;
+        }
+        if let Err((field, err)) = resolve_provider_secret_refs(&mut provider) {
+            // `err` names only the path + I/O cause, never the resolved secret.
+            tracing::warn!(
+                provider = %provider.id,
+                "provider `{}`: cannot resolve secret in `{field}` ({err}); entry skipped",
+                provider.id
+            );
+            continue;
+        }
+        if provider.base_url.trim().is_empty() {
+            tracing::warn!(
+                provider = %provider.id,
+                "provider `{}`: empty `base_url`; entry skipped",
+                provider.id
+            );
+            continue;
+        }
+        if provider.models.is_empty() {
+            tracing::warn!(
+                provider = %provider.id,
+                "provider `{}`: no `models` listed; it will route nothing",
+                provider.id
+            );
+        }
+        providers.push(provider);
+    }
+    providers
+}
+
 impl Config {
     /// Reject invalid glob patterns in the model-filter lists at config load, so
     /// a typo fails loudly instead of silently changing availability.
@@ -2052,6 +2143,7 @@ impl Config {
             warnings: config_warnings,
         } = super::config_model_override_parse::parse_model_overrides(raw_config);
         let (auth_providers, auth_provider_warnings) = parse_auth_providers(raw_config);
+        let providers = parse_providers(raw_config);
         let mut base = toml::Value::try_from(Self::default()).map_err(|e| e.to_string())?;
         if let toml::Value::Table(ref mut t) = base {
             t.remove("model");
@@ -2060,6 +2152,7 @@ impl Config {
         if let toml::Value::Table(ref mut t) = raw_without_model_sections {
             t.remove("model");
             t.remove("auth_provider");
+            t.remove("provider");
         }
         crate::config::deep_merge_toml(&mut base, &raw_without_model_sections);
         let (mut config, user_unused) =
@@ -2073,6 +2166,7 @@ impl Config {
         config.config_models = config_models;
         config.config_warnings = config_warnings;
         config.auth_providers = auth_providers;
+        config.providers = providers;
         config.config_warnings.extend(auth_provider_warnings);
         let declared_provider_names: std::collections::HashSet<&str> = raw_config
             .get("auth_provider")
@@ -3485,6 +3579,10 @@ pub fn resolve_model_list(
             }
         }
     }
+    // Expand custom providers AFTER the slug-donor loop so a synthesized
+    // entry's wire format is never clobbered by a same-slug built-in with a
+    // different backend; global header/scalar defaults below still apply.
+    expand_providers_into_catalog(&mut resolved, &cfg.providers);
     apply_global_extra_headers(&mut resolved, &cfg.models);
     apply_global_scalar_defaults(&mut resolved, &cfg.models);
     for entry in resolved.values_mut() {
@@ -3798,6 +3896,48 @@ pub struct ModelEntryConfig {
     /// the all-disabled state via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "is_default_laziness_detector")]
     pub laziness_detector: LazinessDetectorPerModelConfig,
+}
+impl ModelEntryConfig {
+    /// A fully-defaulted entry for the given wire slug, used as the `..base`
+    /// when synthesizing a `[[provider]]` catalog entry. `ModelEntryConfig`
+    /// has no `Default` (its `context_window` is a required `NonZeroU64`), so
+    /// provider expansion overrides the meaningful fields over this base.
+    fn minimal_for_provider(model: &str) -> Self {
+        Self {
+            id: None,
+            model: model.to_owned(),
+            base_url: String::new(),
+            name: None,
+            description: None,
+            max_completion_tokens: None,
+            temperature: None,
+            top_p: None,
+            api_key: None,
+            env_key: None,
+            api_backend: ApiBackend::default(),
+            auth_scheme: None,
+            reasoning_effort: None,
+            supports_reasoning_effort: false,
+            reasoning_efforts: Vec::new(),
+            extra_headers: IndexMap::new(),
+            context_window: NonZeroU64::new(200_000).unwrap(),
+            auto_compact_threshold_percent: None,
+            system_prompt_label: None,
+            api_base_url: None,
+            use_concise: false,
+            agent_type: default_agent_type(),
+            inference_idle_timeout_secs: None,
+            max_retries: None,
+            hidden: false,
+            supported_in_api: true,
+            supports_backend_search: false,
+            compactions_remaining: None,
+            compaction_at_tokens: None,
+            show_model_fingerprint: false,
+            stream_tool_calls: None,
+            laziness_detector: LazinessDetectorPerModelConfig::default(),
+        }
+    }
 }
 /// True when `cfg` equals the all-disabled default. Derives `PartialEq`
 /// on `f32`, which is fine for the current shape because both `f32`
@@ -4929,6 +5069,77 @@ pub fn resolve_chat_state_auth_type(
         .map(|r| r.auth_type)
         .unwrap_or(fallback)
 }
+/// Wire-format defaults for a custom `[[provider]]`: the sampler backend, the
+/// auth scheme (which header the credential rides in), and any headers the
+/// format requires by default.
+///
+/// * `chat_completions` / `responses` — `Authorization: Bearer <key>`.
+/// * `messages` — `x-api-key: <key>` plus a default `anthropic-version`.
+/// * `gemini` — `x-goog-api-key: <key>` (kept out of the URL).
+///
+/// Provider-supplied `headers` always win over these defaults.
+fn provider_format_defaults(
+    format: xai_grok_config_types::ProviderFormat,
+) -> (ApiBackend, AuthScheme, &'static [(&'static str, &'static str)]) {
+    use xai_grok_config_types::ProviderFormat;
+    match format {
+        ProviderFormat::ChatCompletions => (ApiBackend::ChatCompletions, AuthScheme::Bearer, &[]),
+        ProviderFormat::Responses => (ApiBackend::Responses, AuthScheme::Bearer, &[]),
+        ProviderFormat::Messages => (
+            ApiBackend::Messages,
+            AuthScheme::XApiKey,
+            &[("anthropic-version", "2023-06-01")],
+        ),
+        ProviderFormat::Gemini => (ApiBackend::Gemini, AuthScheme::GoogleApiKey, &[]),
+    }
+}
+
+/// Expand each `[[provider]]` into synthesized catalog entries so the existing
+/// model-routing path handles per-provider base URL / format / auth / headers.
+///
+/// # Routing convention
+///
+/// Each `<model>` a provider serves is inserted under the key
+/// `<provider_id>/<model>` with the wire slug set to the bare `<model>`.
+/// Selecting `<provider_id>/<model>` forces this provider; selecting the bare
+/// `<model>` resolves via [`find_model_by_id`]'s slug fallback (first catalog
+/// match wins, so a built-in x.ai model of the same name keeps precedence and
+/// the default path is never shadowed).
+fn expand_providers_into_catalog(
+    resolved: &mut IndexMap<String, ModelEntry>,
+    providers: &[xai_grok_config_types::ProviderConfig],
+) {
+    let fallback_cw =
+        NonZeroU64::new(DEFAULT_CONTEXT_WINDOW).unwrap_or(NonZeroU64::new(200_000).unwrap());
+    for provider in providers {
+        let (backend, auth_scheme, default_headers) = provider_format_defaults(provider.format);
+        // Format defaults first, provider headers second so the latter win.
+        let mut headers: IndexMap<String, String> = default_headers
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        for (k, v) in &provider.headers {
+            headers.insert(k.clone(), v.clone());
+        }
+        let context_window = provider.context_window.unwrap_or(fallback_cw);
+        for model in &provider.models {
+            let key = format!("{}/{}", provider.id, model);
+            let entry_config = ModelEntryConfig {
+                id: Some(key.clone()),
+                model: model.clone(),
+                base_url: provider.base_url.clone(),
+                api_key: provider.api_key.clone(),
+                api_backend: backend.clone(),
+                auth_scheme: Some(auth_scheme),
+                extra_headers: headers.clone(),
+                context_window,
+                ..ModelEntryConfig::minimal_for_provider(model)
+            };
+            resolved.insert(key, ModelEntry::from_config_entry(&entry_config));
+        }
+    }
+}
+
 pub fn sampling_config_for_model(
     model: &ModelEntry,
     credentials: ResolvedCredentials,
@@ -12104,5 +12315,350 @@ default = "grok-4.5"
         let r = resolve_mcp_recursive_config_watch(None, None, None, None, Some(false));
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Remote);
+    }
+
+    // ── [[provider]] registry: routing + per-format auth ──────────────────
+
+    /// A `[[provider]]` expands into `<id>/<model>` catalog entries whose
+    /// base URL, backend, auth scheme, and default headers come from the
+    /// provider's wire format. Both the prefixed key and the bare slug resolve.
+    #[test]
+    fn provider_registry_expands_and_routes_by_prefix_and_slug() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "acme"
+            format = "messages"
+            base_url = "https://acme.test/v1"
+            api_key = "sk-acme"
+            models = ["m-large"]
+            [provider.headers]
+            x-tenant = "t1"
+
+            [[provider]]
+            id = "goo"
+            format = "gemini"
+            base_url = "https://goo.test/v1beta"
+            api_key = "goo-key"
+            models = ["g-pro"]
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        assert_eq!(cfg.providers.len(), 2);
+        let resolved = resolve_model_list(&cfg, None);
+
+        let acme = resolved.get("acme/m-large").expect("prefixed key present");
+        assert_eq!(acme.info.base_url, "https://acme.test/v1");
+        assert_eq!(acme.info.api_backend, ApiBackend::Messages);
+        assert_eq!(acme.info.auth_scheme, AuthScheme::XApiKey);
+        assert_eq!(acme.api_key.as_deref(), Some("sk-acme"));
+        // Format default header plus provider-supplied header.
+        assert_eq!(
+            acme.info.extra_headers.get("anthropic-version").map(String::as_str),
+            Some("2023-06-01")
+        );
+        assert_eq!(
+            acme.info.extra_headers.get("x-tenant").map(String::as_str),
+            Some("t1")
+        );
+
+        let goo = resolved.get("goo/g-pro").expect("gemini prefixed key present");
+        assert_eq!(goo.info.api_backend, ApiBackend::Gemini);
+        assert_eq!(goo.info.auth_scheme, AuthScheme::GoogleApiKey);
+
+        // Prefixed and bare-slug lookups both resolve to the provider entry.
+        assert!(find_model_by_id(&resolved, "acme/m-large").is_some());
+        assert_eq!(
+            find_model_by_id(&resolved, "m-large").map(|e| e.info.model.as_str()),
+            Some("m-large")
+        );
+    }
+
+    /// A model NOT served by any provider still resolves through the default
+    /// x.ai catalog — the registry never shadows the built-in path.
+    #[test]
+    fn provider_registry_preserves_default_xai_path() {
+        let dm = crate::models::default_model();
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "acme"
+            format = "chat_completions"
+            base_url = "https://acme.test/v1"
+            models = ["custom-only"]
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        // Provider entry added...
+        assert!(resolved.contains_key("acme/custom-only"));
+        // ...and the built-in default model is untouched.
+        let default_entry = resolved.get(dm).expect("default model still present");
+        assert!(
+            crate::util::is_xai_api_url(&default_entry.info.base_url),
+            "default model must keep its x.ai base URL: {}",
+            default_entry.info.base_url
+        );
+    }
+
+    /// When two providers serve the same bare slug, both keep distinct
+    /// `<id>/<slug>` keys and the bare slug resolves to the first (registration
+    /// order), so `<id>/<slug>` is the disambiguator.
+    #[test]
+    fn provider_prefix_disambiguates_shared_slug() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "a"
+            base_url = "https://a.test/v1"
+            models = ["shared"]
+
+            [[provider]]
+            id = "b"
+            base_url = "https://b.test/v1"
+            models = ["shared"]
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        assert_eq!(
+            find_model_by_id(&resolved, "a/shared").map(|e| e.info.base_url.as_str()),
+            Some("https://a.test/v1")
+        );
+        assert_eq!(
+            find_model_by_id(&resolved, "b/shared").map(|e| e.info.base_url.as_str()),
+            Some("https://b.test/v1")
+        );
+        // Bare slug resolves to the first-registered provider.
+        assert_eq!(
+            find_model_by_id(&resolved, "shared").map(|e| e.info.base_url.as_str()),
+            Some("https://a.test/v1")
+        );
+    }
+
+    /// Regression: the slug-donor loop must not flip a provider entry's wire
+    /// format. A `chat_completions` provider whose bare slug matches a built-in
+    /// Responses model keeps `ChatCompletions`.
+    #[test]
+    fn provider_backend_not_clobbered_by_same_slug_builtin() {
+        let dm = crate::models::default_model();
+        // The built-in default model uses the Responses backend; point a
+        // chat_completions provider at the same wire slug.
+        let builtin = default_model_entries(&EndpointsConfig::default())
+            .get(dm)
+            .expect("default present")
+            .clone();
+        assert_eq!(
+            builtin.info.api_backend,
+            ApiBackend::Responses,
+            "precondition: built-in default uses Responses"
+        );
+        let raw: toml::Value = toml::from_str(&format!(
+            r#"
+            [[provider]]
+            id = "acme"
+            format = "chat_completions"
+            base_url = "https://acme.test/v1"
+            models = ["{dm}"]
+            "#
+        ))
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let entry = resolved
+            .get(&format!("acme/{dm}"))
+            .expect("provider entry present");
+        assert_eq!(
+            entry.info.api_backend,
+            ApiBackend::ChatCompletions,
+            "provider wire format must survive the slug-donor loop"
+        );
+    }
+
+    /// Per-format auth scheme flows from a synthesized provider entry all the
+    /// way into the sampler's on-the-wire auth type.
+    #[test]
+    fn provider_per_format_auth_flows_to_sampler() {
+        use xai_grok_config_types::{ProviderConfig, ProviderFormat};
+        let cases = [
+            (ProviderFormat::ChatCompletions, "bearer"),
+            (ProviderFormat::Responses, "bearer"),
+            (ProviderFormat::Messages, "x-api-key"),
+            (ProviderFormat::Gemini, "x-goog-api-key"),
+        ];
+        for (format, want_auth_type) in cases {
+            let providers = vec![ProviderConfig {
+                id: "p".to_owned(),
+                format,
+                base_url: "https://p.test/v1".to_owned(),
+                api_key: Some("sk-test".to_owned()),
+                headers: IndexMap::new(),
+                proxy: None,
+                models: vec!["m".to_owned()],
+                context_window: None,
+            }];
+            let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+            expand_providers_into_catalog(&mut catalog, &providers);
+            let entry = catalog.get("p/m").expect("entry synthesized");
+            let creds = resolve_credentials(entry, None);
+            let config = sampling_config_for_model(entry, creds, None, None, None, None);
+            let client =
+                xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+            assert_eq!(
+                client.auth_info().auth_type,
+                want_auth_type,
+                "format {format:?} must send {want_auth_type}"
+            );
+        }
+    }
+
+    /// End-to-end wire check: a chat_completions provider sends its credential
+    /// as `Authorization: Bearer <key>` to its own base URL.
+    #[tokio::test]
+    async fn provider_chat_completions_bearer_reaches_the_wire() {
+        use xai_grok_config_types::{ProviderConfig, ProviderFormat};
+        use xai_grok_sampling_types::conversation::{ConversationItem, ConversationRequest};
+
+        let server = xai_grok_test_support::MockInferenceServer::start()
+            .await
+            .unwrap();
+        let providers = vec![ProviderConfig {
+            id: "acme".to_owned(),
+            format: ProviderFormat::ChatCompletions,
+            base_url: server.url(),
+            api_key: Some("secret-bearer".to_owned()),
+            headers: IndexMap::new(),
+            proxy: None,
+            models: vec!["m1".to_owned()],
+            context_window: None,
+        }];
+        let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+        expand_providers_into_catalog(&mut catalog, &providers);
+        let entry = catalog.get("acme/m1").expect("entry synthesized");
+        let creds = resolve_credentials(entry, None);
+        let config = sampling_config_for_model(entry, creds, None, None, None, None);
+        let client = xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+
+        let request = ConversationRequest {
+            items: vec![ConversationItem::user("hi".to_owned())],
+            model: Some("m1".to_owned()),
+            ..Default::default()
+        };
+        let _ = client.conversation_collect(request).await;
+
+        let requests = server.requests();
+        let logged = requests
+            .iter()
+            .find(|e| e.path.contains("chat/completions"))
+            .expect("chat/completions request logged");
+        assert_eq!(logged.authorization.as_deref(), Some("Bearer secret-bearer"));
+    }
+
+    /// End-to-end wire check: a messages provider sends `x-api-key` plus the
+    /// default `anthropic-version` header to its own `/messages` endpoint.
+    #[tokio::test]
+    async fn provider_messages_sends_x_api_key_and_anthropic_version() {
+        use xai_grok_config_types::{ProviderConfig, ProviderFormat};
+        use xai_grok_sampling_types::conversation::{ConversationItem, ConversationRequest};
+
+        let server = xai_grok_test_support::MockInferenceServer::start()
+            .await
+            .unwrap();
+        let providers = vec![ProviderConfig {
+            id: "anthro".to_owned(),
+            format: ProviderFormat::Messages,
+            base_url: server.url(),
+            api_key: Some("sk-ant-secret".to_owned()),
+            headers: IndexMap::new(),
+            proxy: None,
+            models: vec!["claude-x".to_owned()],
+            context_window: None,
+        }];
+        let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+        expand_providers_into_catalog(&mut catalog, &providers);
+        let entry = catalog.get("anthro/claude-x").expect("entry synthesized");
+        let creds = resolve_credentials(entry, None);
+        let config = sampling_config_for_model(entry, creds, None, None, None, None);
+        let client = xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+
+        let request = ConversationRequest {
+            items: vec![ConversationItem::user("hi".to_owned())],
+            model: Some("claude-x".to_owned()),
+            ..Default::default()
+        };
+        let _ = client.conversation_collect(request).await;
+
+        let requests = server.requests();
+        let logged = requests
+            .iter()
+            .find(|e| e.path == "/v1/messages")
+            .expect("messages request logged");
+        assert_eq!(logged.header("x-api-key"), Some("sk-ant-secret"));
+        assert_eq!(logged.header("anthropic-version"), Some("2023-06-01"));
+        // The credential must NOT also ride in Authorization.
+        assert!(logged.authorization.is_none(), "messages must not send Bearer");
+    }
+
+    /// End-to-end: a gemini provider sends `x-goog-api-key` to the
+    /// `models/<model>:streamGenerateContent` path and the streamed chunks
+    /// collect into a unified response with text and usage.
+    #[tokio::test]
+    async fn provider_gemini_round_trips_via_mock() {
+        use xai_grok_config_types::{ProviderConfig, ProviderFormat};
+        use xai_grok_sampling_types::conversation::{ConversationItem, ConversationRequest};
+
+        let server = xai_grok_test_support::MockInferenceServer::start()
+            .await
+            .unwrap();
+        let providers = vec![ProviderConfig {
+            id: "goo".to_owned(),
+            format: ProviderFormat::Gemini,
+            base_url: server.url(),
+            api_key: Some("goo-secret".to_owned()),
+            headers: IndexMap::new(),
+            proxy: None,
+            models: vec!["gemini-x".to_owned()],
+            context_window: None,
+        }];
+        let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+        expand_providers_into_catalog(&mut catalog, &providers);
+        let entry = catalog.get("goo/gemini-x").expect("entry synthesized");
+        let creds = resolve_credentials(entry, None);
+        let config = sampling_config_for_model(entry, creds, None, None, None, None);
+        let client = xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+
+        let request = ConversationRequest {
+            items: vec![ConversationItem::user("hi".to_owned())],
+            model: Some("gemini-x".to_owned()),
+            ..Default::default()
+        };
+        let response = client
+            .conversation_collect(request)
+            .await
+            .expect("gemini round-trip succeeds");
+
+        let assistant = response.assistant().expect("assistant item");
+        assert!(
+            assistant.content.contains("Echo: hi"),
+            "unified text: {}",
+            assistant.content
+        );
+        let usage = response.usage.as_ref().expect("usage extracted");
+        assert_eq!(usage.prompt_tokens, 11);
+        assert_eq!(usage.completion_tokens, 7);
+
+        let requests = server.requests();
+        let logged = requests
+            .iter()
+            .find(|e| e.path.contains(":streamGenerateContent"))
+            .expect("gemini request logged");
+        assert_eq!(logged.header("x-goog-api-key"), Some("goo-secret"));
+        assert!(
+            logged.authorization.is_none(),
+            "gemini must not send Bearer"
+        );
     }
 }

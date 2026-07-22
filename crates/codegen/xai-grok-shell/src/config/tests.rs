@@ -2714,6 +2714,27 @@ fn auth_provider_honored_only_from_trusted_disk_layers() {
         "a provider in a trusted disk layer is honored"
     );
 }
+/// A `[[provider]]` registry entry carries a `base_url` + `api_key`, so it
+/// follows the same trust posture as `[auth_provider]`: honored from a trusted
+/// disk layer, and — like auth_provider — never sourced from an untrusted
+/// project `.grok/config.toml`, since that layer never reaches
+/// `new_from_toml_cfg` (see `load_user_config_layer`, which refuses the
+/// cwd-relative fallback).
+#[test]
+fn custom_provider_registry_honored_only_from_trusted_disk_layers() {
+    let layers = ConfigLayers {
+        managed: toml::from_str(
+            "[[provider]]\nid = \"acme\"\nbase_url = \"https://acme.test/v1\"\napi_key = \"sk-acme\"\nmodels = [\"m\"]\n",
+        )
+        .unwrap(),
+        ..Default::default()
+    };
+    let cfg = crate::agent::config::Config::new_from_toml_cfg(&layers.effective_config_disk_only())
+        .unwrap();
+    assert_eq!(cfg.providers.len(), 1, "provider in a trusted layer is honored");
+    assert_eq!(cfg.providers[0].id, "acme");
+    assert_eq!(cfg.providers[0].api_key.as_deref(), Some("sk-acme"));
+}
 /// REGRESSION: the real enterprise two-file merge —
 /// `managed_config.toml` (proxy + BYO model host) layered with
 /// `requirements.toml` (deployment key + S3 trace upload) via the actual
