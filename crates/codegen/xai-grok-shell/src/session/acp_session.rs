@@ -939,8 +939,8 @@ pub(crate) struct SessionActor {
     /// sidecar (`LoadedPlugin::sidecar_spec()`). `None` when the session has no
     /// sidecar plugins. Coerces to `Arc<dyn PluginHookInvoker>` for the hook
     /// runner (see `hook_run_ctx`); disposed on session shutdown. Built once at
-    /// spawn from the initial plugin registry snapshot; not rebuilt on
-    /// `/plugins reload` in Phase 1.
+    /// spawn from the initial plugin registry snapshot; not currently rebuilt on
+    /// `/plugins reload`.
     pub(crate) plugin_host: Option<std::sync::Arc<xai_grok_plugin_host::PluginHost>>,
     /// Centralized event tracking: event log, turn-end guard, active tool,
     /// doom loop terminate flag. All event-related state lives here.

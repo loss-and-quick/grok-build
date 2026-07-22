@@ -132,8 +132,8 @@ pub enum PathOrInline {
 /// TypeScript sidecar plugin runtime selection (`plugin.json`'s `runtime` field).
 ///
 /// `Auto` (the default) defers to the plugin host's own probe order —
-/// `bun` → `node` (22+) → `deno` — per the Phase 1 plan. Explicit variants
-/// pin the sidecar to a single runtime.
+/// `bun` → `node` (22+) → `deno`. Explicit variants pin the sidecar to a
+/// single runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginRuntime {
