@@ -684,6 +684,7 @@ fn collect_plugin(
                 runtime: None,
                 network: None,
                 tools: None,
+                config: None,
             }
         }
         Err(e) => {

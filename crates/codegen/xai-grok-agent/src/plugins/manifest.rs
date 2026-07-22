@@ -203,6 +203,13 @@ pub struct PluginManifest {
     /// [`PluginManifest::sidecar_tools`].
     #[serde(default)]
     pub tools: Option<Vec<ManifestToolSpec>>,
+    /// Default per-plugin configuration object (`plugin.json`'s `config`).
+    /// Surfaced to the sidecar at `initialize` and via `config_get`; user
+    /// `[plugins.<name>]` entries from config.toml are shallow-merged over
+    /// these defaults by the shell's session plugin-host wiring. Defaults to
+    /// `{}` when absent. See [`PluginManifest::sidecar_config_defaults`].
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
 }
 
 /// One model-visible tool declared in a sidecar plugin's manifest (`tools`
@@ -340,6 +347,24 @@ impl PluginManifest {
     /// Effective network flag: the manifest's `network`, or `false` when unset.
     pub fn network_enabled(&self) -> bool {
         self.network.unwrap_or(false)
+    }
+
+    /// Manifest-declared default config object for the sidecar, or `{}` when
+    /// absent. A non-object `config` value is ignored (warned), matching the
+    /// tolerant component-loading convention — the merge layer and SDK
+    /// `ctx.config()` always see a JSON object.
+    pub fn sidecar_config_defaults(&self) -> serde_json::Value {
+        match &self.config {
+            Some(v) if v.is_object() => v.clone(),
+            Some(_) => {
+                tracing::warn!(
+                    plugin = %self.name,
+                    "manifest `config` is not a JSON object; ignoring"
+                );
+                serde_json::json!({})
+            }
+            None => serde_json::json!({}),
+        }
     }
 
     /// Validated sidecar tools from the manifest's `tools` array.
@@ -833,6 +858,7 @@ mod tests {
             runtime: None,
             network: None,
             tools: None,
+            config: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1);
@@ -864,6 +890,7 @@ mod tests {
             runtime: None,
             network: None,
             tools: None,
+            config: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(dirs.is_empty());
@@ -897,6 +924,7 @@ mod tests {
             runtime: None,
             network: None,
             tools: None,
+            config: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(
@@ -930,6 +958,7 @@ mod tests {
             runtime: None,
             network: None,
             tools: None,
+            config: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1, "path within plugin root should be accepted");
@@ -963,6 +992,7 @@ mod tests {
             runtime: None,
             network: None,
             tools: None,
+            config: None,
         };
         assert!(
             manifest.hooks_path(&root).is_none(),
@@ -997,6 +1027,7 @@ mod tests {
             runtime: None,
             network: None,
             tools: None,
+            config: None,
         };
         assert!(
             manifest.mcp_config_path(&root).is_none(),
@@ -1024,6 +1055,7 @@ mod tests {
             runtime: None,
             network: None,
             tools: None,
+            config: None,
         }
     }
 
@@ -1275,5 +1307,38 @@ mod tests {
             manifest.sidecar_tools().is_empty(),
             "tools without a `plugin` sidecar entry have nothing to serve them"
         );
+    }
+
+    // ── Manifest default config (`config`) ──────────────────────────────
+
+    #[test]
+    fn manifest_config_object_is_surfaced_as_defaults() {
+        let json = r#"{
+            "name": "council",
+            "plugin": "./index.ts",
+            "config": { "participants": ["a", "b"], "rounds": 2 }
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let defaults = manifest.sidecar_config_defaults();
+        assert_eq!(defaults["participants"], serde_json::json!(["a", "b"]));
+        assert_eq!(defaults["rounds"], 2);
+    }
+
+    #[test]
+    fn manifest_config_absent_defaults_to_empty_object() {
+        let json = r#"{ "name": "plain", "plugin": "./index.ts" }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.config.is_none());
+        assert_eq!(manifest.sidecar_config_defaults(), serde_json::json!({}));
+    }
+
+    #[test]
+    fn manifest_config_non_object_is_ignored() {
+        // A non-object `config` (array/string/number) is dropped to `{}` so the
+        // SDK's `ctx.config()` always sees an object.
+        let json = r#"{ "name": "bad", "plugin": "./index.ts", "config": [1, 2, 3] }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.config.is_some());
+        assert_eq!(manifest.sidecar_config_defaults(), serde_json::json!({}));
     }
 }

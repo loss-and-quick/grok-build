@@ -24,6 +24,11 @@ pub struct SidecarSpec {
     /// registered in the session tool catalog as `<plugin>__<name>` and
     /// executed in the sidecar via `tool_invoke`.
     pub tools: Vec<super::manifest::SidecarToolSpec>,
+    /// Manifest-declared default config object (`plugin.json`'s `config`), or
+    /// `{}` when absent. User `[plugins.<name>]` entries from config.toml are
+    /// shallow-merged over these defaults by the shell before the result is
+    /// handed to the sidecar at `initialize` / `config_get`.
+    pub config: serde_json::Value,
 }
 
 /// A loaded plugin with resolved components, ready for use by the session.
@@ -201,6 +206,7 @@ impl PluginRegistry {
                     runtime: dp.manifest.runtime_or_default(),
                     network: dp.manifest.network_enabled(),
                     tools: dp.manifest.sidecar_tools(),
+                    config: dp.manifest.sidecar_config_defaults(),
                 });
 
             // Capture inline data before consuming the manifest
@@ -687,6 +693,7 @@ mod tests {
                 runtime: None,
                 network: None,
                 tools: None,
+                config: None,
             },
             id: PluginId::new(scope, &root, name),
             root: root.clone(),
@@ -1314,6 +1321,7 @@ mod tests {
                     input_schema: None,
                     timeout_ms: Some(1_000),
                 }]),
+                config: Some(serde_json::json!({ "participants": ["alice"] })),
             },
             id: PluginId::new(PluginScope::User, root, name),
             root: root.to_path_buf(),
@@ -1353,6 +1361,8 @@ mod tests {
         assert_eq!(spec.tools[0].description, "echo back");
         assert_eq!(spec.tools[0].timeout_ms, 1_000);
         assert_eq!(spec.tools[0].input_schema["type"], "object");
+        // Manifest default config flows through as the sidecar's config defaults.
+        assert_eq!(spec.config, serde_json::json!({ "participants": ["alice"] }));
     }
 
     #[test]

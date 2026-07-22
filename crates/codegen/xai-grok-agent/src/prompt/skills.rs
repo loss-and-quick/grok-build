@@ -1653,6 +1653,7 @@ mod tests {
                 runtime: None,
                 network: None,
                 tools: None,
+                config: None,
             },
             id: PluginId::new(PluginScope::User, root, name),
             root: root.to_path_buf(),

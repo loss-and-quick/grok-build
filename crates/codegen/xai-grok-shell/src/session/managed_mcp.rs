@@ -1004,6 +1004,7 @@ enabled = false
             runtime: None,
             network: None,
             tools: None,
+            config: None,
         };
         let id = PluginId::new(PluginScope::User, &plugin_root, "sentry");
         let dp = DiscoveredPlugin {
@@ -1076,6 +1077,7 @@ enabled = false
             runtime: None,
             network: None,
             tools: None,
+            config: None,
         };
         let id = PluginId::new(PluginScope::User, &plugin_root, "sentry");
         let dp = DiscoveredPlugin {
@@ -1154,6 +1156,7 @@ enabled = false
             runtime: None,
             network: None,
             tools: None,
+            config: None,
         };
         let id = PluginId::new(PluginScope::User, &plugin_root, "slack");
         let dp = DiscoveredPlugin {

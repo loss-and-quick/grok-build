@@ -900,6 +900,14 @@ pub struct PluginsConfig {
     /// which are disabled by default — adding a plugin here overrides that default.
     #[serde(default)]
     pub enabled: Vec<String>,
+    /// Per-plugin configuration tables: a `[plugins.<name>]` sub-table in
+    /// config.toml maps to `<name> -> { ... }` here. Captured via
+    /// `#[serde(flatten)]`, so every key under `[plugins]` that is not
+    /// `paths`/`disabled`/`enabled` is treated as one plugin's own config
+    /// object. Shallow-merged over the plugin manifest's `config` defaults by
+    /// the session plugin-host wiring; see `session::plugin_host`.
+    #[serde(flatten, default)]
+    pub config: std::collections::BTreeMap<String, serde_json::Value>,
     /// CLI `--plugin-dir` paths (populated by CLI arg processing, not config file).
     #[serde(skip)]
     pub cli_plugin_dirs: Vec<std::path::PathBuf>,
@@ -5616,6 +5624,43 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use xai_grok_test_support::EnvGuard;
+
+    /// `[plugins.<name>]` sub-tables deserialize into `PluginsConfig::config`
+    /// (the `#[serde(flatten)]` catch-all) as each plugin's own config object,
+    /// while the named `paths`/`disabled`/`enabled` keys stay in their fields.
+    /// Mirrors the real extract path: `toml_val.get("plugins").try_into()`.
+    #[test]
+    fn plugins_config_captures_per_plugin_tables() {
+        let toml_src = r#"
+            [plugins]
+            disabled = ["noisy"]
+            enabled = ["council"]
+
+            [plugins.council]
+            participants = ["grok", "claude"]
+            rounds = 3
+
+            [plugins.memory]
+            store = "sqlite"
+        "#;
+        let root: toml::Value = toml::from_str(toml_src).unwrap();
+        let cfg: PluginsConfig = root.get("plugins").unwrap().clone().try_into().unwrap();
+
+        // Named fields keep their typed meaning.
+        assert_eq!(cfg.disabled, vec!["noisy".to_string()]);
+        assert_eq!(cfg.enabled, vec!["council".to_string()]);
+        assert!(cfg.paths.is_empty());
+
+        // Per-plugin tables land in the flatten map as JSON objects, and the
+        // named keys are NOT leaked into it.
+        assert!(!cfg.config.contains_key("disabled"));
+        assert!(!cfg.config.contains_key("enabled"));
+        let council = cfg.config.get("council").expect("council config captured");
+        assert_eq!(council["participants"], serde_json::json!(["grok", "claude"]));
+        assert_eq!(council["rounds"], 3);
+        assert_eq!(cfg.config["memory"]["store"], "sqlite");
+    }
+
     #[test]
     fn main_cli_tools_override_preserves_profile_injection_policy() {
         let overrides = CliAgentOverrides {
