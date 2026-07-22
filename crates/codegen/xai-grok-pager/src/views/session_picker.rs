@@ -562,6 +562,7 @@ pub(crate) struct SessionPickerSnapshot<'a> {
 }
 
 /// Rebuild backing-index expansion after a session query changes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sync_session_picker_query_expansion(
     snapshot: SessionPickerSnapshot<'_>,
     state: &mut PickerState,

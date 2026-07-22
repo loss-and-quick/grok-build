@@ -254,7 +254,7 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
     ) -> Result<xai_grok_plugin_host::SpawnedSubagent, String> {
         use xai_grok_plugin_host::AgentStatusDto;
         use xai_grok_tools::implementations::grok_build::task::types::{
-            ModelOverrideProvenance, SubagentEvent, SubagentRequest, SubagentResult,
+            ModelOverrideProvenance, SubagentEvent, SubagentOwner, SubagentRequest, SubagentResult,
             SubagentRuntimeOverrides,
         };
 
@@ -311,7 +311,14 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
             // The plugin owns the result; don't queue a between-turn
             // completion reminder at the model.
             surface_completion: false,
+            // The plugin polls its own result channel; the coordinator never
+            // blocks a turn on this spawn.
+            await_to_completion: false,
             fork_context: false,
+            owner: SubagentOwner::Task,
+            // Session-owned, not turn-owned: a fresh token so turn cancellation
+            // can't reap it (per-spawn timeout and agent_cancel still apply).
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             result_tx,
         };
         self.tx
