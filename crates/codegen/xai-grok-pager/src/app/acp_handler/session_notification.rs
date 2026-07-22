@@ -981,6 +981,21 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         XaiSessionUpdate::InteractionResolved { tool_call_id } => {
             agent.dismiss_resolved_interaction(&tool_call_id)
         }
+        XaiSessionUpdate::PluginPanel {
+            plugin,
+            view_model,
+        } => {
+            if app.appearance.disable_plugins {
+                return false;
+            }
+            // Keyed by (plugin, view_model.id) — panel ids are only
+            // plugin-local — and merged on re-publish so half-typed input
+            // survives a wholesale re-publish.
+            agent.apply_plugin_panel(plugin, view_model)
+        }
+        XaiSessionUpdate::PanelClosed { plugin, id } => {
+            agent.remove_plugin_panel(&plugin, &id)
+        }
         _ => {
             tracing::trace!(
                 "Ignoring {}: {:?}",

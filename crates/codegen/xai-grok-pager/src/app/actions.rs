@@ -366,6 +366,16 @@ pub enum Action {
     ExecuteHooksAction(xai_hooks_plugins_types::HooksAction),
     /// Execute a plugins management action from the modal.
     ExecutePluginsAction(xai_hooks_plugins_types::PluginsAction),
+    /// Toggle the plugin UI-panel overlay.
+    TogglePluginPanels,
+    /// A plugin panel button was activated; route it back to the owning plugin.
+    /// Carries the current text of every Input field in the panel.
+    PluginPanelAction {
+        plugin: String,
+        panel_id: String,
+        button_id: String,
+        inputs: std::collections::BTreeMap<String, String>,
+    },
     /// Execute a marketplace management action from the modal.
     ExecuteMarketplaceAction(xai_hooks_plugins_types::MarketplaceAction),
     /// Add or update an MCP server via x.ai/mcp/upsert.
@@ -1737,6 +1747,17 @@ pub enum Effect {
         session_id: acp::SessionId,
         action: xai_hooks_plugins_types::PluginsAction,
     },
+    /// Route a plugin panel button press back to the owning plugin via the ACP
+    /// ext method `x.ai/plugins/panel_action`. Fire-and-forget from the user's
+    /// view — a false/failed delivery does not surface an error.
+    PluginPanelAction {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        plugin: String,
+        panel_id: String,
+        button_id: String,
+        inputs: std::collections::BTreeMap<String, String>,
+    },
     /// Fetch marketplace plugin list from the shell.
     FetchMarketplaceList {
         agent_id: AgentId,
@@ -2414,6 +2435,9 @@ pub enum TaskResult {
         agent_id: AgentId,
         result: Result<xai_hooks_plugins_types::ActionOutcome, String>,
     },
+    /// Plugin panel button action delivered (fire-and-forget; the boolean is
+    /// logged only).
+    PluginPanelActionResult { delivered: bool },
     /// Marketplace list loaded.
     MarketplaceListLoaded {
         agent_id: AgentId,

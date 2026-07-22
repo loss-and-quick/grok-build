@@ -612,6 +612,25 @@ pub(super) fn default_actions(
             ),
         },
         ActionDef {
+            id: ActionId::TogglePluginPanels,
+            label: "panels",
+            description: "Toggle plugin panels overlay",
+            // F6 is a deliberately conflict-free chord: Ctrl+P is the command
+            // palette, and every free Ctrl+letter is either a live prompt
+            // editor binding (Ctrl+A/H) or already handled (Ctrl+W/Z). F-keys
+            // are neither. Shown only when a plugin has published a panel.
+            default_key: key!(F(6)),
+            alt_keys: vec![],
+            category: Category::Panels,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: Some("F6"),
+            requires_confirmation: false,
+            long_help: Some(
+                "Opens or closes the plugin panel overlay, a full-screen view of the declarative UI panels plugins publish (status chips, tables, input fields, and action buttons).\nA compact summary also shows in the status bar whenever a panel is active.\nInside the overlay: Tab moves focus, arrows switch panels, Enter activates a button, Esc closes.",
+            ),
+        },
+        ActionDef {
             id: ActionId::SendToBackground,
             label: "send to bg",
             description: "Send running task to background",

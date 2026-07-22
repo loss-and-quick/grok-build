@@ -4444,6 +4444,7 @@ fn dashboard_action_for_id(
         | ActionId::ToggleQueue
         | ActionId::OpenSessions
         | ActionId::OpenExtensions
+        | ActionId::TogglePluginPanels
         | ActionId::SendToBackground
         | ActionId::CycleMode
         | ActionId::BashMode

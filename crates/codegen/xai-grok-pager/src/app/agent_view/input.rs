@@ -551,6 +551,26 @@ impl AgentView {
                 return InputOutcome::Changed;
             }
         }
+        if self.plugin_panel_overlay_active() {
+            return match ev {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    // Global quit still works while the overlay is open.
+                    if registry.lookup(key, When::Always) == Some(ActionId::Quit) {
+                        return InputOutcome::Unchanged;
+                    }
+                    // The toggle chord closes the overlay.
+                    if registry.lookup(key, When::AgentScreen)
+                        == Some(ActionId::TogglePluginPanels)
+                    {
+                        self.plugin_panel_overlay_open = false;
+                        return InputOutcome::Changed;
+                    }
+                    self.handle_plugin_panel_key(key)
+                }
+                Event::Paste(text) => self.handle_plugin_panel_paste(text),
+                _ => InputOutcome::Changed,
+            };
+        }
         if self.btw_state.is_some()
             && let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release

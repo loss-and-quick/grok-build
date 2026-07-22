@@ -626,6 +626,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         | TaskResult::MarketplaceActionResult { agent_id, result } => {
             dispatch_action_result(app, agent_id, result)
         }
+        TaskResult::PluginPanelActionResult { delivered } => {
+            // Fire-and-forget from the user's view; log only.
+            tracing::debug!(delivered, "plugin panel_action delivered");
+            vec![]
+        }
         TaskResult::CtaPluginInstallDone {
             agent_id,
             plugin_name,

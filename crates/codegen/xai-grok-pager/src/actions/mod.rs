@@ -94,6 +94,8 @@ pub enum ActionId {
     ToggleQueue,
     OpenSessions,
     OpenExtensions,
+    /// Toggle the plugin UI-panel overlay.
+    TogglePluginPanels,
     SendToBackground,
 
     // Prompt

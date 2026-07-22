@@ -2335,6 +2335,48 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::PluginPanelAction {
+            agent_id: _,
+            session_id,
+            plugin,
+            panel_id,
+            button_id,
+            inputs,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let req_body = xai_hooks_plugins_types::PanelActionRequest {
+                    session_id: session_id.0.to_string(),
+                    plugin,
+                    panel_id,
+                    button_id,
+                    inputs,
+                };
+                let req = acp::ExtRequest::new(
+                    "x.ai/plugins/panel_action",
+                    serde_json::value::to_raw_value(&req_body)
+                        .expect("serialize plugins/panel_action params")
+                        .into(),
+                );
+                let delivered = match acp_send(req, &tx).await {
+                    Ok(resp) => {
+                        let wrapper: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let inner = wrapper.get("result").unwrap_or(&wrapper);
+                        serde_json::from_value::<xai_hooks_plugins_types::PanelActionResponse>(
+                            inner.clone(),
+                        )
+                        .map(|r| r.delivered)
+                        .unwrap_or(false)
+                    }
+                    Err(e) => {
+                        tracing::debug!("plugin panel_action delivery failed: {e}");
+                        false
+                    }
+                };
+                TaskResult::PluginPanelActionResult { delivered }
+            });
+        }
         Effect::FetchMarketplaceList { agent_id, session_id } => {
             let tx = acp_tx.clone();
             tasks

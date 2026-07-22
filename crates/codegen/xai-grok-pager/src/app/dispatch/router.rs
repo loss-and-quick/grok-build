@@ -750,6 +750,34 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 action,
             }]
         }
+        Action::TogglePluginPanels => {
+            with_active_agent(app, |agent| agent.toggle_plugin_panel_overlay());
+            vec![]
+        }
+        Action::PluginPanelAction {
+            plugin,
+            panel_id,
+            button_id,
+            inputs,
+        } => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get(&id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            vec![Effect::PluginPanelAction {
+                agent_id: id,
+                session_id,
+                plugin,
+                panel_id,
+                button_id,
+                inputs,
+            }]
+        }
         Action::UpsertMcpServer { name, config } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];

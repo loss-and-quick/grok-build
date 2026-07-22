@@ -160,6 +160,7 @@ mod notices;
 mod panes;
 mod paste;
 mod plan;
+mod plugin_panel;
 mod prompt;
 mod queue;
 mod render;
@@ -827,6 +828,19 @@ pub struct AgentView {
     pub reauth_stashed_prompt: Option<crate::app::agent::InFlightPrompt>,
     /// Currently active modal dialog (blocks all other input).
     pub active_modal: Option<ActiveModal>,
+    /// Declarative UI panels published by plugins, keyed by the
+    /// `(plugin, panel_id)` pair — panel ids are only plugin-local, so the
+    /// publishing plugin name is part of the key. Insertion order (IndexMap)
+    /// drives the overlay switcher. Re-publishing an existing key merges into
+    /// the live [`PanelState`] so in-progress input survives.
+    pub(crate) plugin_panels:
+        indexmap::IndexMap<(String, String), crate::views::plugin_panel::PanelState>,
+    /// The `(plugin, panel_id)` of the panel shown in the overlay / summarised
+    /// as active in the sidebar. Kept valid as panels come and go.
+    pub(crate) active_plugin_panel: Option<(String, String)>,
+    /// Whether the full-screen plugin-panel overlay is open. The panels persist
+    /// (and show in the sidebar) whether or not the overlay is open.
+    pub(crate) plugin_panel_overlay_open: bool,
     /// Hit areas for modal buttons (from last render).
     pub(crate) modal_buttons: Vec<ModalButtonHit>,
     /// Currently hovered modal button key (for highlight).
@@ -2002,6 +2016,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::ExpandAllThinking => Action::ExpandAllThinking,
         ActionId::ToggleRaw => Action::ToggleRaw,
         ActionId::ToggleMouseCapture => Action::ToggleMouseCapture,
+        ActionId::TogglePluginPanels => Action::TogglePluginPanels,
         ActionId::CopyBlockContent => Action::CopyBlockContent,
         ActionId::CopyBlockMeta => Action::CopyBlockMeta,
         ActionId::OpenBlockViewer => Action::OpenBlockViewer,

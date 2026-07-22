@@ -1278,6 +1278,12 @@ impl AgentView {
         }) {
             status.push("mcp", mcp_line);
         }
+        // Compact plugin-panel summary. Composed alongside the other chips and
+        // rendered ONLY when panels exist, so the shared status bar (and every
+        // existing snapshot without panels) is untouched.
+        if let Some(panel_line) = self.plugin_panel_status_chip(&theme) {
+            status.push("plugin_panels", panel_line);
+        }
         let ctx_used = self.context_state.as_ref().map(|c| c.used);
         let model_window = self.session.models.get_context_window();
         let ctx_total = self
@@ -4155,6 +4161,10 @@ impl AgentView {
             if let Some(popup) = popup {
                 self.frame_occluder_rects.push(popup);
             }
+        }
+        if self.plugin_panel_overlay_active() {
+            let popup = self.draw_plugin_panel_overlay(area, buf);
+            self.frame_occluder_rects.push(popup);
         }
         self.pane_areas = layout.pane_areas();
         {
