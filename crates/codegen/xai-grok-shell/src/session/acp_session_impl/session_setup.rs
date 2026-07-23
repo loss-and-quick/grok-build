@@ -3,6 +3,31 @@
 //! refresh.
 use super::*;
 impl SessionActor {
+    /// Build the plugin credential seam for this session, or `None` when no
+    /// sidecar plugin host is attached (fail-open: the built-in auth path is
+    /// untouched). The seam lets a subscribed plugin supply, refresh, or
+    /// interactively authorize the outbound bearer through the
+    /// `resolve_credential`/`refresh_credential`/`start_oauth_flow` hook events.
+    ///
+    /// Shared by the xAI-side credential provider (session bootstrap /
+    /// model-metadata refresh) and the custom-provider sampler route, so both
+    /// consult the same registry snapshot + plugin invoker.
+    pub(super) fn build_credential_seam(
+        &self,
+    ) -> Option<Arc<dyn crate::auth::credential_seam::PluginCredentialSeam>> {
+        let registry = self.hook_registry.borrow().clone()?;
+        let invoker =
+            self.plugin_host.clone()? as Arc<dyn xai_grok_hooks::invoker::PluginHookInvoker>;
+        Some(Arc::new(
+            crate::auth::credential_seam::HookCredentialSeam::new(
+                (*registry).clone(),
+                invoker,
+                self.session_id_string(),
+                self.session_info.cwd.clone(),
+                self.hook_workspace_root(),
+            ),
+        ))
+    }
     /// `true` for session-based ACP auth methods.
     fn is_session_based_auth(&self) -> bool {
         self.auth_method_id
@@ -363,13 +388,22 @@ impl SessionActor {
             return;
         };
         let _ = am.auth().await;
-        let provider: Arc<dyn xai_grok_auth::AuthCredentialProvider> = Arc::new(
+        // Session-aware construction: when a sidecar plugin subscribes to the
+        // credential seam, let it supply the outbound bearer for this request.
+        // Fail-open — no plugin host means the built-in xAI resolution runs
+        // exactly as before.
+        let mut credential_provider =
             crate::auth::credential_provider::ShellAuthCredentialProvider::new(
                 am.clone(),
                 None,
                 None,
-            ),
-        );
+            );
+        if let Some(seam) = self.build_credential_seam() {
+            credential_provider = credential_provider.with_credential_seam(seam);
+            credential_provider.resolve_credential("outbound").await;
+        }
+        let provider: Arc<dyn xai_grok_auth::AuthCredentialProvider> =
+            Arc::new(credential_provider);
         let middleware_client =
             crate::http::with_auth_retry(crate::http::shared_client(), provider);
         let url = format!("{}/models-v2", base_url);

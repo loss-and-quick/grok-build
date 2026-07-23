@@ -803,6 +803,29 @@ async fn reconstruct_full_config_no_bearer_resolver_for_api_key_method() {
         .await;
 }
 
+/// Fail-open: with no sidecar plugin host attached, no credential seam is built,
+/// so every credential path (xAI provider bootstrap and the custom-provider
+/// sampler route) falls back to the built-in resolution exactly as before.
+#[tokio::test(flavor = "current_thread")]
+async fn build_credential_seam_none_without_plugin_host() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                None,
+                "xai.api_key",
+                xai_chat_state::AuthType::ApiKey,
+                "k".to_string(),
+            )
+            .await;
+            assert!(
+                actor.build_credential_seam().is_none(),
+                "no plugin host -> no credential seam (built-in auth untouched)"
+            );
+        })
+        .await;
+}
+
 /// The pre-flight refresh heals a transiently-`ApiKey` session by writing the
 /// fresh session token back into `creds.api_key`.
 #[tokio::test(flavor = "current_thread")]
