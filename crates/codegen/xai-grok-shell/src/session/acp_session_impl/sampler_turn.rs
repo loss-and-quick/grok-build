@@ -26,6 +26,68 @@ pub(super) fn is_auth_tool_error(err: &xai_tool_runtime::ToolError) -> bool {
         || lower.contains("invalid api key")
         || lower.contains("invalid_token")
 }
+/// A [`xai_grok_sampler::BearerResolver`] that always returns the same
+/// pre-resolved token. Carries a plugin-supplied credential (resolved once per
+/// turn in [`SessionActor::reconstruct_full_config`]) onto the sampler's
+/// per-request auth-attachment path.
+struct StaticBearerResolver(String);
+impl std::fmt::Debug for StaticBearerResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StaticBearerResolver")
+            .finish_non_exhaustive()
+    }
+}
+impl xai_grok_sampler::BearerResolver for StaticBearerResolver {
+    fn current_bearer(&self) -> Option<String> {
+        Some(self.0.clone())
+    }
+}
+
+/// Route a plugin-supplied credential onto a **custom (non-xAI) provider**.
+///
+/// When the session has a credential seam (a sidecar plugin subscribed to
+/// `resolve_credential`) and the outbound `base_url` is not an xAI endpoint,
+/// ask the plugin for the outbound bearer. On a hit the credential is carried
+/// as `Authorization: Bearer <token>`: the seam always supplies a bearer, so
+/// the provider's static `auth_scheme` (e.g. `x-api-key` for the Anthropic
+/// Messages format) is overridden to `Bearer` while the request-body shape
+/// (`api_backend`) is left untouched. This is what lets a plugin OAuth token
+/// reach a BYOK endpoint such as `api.anthropic.com`.
+///
+/// Returns `(bearer_resolver, auth_scheme_override)`:
+/// - `(Some(resolver), Some(Bearer))` when a plugin credential was resolved,
+/// - `(None, None)` for an xAI endpoint, no seam, or a plugin passthrough — the
+///   caller then keeps the provider's static `api_key`/`auth_scheme`.
+///
+/// xAI endpoints are never routed here (their auth stays with the session
+/// `AuthManager` token), so this never perturbs the first-party path. A
+/// per-provider `x-api-key` supplied by a plugin is out of scope: the seam is
+/// bearer-shaped, and static keys already cover that case.
+async fn resolve_custom_provider_auth(
+    seam: Option<Arc<dyn crate::auth::credential_seam::PluginCredentialSeam>>,
+    base_url: &str,
+) -> (
+    Option<xai_grok_sampler::SharedBearerResolver>,
+    Option<xai_grok_sampler::AuthScheme>,
+) {
+    // First-party (xAI) endpoints keep their AuthManager-driven auth untouched.
+    if crate::util::is_xai_api_url(base_url) {
+        return (None, None);
+    }
+    let Some(seam) = seam else {
+        return (None, None);
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    match seam.resolve(&format!("outbound:{base_url}")).await {
+        Some(cred) if cred.is_unexpired(now_ms) => {
+            let resolver: xai_grok_sampler::SharedBearerResolver =
+                Arc::new(StaticBearerResolver(cred.token));
+            (Some(resolver), Some(xai_grok_sampler::AuthScheme::Bearer))
+        }
+        _ => (None, None),
+    }
+}
+
 /// Gate inputs bundled with the composed decision so the 401-recovery log can
 /// report the components.
 #[derive(Clone, Copy)]
@@ -371,7 +433,30 @@ impl SessionActor {
             SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
         let use_bearer_resolver = gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
-        let auth_scheme = model_facts.auth_scheme;
+        let mut auth_scheme = model_facts.auth_scheme;
+        // Auth attachment splits cleanly by provider:
+        // - xAI session-based auth (`use_bearer_resolver`) keeps the live
+        //   `AuthManager` token via `AuthManagerBearerResolver`;
+        // - every other endpoint is a custom/BYOK provider, where a subscribed
+        //   plugin may supply the outbound bearer (`resolve_custom_provider_auth`
+        //   self-guards xAI URLs and overrides `auth_scheme` to Bearer on a hit);
+        // - with no live resolver on either arm, the sampler falls back to the
+        //   construction-time `api_key` header exactly as before.
+        let bearer_resolver: Option<xai_grok_sampler::SharedBearerResolver> = if use_bearer_resolver
+        {
+            self.auth_manager
+                .as_ref()
+                .map(|am| -> xai_grok_sampler::SharedBearerResolver {
+                    std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
+                })
+        } else {
+            let (resolver, scheme_override) =
+                resolve_custom_provider_auth(self.build_credential_seam(), &cfg.base_url).await;
+            if let Some(scheme) = scheme_override {
+                auth_scheme = scheme;
+            }
+            resolver
+        };
         let mut extra_headers = cfg.extra_headers;
         crate::agent::config::inject_url_derived_headers(
             &mut extra_headers,
@@ -432,15 +517,7 @@ impl SessionActor {
                 .map(|a| a.user_id),
             origin_client: self.origin_client.clone(),
             attribution_callback: self.attribution_callback.clone(),
-            bearer_resolver: if use_bearer_resolver {
-                self.auth_manager
-                    .as_ref()
-                    .map(|am| -> xai_grok_sampler::SharedBearerResolver {
-                        std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
-                    })
-            } else {
-                None
-            },
+            bearer_resolver,
             supports_backend_search: self.supports_backend_search.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
@@ -1307,5 +1384,102 @@ impl SessionActor {
         }
         self.chat_state_handle
             .push_assistant_response(assistant_item);
+    }
+}
+
+#[cfg(test)]
+mod custom_provider_auth_tests {
+    use super::*;
+    use crate::auth::credential_seam::{PluginCredential, PluginCredentialSeam};
+
+    #[derive(Debug)]
+    struct MockSeam(Option<PluginCredential>);
+    #[async_trait::async_trait]
+    impl PluginCredentialSeam for MockSeam {
+        async fn resolve(&self, _reason: &str) -> Option<PluginCredential> {
+            self.0.clone()
+        }
+        async fn refresh(&self, _r: &str, _o: Option<&str>) -> Option<PluginCredential> {
+            None
+        }
+        async fn start_oauth_flow(&self, _r: &str) -> Option<PluginCredential> {
+            None
+        }
+    }
+
+    fn oauth_cred() -> PluginCredential {
+        PluginCredential {
+            token: "oauth-bearer".into(),
+            needs_token_auth_header: false,
+            expires_at_ms: None,
+            owner_id: None,
+        }
+    }
+
+    /// A custom (non-xAI) provider with a subscribed plugin: the resolved OAuth
+    /// bearer becomes the live bearer and auth flips to `Authorization: Bearer`
+    /// regardless of the provider's static (x-api-key) scheme. This is the
+    /// anthropic-OAuth acceptance at the config layer.
+    #[tokio::test]
+    async fn custom_provider_seam_hit_forces_bearer() {
+        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockSeam(Some(oauth_cred())));
+        let (resolver, scheme) =
+            resolve_custom_provider_auth(Some(seam), "https://api.anthropic.com").await;
+        assert_eq!(
+            resolver
+                .expect("bearer resolver wired")
+                .current_bearer()
+                .as_deref(),
+            Some("oauth-bearer")
+        );
+        assert_eq!(scheme, Some(xai_grok_sampler::AuthScheme::Bearer));
+    }
+
+    /// Plugin passthrough (declines to resolve): keep the provider's static key.
+    #[tokio::test]
+    async fn custom_provider_seam_passthrough_keeps_static_key() {
+        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockSeam(None));
+        let (resolver, scheme) =
+            resolve_custom_provider_auth(Some(seam), "https://api.anthropic.com").await;
+        assert!(resolver.is_none());
+        assert!(scheme.is_none());
+    }
+
+    /// No seam (no plugin host): unchanged static-key path.
+    #[tokio::test]
+    async fn custom_provider_no_seam_is_noop() {
+        let (resolver, scheme) =
+            resolve_custom_provider_auth(None, "https://api.anthropic.com").await;
+        assert!(resolver.is_none());
+        assert!(scheme.is_none());
+    }
+
+    /// An xAI endpoint is never routed through the plugin seam even if a plugin
+    /// would resolve a credential — the first-party auth path is untouched.
+    #[tokio::test]
+    async fn xai_endpoint_never_uses_seam() {
+        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockSeam(Some(oauth_cred())));
+        let (resolver, scheme) =
+            resolve_custom_provider_auth(Some(seam), "https://api.x.ai/v1").await;
+        assert!(
+            resolver.is_none(),
+            "xAI endpoint must not take a plugin bearer"
+        );
+        assert!(scheme.is_none());
+    }
+
+    /// An expired plugin credential is ignored (falls back to the static key).
+    #[tokio::test]
+    async fn expired_credential_falls_back() {
+        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockSeam(Some(PluginCredential {
+            token: "stale".into(),
+            needs_token_auth_header: false,
+            expires_at_ms: Some(1),
+            owner_id: None,
+        })));
+        let (resolver, scheme) =
+            resolve_custom_provider_auth(Some(seam), "https://api.anthropic.com").await;
+        assert!(resolver.is_none());
+        assert!(scheme.is_none());
     }
 }
