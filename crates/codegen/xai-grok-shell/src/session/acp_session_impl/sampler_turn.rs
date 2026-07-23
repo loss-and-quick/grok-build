@@ -90,6 +90,33 @@ async fn resolve_custom_provider_auth(
     }
 }
 
+/// Ask a subscribed plugin to mint a fresh credential for a **custom (non-xAI)
+/// provider** after a `401`.
+///
+/// The mirror of [`resolve_custom_provider_auth`] on the recovery side: when a
+/// custom endpoint's request comes back `401` and a credential seam is present,
+/// drive `refresh_credential`. Returns `true` when the plugin refreshed (the
+/// caller then resubmits — the next [`SessionActor::reconstruct_full_config`]
+/// re-resolves the now-persisted token via [`resolve_custom_provider_auth`]).
+///
+/// xAI endpoints are never routed here (their `401` is healed by the session
+/// `AuthManager` path), and a missing seam / plugin passthrough returns `false`
+/// (fail-open: the `401` then surfaces as before). `owner_id` is not retained
+/// across turns — the seam scopes by `base_url`; a future provider needing the
+/// owner would have to carry it back from `resolve`.
+async fn refresh_custom_provider_credential(
+    seam: Option<Arc<dyn crate::auth::credential_seam::PluginCredentialSeam>>,
+    base_url: &str,
+) -> bool {
+    if crate::util::is_xai_api_url(base_url) {
+        return false;
+    }
+    let Some(seam) = seam else {
+        return false;
+    };
+    seam.refresh("outbound_401", None, base_url).await.is_some()
+}
+
 /// Gate inputs bundled with the composed decision so the 401-recovery log can
 /// report the components.
 #[derive(Clone, Copy)]
@@ -966,6 +993,31 @@ impl SessionActor {
             self.prepare_sampler_for_turn().await;
             return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
         }
+        // Custom-provider (non-xAI) 401 owned by a plugin credential: neither the
+        // session-token gate nor a built-in `[auth_provider.*]` applies, so ask
+        // the seam to mint a fresh bearer (e.g. an OAuth refresh). On success,
+        // resubmit — the next `reconstruct_full_config` re-resolves the plugin's
+        // now-persisted token. Bounded by `AuthRetrySchedule::MAX_RETRIES` in the
+        // turn loop, so a plugin that keeps minting a bad token cannot spin.
+        let is_credential_401 =
+            matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401);
+        if is_credential_401
+            && auth_provider.is_none()
+            && refresh_custom_provider_credential(self.build_credential_seam(), &failed_base_url)
+                .await
+        {
+            tracing::info!(
+                session_id = % self.session_info.id.0, base_url = % failed_base_url,
+                "auth recovery: custom-provider 401, plugin seam refreshed credential, retrying"
+            );
+            xai_grok_telemetry::unified_log::info(
+                "auth recovery: custom-provider 401, plugin seam refreshed credential, retrying",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({ "base_url" : failed_base_url })),
+            );
+            self.prepare_sampler_for_turn().await;
+            return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
+        }
         if matches!(error.kind, SamplingErrorKind::IdleTimeout) {
             self.signals_handle().record_idle_timeout();
         }
@@ -1488,5 +1540,59 @@ mod custom_provider_auth_tests {
             resolve_custom_provider_auth(Some(seam), "https://api.anthropic.com").await;
         assert!(resolver.is_none());
         assert!(scheme.is_none());
+    }
+
+    /// A seam whose `refresh` mints a fresh credential (the resolve arm is
+    /// irrelevant to the 401-recovery path).
+    #[derive(Debug)]
+    struct MockRefreshSeam(Option<PluginCredential>);
+    #[async_trait::async_trait]
+    impl PluginCredentialSeam for MockRefreshSeam {
+        async fn resolve(&self, _reason: &str, _base_url: &str) -> Option<PluginCredential> {
+            None
+        }
+        async fn refresh(
+            &self,
+            _r: &str,
+            _o: Option<&str>,
+            _base_url: &str,
+        ) -> Option<PluginCredential> {
+            self.0.clone()
+        }
+        async fn start_oauth_flow(&self, _r: &str) -> Option<PluginCredential> {
+            None
+        }
+    }
+
+    /// Custom (non-xAI) provider 401: the seam refreshes → recovery fires.
+    #[tokio::test]
+    async fn custom_provider_refresh_hit_recovers() {
+        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockRefreshSeam(Some(oauth_cred())));
+        assert!(refresh_custom_provider_credential(Some(seam), "https://api.anthropic.com").await);
+    }
+
+    /// The plugin declines to refresh (passthrough): no recovery, the 401
+    /// surfaces as before.
+    #[tokio::test]
+    async fn custom_provider_refresh_passthrough_no_recovery() {
+        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockRefreshSeam(None));
+        assert!(!refresh_custom_provider_credential(Some(seam), "https://api.anthropic.com").await);
+    }
+
+    /// No seam (no plugin host): the 401 is not seam-recoverable.
+    #[tokio::test]
+    async fn custom_provider_refresh_no_seam_no_recovery() {
+        assert!(!refresh_custom_provider_credential(None, "https://api.anthropic.com").await);
+    }
+
+    /// An xAI endpoint is never refreshed through the plugin seam even if the
+    /// plugin would mint one — first-party 401s heal via the `AuthManager` path.
+    #[tokio::test]
+    async fn xai_endpoint_never_refreshes_via_seam() {
+        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockRefreshSeam(Some(oauth_cred())));
+        assert!(
+            !refresh_custom_provider_credential(Some(seam), "https://api.x.ai/v1").await,
+            "xAI endpoint must not take a plugin refresh"
+        );
     }
 }
