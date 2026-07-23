@@ -30,6 +30,34 @@ export type { InitializeParams } from "./generated/InitializeParams.ts";
 export type { InitializeResult } from "./generated/InitializeResult.ts";
 export type { LogEmitParams } from "./generated/LogEmitParams.ts";
 export type { LogLevelDto } from "./generated/LogLevelDto.ts";
+// Per-event hook payloads + their nested DTOs (see `HookPayloadMap`).
+export type { SubagentStopPhaseDto } from "./generated/SubagentStopPhaseDto.ts";
+export type { BackgroundTaskTypeDto } from "./generated/BackgroundTaskTypeDto.ts";
+export type { StopFailureKindDto } from "./generated/StopFailureKindDto.ts";
+export type { StopBackgroundTaskDto } from "./generated/StopBackgroundTaskDto.ts";
+export type { StopSessionCronDto } from "./generated/StopSessionCronDto.ts";
+export type { ProviderResponseToolCallDto } from "./generated/ProviderResponseToolCallDto.ts";
+export type { SessionStartPayload } from "./generated/SessionStartPayload.ts";
+export type { SessionEndPayload } from "./generated/SessionEndPayload.ts";
+export type { StopPayload } from "./generated/StopPayload.ts";
+export type { StopFailurePayload } from "./generated/StopFailurePayload.ts";
+export type { PreToolUsePayload } from "./generated/PreToolUsePayload.ts";
+export type { PostToolUsePayload } from "./generated/PostToolUsePayload.ts";
+export type { PostToolUseFailurePayload } from "./generated/PostToolUseFailurePayload.ts";
+export type { PermissionDeniedPayload } from "./generated/PermissionDeniedPayload.ts";
+export type { UserPromptSubmitPayload } from "./generated/UserPromptSubmitPayload.ts";
+export type { NotificationPayload } from "./generated/NotificationPayload.ts";
+export type { SubagentStartPayload } from "./generated/SubagentStartPayload.ts";
+export type { SubagentStopPayload } from "./generated/SubagentStopPayload.ts";
+export type { PreCompactPayload } from "./generated/PreCompactPayload.ts";
+export type { PostCompactPayload } from "./generated/PostCompactPayload.ts";
+export type { ProviderRequestPayload } from "./generated/ProviderRequestPayload.ts";
+export type { ProviderResponsePayload } from "./generated/ProviderResponsePayload.ts";
+export type { ProviderErrorPayload } from "./generated/ProviderErrorPayload.ts";
+export type { SubagentResolvePayload } from "./generated/SubagentResolvePayload.ts";
+export type { ResolveCredentialPayload } from "./generated/ResolveCredentialPayload.ts";
+export type { RefreshCredentialPayload } from "./generated/RefreshCredentialPayload.ts";
+export type { StartOauthFlowPayload } from "./generated/StartOauthFlowPayload.ts";
 export type { PanelActionParams } from "./generated/PanelActionParams.ts";
 export type { PanelBlock } from "./generated/PanelBlock.ts";
 export type { PanelButton } from "./generated/PanelButton.ts";
@@ -117,6 +145,7 @@ export type {
   DefinePluginOptions,
   PluginHandle,
   HookHandler,
+  HookPayloadMap,
   HookResult,
   Teardown,
   ToolDefinition,

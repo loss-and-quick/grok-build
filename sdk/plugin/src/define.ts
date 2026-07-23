@@ -23,8 +23,81 @@ import type { InitializeResult } from "./generated/InitializeResult.ts";
 import type { ToolDescriptorDto } from "./generated/ToolDescriptorDto.ts";
 import type { ToolInvokeResult } from "./generated/ToolInvokeResult.ts";
 
+import type { SessionStartPayload } from "./generated/SessionStartPayload.ts";
+import type { SessionEndPayload } from "./generated/SessionEndPayload.ts";
+import type { StopPayload } from "./generated/StopPayload.ts";
+import type { StopFailurePayload } from "./generated/StopFailurePayload.ts";
+import type { PreToolUsePayload } from "./generated/PreToolUsePayload.ts";
+import type { PostToolUsePayload } from "./generated/PostToolUsePayload.ts";
+import type { PostToolUseFailurePayload } from "./generated/PostToolUseFailurePayload.ts";
+import type { PermissionDeniedPayload } from "./generated/PermissionDeniedPayload.ts";
+import type { UserPromptSubmitPayload } from "./generated/UserPromptSubmitPayload.ts";
+import type { NotificationPayload } from "./generated/NotificationPayload.ts";
+import type { SubagentStartPayload } from "./generated/SubagentStartPayload.ts";
+import type { SubagentStopPayload } from "./generated/SubagentStopPayload.ts";
+import type { PreCompactPayload } from "./generated/PreCompactPayload.ts";
+import type { PostCompactPayload } from "./generated/PostCompactPayload.ts";
+import type { ProviderRequestPayload } from "./generated/ProviderRequestPayload.ts";
+import type { ProviderResponsePayload } from "./generated/ProviderResponsePayload.ts";
+import type { ProviderErrorPayload } from "./generated/ProviderErrorPayload.ts";
+import type { SubagentResolvePayload } from "./generated/SubagentResolvePayload.ts";
+import type { ResolveCredentialPayload } from "./generated/ResolveCredentialPayload.ts";
+import type { RefreshCredentialPayload } from "./generated/RefreshCredentialPayload.ts";
+import type { StartOauthFlowPayload } from "./generated/StartOauthFlowPayload.ts";
+
 /** The plugin SDK's own protocol version (wire contract v1). */
 export const PROTOCOL_VERSION = 1;
+
+/**
+ * Maps each `EventName` wire string to the typed payload a handler for that
+ * event receives. The payload interfaces are generated from the Rust
+ * `*Payload` DTOs in `xai-grok-plugin-protocol` (source of truth), so this map
+ * mirrors the hook wire exactly. `permission_ask` has no dispatcher payload
+ * (it rides the permission manager's own seam) and stays `unknown`;
+ * `subagent_end` is the wire alias of `subagent_stop` and shares its payload.
+ *
+ * `_HookPayloadMapCoversEvents` below makes coverage a compile-time invariant:
+ * an event added to (or removed from) `EventName` that this map does not track
+ * fails the build.
+ */
+export interface HookPayloadMap {
+  session_start: SessionStartPayload;
+  session_end: SessionEndPayload;
+  stop: StopPayload;
+  stop_failure: StopFailurePayload;
+  pre_tool_use: PreToolUsePayload;
+  post_tool_use: PostToolUsePayload;
+  post_tool_use_failure: PostToolUseFailurePayload;
+  permission_denied: PermissionDeniedPayload;
+  user_prompt_submit: UserPromptSubmitPayload;
+  notification: NotificationPayload;
+  subagent_start: SubagentStartPayload;
+  subagent_stop: SubagentStopPayload;
+  subagent_end: SubagentStopPayload;
+  pre_compact: PreCompactPayload;
+  post_compact: PostCompactPayload;
+  provider_request: ProviderRequestPayload;
+  provider_response: ProviderResponsePayload;
+  provider_error: ProviderErrorPayload;
+  subagent_resolve: SubagentResolvePayload;
+  permission_ask: unknown;
+  resolve_credential: ResolveCredentialPayload;
+  refresh_credential: RefreshCredentialPayload;
+  start_oauth_flow: StartOauthFlowPayload;
+}
+
+type AssertTrue<T extends true> = T;
+
+/**
+ * Compile-time guard: `HookPayloadMap` must have an entry for every
+ * `EventName`. Resolves to `true` today; if `EventName` gains a member (or the
+ * map drops one), the map no longer satisfies `Record<EventName, unknown>` and
+ * this becomes `AssertTrue<false>` — a build-time type error. Exported so it
+ * counts as used (the invariant is what matters, not the value).
+ */
+export type HookPayloadMapCoversEventName = AssertTrue<
+  HookPayloadMap extends Record<EventName, unknown> ? true : false
+>;
 
 /**
  * The `hook_invoke` reply shape. Parameterized by event name for API
@@ -38,9 +111,16 @@ export const PROTOCOL_VERSION = 1;
  */
 export type HookResult<_E extends EventName = EventName> = HookInvokeResult;
 
-/** A hook handler. Returning `undefined`/`void` means passthrough (`observed`). */
+/**
+ * A hook handler. `payload` is typed per event via [`HookPayloadMap`], so a
+ * handler registered for a specific event (e.g. `pre_tool_use`) receives that
+ * event's payload interface rather than a bare `unknown`. A handler written
+ * against the default `EventName` (or that ignores the argument) sees the
+ * `unknown` union, so existing `(payload, ctx) => …` plugins keep compiling.
+ * Returning `undefined`/`void` means passthrough (`observed`).
+ */
 export type HookHandler<E extends EventName = EventName> = (
-  payload: unknown,
+  payload: HookPayloadMap[E],
   ctx: PluginContext,
 ) => Promise<HookResult<E> | void> | HookResult<E> | void;
 
@@ -236,7 +316,12 @@ export function definePlugin(
     },
 
     async hookInvoke(params): Promise<HookInvokeResult> {
-      const handler = def.hooks?.[params.event as EventName];
+      // The event is only known at runtime, so erase the per-event handler
+      // signature to the default (payload: unknown) before dispatching the
+      // wire payload — which arrives typed as `unknown`.
+      const handler = def.hooks?.[params.event as EventName] as
+        | HookHandler
+        | undefined;
       if (!handler || !ctx) return observed();
       try {
         const result = await handler(params.payload, ctx);
