@@ -78,7 +78,9 @@ async fn resolve_custom_provider_auth(
         return (None, None);
     };
     let now_ms = chrono::Utc::now().timestamp_millis();
-    match seam.resolve(&format!("outbound:{base_url}")).await {
+    // `base_url` also rides the payload as a first-class field so the plugin can
+    // scope its reply to this exact custom-provider endpoint.
+    match seam.resolve(&format!("outbound:{base_url}"), base_url).await {
         Some(cred) if cred.is_unexpired(now_ms) => {
             let resolver: xai_grok_sampler::SharedBearerResolver =
                 Arc::new(StaticBearerResolver(cred.token));
@@ -1396,10 +1398,15 @@ mod custom_provider_auth_tests {
     struct MockSeam(Option<PluginCredential>);
     #[async_trait::async_trait]
     impl PluginCredentialSeam for MockSeam {
-        async fn resolve(&self, _reason: &str) -> Option<PluginCredential> {
+        async fn resolve(&self, _reason: &str, _base_url: &str) -> Option<PluginCredential> {
             self.0.clone()
         }
-        async fn refresh(&self, _r: &str, _o: Option<&str>) -> Option<PluginCredential> {
+        async fn refresh(
+            &self,
+            _r: &str,
+            _o: Option<&str>,
+            _base_url: &str,
+        ) -> Option<PluginCredential> {
             None
         }
         async fn start_oauth_flow(&self, _r: &str) -> Option<PluginCredential> {

@@ -83,12 +83,21 @@ impl PluginCredential {
 #[async_trait::async_trait]
 pub trait PluginCredentialSeam: Send + Sync + std::fmt::Debug + 'static {
     /// Resolve a credential before the built-in resolution runs. `reason`
-    /// describes the context (`bootstrap`, `outbound`, …).
-    async fn resolve(&self, reason: &str) -> Option<PluginCredential>;
+    /// describes the context (`bootstrap`, `outbound`, …); `base_url` is the
+    /// outbound endpoint the credential is resolved *for*, so the plugin can
+    /// scope its reply to the target provider (empty when the fire site has no
+    /// specific target).
+    async fn resolve(&self, reason: &str, base_url: &str) -> Option<PluginCredential>;
 
     /// Mint a fresh credential on a `401`/expiry. `owner_id` is the owner of the
-    /// credential being refreshed, when known.
-    async fn refresh(&self, reason: &str, owner_id: Option<&str>) -> Option<PluginCredential>;
+    /// credential being refreshed, when known; `base_url` is the outbound
+    /// endpoint the refreshed credential is destined for (see [`Self::resolve`]).
+    async fn refresh(
+        &self,
+        reason: &str,
+        owner_id: Option<&str>,
+        base_url: &str,
+    ) -> Option<PluginCredential>;
 
     /// Drive the whole interactive authorization flow and return the final
     /// credential. `reason` describes what triggered it (`missing_credential`,
@@ -170,7 +179,7 @@ impl HookCredentialSeam {
 
 #[async_trait::async_trait]
 impl PluginCredentialSeam for HookCredentialSeam {
-    async fn resolve(&self, reason: &str) -> Option<PluginCredential> {
+    async fn resolve(&self, reason: &str, base_url: &str) -> Option<PluginCredential> {
         if !self.has_subscriber(HookEventName::ResolveCredential) {
             return None;
         }
@@ -178,6 +187,7 @@ impl PluginCredentialSeam for HookCredentialSeam {
             HookEventName::ResolveCredential,
             HookPayload::ResolveCredential {
                 reason: reason.to_string(),
+                base_url: base_url.to_string(),
                 owner_hint: None,
             },
         );
@@ -191,7 +201,12 @@ impl PluginCredentialSeam for HookCredentialSeam {
         PluginCredential::from_payload(value)
     }
 
-    async fn refresh(&self, reason: &str, owner_id: Option<&str>) -> Option<PluginCredential> {
+    async fn refresh(
+        &self,
+        reason: &str,
+        owner_id: Option<&str>,
+        base_url: &str,
+    ) -> Option<PluginCredential> {
         if !self.has_subscriber(HookEventName::RefreshCredential) {
             return None;
         }
@@ -199,6 +214,7 @@ impl PluginCredentialSeam for HookCredentialSeam {
             HookEventName::RefreshCredential,
             HookPayload::RefreshCredential {
                 reason: reason.to_string(),
+                base_url: base_url.to_string(),
                 owner_id: owner_id.map(str::to_string),
             },
         );

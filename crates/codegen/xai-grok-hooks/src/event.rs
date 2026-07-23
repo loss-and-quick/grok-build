@@ -588,6 +588,13 @@ pub enum HookPayload {
     ResolveCredential {
         /// Why the credential is being resolved (`bootstrap`, `outbound`, …).
         reason: String,
+        /// The outbound endpoint the credential is resolved *for*. A plugin
+        /// scopes its reply to this target so a credential minted for one
+        /// provider never rides an outbound request to another (e.g. an
+        /// Anthropic OAuth bearer must not reach an xAI endpoint). Empty when
+        /// the fire site has no specific target.
+        #[serde(rename = "baseUrl")]
+        base_url: String,
         /// Hint identifying which credential the core expects (e.g. an account
         /// label); `None` when the core has no expectation.
         #[serde(rename = "ownerHint", skip_serializing_if = "Option::is_none")]
@@ -599,6 +606,12 @@ pub enum HookPayload {
     RefreshCredential {
         /// Why the refresh fired (`unauthorized`, `expired`, …).
         reason: String,
+        /// The outbound endpoint the refreshed credential is destined for. Like
+        /// [`Self::ResolveCredential::base_url`], a plugin scopes its reply to
+        /// this target so a freshly minted bearer never leaks to another
+        /// provider. Empty when the fire site has no specific target.
+        #[serde(rename = "baseUrl")]
+        base_url: String,
         /// The owner id of the credential being refreshed, if known.
         #[serde(rename = "ownerId", skip_serializing_if = "Option::is_none")]
         owner_id: Option<String>,
@@ -1158,6 +1171,7 @@ mod tests {
             permission_mode: None,
             payload: HookPayload::ResolveCredential {
                 reason: "outbound".into(),
+                base_url: "https://api.anthropic.com".into(),
                 owner_hint: Some("primary".into()),
             },
         };
@@ -1167,6 +1181,13 @@ mod tests {
             Some("resolve_credential")
         );
         assert_eq!(value.get("reason").and_then(|v| v.as_str()), Some("outbound"));
+        // The outbound target rides the payload as camelCase `baseUrl` so a
+        // plugin can scope its reply to it.
+        assert_eq!(
+            value.get("baseUrl").and_then(|v| v.as_str()),
+            Some("https://api.anthropic.com")
+        );
+        assert!(value.get("base_url").is_none(), "leaked snake_case key");
         assert_eq!(
             value.get("ownerHint").and_then(|v| v.as_str()),
             Some("primary")
@@ -1176,12 +1197,17 @@ mod tests {
         // Absent owner id/hint omitted (not null); no matcher selector.
         let refresh = HookPayload::RefreshCredential {
             reason: "unauthorized".into(),
+            base_url: "https://api.x.ai/v1".into(),
             owner_id: None,
         };
         let value = serde_json::to_value(&refresh).unwrap();
         assert_eq!(
             value.get("reason").and_then(|v| v.as_str()),
             Some("unauthorized")
+        );
+        assert_eq!(
+            value.get("baseUrl").and_then(|v| v.as_str()),
+            Some("https://api.x.ai/v1")
         );
         assert!(value.get("ownerId").is_none());
         assert_eq!(refresh.match_value(), None);

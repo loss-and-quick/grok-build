@@ -400,7 +400,13 @@ impl SessionActor {
             );
         if let Some(seam) = self.build_credential_seam() {
             credential_provider = credential_provider.with_credential_seam(seam);
-            credential_provider.resolve_credential("outbound").await;
+            // Scope the seam to the request's endpoint (the cli-chat-proxy URL
+            // guarded above): a plugin that owns a *different* provider's
+            // credential (e.g. an Anthropic OAuth bearer) sees an xAI target and
+            // passes through, so its token never rides this xAI session request.
+            credential_provider
+                .resolve_credential("outbound", base_url)
+                .await;
         }
         let provider: Arc<dyn xai_grok_auth::AuthCredentialProvider> =
             Arc::new(credential_provider);

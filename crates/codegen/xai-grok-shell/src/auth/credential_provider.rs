@@ -30,6 +30,13 @@ pub struct ShellAuthCredentialProvider {
     /// The most recent plugin-supplied credential, preferred on the wire while
     /// present. Empty until a resolve/refresh/oauth seam call succeeds.
     plugin_credential: ArcSwap<Option<PluginCredential>>,
+    /// The outbound endpoint the seam is resolving/refreshing *for*. Stashed by
+    /// [`resolve_credential`](Self::resolve_credential) (whose caller knows the
+    /// target) so the argument-less [`refresh_after_unauthorized`] can scope its
+    /// `refresh_credential` dispatch to the same endpoint. Empty until the first
+    /// resolve — a refresh with an empty target lets a scoping plugin pass
+    /// through (fail-safe), never leaking a credential to an unknown provider.
+    seam_base_url: ArcSwap<String>,
 }
 impl ShellAuthCredentialProvider {
     pub(crate) fn new(
@@ -45,6 +52,7 @@ impl ShellAuthCredentialProvider {
             static_credentials,
             credential_seam: None,
             plugin_credential: ArcSwap::from_pointee(None),
+            seam_base_url: ArcSwap::from_pointee(String::new()),
         }
     }
 
@@ -73,12 +81,16 @@ impl ShellAuthCredentialProvider {
     /// `true` when a plugin credential was obtained. No-op (returns `false`)
     /// when no seam is injected or the plugin passes through — the built-in
     /// resolution then applies. Fired at session bootstrap and whenever no
-    /// usable credential is cached.
-    pub(crate) async fn resolve_credential(&self, reason: &str) -> bool {
+    /// usable credential is cached. `base_url` is the outbound endpoint this
+    /// credential is resolved *for*: it rides the `resolve_credential` payload
+    /// so a plugin can scope its reply to the target provider, and is stashed so
+    /// a later [`refresh_after_unauthorized`] scopes its refresh identically.
+    pub(crate) async fn resolve_credential(&self, reason: &str, base_url: &str) -> bool {
+        self.seam_base_url.store(Arc::new(base_url.to_string()));
         let Some(seam) = self.credential_seam.as_ref() else {
             return false;
         };
-        match seam.resolve(reason).await {
+        match seam.resolve(reason, base_url).await {
             Some(cred) => {
                 self.plugin_credential.store(Arc::new(Some(cred)));
                 true
@@ -183,7 +195,11 @@ impl AuthCredentialProvider for ShellAuthCredentialProvider {
                 .as_ref()
                 .as_ref()
                 .and_then(|c| c.owner_id.clone());
-            if let Some(cred) = seam.refresh("unauthorized", owner.as_deref()).await {
+            let base_url = self.seam_base_url.load();
+            if let Some(cred) = seam
+                .refresh("unauthorized", owner.as_deref(), base_url.as_str())
+                .await
+            {
                 self.plugin_credential.store(Arc::new(Some(cred)));
                 return true;
             }
@@ -1004,22 +1020,29 @@ mod tests {
     }
 
     /// A configurable [`PluginCredentialSeam`] for the seam-precedence tests.
+    /// `seen_base_url` records the `base_url` the last resolve/refresh dispatch
+    /// carried, so a test can assert the outbound target is forwarded to the
+    /// plugin (the scoping the plugin then enforces).
     #[derive(Debug, Default)]
     struct MockSeam {
         resolve: Option<PluginCredential>,
         refresh: Option<PluginCredential>,
         oauth: Option<PluginCredential>,
+        seen_base_url: std::sync::Mutex<Option<String>>,
     }
     #[async_trait::async_trait]
     impl PluginCredentialSeam for MockSeam {
-        async fn resolve(&self, _reason: &str) -> Option<PluginCredential> {
+        async fn resolve(&self, _reason: &str, base_url: &str) -> Option<PluginCredential> {
+            *self.seen_base_url.lock().unwrap() = Some(base_url.to_string());
             self.resolve.clone()
         }
         async fn refresh(
             &self,
             _reason: &str,
             _owner_id: Option<&str>,
+            base_url: &str,
         ) -> Option<PluginCredential> {
+            *self.seen_base_url.lock().unwrap() = Some(base_url.to_string());
             self.refresh.clone()
         }
         async fn start_oauth_flow(&self, _reason: &str) -> Option<PluginCredential> {
@@ -1046,17 +1069,27 @@ mod tests {
             &dir,
             Some(make_auth("builtin-token", ChronoDuration::hours(1))),
         );
-        let provider = ShellAuthCredentialProvider::new(mgr, None, None).with_credential_seam(
-            Arc::new(MockSeam {
-                resolve: Some(plugin_cred("plugin-token", false)),
-                ..Default::default()
-            }),
-        );
+        let seam = Arc::new(MockSeam {
+            resolve: Some(plugin_cred("plugin-token", false)),
+            ..Default::default()
+        });
+        let provider = ShellAuthCredentialProvider::new(mgr, None, None)
+            .with_credential_seam(seam.clone());
 
         // Before resolve: the built-in token is used.
         assert_eq!(provider.snapshot().token.as_deref(), Some("builtin-token"));
 
-        assert!(provider.resolve_credential("bootstrap").await);
+        assert!(
+            provider
+                .resolve_credential("bootstrap", "https://api.anthropic.com")
+                .await
+        );
+        // The outbound target is forwarded to the plugin so it can scope its
+        // reply (the fix for credentials leaking to a foreign provider).
+        assert_eq!(
+            seam.seen_base_url.lock().unwrap().as_deref(),
+            Some("https://api.anthropic.com")
+        );
         let snap = provider.snapshot();
         assert_eq!(snap.token.as_deref(), Some("plugin-token"));
         assert_eq!(snap.user_id.as_deref(), Some("plugin-owner"));
@@ -1076,7 +1109,7 @@ mod tests {
         let provider = ShellAuthCredentialProvider::new(mgr, None, None)
             .with_credential_seam(Arc::new(MockSeam::default()));
 
-        assert!(!provider.resolve_credential("bootstrap").await);
+        assert!(!provider.resolve_credential("bootstrap", "https://api.x.ai/v1").await);
         assert_eq!(provider.snapshot().token.as_deref(), Some("builtin-token"));
         assert!(provider.needs_token_auth_header());
     }
@@ -1091,7 +1124,7 @@ mod tests {
             Some(make_auth("builtin-token", ChronoDuration::hours(1))),
         );
         let provider = ShellAuthCredentialProvider::new(mgr, None, None);
-        assert!(!provider.resolve_credential("bootstrap").await);
+        assert!(!provider.resolve_credential("bootstrap", "https://api.x.ai/v1").await);
         assert!(!provider.start_oauth_flow("sign_in").await);
         assert_eq!(provider.snapshot().token.as_deref(), Some("builtin-token"));
     }
@@ -1154,7 +1187,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        assert!(provider.resolve_credential("bootstrap").await);
+        assert!(provider.resolve_credential("bootstrap", "https://api.x.ai/v1").await);
         // Cached but already expired -> snapshot falls back to the built-in token.
         assert_eq!(provider.snapshot().token.as_deref(), Some("builtin-token"));
     }
