@@ -67,6 +67,77 @@ pub(super) fn failover_outcome_for_directive(
     }
 }
 
+/// One `{ id, name }` entry in a `provider_response` reply. The plugin echoes a
+/// tool-call `id` with the `name` it should carry after unmasking.
+#[derive(serde::Deserialize)]
+struct ProviderResponseRenameEntry {
+    id: String,
+    name: String,
+}
+
+/// The tolerant reply shape for the `provider_response` seam:
+/// `{ toolCalls: [{ id, name }] }`. Every field is optional/defaulted so a
+/// missing or partially-shaped reply parses to an empty rename set rather than
+/// an error.
+#[derive(serde::Deserialize)]
+struct ProviderResponseReply {
+    #[serde(default, rename = "toolCalls")]
+    tool_calls: Vec<ProviderResponseRenameEntry>,
+}
+
+/// Parse a `provider_response` Replace reply into an id→name rename map.
+///
+/// Defensive: a reply that does not deserialize, or carries no usable
+/// `{ id, name }` pair, yields `None` so the response is left unchanged. This
+/// seam is not fail-open in the safety sense — a half-applied rename would
+/// break dispatch — so the caller applies the whole returned map atomically or
+/// nothing at all. Entries with an empty `id` or `name` are dropped.
+fn parse_provider_response_renames(
+    value: serde_json::Value,
+) -> Option<std::collections::HashMap<String, String>> {
+    let reply = match serde_json::from_value::<ProviderResponseReply>(value) {
+        Ok(reply) => reply,
+        Err(err) => {
+            tracing::warn!(%err, "provider_response reply did not parse; leaving response unchanged");
+            return None;
+        }
+    };
+    let map: std::collections::HashMap<String, String> = reply
+        .tool_calls
+        .into_iter()
+        .filter(|entry| !entry.id.is_empty() && !entry.name.is_empty())
+        .map(|entry| (entry.id, entry.name))
+        .collect();
+    (!map.is_empty()).then_some(map)
+}
+
+/// Apply a `provider_response` rename map to `response` in place: rewrite the
+/// `name` of every tool call whose `id` is a key in `renames`; tool calls whose
+/// id is absent are left untouched.
+///
+/// [`ConversationResponse::tool_calls`] and
+/// [`ConversationResponse::assistant`] both read the trailing `AssistantItem`'s
+/// `tool_calls`, so this single mutation is observed by both the
+/// dispatched-tool-call view (copied at the turn call-site) and the assistant
+/// item recorded to history. The rename is structural and applied atomically
+/// from one map — there is no partial application.
+pub(super) fn apply_tool_call_renames(
+    response: &mut xai_grok_sampling_types::ConversationResponse,
+    renames: &std::collections::HashMap<String, String>,
+) {
+    if renames.is_empty() {
+        return;
+    }
+    let Some(assistant) = response.assistant_mut() else {
+        return;
+    };
+    for call in &mut assistant.tool_calls {
+        if let Some(new_name) = renames.get(call.id.as_ref()) {
+            call.name = new_name.clone();
+        }
+    }
+}
+
 /// A [`RequestInterceptor`] that fires the `provider_request` Replace hook.
 ///
 /// It owns everything needed to build a hook envelope and run context from a
@@ -217,6 +288,87 @@ impl SessionActor {
             registry,
             plugin_invoker,
         }
+    }
+
+    /// Consult the `provider_response` Replace hook for tool-call name rewrites
+    /// to apply to a model response before the shell dispatches its tool calls.
+    ///
+    /// Returns `None` (leave the response unchanged) when:
+    /// - the endpoint is first-party — first-party responses are never masked,
+    ///   a self-guard mirroring the custom-provider credential seam;
+    /// - `base_url` is empty (no known target to scope the reply to);
+    /// - no plugin subscribes to `provider_response`;
+    /// - the response carries no tool calls to rename;
+    /// - the plugin's reply is missing or malformed (defensive parse).
+    ///
+    /// The dispatch is purely shell-side (post-sampler): it builds the outbound
+    /// payload from the response's tool calls, fires the Replace hook, and parses
+    /// the reply into an id→name map the caller applies atomically via
+    /// [`apply_tool_call_renames`].
+    pub(super) async fn resolve_provider_response_renames(
+        &self,
+        response: &xai_grok_sampling_types::ConversationResponse,
+        base_url: &str,
+    ) -> Option<std::collections::HashMap<String, String>> {
+        // First-party (xAI) endpoints are never offered to this seam.
+        if base_url.is_empty() || crate::util::is_xai_api_url(base_url) {
+            return None;
+        }
+        let registry = self.hook_registry.borrow().clone()?;
+        if !registry.has_enabled_hooks_for_canonical(HookEventName::ProviderResponse) {
+            return None;
+        }
+        let tool_calls: Vec<xai_grok_hooks::event::ProviderResponseToolCall> = response
+            .tool_calls()
+            .iter()
+            .map(|tc| xai_grok_hooks::event::ProviderResponseToolCall {
+                id: tc.id.as_ref().to_string(),
+                name: tc.name.clone(),
+            })
+            .collect();
+        // Nothing to offer the plugin when the response made no tool calls.
+        if tool_calls.is_empty() {
+            return None;
+        }
+        let endpoint = self.provider_response_endpoint().await;
+        let envelope = self.make_hook_envelope(
+            HookEventName::ProviderResponse,
+            None,
+            HookPayload::ProviderResponse {
+                base_url: base_url.to_string(),
+                endpoint,
+                tool_calls,
+            },
+        );
+        let ctx = self.hook_run_ctx();
+        let value = xai_grok_hooks::dispatcher::dispatch_replace(
+            &registry,
+            HookEventName::ProviderResponse,
+            &envelope,
+            &ctx,
+        )
+        .await?;
+        parse_provider_response_renames(value)
+    }
+
+    /// The wire endpoint path for the active model's API backend
+    /// (`chat/completions`, `responses`, `messages`), informational for a
+    /// `provider_response` subscriber. Falls back to `chat/completions` when the
+    /// sampling config is unavailable.
+    async fn provider_response_endpoint(&self) -> String {
+        let backend = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|cfg| cfg.api_backend)
+            .unwrap_or_default();
+        match backend {
+            xai_grok_sampling_types::ApiBackend::ChatCompletions => "chat/completions",
+            xai_grok_sampling_types::ApiBackend::Responses => "responses",
+            xai_grok_sampling_types::ApiBackend::Messages => "messages",
+            xai_grok_sampling_types::ApiBackend::Gemini => "generate_content",
+        }
+        .to_string()
     }
 
     /// Consult the `provider_error` Replace hook for a directive on a failed
@@ -626,5 +778,109 @@ mod tests {
                 );
             })
             .await;
+    }
+
+    // ── provider_response: pure application + reply parsing. ─────────────────
+
+    fn tool_call(id: &str, name: &str) -> xai_grok_sampling_types::ToolCall {
+        xai_grok_sampling_types::ToolCall {
+            id: id.into(),
+            name: name.to_string(),
+            arguments: "{}".into(),
+        }
+    }
+
+    /// Applying a rename map rewrites the tool-call names observed through BOTH
+    /// `tool_calls()` (the dispatched view) and `assistant()` (recorded to
+    /// history), since both read the single trailing `AssistantItem`. A call
+    /// whose id is absent from the map is left untouched.
+    #[test]
+    fn apply_tool_call_renames_rewrites_both_views_and_skips_unmapped() {
+        use xai_grok_sampling_types::{ConversationItem, ConversationResponse};
+
+        let mut response = ConversationResponse {
+            items: vec![ConversationItem::assistant_tool_calls(vec![
+                tool_call("call_a", "masked_read"),
+                tool_call("call_b", "masked_write"),
+                tool_call("call_c", "already_clear"),
+            ])],
+            stop_reason: None,
+            usage: None,
+            cost_usd_ticks: None,
+            message_chunks_emitted: 0,
+            doom_loop_signals: Vec::new(),
+            stop_message: None,
+        };
+
+        let mut renames = std::collections::HashMap::new();
+        renames.insert("call_a".to_string(), "read_file".to_string());
+        renames.insert("call_b".to_string(), "write_file".to_string());
+        // An id not present in the response is simply ignored.
+        renames.insert("call_absent".to_string(), "noop".to_string());
+
+        apply_tool_call_renames(&mut response, &renames);
+
+        // The dispatched-tool-call view observes the real names.
+        let via_tool_calls: Vec<&str> =
+            response.tool_calls().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(via_tool_calls, vec!["read_file", "write_file", "already_clear"]);
+
+        // The assistant item recorded to history observes the SAME real names —
+        // proving the double-write is a single shared source, not two copies.
+        let assistant = response.assistant().expect("assistant item present");
+        let via_assistant: Vec<&str> =
+            assistant.tool_calls.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(via_assistant, vec!["read_file", "write_file", "already_clear"]);
+
+        // The unmapped call kept its original name.
+        assert_eq!(assistant.tool_calls[2].name, "already_clear");
+    }
+
+    /// An empty rename map is a no-op (the common case when a plugin passes
+    /// through), and reaching for the assistant on a response without one never
+    /// panics.
+    #[test]
+    fn apply_tool_call_renames_empty_map_is_noop() {
+        use xai_grok_sampling_types::{ConversationItem, ConversationResponse};
+
+        let mut response = ConversationResponse {
+            items: vec![ConversationItem::assistant_tool_calls(vec![tool_call(
+                "call_a", "masked_read",
+            )])],
+            stop_reason: None,
+            usage: None,
+            cost_usd_ticks: None,
+            message_chunks_emitted: 0,
+            doom_loop_signals: Vec::new(),
+            stop_message: None,
+        };
+        apply_tool_call_renames(&mut response, &std::collections::HashMap::new());
+        assert_eq!(response.tool_calls()[0].name, "masked_read");
+    }
+
+    /// The reply parser accepts the `{ toolCalls: [{ id, name }] }` wire shape,
+    /// drops entries with an empty id/name, and fails open (None) on a missing
+    /// or malformed reply.
+    #[test]
+    fn parse_provider_response_renames_is_defensive() {
+        // Well-formed reply → id→name map.
+        let map = parse_provider_response_renames(serde_json::json!({
+            "toolCalls": [
+                { "id": "call_a", "name": "read_file" },
+                { "id": "call_b", "name": "write_file" },
+                { "id": "", "name": "dropped_empty_id" },
+                { "id": "call_c", "name": "" },
+            ]
+        }))
+        .expect("valid reply yields a map");
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("call_a").map(String::as_str), Some("read_file"));
+        assert_eq!(map.get("call_b").map(String::as_str), Some("write_file"));
+
+        // Missing / empty / garbage replies leave the response unchanged.
+        assert!(parse_provider_response_renames(serde_json::json!({})).is_none());
+        assert!(parse_provider_response_renames(serde_json::json!({ "toolCalls": [] })).is_none());
+        assert!(parse_provider_response_renames(serde_json::json!({ "nope": 1 })).is_none());
+        assert!(parse_provider_response_renames(serde_json::json!("garbage")).is_none());
     }
 }

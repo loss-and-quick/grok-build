@@ -2023,7 +2023,7 @@ impl SessionActor {
                 )),
             );
             let model_timer = std::time::Instant::now();
-            let (response, latency) = match self.run_turn_via_sampler(request.clone()).await {
+            let (mut response, latency) = match self.run_turn_via_sampler(request.clone()).await {
                 Ok(SamplerTurnOutcome::Response(r, latency)) => (r, latency),
                 Err(error) => {
                     self.tool_context.fail_task_output_usage_closed();
@@ -2073,6 +2073,28 @@ impl SessionActor {
                 }
             };
             auth_retry_schedule.reset();
+            // Reversible tool-call name unmasking: a `provider_response` plugin
+            // may rewrite the names of this response's tool calls (custom
+            // providers only; first-party endpoints are self-guarded inside the
+            // dispatch). Applied here, before the tool-call list is copied and
+            // before the assistant item is recorded to history, so every
+            // downstream consumer — StructuredOutput detection, dispatch,
+            // persistence — observes the real names. The rename is applied
+            // atomically from one map, never partially.
+            {
+                let base_url = self
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .map(|cfg| cfg.base_url)
+                    .unwrap_or_default();
+                if let Some(renames) = self
+                    .resolve_provider_response_renames(&response, &base_url)
+                    .await
+                {
+                    super::provider_control::apply_tool_call_renames(&mut response, &renames);
+                }
+            }
             let model_elapsed_ms = model_timer.elapsed().as_millis() as u64;
             let usage = response.usage.as_ref();
             let prompt_tokens = usage.map(|u| u.prompt_tokens);
