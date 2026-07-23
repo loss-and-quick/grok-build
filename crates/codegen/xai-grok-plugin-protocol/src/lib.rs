@@ -12,6 +12,17 @@
 //! `serde_json::Value` fields carry opaque payloads; on the TS side they surface
 //! as `unknown` (via `#[ts(type = "unknown")]`) rather than pulling ts-rs's
 //! `JsonValue` shim into the export tree.
+//!
+//! Hook payloads are typed per event: each `xai-grok-hooks::event::HookPayload`
+//! variant has a matching `*Payload` DTO here (see the per-event section below),
+//! and the SDK keys them by `EventName` so a handler receives the payload typed
+//! to its event rather than a bare `unknown`. Only the genuinely opaque inner
+//! fields — tool input/result, the request body — stay `serde_json::Value` /
+//! `unknown`, since their shape is the tool's or provider's, not this contract's.
+//! The `hook_invoke` transport (`HookInvokeParams::payload`) still carries an
+//! `unknown` value on the wire; the typing is a compile-time SDK convenience over
+//! that same envelope, proven against the source `HookPayload` by the
+//! plugin-host drift guard.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -148,6 +159,362 @@ impl std::fmt::Display for EventName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-event hook payloads (core→plugin)
+//
+// One typed struct per `xai-grok-hooks::event::HookPayload` variant, mirroring
+// that variant's wire shape byte-for-byte. `HookPayload` is `#[serde(untagged)]`
+// and flattened into the hook envelope; each variant renames its fields to
+// camelCase, so — unlike the snake_case RPC vocabulary above — these payload
+// DTOs carry `#[serde(rename_all = "camelCase")]` to reproduce the hook wire
+// exactly. The SDK keys them by `EventName` (see `HookPayloadMap` in
+// `sdk/plugin/src/define.ts`) so a handler receives the payload typed to its
+// event. Inner `serde_json::Value` fields (tool input/result, request body)
+// stay `unknown`: they are opaque, tool- and request-shaped, not part of this
+// contract. The plugin-host drift guard proves these stay identical to the
+// source `HookPayload`; a rename here fails that assert, a new variant there
+// fails to compile.
+//
+// Optional fields keep `skip_serializing_if = "Option::is_none"` (so the wire
+// omits absent fields exactly as the source does) plus `#[serde(default)]` for
+// forward-tolerant deserialization; ts-rs renders them `field?: T | null`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Mirror of `xai-grok-hooks::event::SubagentStopPhase`. `SubagentStop` fire
+/// phase; lowercase on the wire.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub enum SubagentStopPhaseDto {
+    Gate,
+    Observe,
+}
+
+/// Mirror of `xai-grok-hooks::event::BackgroundTaskType`. snake_case wire.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub enum BackgroundTaskTypeDto {
+    Shell,
+    Monitor,
+    Subagent,
+}
+
+/// Mirror of `xai-grok-hooks::event::StopFailureKind`. snake_case wire.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub enum StopFailureKindDto {
+    RateLimit,
+    AuthenticationFailed,
+    InvalidRequest,
+    ServerError,
+    MaxOutputTokens,
+    Unknown,
+}
+
+/// Mirror of `xai-grok-hooks::event::StopBackgroundTask`: one in-flight
+/// background task in a `Stop` payload. camelCase wire (`type`, `agentType`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct StopBackgroundTaskDto {
+    pub id: String,
+    pub r#type: BackgroundTaskTypeDto,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+}
+
+/// Mirror of `xai-grok-hooks::event::StopSessionCron`: one session-scoped
+/// scheduled wakeup in a `Stop` payload. camelCase wire.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct StopSessionCronDto {
+    pub id: String,
+    pub schedule: String,
+    pub recurring: bool,
+    pub prompt: String,
+}
+
+/// Mirror of `xai-grok-hooks::event::ProviderResponseToolCall`: one tool call
+/// in a `ProviderResponse` payload. Both field names are already the wire
+/// tokens, so no rename.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct ProviderResponseToolCallDto {
+    pub id: String,
+    pub name: String,
+}
+
+/// `session_start` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct SessionStartPayload {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+}
+
+/// `session_end` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct SessionEndPayload {
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null", optional = nullable)]
+    pub turn_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null", optional = nullable)]
+    pub tool_call_count: Option<u64>,
+}
+
+/// `stop` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct StopPayload {
+    pub reason: String,
+    pub stop_hook_active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_assistant_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_tasks: Option<Vec<StopBackgroundTaskDto>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_crons: Option<Vec<StopSessionCronDto>>,
+}
+
+/// `stop_failure` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct StopFailurePayload {
+    pub error: StopFailureKindDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_details: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_assistant_message: Option<String>,
+}
+
+/// `pre_tool_use` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct PreToolUsePayload {
+    pub tool_name: String,
+    pub tool_use_id: String,
+    #[ts(type = "unknown")]
+    pub tool_input: serde_json::Value,
+    pub tool_input_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
+}
+
+/// `post_tool_use` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct PostToolUsePayload {
+    pub tool_name: String,
+    pub tool_use_id: String,
+    #[ts(type = "unknown")]
+    pub tool_input: serde_json::Value,
+    #[ts(type = "unknown")]
+    pub tool_result: serde_json::Value,
+    pub tool_input_truncated: bool,
+    pub tool_result_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null", optional = nullable)]
+    pub duration_ms: Option<u64>,
+    pub is_backgrounded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
+}
+
+/// `post_tool_use_failure` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct PostToolUseFailurePayload {
+    pub tool_name: String,
+    pub tool_use_id: String,
+    #[ts(type = "unknown")]
+    pub tool_input: serde_json::Value,
+    pub tool_input_truncated: bool,
+    pub error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
+}
+
+/// `permission_denied` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct PermissionDeniedPayload {
+    pub tool_name: String,
+    pub tool_use_id: String,
+    #[ts(type = "unknown")]
+    pub tool_input: serde_json::Value,
+    pub tool_input_truncated: bool,
+}
+
+/// `user_prompt_submit` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct UserPromptSubmitPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
+/// `notification` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct NotificationPayload {
+    pub notification_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+}
+
+/// `subagent_start` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct SubagentStartPayload {
+    pub subagent_id: String,
+    pub subagent_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// `subagent_stop` payload (also the payload of the `subagent_end` alias).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct SubagentStopPayload {
+    pub phase: SubagentStopPhaseDto,
+    pub subagent_id: String,
+    pub subagent_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_hook_active: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_assistant_message: Option<String>,
+}
+
+/// `pre_compact` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct PreCompactPayload {
+    pub source: String,
+}
+
+/// `post_compact` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct PostCompactPayload {
+    pub source: String,
+}
+
+/// `provider_request` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct ProviderRequestPayload {
+    pub endpoint: String,
+    pub model: String,
+    pub base_url_alias: String,
+    pub agent: String,
+    pub tools: Vec<String>,
+    #[ts(type = "Array<[string, string]>")]
+    pub headers: Vec<(String, String)>,
+    #[ts(type = "unknown")]
+    pub body: serde_json::Value,
+}
+
+/// `provider_response` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct ProviderResponsePayload {
+    pub base_url: String,
+    pub endpoint: String,
+    pub tool_calls: Vec<ProviderResponseToolCallDto>,
+}
+
+/// `provider_error` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct ProviderErrorPayload {
+    pub error_class: String,
+    pub model: String,
+    #[ts(type = "number")]
+    pub attempt: u32,
+    pub base_url_alias: String,
+}
+
+/// `subagent_resolve` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct SubagentResolvePayload {
+    pub subagent_id: String,
+    pub subagent_type: String,
+    pub description: String,
+    pub prompt_preview: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub parent_model: String,
+}
+
+/// `resolve_credential` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct ResolveCredentialPayload {
+    pub reason: String,
+    pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_hint: Option<String>,
+}
+
+/// `refresh_credential` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct RefreshCredentialPayload {
+    pub reason: String,
+    pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
+}
+
+/// `start_oauth_flow` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct StartOauthFlowPayload {
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_hint: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -857,6 +1224,33 @@ mod bindings_export {
             DecisionDto,
             LogLevelDto,
             EventName,
+            SubagentStopPhaseDto,
+            BackgroundTaskTypeDto,
+            StopFailureKindDto,
+            StopBackgroundTaskDto,
+            StopSessionCronDto,
+            ProviderResponseToolCallDto,
+            SessionStartPayload,
+            SessionEndPayload,
+            StopPayload,
+            StopFailurePayload,
+            PreToolUsePayload,
+            PostToolUsePayload,
+            PostToolUseFailurePayload,
+            PermissionDeniedPayload,
+            UserPromptSubmitPayload,
+            NotificationPayload,
+            SubagentStartPayload,
+            SubagentStopPayload,
+            PreCompactPayload,
+            PostCompactPayload,
+            ProviderRequestPayload,
+            ProviderResponsePayload,
+            ProviderErrorPayload,
+            SubagentResolvePayload,
+            ResolveCredentialPayload,
+            RefreshCredentialPayload,
+            StartOauthFlowPayload,
             HostCapabilities,
             InitializeParams,
             InitializeResult,
@@ -1652,5 +2046,244 @@ mod tests {
             let back: EventName = serde_json::from_value(json!(wire)).unwrap();
             assert_eq!(back, ev, "round-trip drift");
         }
+    }
+
+    /// The nested payload enums serialize to their frozen wire tokens.
+    #[test]
+    fn payload_nested_enum_wire_forms() {
+        assert_eq!(
+            serde_json::to_value(SubagentStopPhaseDto::Gate).unwrap(),
+            json!("gate")
+        );
+        assert_eq!(
+            serde_json::to_value(SubagentStopPhaseDto::Observe).unwrap(),
+            json!("observe")
+        );
+        for (v, s) in [
+            (BackgroundTaskTypeDto::Shell, "shell"),
+            (BackgroundTaskTypeDto::Monitor, "monitor"),
+            (BackgroundTaskTypeDto::Subagent, "subagent"),
+        ] {
+            assert_eq!(serde_json::to_value(v).unwrap(), json!(s));
+        }
+        for (v, s) in [
+            (StopFailureKindDto::RateLimit, "rate_limit"),
+            (StopFailureKindDto::AuthenticationFailed, "authentication_failed"),
+            (StopFailureKindDto::InvalidRequest, "invalid_request"),
+            (StopFailureKindDto::ServerError, "server_error"),
+            (StopFailureKindDto::MaxOutputTokens, "max_output_tokens"),
+            (StopFailureKindDto::Unknown, "unknown"),
+        ] {
+            assert_eq!(serde_json::to_value(v).unwrap(), json!(s));
+        }
+    }
+
+    /// `ProviderRequestPayload`: header tuples serialize as `[k, v]` pairs and
+    /// the tool catalog as a string array, both camelCase-keyed.
+    #[test]
+    fn provider_request_payload_round_trip() {
+        round_trip(
+            &ProviderRequestPayload {
+                endpoint: "chat/completions".into(),
+                model: "grok-4.5".into(),
+                base_url_alias: "https://api.x.ai/v1".into(),
+                agent: "reviewer".into(),
+                tools: vec!["read_file".into(), "memory__recall".into()],
+                headers: vec![
+                    ("accept".into(), "text/event-stream".into()),
+                    ("content-type".into(), "application/json".into()),
+                ],
+                body: json!({ "model": "grok-4.5", "stream": true }),
+            },
+            json!({
+                "endpoint": "chat/completions",
+                "model": "grok-4.5",
+                "baseUrlAlias": "https://api.x.ai/v1",
+                "agent": "reviewer",
+                "tools": ["read_file", "memory__recall"],
+                "headers": [
+                    ["accept", "text/event-stream"],
+                    ["content-type", "application/json"],
+                ],
+                "body": { "model": "grok-4.5", "stream": true },
+            }),
+        );
+    }
+
+    /// `PostToolUsePayload`: every `tool*` field, the optional `durationMs`
+    /// number, and `isBackgrounded`, all camelCase on the wire.
+    #[test]
+    fn post_tool_use_payload_round_trip() {
+        round_trip(
+            &PostToolUsePayload {
+                tool_name: "bash".into(),
+                tool_use_id: "call-1".into(),
+                tool_input: json!({ "command": "ls" }),
+                tool_result: json!({ "stdout": "a\nb" }),
+                tool_input_truncated: false,
+                tool_result_truncated: true,
+                duration_ms: Some(1234),
+                is_backgrounded: false,
+                subagent_type: Some("explore".into()),
+            },
+            json!({
+                "toolName": "bash",
+                "toolUseId": "call-1",
+                "toolInput": { "command": "ls" },
+                "toolResult": { "stdout": "a\nb" },
+                "toolInputTruncated": false,
+                "toolResultTruncated": true,
+                "durationMs": 1234,
+                "isBackgrounded": false,
+                "subagentType": "explore",
+            }),
+        );
+
+        // Absent optionals are omitted (not null), and deserialization is
+        // forward-tolerant of unknown fields.
+        let p: PostToolUsePayload = serde_json::from_value(json!({
+            "toolName": "read_file",
+            "toolUseId": "call-2",
+            "toolInput": {},
+            "toolResult": {},
+            "toolInputTruncated": false,
+            "toolResultTruncated": false,
+            "isBackgrounded": true,
+            "future": 1,
+        }))
+        .unwrap();
+        assert_eq!(p.duration_ms, None);
+        assert_eq!(p.subagent_type, None);
+        let v = serde_json::to_value(&p).unwrap();
+        assert!(v.get("durationMs").is_none());
+        assert!(v.get("subagentType").is_none());
+    }
+
+    /// `StopPayload`: the nested `backgroundTasks` / `sessionCrons` vecs and
+    /// their per-entry camelCase renames (`type`, `agentType`).
+    #[test]
+    fn stop_payload_round_trip() {
+        round_trip(
+            &StopPayload {
+                reason: "end_turn".into(),
+                stop_hook_active: true,
+                last_assistant_message: Some("done".into()),
+                background_tasks: Some(vec![
+                    StopBackgroundTaskDto {
+                        id: "task-001".into(),
+                        r#type: BackgroundTaskTypeDto::Shell,
+                        status: "running".into(),
+                        description: None,
+                        command: Some("tail -f log".into()),
+                        agent_type: None,
+                    },
+                    StopBackgroundTaskDto {
+                        id: "task-002".into(),
+                        r#type: BackgroundTaskTypeDto::Subagent,
+                        status: "running".into(),
+                        description: Some("explore".into()),
+                        command: None,
+                        agent_type: Some("explore".into()),
+                    },
+                ]),
+                session_crons: Some(vec![StopSessionCronDto {
+                    id: "cron-001".into(),
+                    schedule: "every 2h".into(),
+                    recurring: true,
+                    prompt: "check the build".into(),
+                }]),
+            },
+            json!({
+                "reason": "end_turn",
+                "stopHookActive": true,
+                "lastAssistantMessage": "done",
+                "backgroundTasks": [
+                    { "id": "task-001", "type": "shell", "status": "running", "command": "tail -f log" },
+                    {
+                        "id": "task-002",
+                        "type": "subagent",
+                        "status": "running",
+                        "description": "explore",
+                        "agentType": "explore",
+                    },
+                ],
+                "sessionCrons": [
+                    { "id": "cron-001", "schedule": "every 2h", "recurring": true, "prompt": "check the build" },
+                ],
+            }),
+        );
+    }
+
+    /// `ProviderResponsePayload`: the `toolCalls` vec of `{ id, name }` entries.
+    #[test]
+    fn provider_response_payload_round_trip() {
+        round_trip(
+            &ProviderResponsePayload {
+                base_url: "https://provider.example/v1".into(),
+                endpoint: "messages".into(),
+                tool_calls: vec![
+                    ProviderResponseToolCallDto {
+                        id: "call_1".into(),
+                        name: "masked_a".into(),
+                    },
+                    ProviderResponseToolCallDto {
+                        id: "call_2".into(),
+                        name: "masked_b".into(),
+                    },
+                ],
+            },
+            json!({
+                "baseUrl": "https://provider.example/v1",
+                "endpoint": "messages",
+                "toolCalls": [
+                    { "id": "call_1", "name": "masked_a" },
+                    { "id": "call_2", "name": "masked_b" },
+                ],
+            }),
+        );
+    }
+
+    /// One credential payload: `resolve_credential` with its `baseUrl` /
+    /// `ownerHint` camelCase renames and omit-on-absent behavior.
+    #[test]
+    fn resolve_credential_payload_round_trip() {
+        round_trip(
+            &ResolveCredentialPayload {
+                reason: "outbound".into(),
+                base_url: "https://idp.example/v1".into(),
+                owner_hint: Some("primary".into()),
+            },
+            json!({
+                "reason": "outbound",
+                "baseUrl": "https://idp.example/v1",
+                "ownerHint": "primary",
+            }),
+        );
+
+        // Absent `ownerHint` is omitted, not null.
+        let p: ResolveCredentialPayload = serde_json::from_value(json!({
+            "reason": "bootstrap",
+            "baseUrl": "",
+        }))
+        .unwrap();
+        assert_eq!(p.owner_hint, None);
+        assert!(serde_json::to_value(&p).unwrap().get("ownerHint").is_none());
+    }
+
+    /// `StopFailurePayload`: the nested `StopFailureKindDto` and camelCase
+    /// `errorDetails`.
+    #[test]
+    fn stop_failure_payload_round_trip() {
+        round_trip(
+            &StopFailurePayload {
+                error: StopFailureKindDto::RateLimit,
+                error_details: Some("429".into()),
+                last_assistant_message: None,
+            },
+            json!({
+                "error": "rate_limit",
+                "errorDetails": "429",
+            }),
+        );
     }
 }
