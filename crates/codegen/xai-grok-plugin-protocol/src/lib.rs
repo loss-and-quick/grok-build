@@ -254,6 +254,31 @@ pub struct ProviderResponseToolCallDto {
     pub name: String,
 }
 
+/// The envelope fields present on EVERY hook payload, mirroring the non-payload
+/// fields of `xai-grok-hooks::event::HookEventEnvelope`. The core forwards the
+/// whole envelope to a hook — the event-specific payload is flattened alongside
+/// these — so a handler's typed payload is `HookEnvelopeCommon & <event
+/// payload>` (see the SDK's `HookHandler`). `hookEventName` echoes which event
+/// fired; the rest identify the session and its fire-site context.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+pub struct HookEnvelopeCommon {
+    pub hook_event_name: EventName,
+    pub session_id: String,
+    pub cwd: String,
+    pub workspace_root: String,
+    pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_identifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+}
+
 /// `session_start` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
@@ -1224,6 +1249,7 @@ mod bindings_export {
             DecisionDto,
             LogLevelDto,
             EventName,
+            HookEnvelopeCommon,
             SubagentStopPhaseDto,
             BackgroundTaskTypeDto,
             StopFailureKindDto,
@@ -2049,6 +2075,45 @@ mod tests {
     }
 
     /// The nested payload enums serialize to their frozen wire tokens.
+    #[test]
+    fn hook_envelope_common_round_trip() {
+        round_trip(
+            &HookEnvelopeCommon {
+                hook_event_name: EventName::ProviderRequest,
+                session_id: "sess-1".into(),
+                cwd: "/repo".into(),
+                workspace_root: "/repo".into(),
+                timestamp: "2026-01-01T00:00:00Z".into(),
+                transcript_path: Some("/t.jsonl".into()),
+                client_identifier: None,
+                prompt_id: Some("p-9".into()),
+                permission_mode: Some("default".into()),
+            },
+            json!({
+                "hookEventName": "provider_request",
+                "sessionId": "sess-1",
+                "cwd": "/repo",
+                "workspaceRoot": "/repo",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "transcriptPath": "/t.jsonl",
+                "promptId": "p-9",
+                "permissionMode": "default",
+            }),
+        );
+        // Optionals omit when absent (forward-compat; no deny_unknown_fields).
+        let c: HookEnvelopeCommon = serde_json::from_value(json!({
+            "hookEventName": "session_start",
+            "sessionId": "s",
+            "cwd": "/w",
+            "workspaceRoot": "/w",
+            "timestamp": "t",
+            "future": 1,
+        }))
+        .unwrap();
+        assert_eq!(c.transcript_path, None);
+        assert_eq!(c.permission_mode, None);
+    }
+
     #[test]
     fn payload_nested_enum_wire_forms() {
         assert_eq!(

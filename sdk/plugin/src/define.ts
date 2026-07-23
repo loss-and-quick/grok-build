@@ -18,6 +18,7 @@ import {
 } from "./context.ts";
 
 import type { EventName } from "./generated/EventName.ts";
+import type { HookEnvelopeCommon } from "./generated/HookEnvelopeCommon.ts";
 import type { HookInvokeResult } from "./generated/HookInvokeResult.ts";
 import type { InitializeResult } from "./generated/InitializeResult.ts";
 import type { ToolDescriptorDto } from "./generated/ToolDescriptorDto.ts";
@@ -112,15 +113,18 @@ export type HookPayloadMapCoversEventName = AssertTrue<
 export type HookResult<_E extends EventName = EventName> = HookInvokeResult;
 
 /**
- * A hook handler. `payload` is typed per event via [`HookPayloadMap`], so a
- * handler registered for a specific event (e.g. `pre_tool_use`) receives that
- * event's payload interface rather than a bare `unknown`. A handler written
- * against the default `EventName` (or that ignores the argument) sees the
- * `unknown` union, so existing `(payload, ctx) => …` plugins keep compiling.
- * Returning `undefined`/`void` means passthrough (`observed`).
+ * A hook handler. The core forwards the whole event envelope, so `payload` is
+ * the common envelope fields ([`HookEnvelopeCommon`]: `sessionId`, `cwd`,
+ * `workspaceRoot`, `hookEventName`, …) intersected with the event-specific
+ * payload ([`HookPayloadMap`]). A handler registered for a specific event
+ * (e.g. `pre_tool_use`) reads both that event's fields and the envelope fields,
+ * typed. A handler written against the default `EventName` (or that ignores the
+ * argument) sees the common fields plus the payload union, so existing
+ * `(payload, ctx) => …` plugins keep compiling. Returning `undefined`/`void`
+ * means passthrough (`observed`).
  */
 export type HookHandler<E extends EventName = EventName> = (
-  payload: HookPayloadMap[E],
+  payload: HookEnvelopeCommon & HookPayloadMap[E],
   ctx: PluginContext,
 ) => Promise<HookResult<E> | void> | HookResult<E> | void;
 
@@ -317,14 +321,20 @@ export function definePlugin(
 
     async hookInvoke(params): Promise<HookInvokeResult> {
       // The event is only known at runtime, so erase the per-event handler
-      // signature to the default (payload: unknown) before dispatching the
-      // wire payload — which arrives typed as `unknown`.
+      // signature to the default `HookHandler` before dispatch.
       const handler = def.hooks?.[params.event as EventName] as
         | HookHandler
         | undefined;
       if (!handler || !ctx) return observed();
       try {
-        const result = await handler(params.payload, ctx);
+        // The wire payload arrives as `unknown`; at runtime it is the whole
+        // envelope (common fields flattened with the event payload), which is
+        // exactly the default handler's parameter type. Assert it across the
+        // erased boundary.
+        const result = await handler(
+          params.payload as HookEnvelopeCommon & HookPayloadMap[EventName],
+          ctx,
+        );
         return result ?? observed();
       } catch (err) {
         host.logEmit({

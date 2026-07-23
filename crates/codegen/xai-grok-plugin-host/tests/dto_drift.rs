@@ -21,8 +21,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use xai_grok_hooks::event::{
-    BackgroundTaskType, HookPayload, ProviderResponseToolCall, StopBackgroundTask, StopFailureKind,
-    StopSessionCron, SubagentStopPhase,
+    BackgroundTaskType, HookEventEnvelope, HookEventName, HookPayload, ProviderResponseToolCall,
+    StopBackgroundTask, StopFailureKind, StopSessionCron, SubagentStopPhase,
 };
 use xai_grok_plugin_protocol as proto;
 
@@ -207,48 +207,90 @@ fn all_payload_samples() -> Vec<HookPayload> {
 /// variant fails to compile here (not merely at runtime), forcing its DTO and
 /// this mapping to be added. A renamed or wrongly-typed field instead fails the
 /// `assert_eq!` below.
+/// Round-trip `source` (a serialized `HookPayload`) through the plugin-protocol
+/// DTO matching `payload`'s variant. The `match` is exhaustive and wildcard-free
+/// on purpose: a new `HookPayload` variant fails to COMPILE here.
+fn payload_via_dto(payload: &HookPayload, source: &Value) -> Value {
+    match payload {
+        HookPayload::SessionStart { .. } => reround::<proto::SessionStartPayload>(source),
+        HookPayload::SessionEnd { .. } => reround::<proto::SessionEndPayload>(source),
+        HookPayload::Stop { .. } => reround::<proto::StopPayload>(source),
+        HookPayload::StopFailure { .. } => reround::<proto::StopFailurePayload>(source),
+        HookPayload::PreToolUse { .. } => reround::<proto::PreToolUsePayload>(source),
+        HookPayload::PostToolUse { .. } => reround::<proto::PostToolUsePayload>(source),
+        HookPayload::PostToolUseFailure { .. } => {
+            reround::<proto::PostToolUseFailurePayload>(source)
+        }
+        HookPayload::PermissionDenied { .. } => reround::<proto::PermissionDeniedPayload>(source),
+        HookPayload::UserPromptSubmit { .. } => reround::<proto::UserPromptSubmitPayload>(source),
+        HookPayload::Notification { .. } => reround::<proto::NotificationPayload>(source),
+        HookPayload::SubagentStart { .. } => reround::<proto::SubagentStartPayload>(source),
+        HookPayload::SubagentStop { .. } => reround::<proto::SubagentStopPayload>(source),
+        HookPayload::PreCompact { .. } => reround::<proto::PreCompactPayload>(source),
+        HookPayload::PostCompact { .. } => reround::<proto::PostCompactPayload>(source),
+        HookPayload::ProviderRequest { .. } => reround::<proto::ProviderRequestPayload>(source),
+        HookPayload::ProviderResponse { .. } => reround::<proto::ProviderResponsePayload>(source),
+        HookPayload::ProviderError { .. } => reround::<proto::ProviderErrorPayload>(source),
+        HookPayload::SubagentResolve { .. } => reround::<proto::SubagentResolvePayload>(source),
+        HookPayload::ResolveCredential { .. } => reround::<proto::ResolveCredentialPayload>(source),
+        HookPayload::RefreshCredential { .. } => reround::<proto::RefreshCredentialPayload>(source),
+        HookPayload::StartOauthFlow { .. } => reround::<proto::StartOauthFlowPayload>(source),
+    }
+}
+
 #[test]
 fn dto_wire_matches_source_for_every_variant() {
     for payload in all_payload_samples() {
         let source = serde_json::to_value(&payload).expect("source HookPayload serializes");
-        let via_dto = match &payload {
-            HookPayload::SessionStart { .. } => reround::<proto::SessionStartPayload>(&source),
-            HookPayload::SessionEnd { .. } => reround::<proto::SessionEndPayload>(&source),
-            HookPayload::Stop { .. } => reround::<proto::StopPayload>(&source),
-            HookPayload::StopFailure { .. } => reround::<proto::StopFailurePayload>(&source),
-            HookPayload::PreToolUse { .. } => reround::<proto::PreToolUsePayload>(&source),
-            HookPayload::PostToolUse { .. } => reround::<proto::PostToolUsePayload>(&source),
-            HookPayload::PostToolUseFailure { .. } => {
-                reround::<proto::PostToolUseFailurePayload>(&source)
-            }
-            HookPayload::PermissionDenied { .. } => {
-                reround::<proto::PermissionDeniedPayload>(&source)
-            }
-            HookPayload::UserPromptSubmit { .. } => {
-                reround::<proto::UserPromptSubmitPayload>(&source)
-            }
-            HookPayload::Notification { .. } => reround::<proto::NotificationPayload>(&source),
-            HookPayload::SubagentStart { .. } => reround::<proto::SubagentStartPayload>(&source),
-            HookPayload::SubagentStop { .. } => reround::<proto::SubagentStopPayload>(&source),
-            HookPayload::PreCompact { .. } => reround::<proto::PreCompactPayload>(&source),
-            HookPayload::PostCompact { .. } => reround::<proto::PostCompactPayload>(&source),
-            HookPayload::ProviderRequest { .. } => reround::<proto::ProviderRequestPayload>(&source),
-            HookPayload::ProviderResponse { .. } => {
-                reround::<proto::ProviderResponsePayload>(&source)
-            }
-            HookPayload::ProviderError { .. } => reround::<proto::ProviderErrorPayload>(&source),
-            HookPayload::SubagentResolve { .. } => reround::<proto::SubagentResolvePayload>(&source),
-            HookPayload::ResolveCredential { .. } => {
-                reround::<proto::ResolveCredentialPayload>(&source)
-            }
-            HookPayload::RefreshCredential { .. } => {
-                reround::<proto::RefreshCredentialPayload>(&source)
-            }
-            HookPayload::StartOauthFlow { .. } => reround::<proto::StartOauthFlowPayload>(&source),
-        };
+        let via_dto = payload_via_dto(&payload, &source);
         assert_eq!(
             source, via_dto,
             "wire drift between HookPayload and its DTO for {payload:?}"
+        );
+    }
+}
+
+/// The plugin receives the whole *envelope* (the runner forwards it verbatim and
+/// the host relays it unchanged), with the event payload flattened alongside the
+/// common fields. So a handler's typed payload is `HookEnvelopeCommon &
+/// <event payload>`. This proves that intersection covers the envelope with no
+/// gap: for every variant, `HookEnvelopeCommon` ∪ the event DTO must re-serialize
+/// to exactly the envelope wire. A new common field on `HookEventEnvelope` that
+/// `HookEnvelopeCommon` fails to mirror leaves a key uncovered and fails here.
+#[test]
+fn envelope_common_and_payload_cover_full_envelope() {
+    for payload in all_payload_samples() {
+        let envelope = HookEventEnvelope {
+            hook_event_name: HookEventName::PreToolUse,
+            session_id: "sess-1".into(),
+            cwd: "/repo".into(),
+            workspace_root: "/ws".into(),
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            transcript_path: Some("/t.jsonl".into()),
+            client_identifier: Some("grok/1".into()),
+            prompt_id: Some("p-1".into()),
+            permission_mode: Some("default".into()),
+            payload: payload.clone(),
+        };
+        let full = serde_json::to_value(&envelope).expect("envelope serializes");
+
+        // Common fields, typed via HookEnvelopeCommon.
+        let common = reround::<proto::HookEnvelopeCommon>(&full);
+        // Event fields, typed via the matching payload DTO.
+        let event = payload_via_dto(&payload, &full);
+
+        // Merge the two typed halves; they must reconstruct the whole envelope
+        // with no extra or missing key.
+        let mut merged = serde_json::Map::new();
+        for part in [common, event] {
+            for (k, v) in part.as_object().expect("typed half is an object") {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        assert_eq!(
+            Value::Object(merged),
+            full,
+            "HookEnvelopeCommon + payload DTO does not cover the full envelope for {payload:?}"
         );
     }
 }
