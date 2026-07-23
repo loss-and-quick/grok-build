@@ -35,6 +35,11 @@ pub enum HookEventName {
 
     /// Intercepts the outgoing LLM request; Replace gate. Reserved; not wired yet.
     ProviderRequest,
+    /// Rewrites the names of tool calls in a model response before the shell
+    /// dispatches them; Replace gate. The shell-side mirror of `ProviderRequest`,
+    /// applied post-sampler with no sampler involvement. Plugin-only, not
+    /// hub-forwarded. First-party endpoints are never offered to this seam.
+    ProviderResponse,
     /// Provider failure → retry (model/base_url alias) or fail; Replace gate.
     /// Reserved; not wired yet.
     ProviderError,
@@ -112,6 +117,9 @@ impl<'de> serde::Deserialize<'de> for HookEventName {
             "PreCompact" | "pre_compact" | "preCompact" => Ok(Self::PreCompact),
             "PostCompact" | "post_compact" | "postCompact" => Ok(Self::PostCompact),
             "ProviderRequest" | "provider_request" | "providerRequest" => Ok(Self::ProviderRequest),
+            "ProviderResponse" | "provider_response" | "providerResponse" => {
+                Ok(Self::ProviderResponse)
+            }
             "ProviderError" | "provider_error" | "providerError" => Ok(Self::ProviderError),
             "SubagentResolve" | "subagent_resolve" | "subagentResolve" => {
                 Ok(Self::SubagentResolve)
@@ -129,7 +137,7 @@ impl<'de> serde::Deserialize<'de> for HookEventName {
                  SessionStart, PreToolUse, PostToolUse, PostToolUseFailure, \
                  SessionEnd, Stop, StopFailure, Notification, UserPromptSubmit, \
                  PermissionDenied, SubagentStart, SubagentStop, \
-                 PreCompact, PostCompact, ProviderRequest, ProviderError, \
+                 PreCompact, PostCompact, ProviderRequest, ProviderResponse, ProviderError, \
                  SubagentResolve, PermissionAsk, ResolveCredential, \
                  RefreshCredential, StartOauthFlow (camelCase and per-operation aliases \
                  such as beforeShellExecution are also accepted)"
@@ -156,6 +164,7 @@ impl std::fmt::Display for HookEventName {
             Self::PreCompact => write!(f, "pre_compact"),
             Self::PostCompact => write!(f, "post_compact"),
             Self::ProviderRequest => write!(f, "provider_request"),
+            Self::ProviderResponse => write!(f, "provider_response"),
             Self::ProviderError => write!(f, "provider_error"),
             Self::SubagentResolve => write!(f, "subagent_resolve"),
             Self::PermissionAsk => write!(f, "permission_ask"),
@@ -245,6 +254,7 @@ impl HookEventName {
             // permission manager's bespoke seam rather than this dispatcher, so it
             // keeps the fire-all `Ignored` matcher and stays plugin-only.
             Self::ProviderRequest => t(Replace, Ignored, false),
+            Self::ProviderResponse => t(Replace, Ignored, false),
             Self::ProviderError => t(Replace, Ignored, false),
             Self::SubagentResolve => t(Replace, Ignored, false),
             Self::PermissionAsk => t(Tool, Ignored, false),
@@ -365,6 +375,16 @@ pub struct HookEventEnvelope {
     pub permission_mode: Option<String>,
     #[serde(flatten)]
     pub payload: HookPayload,
+}
+
+/// One tool call in a [`HookPayload::ProviderResponse`] payload: the stable
+/// call `id` and its current `name`. The plugin echoes the `id` back with a
+/// (possibly rewritten) `name` in its reply. Both field names are already the
+/// camelCase wire tokens, so no rename is needed.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderResponseToolCall {
+    pub id: String,
+    pub name: String,
 }
 
 /// Event-specific payload, flattened into the envelope JSON.
@@ -550,6 +570,23 @@ pub enum HookPayload {
         headers: Vec<(String, String)>,
         body: serde_json::Value,
     },
+    /// The tool calls in a model response, offered to a `provider_response`
+    /// Replace hook which may return a `{ toolCalls: [{ id, name }] }` reply. The
+    /// shell builds an id→name map from the reply and rewrites each response tool
+    /// call whose id matches, so a plugin can reversibly rename masked tool calls
+    /// before the shell dispatches them. Applied post-sampler, purely shell-side.
+    ProviderResponse {
+        /// The outbound endpoint the response came from. First-party endpoints
+        /// are never offered to this seam (the shell self-guards); a custom
+        /// provider rides this so the plugin can scope its reply to the target.
+        #[serde(rename = "baseUrl")]
+        base_url: String,
+        /// The API path (`chat/completions`, `responses`, `messages`).
+        endpoint: String,
+        /// The response's tool calls, in emission order.
+        #[serde(rename = "toolCalls")]
+        tool_calls: Vec<ProviderResponseToolCall>,
+    },
     /// A provider/stream failure, offered to a `provider_error` Replace hook
     /// which may return a retry directive (model / base-URL substitution).
     ProviderError {
@@ -652,6 +689,7 @@ impl HookPayload {
             Self::Stop { .. }
             | Self::UserPromptSubmit { .. }
             | Self::ProviderRequest { .. }
+            | Self::ProviderResponse { .. }
             | Self::ProviderError { .. }
             | Self::SubagentResolve { .. }
             | Self::ResolveCredential { .. }
@@ -726,6 +764,11 @@ mod tests {
                 HookEventName::ProviderRequest,
             ),
             (
+                "ProviderResponse",
+                "provider_response",
+                HookEventName::ProviderResponse,
+            ),
+            (
                 "ProviderError",
                 "provider_error",
                 HookEventName::ProviderError,
@@ -789,6 +832,7 @@ mod tests {
             (HookEventName::PreCompact, "pre_compact"),
             (HookEventName::PostCompact, "post_compact"),
             (HookEventName::ProviderRequest, "provider_request"),
+            (HookEventName::ProviderResponse, "provider_response"),
             (HookEventName::ProviderError, "provider_error"),
             (HookEventName::SubagentResolve, "subagent_resolve"),
             (HookEventName::PermissionAsk, "permission_ask"),
@@ -821,6 +865,7 @@ mod tests {
             ("preCompact", HookEventName::PreCompact),
             ("stopFailure", HookEventName::StopFailure),
             ("providerRequest", HookEventName::ProviderRequest),
+            ("providerResponse", HookEventName::ProviderResponse),
             ("providerError", HookEventName::ProviderError),
             ("subagentResolve", HookEventName::SubagentResolve),
             ("permissionAsk", HookEventName::PermissionAsk),
@@ -855,6 +900,10 @@ mod tests {
         assert_eq!(HookEventName::PostToolUse.traits().gate, GateKind::Observe);
         assert_eq!(
             HookEventName::ProviderRequest.traits().gate,
+            GateKind::Replace
+        );
+        assert_eq!(
+            HookEventName::ProviderResponse.traits().gate,
             GateKind::Replace
         );
         assert_eq!(
@@ -1096,6 +1145,66 @@ mod tests {
         assert!(value.get("body").is_some());
         // No credential header must be present (the fire site strips it).
         assert!(value.get("headers").is_some());
+    }
+
+    #[test]
+    fn provider_response_payload_serializes_camel_case_wire_shape() {
+        let envelope = HookEventEnvelope {
+            hook_event_name: HookEventName::ProviderResponse,
+            session_id: "s".into(),
+            cwd: "/tmp".into(),
+            workspace_root: "/tmp".into(),
+            timestamp: "2025-01-01T00:00:00Z".into(),
+            transcript_path: None,
+            client_identifier: None,
+            prompt_id: None,
+            permission_mode: None,
+            payload: HookPayload::ProviderResponse {
+                base_url: "https://provider.example/v1".into(),
+                endpoint: "messages".into(),
+                tool_calls: vec![
+                    ProviderResponseToolCall {
+                        id: "call_1".into(),
+                        name: "masked_a".into(),
+                    },
+                    ProviderResponseToolCall {
+                        id: "call_2".into(),
+                        name: "masked_b".into(),
+                    },
+                ],
+            },
+        };
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(
+            value.get("hookEventName").and_then(|v| v.as_str()),
+            Some("provider_response")
+        );
+        // camelCase renames on the wire: `baseUrl`, `endpoint`, `toolCalls`.
+        assert_eq!(
+            value.get("baseUrl").and_then(|v| v.as_str()),
+            Some("https://provider.example/v1")
+        );
+        assert_eq!(
+            value.get("endpoint").and_then(|v| v.as_str()),
+            Some("messages")
+        );
+        assert!(value.get("base_url").is_none(), "leaked snake_case baseUrl");
+        assert!(value.get("tool_calls").is_none(), "leaked snake_case toolCalls");
+        let calls = value
+            .get("toolCalls")
+            .and_then(|v| v.as_array())
+            .expect("toolCalls array present");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].get("id").and_then(|v| v.as_str()), Some("call_1"));
+        assert_eq!(
+            calls[0].get("name").and_then(|v| v.as_str()),
+            Some("masked_a")
+        );
+        assert_eq!(calls[1].get("id").and_then(|v| v.as_str()), Some("call_2"));
+        assert_eq!(
+            calls[1].get("name").and_then(|v| v.as_str()),
+            Some("masked_b")
+        );
     }
 
     #[test]

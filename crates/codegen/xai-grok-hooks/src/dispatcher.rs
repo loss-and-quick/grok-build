@@ -1372,19 +1372,21 @@ mod tests {
                 | HookEventName::PreCompact
                 | HookEventName::PostCompact
                 | HookEventName::ProviderRequest
+                | HookEventName::ProviderResponse
                 | HookEventName::ProviderError
                 | HookEventName::SubagentResolve
                 | HookEventName::PermissionAsk
                 | HookEventName::ResolveCredential
                 | HookEventName::RefreshCredential
-                | HookEventName::StartOauthFlow => 22,
+                | HookEventName::StartOauthFlow => 23,
             }
         };
         assert_eq!(
-            // +8 non-forwarded: PreToolUse (blocking) plus the seven plugin-only
-            // seams (ProviderRequest/ProviderError/SubagentResolve/PermissionAsk/
-            // ResolveCredential/RefreshCredential/StartOauthFlow), tested above.
-            cases.len() + 8,
+            // +9 non-forwarded: PreToolUse (blocking) plus the eight plugin-only
+            // seams (ProviderRequest/ProviderResponse/ProviderError/SubagentResolve/
+            // PermissionAsk/ResolveCredential/RefreshCredential/StartOauthFlow),
+            // tested above.
+            cases.len() + 9,
             total_variants(HookEventName::SessionStart),
             "update hub_hook_kind test when new HookEventName variants are added"
         );

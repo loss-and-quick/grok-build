@@ -393,6 +393,7 @@ mod tests {
             // Reserved seams (below): plugin-only, so deliberately absent from
             // the flat listing.
             HookEventName::ProviderRequest,
+            HookEventName::ProviderResponse,
             HookEventName::ProviderError,
             HookEventName::SubagentResolve,
             HookEventName::PermissionAsk,
@@ -408,6 +409,7 @@ mod tests {
             let reserved = matches!(
                 event,
                 HookEventName::ProviderRequest
+                    | HookEventName::ProviderResponse
                     | HookEventName::ProviderError
                     | HookEventName::SubagentResolve
                     | HookEventName::PermissionAsk
@@ -432,6 +434,7 @@ mod tests {
                 | HookEventName::PostCompact
                 | HookEventName::SessionEnd
                 | HookEventName::ProviderRequest
+                | HookEventName::ProviderResponse
                 | HookEventName::ProviderError
                 | HookEventName::SubagentResolve
                 | HookEventName::PermissionAsk

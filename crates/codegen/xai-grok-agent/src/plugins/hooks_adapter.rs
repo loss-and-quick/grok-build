@@ -42,6 +42,7 @@ const SUPPORTED_EVENTS: &[&str] = &[
     "PostCompact",
     // Provider / subagent-resolve / permission events — PascalCase and snake_case
     "ProviderRequest",
+    "ProviderResponse",
     "ProviderError",
     "SubagentResolve",
     "PermissionAsk",
@@ -60,6 +61,7 @@ const SUPPORTED_EVENTS: &[&str] = &[
     "pre_compact",
     "post_compact",
     "provider_request",
+    "provider_response",
     "provider_error",
     "subagent_resolve",
     "permission_ask",
