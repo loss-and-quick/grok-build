@@ -7,4 +7,4 @@
  * to a seam-less event is valid — it simply never fires; status is visible in
  * the UI.
  */
-export type EventName = "session_start" | "session_end" | "stop" | "stop_failure" | "pre_tool_use" | "post_tool_use" | "post_tool_use_failure" | "permission_denied" | "user_prompt_submit" | "notification" | "subagent_start" | "subagent_stop" | "subagent_end" | "pre_compact" | "post_compact" | "provider_request" | "provider_error" | "subagent_resolve" | "permission_ask" | "resolve_credential" | "refresh_credential" | "start_oauth_flow";
+export type EventName = "session_start" | "session_end" | "stop" | "stop_failure" | "pre_tool_use" | "post_tool_use" | "post_tool_use_failure" | "permission_denied" | "user_prompt_submit" | "notification" | "subagent_start" | "subagent_stop" | "subagent_end" | "pre_compact" | "post_compact" | "provider_request" | "provider_response" | "provider_error" | "subagent_resolve" | "permission_ask" | "resolve_credential" | "refresh_credential" | "start_oauth_flow";

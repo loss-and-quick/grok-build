@@ -225,6 +225,36 @@ describe("definePlugin — hook_invoke dispatch", () => {
     expect(result).toEqual({ kind: "replace", payload: { patched: true } });
   });
 
+  test("provider_response replies with a toolCalls rename map", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      {
+        hooks: {
+          provider_response: () =>
+            replace({
+              toolCalls: [
+                { id: "call_a", name: "read_file" },
+                { id: "call_b", name: "write_file" },
+              ],
+            }),
+        },
+      },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    const result = await invokeHook(reader, writer, "provider_response", "replace", 1);
+    expect(result).toEqual({
+      kind: "replace",
+      payload: {
+        toolCalls: [
+          { id: "call_a", name: "read_file" },
+          { id: "call_b", name: "write_file" },
+        ],
+      },
+    });
+  });
+
   test("a hook returning undefined is treated as passthrough (observed)", async () => {
     const { reader, writer } = setUpEndpoint();
     definePlugin(

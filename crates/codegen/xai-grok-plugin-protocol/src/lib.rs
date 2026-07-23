@@ -94,6 +94,9 @@ pub enum EventName {
     // Reserved (gates fixed; host replies `method_not_found` until wired).
     /// Replace gate; intercepts the outgoing LLM request (incl. system prompt).
     ProviderRequest,
+    /// Replace gate; rewrites the names of tool calls in a model response before
+    /// the shell dispatches them. Reply shape: `{ toolCalls: [{ id, name }] }`.
+    ProviderResponse,
     /// Replace gate; provider failure → retry (model/base_url alias) or fail.
     ProviderError,
     /// Replace gate; resolves a subagent spec before spawn.
@@ -130,6 +133,7 @@ impl EventName {
             Self::PreCompact => "pre_compact",
             Self::PostCompact => "post_compact",
             Self::ProviderRequest => "provider_request",
+            Self::ProviderResponse => "provider_response",
             Self::ProviderError => "provider_error",
             Self::SubagentResolve => "subagent_resolve",
             Self::PermissionAsk => "permission_ask",
@@ -1608,7 +1612,7 @@ mod tests {
 
     /// Golden list: `EventName`'s snake_case wire forms are frozen. `Display`,
     /// `as_str`, serde output, and round-trip must all agree, and the set is
-    /// exactly the 15 live + 7 reserved events.
+    /// exactly the 15 live + 8 reserved events.
     #[test]
     fn event_name_wire_forms_are_stable() {
         let golden = [
@@ -1628,6 +1632,7 @@ mod tests {
             (EventName::PreCompact, "pre_compact"),
             (EventName::PostCompact, "post_compact"),
             (EventName::ProviderRequest, "provider_request"),
+            (EventName::ProviderResponse, "provider_response"),
             (EventName::ProviderError, "provider_error"),
             (EventName::SubagentResolve, "subagent_resolve"),
             (EventName::PermissionAsk, "permission_ask"),
@@ -1635,7 +1640,7 @@ mod tests {
             (EventName::RefreshCredential, "refresh_credential"),
             (EventName::StartOauthFlow, "start_oauth_flow"),
         ];
-        assert_eq!(golden.len(), 22, "15 live + 7 reserved events");
+        assert_eq!(golden.len(), 23, "15 live + 8 reserved events");
         for (ev, wire) in golden {
             assert_eq!(ev.as_str(), wire, "as_str drift");
             assert_eq!(ev.to_string(), wire, "Display drift");
