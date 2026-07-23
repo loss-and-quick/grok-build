@@ -52,10 +52,21 @@ _: {
       nativeBuildInputs = with pkgs; [pkg-config cmake protobuf];
       buildInputs = nativeLibs; # zlib
 
-      # find_protoc() (crates/build/xai-proto-build/src/find_protoc.rs) checks
-      # $PROTOC first, so this skips the bin/protoc DotSlash wrapper (and its
-      # network fetch) entirely — same reasoning as nix/shells.nix.
-      env.PROTOC = "${pkgs.protobuf}/bin/protoc";
+      env = {
+        # find_protoc() (crates/build/xai-proto-build/src/find_protoc.rs) checks
+        # $PROTOC first, so this skips the bin/protoc DotSlash wrapper (and its
+        # network fetch) entirely — same reasoning as nix/shells.nix.
+        PROTOC = "${pkgs.protobuf}/bin/protoc";
+
+        # xai-grok-tools AND xai-grok-shell each have a build.rs that bundles
+        # ripgrep (embedded + self-extracted at runtime); in a release build
+        # they DOWNLOAD the musl asset from GitHub unless pointed at a local rg
+        # — which the sandboxed (network-free) nix build cannot do. Hand both
+        # nixpkgs' rg so the build stays offline. (bfs/ugrep only bundle when
+        # their own *_PATH is set, so they no-op.)
+        GROK_TOOLS_BUNDLE_RG_PATH = "${pkgs.ripgrep}/bin/rg";
+        GROK_SHELL_BUNDLE_RG_PATH = "${pkgs.ripgrep}/bin/rg";
+      };
     };
 
     grok-build = craneLib.buildPackage (commonArgs
