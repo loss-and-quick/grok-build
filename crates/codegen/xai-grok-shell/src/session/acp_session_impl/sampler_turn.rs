@@ -1461,7 +1461,11 @@ mod custom_provider_auth_tests {
         ) -> Option<PluginCredential> {
             None
         }
-        async fn start_oauth_flow(&self, _r: &str) -> Option<PluginCredential> {
+        async fn start_oauth_flow(
+            &self,
+            _r: &str,
+            _target_plugin: Option<&str>,
+        ) -> Option<PluginCredential> {
             None
         }
     }
@@ -1559,7 +1563,11 @@ mod custom_provider_auth_tests {
         ) -> Option<PluginCredential> {
             self.0.clone()
         }
-        async fn start_oauth_flow(&self, _r: &str) -> Option<PluginCredential> {
+        async fn start_oauth_flow(
+            &self,
+            _r: &str,
+            _target_plugin: Option<&str>,
+        ) -> Option<PluginCredential> {
             None
         }
     }

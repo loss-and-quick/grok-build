@@ -101,12 +101,15 @@ impl ShellAuthCredentialProvider {
 
     /// Drive the plugin's interactive authorization flow, caching the final
     /// credential. Returns `true` when the flow produced one. Triggered on an
-    /// explicit sign-in or when no usable credential exists.
-    pub(crate) async fn start_oauth_flow(&self, reason: &str) -> bool {
+    /// explicit sign-in or when no usable credential exists. `target_plugin`,
+    /// when `Some(name)`, restricts the flow to that single plugin's handler
+    /// (the `/login` provider the user selected); `None` consults all
+    /// subscribers.
+    pub(crate) async fn start_oauth_flow(&self, reason: &str, target_plugin: Option<&str>) -> bool {
         let Some(seam) = self.credential_seam.as_ref() else {
             return false;
         };
-        match seam.start_oauth_flow(reason).await {
+        match seam.start_oauth_flow(reason, target_plugin).await {
             Some(cred) => {
                 self.plugin_credential.store(Arc::new(Some(cred)));
                 true
@@ -1045,7 +1048,11 @@ mod tests {
             *self.seen_base_url.lock().unwrap() = Some(base_url.to_string());
             self.refresh.clone()
         }
-        async fn start_oauth_flow(&self, _reason: &str) -> Option<PluginCredential> {
+        async fn start_oauth_flow(
+            &self,
+            _reason: &str,
+            _target_plugin: Option<&str>,
+        ) -> Option<PluginCredential> {
             self.oauth.clone()
         }
     }
@@ -1125,7 +1132,7 @@ mod tests {
         );
         let provider = ShellAuthCredentialProvider::new(mgr, None, None);
         assert!(!provider.resolve_credential("bootstrap", "https://api.x.ai/v1").await);
-        assert!(!provider.start_oauth_flow("sign_in").await);
+        assert!(!provider.start_oauth_flow("sign_in", None).await);
         assert_eq!(provider.snapshot().token.as_deref(), Some("builtin-token"));
     }
 
@@ -1162,7 +1169,7 @@ mod tests {
             }),
         );
         assert!(provider.snapshot().token.is_none());
-        assert!(provider.start_oauth_flow("missing_credential").await);
+        assert!(provider.start_oauth_flow("missing_credential", None).await);
         assert_eq!(provider.snapshot().token.as_deref(), Some("oauth-token"));
     }
 
