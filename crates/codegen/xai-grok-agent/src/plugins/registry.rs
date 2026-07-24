@@ -56,6 +56,10 @@ pub struct LoadedPlugin {
     pub version: Option<String>,
     /// Plugin description from manifest.
     pub description: Option<String>,
+    /// Interactive-login label from the manifest `oauthLabel` field. `Some`
+    /// only when the plugin opts into being advertised as a `/login` provider;
+    /// paired with a sidecar entry it becomes a selectable OAuth sign-in method.
+    pub oauth_label: Option<String>,
     /// Resolved skill directories.
     pub skill_dirs: Vec<PathBuf>,
     pub command_dirs: Vec<PathBuf>,
@@ -235,6 +239,7 @@ impl PluginRegistry {
                 enabled,
                 version: dp.manifest.version,
                 description: dp.manifest.description,
+                oauth_label: dp.manifest.oauth_label,
                 skill_names,
                 agent_names,
                 skill_dirs: dp.skill_dirs,
@@ -330,6 +335,26 @@ impl PluginRegistry {
     /// Look up which plugin owns an MCP server by server name.
     pub fn mcp_server_owner(&self, server_name: &str) -> Option<&str> {
         self.mcp_owners.get(server_name).map(|s| s.as_str())
+    }
+
+    /// Plugins that advertise an interactive OAuth sign-in as a `/login`
+    /// provider, as `(plugin_name, label)` pairs in the registry's stable order.
+    ///
+    /// A plugin qualifies when it is enabled and trusted, ships a sidecar entry
+    /// (only a sidecar handler can mint a credential across the interactive
+    /// `start_oauth_flow` seam — a command/http hook can merely pass through),
+    /// and declares the manifest `oauthLabel`. The label is the human-facing
+    /// name shown in the picker.
+    pub fn oauth_login_providers(&self) -> Vec<(&str, &str)> {
+        self.active_plugins()
+            .into_iter()
+            .filter(|p| p.sidecar.is_some())
+            .filter_map(|p| {
+                p.oauth_label
+                    .as_deref()
+                    .map(|label| (p.name.as_str(), label))
+            })
+            .collect()
     }
 
     /// Number of plugins in the registry.
@@ -694,6 +719,7 @@ mod tests {
                 network: None,
                 tools: None,
                 config: None,
+                oauth_label: None,
             },
             id: PluginId::new(scope, &root, name),
             root: root.clone(),
@@ -1322,6 +1348,7 @@ mod tests {
                     timeout_ms: Some(1_000),
                 }]),
                 config: Some(serde_json::json!({ "participants": ["alice"] })),
+                oauth_label: None,
             },
             id: PluginId::new(PluginScope::User, root, name),
             root: root.to_path_buf(),

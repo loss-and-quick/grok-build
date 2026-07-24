@@ -1005,6 +1005,7 @@ enabled = false
             network: None,
             tools: None,
             config: None,
+            oauth_label: None,
         };
         let id = PluginId::new(PluginScope::User, &plugin_root, "sentry");
         let dp = DiscoveredPlugin {
@@ -1078,6 +1079,7 @@ enabled = false
             network: None,
             tools: None,
             config: None,
+            oauth_label: None,
         };
         let id = PluginId::new(PluginScope::User, &plugin_root, "sentry");
         let dp = DiscoveredPlugin {
@@ -1157,6 +1159,7 @@ enabled = false
             network: None,
             tools: None,
             config: None,
+            oauth_label: None,
         };
         let id = PluginId::new(PluginScope::User, &plugin_root, "slack");
         let dp = DiscoveredPlugin {

@@ -216,6 +216,7 @@ mod tests {
             enabled: true,
             version: Some("1.0.0".to_string()),
             description: None,
+            oauth_label: None,
             skill_dirs: vec![],
             command_dirs: vec![],
             agent_dirs: vec![],

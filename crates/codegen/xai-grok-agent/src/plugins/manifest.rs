@@ -210,6 +210,15 @@ pub struct PluginManifest {
     /// `{}` when absent. See [`PluginManifest::sidecar_config_defaults`].
     #[serde(default)]
     pub config: Option<serde_json::Value>,
+
+    /// Human-facing login label advertised when the plugin offers an
+    /// interactive OAuth sign-in. When set AND the plugin subscribes to the
+    /// `start_oauth_flow` hook event, the plugin becomes a selectable `/login`
+    /// provider whose entry shows this label (e.g. `"Sign in with Acme"`).
+    /// Absent by default — a plugin that does not opt in is never advertised as
+    /// a login provider. See [`PluginManifest::oauth_login_label`].
+    #[serde(default)]
+    pub oauth_label: Option<String>,
 }
 
 /// One model-visible tool declared in a sidecar plugin's manifest (`tools`
@@ -347,6 +356,13 @@ impl PluginManifest {
     /// Effective network flag: the manifest's `network`, or `false` when unset.
     pub fn network_enabled(&self) -> bool {
         self.network.unwrap_or(false)
+    }
+
+    /// The interactive-login label the plugin advertises, when it opts in via
+    /// the manifest `oauthLabel` field. `None` (the default) means the plugin is
+    /// not advertised as a `/login` provider.
+    pub fn oauth_login_label(&self) -> Option<&str> {
+        self.oauth_label.as_deref()
     }
 
     /// Manifest-declared default config object for the sidecar, or `{}` when
@@ -859,6 +875,7 @@ mod tests {
             network: None,
             tools: None,
             config: None,
+            oauth_label: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1);
@@ -891,6 +908,7 @@ mod tests {
             network: None,
             tools: None,
             config: None,
+            oauth_label: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(dirs.is_empty());
@@ -925,6 +943,7 @@ mod tests {
             network: None,
             tools: None,
             config: None,
+            oauth_label: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(
@@ -959,6 +978,7 @@ mod tests {
             network: None,
             tools: None,
             config: None,
+            oauth_label: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1, "path within plugin root should be accepted");
@@ -993,6 +1013,7 @@ mod tests {
             network: None,
             tools: None,
             config: None,
+            oauth_label: None,
         };
         assert!(
             manifest.hooks_path(&root).is_none(),
@@ -1028,6 +1049,7 @@ mod tests {
             network: None,
             tools: None,
             config: None,
+            oauth_label: None,
         };
         assert!(
             manifest.mcp_config_path(&root).is_none(),
@@ -1056,6 +1078,7 @@ mod tests {
             network: None,
             tools: None,
             config: None,
+            oauth_label: None,
         }
     }
 
@@ -1340,5 +1363,36 @@ mod tests {
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(manifest.config.is_some());
         assert_eq!(manifest.sidecar_config_defaults(), serde_json::json!({}));
+    }
+
+    // ── Interactive-login opt-in (`oauthLabel`) ─────────────────────────
+
+    #[test]
+    fn oauth_label_parses_from_camel_case() {
+        let json = r#"{
+            "name": "sign-in-plugin",
+            "plugin": "./index.ts",
+            "oauthLabel": "Sign in with Acme"
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.oauth_label.as_deref(), Some("Sign in with Acme"));
+        assert_eq!(manifest.oauth_login_label(), Some("Sign in with Acme"));
+    }
+
+    #[test]
+    fn oauth_label_absent_defaults_to_none() {
+        let json = r#"{ "name": "plain", "plugin": "./index.ts" }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.oauth_label.is_none());
+        assert_eq!(manifest.oauth_login_label(), None);
+    }
+
+    #[test]
+    fn oauth_label_snake_case_is_ignored_as_unknown() {
+        // The wire field is camelCase `oauthLabel`; a snake_case spelling is an
+        // unknown field (silently ignored) and does not opt the plugin in.
+        let json = r#"{ "name": "plain", "plugin": "./index.ts", "oauth_label": "Nope" }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.oauth_login_label().is_none());
     }
 }
