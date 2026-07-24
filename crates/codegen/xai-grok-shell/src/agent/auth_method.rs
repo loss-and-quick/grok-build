@@ -291,16 +291,22 @@ pub enum AuthMethodKind {
     CachedToken,
     GrokCom,
     Oidc,
+    /// A plugin-provided interactive OAuth sign-in (`plugin-oauth:<plugin>`).
+    /// Interactive and session-based-like; the plugin name is not carried here
+    /// (the enum stays `Copy`) — recover it with [`parse_plugin_oauth_id`].
+    PluginOauth,
     Unknown,
 }
 
 impl AuthMethodKind {
     pub fn from_id(id: &acp::AuthMethodId) -> Self {
-        match id.0.as_ref() {
+        let id = id.0.as_ref();
+        match id {
             XAI_API_KEY_METHOD_ID => Self::XaiApiKey,
             CACHED_TOKEN_AUTH_METHOD_ID => Self::CachedToken,
             GROK_COM_METHOD_ID => Self::GrokCom,
             OIDC_METHOD_ID => Self::Oidc,
+            _ if id.starts_with(PLUGIN_OAUTH_METHOD_PREFIX) => Self::PluginOauth,
             _ => Self::Unknown,
         }
     }
@@ -310,14 +316,21 @@ impl AuthMethodKind {
         matches!(self, Self::XaiApiKey)
     }
 
-    /// `true` for session-based methods (cached_token, grok.com, oidc).
+    /// `true` for session-based methods (cached_token, grok.com, oidc) and the
+    /// interactive plugin-oauth method, which is session-based-like: it is not
+    /// an api-key, so the same gates (`preferred_method=oidc` allow, session
+    /// classification) apply.
     pub fn is_session_based(self) -> bool {
-        matches!(self, Self::CachedToken | Self::GrokCom | Self::Oidc)
+        matches!(
+            self,
+            Self::CachedToken | Self::GrokCom | Self::Oidc | Self::PluginOauth
+        )
     }
 
-    /// Requires user interaction (browser, OIDC redirect, or external auth command).
+    /// Requires user interaction (browser, OIDC redirect, external auth command,
+    /// or a plugin's interactive sign-in).
     pub fn needs_interactive_login(self) -> bool {
-        matches!(self, Self::GrokCom | Self::Oidc)
+        matches!(self, Self::GrokCom | Self::Oidc | Self::PluginOauth)
     }
 
     pub fn auth_error_message(self) -> &'static str {
@@ -468,6 +481,37 @@ pub fn grok_com_auth_method(
     )
 }
 
+/// Method-id prefix for a plugin-provided interactive OAuth sign-in. The full
+/// id is `plugin-oauth:<plugin-name>`; build one with [`plugin_oauth_method_id`]
+/// and recover the plugin name with [`parse_plugin_oauth_id`].
+pub const PLUGIN_OAUTH_METHOD_PREFIX: &str = "plugin-oauth:";
+
+/// Build the ACP method id advertising `plugin`'s interactive OAuth sign-in.
+pub fn plugin_oauth_method_id(plugin: &str) -> String {
+    format!("{PLUGIN_OAUTH_METHOD_PREFIX}{plugin}")
+}
+
+/// The plugin name inside a `plugin-oauth:<plugin>` method id, or `None` when
+/// `id` is not a plugin-oauth id. An empty remainder (`plugin-oauth:`) yields
+/// `Some("")`; callers must reject an empty name.
+pub fn parse_plugin_oauth_id(id: &acp::AuthMethodId) -> Option<&str> {
+    id.0.as_ref().strip_prefix(PLUGIN_OAUTH_METHOD_PREFIX)
+}
+
+/// A `/login` method entry for a plugin's interactive OAuth sign-in. `plugin` is
+/// the kebab-case plugin name; `label` is the human-facing name the plugin
+/// declares via the manifest `oauthLabel` field. Mirrors the shape of
+/// [`oidc_auth_method`] / [`xai_api_key_auth_method`].
+pub fn plugin_oauth_auth_method(plugin: &str, label: &str) -> acp::AuthMethod {
+    acp::AuthMethod::Agent(
+        acp::AuthMethodAgent::new(
+            acp::AuthMethodId::new(plugin_oauth_method_id(plugin)),
+            label.to_string(),
+        )
+        .description(Some(format!("Sign in via the {label} plugin"))),
+    )
+}
+
 pub const OIDC_METHOD_ID: &str = "oidc";
 pub fn oidc_auth_method(issuer: &str, label: Option<&str>) -> acp::AuthMethod {
     let name = label
@@ -550,6 +594,65 @@ mod tests {
         assert!(!is_session_based_method(&acp::AuthMethodId::new(
             "unknown-method"
         )));
+    }
+
+    // ── plugin-oauth:<plugin> method id + kind + builder ────────────────
+
+    /// The `plugin-oauth:<plugin>` id round-trips through build ↔ parse, and a
+    /// non-plugin id parses to `None`.
+    #[test]
+    fn plugin_oauth_id_round_trips() {
+        assert_eq!(plugin_oauth_method_id("acme"), "plugin-oauth:acme");
+        let id = acp::AuthMethodId::new(plugin_oauth_method_id("acme"));
+        assert_eq!(parse_plugin_oauth_id(&id), Some("acme"));
+        // A bare prefix yields an empty name (callers must reject it).
+        assert_eq!(
+            parse_plugin_oauth_id(&acp::AuthMethodId::new(PLUGIN_OAUTH_METHOD_PREFIX)),
+            Some("")
+        );
+        // Built-in ids are not plugin-oauth ids.
+        assert_eq!(
+            parse_plugin_oauth_id(&acp::AuthMethodId::new(XAI_API_KEY_METHOD_ID)),
+            None
+        );
+        assert_eq!(
+            parse_plugin_oauth_id(&acp::AuthMethodId::new(OIDC_METHOD_ID)),
+            None
+        );
+    }
+
+    /// A plugin-oauth id classifies as `PluginOauth`: session-based-like and
+    /// interactive, never api-key.
+    #[test]
+    fn plugin_oauth_kind_classification() {
+        let id = acp::AuthMethodId::new(plugin_oauth_method_id("acme"));
+        let kind = AuthMethodKind::from_id(&id);
+        assert_eq!(kind, AuthMethodKind::PluginOauth);
+        assert!(!kind.is_api_key());
+        assert!(kind.is_session_based());
+        assert!(kind.needs_interactive_login());
+        // The shared wrapper agrees (drives the session auth gate).
+        assert!(is_session_based_method(&id));
+        // Session-expired messaging (not the api-key hint).
+        assert_eq!(kind.auth_error_message(), AUTH_ERROR_SESSION_EXPIRED);
+    }
+
+    /// The advertised method entry carries the plugin id, the label as its
+    /// name, and a "Sign in via the <label> plugin" description.
+    #[test]
+    fn plugin_oauth_auth_method_shape() {
+        let method = plugin_oauth_auth_method("acme", "Acme Sign-In");
+        assert_eq!(method.id().0.as_ref(), "plugin-oauth:acme");
+        assert_eq!(method.name(), "Acme Sign-In");
+        assert_eq!(
+            method.description(),
+            Some("Sign in via the Acme Sign-In plugin")
+        );
+        // And it round-trips back to the PluginOauth kind.
+        assert_eq!(
+            AuthMethodKind::from_id(method.id()),
+            AuthMethodKind::PluginOauth
+        );
     }
 
     use xai_grok_test_support::EnvGuard;
