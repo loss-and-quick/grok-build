@@ -340,7 +340,22 @@ impl acp::Agent for MvpAgent {
             has_auth_provider_command: has_auth_provider,
             preferred_method,
         });
-        let auth_methods = built.methods;
+        let mut auth_methods = built.methods;
+        // Advertise plugin-provided interactive OAuth sign-in methods AFTER the
+        // built-in xAI methods, so xAI stays the default (`auth_methods.first()`
+        // is unchanged and the BYOK invariant below still holds). A plugin
+        // qualifies when it is enabled + trusted, ships a sidecar, and declares
+        // `oauthLabel`. Skipped under `preferred_method=api_key` (fail-closed to
+        // api-key only, so `authenticate` would reject the interactive method
+        // anyway). The registry is built lazily, so ensure it first.
+        self.ensure_plugin_registry();
+        if !matches!(preferred_method, Some(crate::auth::PreferredAuthMethod::ApiKey))
+            && let Some(registry) = self.plugin_registry_handle.snapshot()
+        {
+            for (plugin, label) in registry.oauth_login_providers() {
+                auth_methods.push(auth_method::plugin_oauth_auth_method(plugin, label));
+            }
+        }
         xai_grok_telemetry::unified_log::info(
             "auth: initialize() built auth_methods for ACP response",
             None,
@@ -829,6 +844,90 @@ impl acp::Agent for MvpAgent {
                     user_id: Some(auth.user_id.clone()),
                 });
                 self.maybe_fetch_post_auth_settings().await;
+                Ok(self.auth_response_with_meta())
+            }
+            id if id.starts_with(auth_method::PLUGIN_OAUTH_METHOD_PREFIX) => {
+                let plugin = match auth_method::parse_plugin_oauth_id(&arguments.method_id) {
+                    Some(name) if !name.is_empty() => name.to_string(),
+                    _ => {
+                        emit_login_span(false, id, None, Some("invalid_plugin_oauth_id"));
+                        return Err(
+                            acp::Error::invalid_params()
+                                .data(
+                                    format!(
+                                        "invalid plugin-oauth method id: {}", arguments
+                                        .method_id.0
+                                    ),
+                                ),
+                        );
+                    }
+                };
+                // authenticate() is session-less, but driving the interactive
+                // seam needs a live session's plugin host. Select one; if none
+                // exists yet, guide the user to open a session first.
+                let cmd_tx = self
+                    .sessions
+                    .borrow()
+                    .values()
+                    .next()
+                    .map(|h| h.cmd_tx.clone());
+                let Some(cmd_tx) = cmd_tx else {
+                    emit_login_span(false, id, None, Some("no_active_session"));
+                    return Err(
+                        acp::Error::auth_required()
+                            .data(
+                                format!(
+                                    "Start a session before signing in with the {plugin} plugin, then run /login again."
+                                ),
+                            ),
+                    );
+                };
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if cmd_tx
+                    .send(crate::session::SessionCommand::StartPluginOauthFlow {
+                        plugin: plugin.clone(),
+                        reason: "sign_in".to_string(),
+                        respond_to: reply_tx,
+                    })
+                    .is_err()
+                {
+                    emit_login_span(false, id, None, Some("session_unavailable"));
+                    return Err(
+                        acp::Error::auth_required()
+                            .data(
+                                format!(
+                                    "The {plugin} plugin session is unavailable; try /login again."
+                                ),
+                            ),
+                    );
+                }
+                xai_grok_telemetry::unified_log::info(
+                    "auth: driving plugin oauth sign-in",
+                    None,
+                    Some(serde_json::json!({ "plugin" : plugin, "method" : id })),
+                );
+                let signed_in = reply_rx.await.unwrap_or(false);
+                if !signed_in {
+                    emit_login_span(false, id, None, Some("plugin_oauth_declined"));
+                    return Err(
+                        acp::Error::auth_required()
+                            .data(
+                                format!(
+                                    "Sign-in via the {plugin} plugin did not complete."
+                                ),
+                            ),
+                    );
+                }
+                self.set_auth_method(arguments.method_id.clone());
+                self.ensure_telemetry_client();
+                if crate::agent::chat_modes::process_chat_mode_enabled() {
+                    self.chat_modes.warm_in_background();
+                }
+                emit_login_span(true, id, None, None);
+                log_event(xai_grok_telemetry::events::Login {
+                    auth_method: arguments.method_id.0.as_ref().to_string(),
+                    user_id: None,
+                });
                 Ok(self.auth_response_with_meta())
             }
             _ => {

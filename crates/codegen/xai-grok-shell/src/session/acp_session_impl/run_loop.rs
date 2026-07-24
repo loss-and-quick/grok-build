@@ -552,7 +552,12 @@ if let Some(ref tp)
             .clone(),). await; } } SessionCommand::CompactSession { user_context,
             respond_to } => { let s = session.clone(); tokio::task::spawn_local(async
             move { let compact_session = s.run_compact(user_context). await; let _ =
-            respond_to.send(compact_session); }); } SessionCommand::ReloadPlugins {
+            respond_to.send(compact_session); }); }
+            SessionCommand::StartPluginOauthFlow { plugin, reason, respond_to } => { let s
+            = session.clone(); tokio::task::spawn_local(async move { let ok = match s
+            .build_credential_seam() { Some(seam) => seam.start_oauth_flow(& reason,
+            Some(& plugin)). await .is_some(), None => false, }; let _ = respond_to
+            .send(ok); }); } SessionCommand::ReloadPlugins {
             registry } => { if ! session.startup_hints.is_subagent { let registry =
             session.preserve_session_plugin_dirs(registry); session
             .apply_plugin_registry_snapshot(registry). await; } }

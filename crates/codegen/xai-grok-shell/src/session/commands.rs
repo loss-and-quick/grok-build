@@ -253,6 +253,18 @@ pub enum SessionCommand {
         user_context: Option<String>,
         respond_to: oneshot::Sender<acp::Result<()>>,
     },
+    /// Drive a plugin's interactive OAuth sign-in through this session's
+    /// credential seam (a `/login` provider the user selected). The actor runs
+    /// the flow against its own post-startup hook registry (which carries the
+    /// sidecar `start_oauth_flow` subscription) and replies `true` when the
+    /// plugin returned a credential.
+    StartPluginOauthFlow {
+        /// The plugin whose sign-in handler to run (the seam targets only it).
+        plugin: String,
+        /// Context passed to the plugin (`sign_in`).
+        reason: String,
+        respond_to: oneshot::Sender<bool>,
+    },
     /// Reload plugin hooks and registry mid-session.
     ReloadPlugins {
         registry: Option<std::sync::Arc<xai_grok_agent::plugins::PluginRegistry>>,
