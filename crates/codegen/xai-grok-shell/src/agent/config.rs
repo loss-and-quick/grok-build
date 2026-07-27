@@ -5534,6 +5534,15 @@ pub fn to_acp_model_info(
                     "agentType".to_string(),
                     serde_json::Value::String(info.agent_type.clone()),
                 );
+                // `is_xai_api_bearer_url`, not `is_xai_api_url`: the latter is
+                // scheme-agnostic and treats loopback as xAI (it decides
+                // credential *refusal*, where failing closed is correct), which
+                // would mark a custom provider behind a local gateway as
+                // first-party and keep grok.com account gates applied to it.
+                map.insert(
+                    "firstParty".to_string(),
+                    serde_json::Value::Bool(crate::util::is_xai_api_bearer_url(&info.base_url)),
+                );
                 if info.supports_reasoning_effort {
                     map.insert(
                         "supportsReasoningEffort".to_string(),
@@ -7872,6 +7881,46 @@ if n == name && f.as_deref() == field
             meta["agentType"], DEFAULT_AGENT_TYPE,
             "agentType should always be in meta, defaulting to DEFAULT_AGENT_TYPE"
         );
+    }
+
+    fn first_party_meta_flag(base_url: &str) -> bool {
+        let mut models = IndexMap::new();
+        models.insert(
+            "m".to_string(),
+            test_model_entry("m", base_url, None, None, None),
+        );
+        let infos = to_acp_model_info(&models);
+        let meta = infos
+            .values()
+            .next()
+            .expect("should have one model")
+            .meta
+            .as_ref()
+            .expect("meta should be present");
+        meta["firstParty"]
+            .as_bool()
+            .expect("firstParty should be a bool")
+    }
+
+    #[test]
+    fn acp_model_meta_marks_first_party_xai_models() {
+        assert!(first_party_meta_flag("https://api.x.ai/v1"));
+    }
+
+    #[test]
+    fn acp_model_meta_marks_custom_provider_models_as_non_first_party() {
+        assert!(!first_party_meta_flag("https://api.anthropic.com/v1"));
+        assert!(!first_party_meta_flag("https://api.z.ai/api/anthropic/v1"));
+    }
+
+    // A custom provider reached through a local gateway/proxy is BYOK, not an
+    // xAI endpoint. `is_xai_api_url` answers `true` for loopback (it exists to
+    // decide credential *refusal*, and the cli-chat-proxy runs there in dev),
+    // so the meta flag must use the stricter `is_xai_api_bearer_url`.
+    #[test]
+    fn acp_model_meta_marks_loopback_gateway_models_as_non_first_party() {
+        assert!(!first_party_meta_flag("http://localhost:8888/v1"));
+        assert!(!first_party_meta_flag("http://127.0.0.1:11434/v1"));
     }
     #[test]
     fn acp_model_meta_emits_reasoning_effort_when_supported() {
