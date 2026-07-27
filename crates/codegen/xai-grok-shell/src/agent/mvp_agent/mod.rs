@@ -1984,6 +1984,7 @@ impl MvpAgent {
                 let auth_meta = crate::auth::AuthMeta {
                     email: auth.email.clone(),
                     auth_mode: Some(format!("{:?}", auth.auth_mode)),
+                    is_first_party_account: auth.is_session_auth(),
                     team_id: auth.team_id.clone(),
                     team_name: auth.team_name.clone(),
                     is_zdr: auth.is_zdr_team(),

@@ -17,6 +17,22 @@ pub struct AuthMeta {
     pub email: Option<String>,
     #[serde(default)]
     pub auth_mode: Option<String>,
+    /// `true` when the active session credential is a first-party xAI account
+    /// login: a grok.com web login, an OIDC login (including enterprise
+    /// issuers), or an external auth provider that declared an xAI issuer.
+    ///
+    /// Surfaced so the pager can scope grok.com account features (tier gates,
+    /// usage/billing surface, subscription upsell) to accounts that actually
+    /// have one. A plain API key is BYOK, and a plugin-OAuth credential
+    /// belongs to some other vendor — neither is a grok.com account, so those
+    /// gates must not apply. Mirrors [`crate::auth::GrokAuth::is_session_auth`];
+    /// absent (`false`) when there is no current credential.
+    ///
+    /// Deliberately *not* `GrokAuth::is_xai_auth`: that one is `false` for
+    /// `AuthMode::WebLogin`, which is exactly the grok.com account the gates
+    /// exist for.
+    #[serde(default)]
+    pub is_first_party_account: bool,
     /// Team principal UUID when the session is a team login (`None` for personal).
     #[serde(default)]
     pub team_id: Option<String>,
@@ -45,6 +61,7 @@ impl Default for AuthMeta {
         Self {
             email: None,
             auth_mode: None,
+            is_first_party_account: false,
             team_id: None,
             team_name: None,
             is_zdr: false,
