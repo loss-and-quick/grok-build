@@ -940,6 +940,9 @@ pub fn parse_remote_model_value(
                 }
             })
             .unwrap_or_default(),
+        // Remote (first-party) models are never plugin-backed, so they carry no
+        // plugin account selector; `auth_account` is a local-config concern.
+        auth_account: None,
     })
 }
 fn get_string(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {

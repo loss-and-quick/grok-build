@@ -3428,6 +3428,7 @@ mod tests {
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: config::LazinessDetectorPerModelConfig::default(),
+            auth_account: None,
         }
     }
 

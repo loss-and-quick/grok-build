@@ -59,6 +59,14 @@ pub struct ProviderConfig {
     /// not otherwise supply one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<NonZeroU64>,
+    /// Which of a credential plugin's accounts this provider's models
+    /// authenticate as. Rides the plugin credential seam as the `ownerHint` on
+    /// `resolve_credential` / `refresh_credential` / `start_oauth_flow`, so one
+    /// sidecar plugin can hold several accounts for the same provider and two
+    /// `[[provider]]` entries sharing a `base_url` can name different ones.
+    /// `None` means "the plugin's default account".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_account: Option<String>,
 }
 
 #[cfg(test)]
@@ -75,6 +83,7 @@ mod tests {
             proxy = "http://proxy.test:8080"
             models = ["m-large", "m-small"]
             context_window = 128000
+            auth_account = "work"
             [headers]
             anthropic-version = "2023-06-01"
             x-extra = "on"
@@ -87,6 +96,7 @@ mod tests {
         assert_eq!(p.proxy.as_deref(), Some("http://proxy.test:8080"));
         assert_eq!(p.models, vec!["m-large", "m-small"]);
         assert_eq!(p.context_window.map(|c| c.get()), Some(128000));
+        assert_eq!(p.auth_account.as_deref(), Some("work"));
         assert_eq!(p.headers.get("anthropic-version").map(String::as_str), Some("2023-06-01"));
         assert_eq!(p.headers.get("x-extra").map(String::as_str), Some("on"));
     }
@@ -104,6 +114,36 @@ mod tests {
         assert!(p.proxy.is_none());
         assert!(p.models.is_empty());
         assert!(p.context_window.is_none());
+        // Absent selector = "the plugin's default account".
+        assert!(p.auth_account.is_none());
+    }
+
+    /// Two entries pointing at the same plugin-backed endpoint stay distinct
+    /// accounts: the `<id>/` prefix disambiguates the routing key and
+    /// `auth_account` disambiguates the credential.
+    #[test]
+    fn same_base_url_entries_carry_distinct_accounts() {
+        let toml = r#"
+            [[provider]]
+            id = "acme-work"
+            base_url = "https://example.test/v1"
+            models = ["m-large"]
+            auth_account = "work"
+
+            [[provider]]
+            id = "acme-personal"
+            base_url = "https://example.test/v1"
+            models = ["m-large"]
+            auth_account = "personal"
+        "#;
+        #[derive(Deserialize)]
+        struct Root {
+            provider: Vec<ProviderConfig>,
+        }
+        let root: Root = toml::from_str(toml).unwrap();
+        assert_eq!(root.provider[0].base_url, root.provider[1].base_url);
+        assert_eq!(root.provider[0].auth_account.as_deref(), Some("work"));
+        assert_eq!(root.provider[1].auth_account.as_deref(), Some("personal"));
     }
 
     #[test]

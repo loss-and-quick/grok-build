@@ -3908,6 +3908,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 show_model_fingerprint: m.show_model_fingerprint,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
+                auth_account: None,
             };
             (key, config)
         })
@@ -4031,6 +4032,13 @@ pub struct ModelEntryConfig {
     /// the all-disabled state via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "is_default_laziness_detector")]
     pub laziness_detector: LazinessDetectorPerModelConfig,
+    /// Which of a credential plugin's accounts this model authenticates as.
+    /// Rides the plugin credential seam as `ownerHint`, so two catalog entries
+    /// sharing a `base_url` (and hence a plugin) can name different accounts.
+    /// `None` = the plugin's default account. Inherited from the owning
+    /// `[[provider]]` for synthesized entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_account: Option<String>,
 }
 impl ModelEntryConfig {
     /// A fully-defaulted entry for the given wire slug, used as the `..base`
@@ -4071,6 +4079,7 @@ impl ModelEntryConfig {
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            auth_account: None,
         }
     }
 }
@@ -4313,6 +4322,11 @@ pub struct ModelInfo {
     /// injecting nudges. See [`LazinessDetectorPerModelConfig`].
     #[serde(default)]
     pub laziness_detector: LazinessDetectorPerModelConfig,
+    /// Which of a credential plugin's accounts this model authenticates as; see
+    /// [`ModelEntryConfig::auth_account`]. Threaded to the plugin credential
+    /// seam as `ownerHint`. `None` = the plugin's default account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_account: Option<String>,
 }
 impl ModelInfo {
     /// Minimal fallback descriptor for an unknown model slug.
@@ -4349,6 +4363,7 @@ impl ModelInfo {
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            auth_account: None,
         }
     }
     /// Extract shared model metadata from a flat config entry.
@@ -4384,6 +4399,7 @@ impl ModelInfo {
             show_model_fingerprint: entry.show_model_fingerprint,
             stream_tool_calls: entry.stream_tool_calls,
             laziness_detector: entry.laziness_detector.clone(),
+            auth_account: entry.auth_account.clone(),
         }
     }
     /// Derive the legacy effort gate/default from `reasoning_efforts` so the
@@ -4991,6 +5007,11 @@ pub struct ModelAuthFacts {
     /// entry so the main turn path (`reconstruct_full_config`) threads a
     /// `[[provider]]` proxy into the sampler without widening `SamplingConfig`.
     pub proxy: Option<String>,
+    /// Which of a credential plugin's accounts this model authenticates as
+    /// ([`ModelInfo::auth_account`]). Rides here for the same reason `proxy`
+    /// does: the turn path needs it from the catalog entry without widening
+    /// `SamplingConfig`. `None` = the plugin's default account.
+    pub auth_account: Option<String>,
 }
 /// Resolve `model_id` to its auth facts and auth-provider reference from one
 /// effective-config load; both ride the same memo (see
@@ -5007,6 +5028,7 @@ pub fn resolve_model_auth_facts_and_provider(
                 byok: ModelByok::Unknown,
                 auth_scheme: AuthScheme::default(),
                 proxy: None,
+                auth_account: None,
             },
             None,
         );
@@ -5020,6 +5042,10 @@ pub fn resolve_model_auth_facts_and_provider(
             },
             proxy: match &lookup {
                 ModelLookup::Loaded(Some(e)) => e.proxy.clone(),
+                _ => None,
+            },
+            auth_account: match &lookup {
+                ModelLookup::Loaded(Some(e)) => e.info().auth_account.clone(),
                 _ => None,
             },
         };
@@ -5135,6 +5161,7 @@ pub fn resolve_aux_model_sampling_config(
                 show_model_fingerprint: false,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
+                auth_account: None,
             },
             api_key: Some(bearer),
             env_key: None,
@@ -5296,6 +5323,10 @@ fn expand_providers_into_catalog(
                 auth_scheme: Some(auth_scheme),
                 extra_headers: headers.clone(),
                 context_window,
+                // Every model this provider serves authenticates as the
+                // provider's account, so two `[[provider]]` entries sharing a
+                // `base_url` stay distinct credentials.
+                auth_account: provider.auth_account.clone(),
                 ..ModelEntryConfig::minimal_for_provider(model)
             };
             let mut model_entry = ModelEntry::from_config_entry(&entry_config);
@@ -5455,6 +5486,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            auth_account: None,
         },
         api_key: None,
         env_key: None,
@@ -6670,6 +6702,7 @@ if n == name && f.as_deref() == field
                 show_model_fingerprint: false,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
+                auth_account: None,
             },
             api_key: api_key.map(|s| s.to_string()),
             env_key: env_key.map(EnvKeys::single),
@@ -7734,6 +7767,7 @@ if n == name && f.as_deref() == field
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            auth_account: None,
         };
         let info = ModelInfo::from_config(&entry);
         assert!(info.use_concise);
@@ -7893,6 +7927,7 @@ if n == name && f.as_deref() == field
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            auth_account: None,
         };
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.agent_type, "codex");
@@ -8449,6 +8484,7 @@ if n == name && f.as_deref() == field
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            auth_account: None,
         };
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.inference_idle_timeout_secs, Some(120));
@@ -12094,6 +12130,7 @@ default = "grok-4.5"
                 show_model_fingerprint: false,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
+                auth_account: None,
                 auto_compact_threshold_percent: None,
                 system_prompt_label: None,
             },
@@ -12963,6 +13000,52 @@ default = "grok-4.5"
         );
     }
 
+    /// Two `[[provider]]` entries pointing at the *same* plugin-backed endpoint
+    /// but naming different `auth_account`s expand into independent catalog
+    /// entries, each carrying its own selector all the way to `ModelInfo`. This
+    /// is what lets one sidecar plugin hold several accounts for one provider.
+    /// A third entry without a selector keeps `None` — the plugin's default
+    /// account, the behaviour before the field existed.
+    #[test]
+    fn provider_auth_account_expands_per_entry() {
+        use xai_grok_config_types::{ProviderConfig, ProviderFormat};
+        let entry = |id: &str, account: Option<&str>| ProviderConfig {
+            id: id.to_owned(),
+            format: ProviderFormat::ChatCompletions,
+            base_url: "https://example.test/v1".to_owned(),
+            api_key: None,
+            headers: IndexMap::new(),
+            proxy: None,
+            models: vec!["m".to_owned()],
+            context_window: None,
+            auth_account: account.map(str::to_owned),
+        };
+        let providers = vec![
+            entry("acme-work", Some("work")),
+            entry("acme-personal", Some("personal")),
+            entry("acme-default", None),
+        ];
+        let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+        expand_providers_into_catalog(&mut catalog, &providers);
+
+        let account_of = |key: &str| {
+            catalog
+                .get(key)
+                .unwrap_or_else(|| panic!("{key} synthesized"))
+                .info
+                .auth_account
+                .clone()
+        };
+        // Same base_url and same wire slug; only the account differs.
+        assert_eq!(account_of("acme-work/m").as_deref(), Some("work"));
+        assert_eq!(account_of("acme-personal/m").as_deref(), Some("personal"));
+        assert_eq!(account_of("acme-default/m"), None);
+        assert_eq!(
+            catalog["acme-work/m"].info.base_url, catalog["acme-personal/m"].info.base_url,
+            "the two accounts share one endpoint; only auth_account separates them"
+        );
+    }
+
     /// A provider `proxy` threads through expansion and
     /// `sampling_config_for_model` into `SamplerConfig.proxy`; a provider
     /// without one leaves it unset.
@@ -12979,6 +13062,7 @@ default = "grok-4.5"
                 proxy: Some("http://proxy.test:3128".to_owned()),
                 models: vec!["m".to_owned()],
                 context_window: None,
+                auth_account: None,
             },
             ProviderConfig {
                 id: "direct".to_owned(),
@@ -12989,6 +13073,7 @@ default = "grok-4.5"
                 proxy: None,
                 models: vec!["m".to_owned()],
                 context_window: None,
+                auth_account: None,
             },
         ];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
@@ -13040,6 +13125,7 @@ default = "grok-4.5"
                 proxy: None,
                 models: vec!["m".to_owned()],
                 context_window: None,
+                auth_account: None,
             }];
             let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
             expand_providers_into_catalog(&mut catalog, &providers);
@@ -13075,6 +13161,7 @@ default = "grok-4.5"
             proxy: None,
             models: vec!["m1".to_owned()],
             context_window: None,
+            auth_account: None,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -13120,6 +13207,7 @@ default = "grok-4.5"
             proxy: None,
             models: vec!["claude-x".to_owned()],
             context_window: None,
+            auth_account: None,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -13169,6 +13257,7 @@ default = "grok-4.5"
             proxy: None,
             models: vec!["gemini-x".to_owned()],
             context_window: None,
+            auth_account: None,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
