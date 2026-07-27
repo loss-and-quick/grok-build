@@ -9,7 +9,9 @@
 //! renderer (web) can lay out the same state without re-deriving the rules.
 
 use agent_client_protocol as acp;
-use xai_grok_shell::agent::auth_method::AuthMethodKind;
+use xai_grok_shell::agent::auth_method::{
+    AUTH_METHOD_META_ACCOUNT_LABEL, AUTH_METHOD_META_PROVIDER_LABEL, AuthMethodKind,
+};
 
 use crate::modal_window_state::ModalWindowState;
 use crate::views::picker::PickerState;
@@ -27,12 +29,13 @@ pub struct AuthMethodEntry {
     /// Identity of this entry. Two entries can share a provider, so the
     /// method id — never the provider name — is the key.
     pub method_id: acp::AuthMethodId,
-    /// Provider / plugin display name, e.g. `"Acme OAuth"`.
+    /// Provider / plugin display name, e.g. `"Acme OAuth"`. Read from the
+    /// method's `providerLabel` meta, falling back to the method name.
     pub provider_label: String,
-    /// Account within `provider_label` (email, workspace, tenant). `None`
-    /// until the agent advertises one method per account; kept as its own
-    /// field so a future list of two accounts on one provider renders
-    /// unambiguously instead of showing the provider name twice.
+    /// Account within `provider_label` (email, workspace, tenant), read from
+    /// the method's `accountLabel` meta. `None` when the method is not scoped
+    /// to an account; kept as its own field so two accounts on one provider
+    /// render unambiguously instead of showing the provider name twice.
     pub account_label: Option<String>,
     /// Classification of the method id. Informational only — the picker does
     /// not prefer any particular kind.
@@ -51,6 +54,9 @@ impl AuthMethodEntry {
         current_method_id: Option<&acp::AuthMethodId>,
     ) -> Self {
         let kind = AuthMethodKind::from_id(method.id());
+        let provider_label = meta_str(method, AUTH_METHOD_META_PROVIDER_LABEL)
+            .unwrap_or_else(|| method.name().to_string());
+        let account_label = meta_str(method, AUTH_METHOD_META_ACCOUNT_LABEL);
         let mut details = vec![
             AuthMethodDetail {
                 label: "Method".to_string(),
@@ -61,6 +67,12 @@ impl AuthMethodEntry {
                 value: auth_kind_label(kind).to_string(),
             },
         ];
+        if let Some(account) = &account_label {
+            details.push(AuthMethodDetail {
+                label: "Account".to_string(),
+                value: account.clone(),
+            });
+        }
         if let Some(desc) = method.description()
             && !desc.trim().is_empty()
         {
@@ -71,8 +83,8 @@ impl AuthMethodEntry {
         }
         Self {
             method_id: method.id().clone(),
-            provider_label: method.name().to_string(),
-            account_label: None,
+            provider_label,
+            account_label,
             kind,
             is_current: current_method_id.is_some_and(|id| id == method.id()),
             details,
@@ -96,6 +108,13 @@ impl AuthMethodEntry {
     pub fn right_label(&self) -> &str {
         self.account_label.as_deref().unwrap_or("")
     }
+}
+
+/// A non-blank string value from the method's `meta`, or `None`. Blank values
+/// are treated as absent so a renderer never has to special-case `""`.
+fn meta_str(method: &acp::AuthMethod, key: &str) -> Option<String> {
+    let value = method.meta()?.get(key)?.as_str()?.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Outcome of one input event, for the caller to turn into an action.
@@ -340,6 +359,95 @@ mod tests {
             ids(&state),
             vec!["plugin-oauth:example-auth", "plugin-oauth:example-auth#2"]
         );
+    }
+
+    /// The agent advertises one method per account, each carrying the provider
+    /// and account labels in `meta`. The picker must render two rows that share
+    /// a provider name yet stay tellable apart by their account column.
+    #[test]
+    fn accounts_advertised_by_a_plugin_render_as_distinguishable_rows() {
+        use xai_grok_shell::agent::auth_method::plugin_oauth_auth_method;
+
+        let methods = vec![
+            plugin_oauth_auth_method(
+                "example-auth",
+                "Acme OAuth",
+                Some("work"),
+                Some("work@example.com"),
+            ),
+            plugin_oauth_auth_method(
+                "example-auth",
+                "Acme OAuth",
+                Some("personal"),
+                Some("personal@example.com"),
+            ),
+        ];
+        let state = AuthMethodPickerState::new(&methods, None, None, false);
+
+        assert_eq!(state.len(), 2);
+        assert_eq!(
+            ids(&state),
+            vec![
+                "plugin-oauth:example-auth#work",
+                "plugin-oauth:example-auth#personal"
+            ]
+        );
+        assert!(
+            state
+                .entries
+                .iter()
+                .all(|entry| entry.provider_label == "Acme OAuth"),
+            "both rows name the same provider"
+        );
+        assert_eq!(
+            state
+                .entries
+                .iter()
+                .map(|entry| entry.right_label())
+                .collect::<Vec<_>>(),
+            vec!["work@example.com", "personal@example.com"],
+            "the account column is what tells the two rows apart"
+        );
+        // The account is also spelled out in the detail rows.
+        assert!(
+            state.entries[0]
+                .details
+                .iter()
+                .any(|d| d.label == "Account" && d.value == "work@example.com")
+        );
+    }
+
+    /// A method without account meta keeps today's shape: the method name is
+    /// the provider label and nothing lands in the account column.
+    #[test]
+    fn account_less_method_has_no_account_label() {
+        use xai_grok_shell::agent::auth_method::plugin_oauth_auth_method;
+
+        let methods = vec![plugin_oauth_auth_method(
+            "example-auth",
+            "Acme OAuth",
+            None,
+            None,
+        )];
+        let state = AuthMethodPickerState::new(&methods, None, None, false);
+        assert_eq!(state.entries[0].provider_label, "Acme OAuth");
+        assert_eq!(state.entries[0].account_label, None);
+        assert!(state.entries[0].right_label().is_empty());
+        assert!(
+            !state.entries[0]
+                .details
+                .iter()
+                .any(|d| d.label == "Account")
+        );
+    }
+
+    /// A method with no `meta` at all (every built-in one) still labels itself
+    /// from the method name.
+    #[test]
+    fn provider_label_falls_back_to_the_method_name_without_meta() {
+        let state = AuthMethodPickerState::new(&mixed_methods(), None, None, false);
+        assert_eq!(state.entries[0].provider_label, "xAI");
+        assert_eq!(state.entries[0].account_label, None);
     }
 
     #[test]
