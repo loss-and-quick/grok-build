@@ -2028,8 +2028,7 @@ fn parse_auth_providers(
 fn resolve_provider_secret_refs(
     p: &mut xai_grok_config_types::ProviderConfig,
 ) -> Result<(), (&'static str, crate::config::SecretRefError)> {
-    p.base_url =
-        crate::config::resolve_secret_refs(&p.base_url).map_err(|e| ("base_url", e))?;
+    p.base_url = crate::config::resolve_secret_refs(&p.base_url).map_err(|e| ("base_url", e))?;
     if let Some(key) = p.api_key.take() {
         p.api_key = Some(crate::config::resolve_secret_refs(&key).map_err(|e| ("api_key", e))?);
     }
@@ -2037,8 +2036,8 @@ fn resolve_provider_secret_refs(
         p.proxy = Some(crate::config::resolve_secret_refs(&proxy).map_err(|e| ("proxy", e))?);
     }
     for value in p.headers.values_mut() {
-        let resolved = crate::config::resolve_secret_refs(value.as_str())
-            .map_err(|e| ("headers", e))?;
+        let resolved =
+            crate::config::resolve_secret_refs(value.as_str()).map_err(|e| ("headers", e))?;
         *value = resolved;
     }
     Ok(())
@@ -5240,7 +5239,11 @@ pub fn resolve_chat_state_auth_type(
 /// Provider-supplied `headers` always win over these defaults.
 fn provider_format_defaults(
     format: xai_grok_config_types::ProviderFormat,
-) -> (ApiBackend, AuthScheme, &'static [(&'static str, &'static str)]) {
+) -> (
+    ApiBackend,
+    AuthScheme,
+    &'static [(&'static str, &'static str)],
+) {
     use xai_grok_config_types::ProviderFormat;
     match format {
         ProviderFormat::ChatCompletions => (ApiBackend::ChatCompletions, AuthScheme::Bearer, &[]),
@@ -5515,14 +5518,45 @@ pub fn resolve_web_search_sampling_config(
     }
     resolved.map(crate::tools::config::web_search_sampling_config)
 }
+/// The provider id a catalog key was synthesized from, or `None` for a
+/// hand-written `[models.*]` entry.
+///
+/// `[[providers]]` expansion keys every entry `<provider id>/<slug>` (see
+/// `expand_providers_into_catalog`), so the prefix is recoverable without
+/// carrying a second copy of it through `ModelInfo`.
+fn provider_id_from_catalog_key<'a>(key: &'a str, slug: &str) -> Option<&'a str> {
+    key.strip_suffix(slug)?
+        .strip_suffix('/')
+        .filter(|id| !id.is_empty())
+}
 pub fn to_acp_model_info(
     models: &IndexMap<String, ModelEntry>,
 ) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+    // The same slug served by two providers labels identically — `alpha/some-model`
+    // and `beta/some-model` both read "some-model" in the picker and the status bar,
+    // leaving no way to tell which one is answering. Count the labels first and
+    // qualify only the ones that actually collide, so a catalog with a single
+    // provider per slug reads exactly as it does today.
+    let mut label_uses: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for model in models.values() {
+        let info = model.info();
+        *label_uses
+            .entry(info.name.as_deref().unwrap_or(info.model.as_str()))
+            .or_default() += 1;
+    }
     models
         .iter()
         .map(|(key, model)| {
             let info = model.info();
             let model_id = acp::ModelId::new(Arc::from(key.clone()));
+            let provider_id = provider_id_from_catalog_key(key, &info.model);
+            let base_label = info.name.as_deref().unwrap_or(info.model.as_str());
+            let display_name = match provider_id {
+                Some(provider) if label_uses.get(base_label).copied().unwrap_or(0) > 1 => {
+                    format!("{base_label} ({provider})")
+                }
+                _ => base_label.to_string(),
+            };
             let total_context_tokens = info.context_window.get();
             let meta = {
                 let mut map = serde_json::Map::new();
@@ -5534,6 +5568,14 @@ pub fn to_acp_model_info(
                     "agentType".to_string(),
                     serde_json::Value::String(info.agent_type.clone()),
                 );
+                // Structured twin of the "(provider)" label suffix, so a client
+                // can render provenance its own way without re-parsing the id.
+                if let Some(provider) = provider_id {
+                    map.insert(
+                        "provider".to_string(),
+                        serde_json::Value::String(provider.to_string()),
+                    );
+                }
                 // `is_xai_api_bearer_url`, not `is_xai_api_url`: the latter is
                 // scheme-agnostic and treats loopback as xAI (it decides
                 // credential *refusal*, where failing closed is correct), which
@@ -5565,12 +5607,9 @@ pub fn to_acp_model_info(
             };
             (
                 model_id.clone(),
-                acp::ModelInfo::new(
-                    model_id,
-                    info.name.clone().unwrap_or_else(|| info.model.clone()),
-                )
-                .description(info.description.clone())
-                .meta(meta),
+                acp::ModelInfo::new(model_id, display_name)
+                    .description(info.description.clone())
+                    .meta(meta),
             )
         })
         .collect()
@@ -5665,7 +5704,10 @@ mod tests {
         assert!(!cfg.config.contains_key("disabled"));
         assert!(!cfg.config.contains_key("enabled"));
         let council = cfg.config.get("council").expect("council config captured");
-        assert_eq!(council["participants"], serde_json::json!(["grok", "claude"]));
+        assert_eq!(
+            council["participants"],
+            serde_json::json!(["grok", "claude"])
+        );
         assert_eq!(council["rounds"], 3);
         assert_eq!(cfg.config["memory"]["store"], "sqlite");
     }
@@ -7441,7 +7483,10 @@ if n == name && f.as_deref() == field
         assert_eq!(cfg.model_fallbacks.len(), 1);
         let fb = &cfg.model_fallbacks[0];
         assert_eq!(fb.from, "grok-4.5");
-        assert_eq!(fb.to, vec!["grok-4".to_string(), "claude-sonnet".to_string()]);
+        assert_eq!(
+            fb.to,
+            vec!["grok-4".to_string(), "claude-sonnet".to_string()]
+        );
         assert_eq!(fb.cooldown_seconds, 30);
         // Known classes trigger the chain.
         for class in ["rate_limit", "overloaded", "5xx", "network", "stream"] {
@@ -7900,6 +7945,71 @@ if n == name && f.as_deref() == field
         meta["firstParty"]
             .as_bool()
             .expect("firstParty should be a bool")
+    }
+
+    fn provider_catalog(entries: &[(&str, &str)]) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+        let mut models = IndexMap::new();
+        for (key, slug) in entries {
+            models.insert(
+                (*key).to_string(),
+                test_model_entry(slug, "https://example.invalid/v1", None, None, None),
+            );
+        }
+        to_acp_model_info(&models)
+    }
+
+    fn label_of(infos: &IndexMap<acp::ModelId, acp::ModelInfo>, key: &str) -> String {
+        infos
+            .get(&acp::ModelId::new(Arc::from(key.to_string())))
+            .expect("model should be in the catalog")
+            .name
+            .clone()
+    }
+
+    /// Same slug from two providers: the picker and the status bar showed one
+    /// label for both, so there was no way to tell which one was answering.
+    #[test]
+    fn acp_model_info_qualifies_labels_that_two_providers_share() {
+        let infos = provider_catalog(&[
+            ("alpha/shared-1", "shared-1"),
+            ("beta/shared-1", "shared-1"),
+        ]);
+        assert_eq!(label_of(&infos, "alpha/shared-1"), "shared-1 (alpha)");
+        assert_eq!(label_of(&infos, "beta/shared-1"), "shared-1 (beta)");
+    }
+
+    /// A slug only one provider serves keeps its bare label — the suffix is
+    /// disambiguation, not decoration.
+    #[test]
+    fn acp_model_info_leaves_unambiguous_labels_alone() {
+        let infos = provider_catalog(&[("alpha/only-here", "only-here"), ("beta/other", "other")]);
+        assert_eq!(label_of(&infos, "alpha/only-here"), "only-here");
+        assert_eq!(label_of(&infos, "beta/other"), "other");
+    }
+
+    /// A hand-written `[models.*]` entry has no provider prefix to recover, so
+    /// it is never qualified even when its label collides.
+    #[test]
+    fn acp_model_info_qualifies_only_provider_synthesized_entries() {
+        let infos = provider_catalog(&[("shared-2", "shared-2"), ("beta/shared-2", "shared-2")]);
+        assert_eq!(label_of(&infos, "shared-2"), "shared-2");
+        assert_eq!(label_of(&infos, "beta/shared-2"), "shared-2 (beta)");
+    }
+
+    #[test]
+    fn acp_model_meta_carries_the_provider_id() {
+        let infos = provider_catalog(&[("alpha/solo", "solo"), ("plain", "plain")]);
+        let meta = |key: &str| {
+            infos
+                .get(&acp::ModelId::new(Arc::from(key.to_string())))
+                .and_then(|i| i.meta.clone())
+                .expect("meta should be present")
+        };
+        assert_eq!(meta("alpha/solo")["provider"], "alpha");
+        assert!(
+            !meta("plain").contains_key("provider"),
+            "a hand-written entry has no provider to report"
+        );
     }
 
     #[test]
@@ -12725,7 +12835,10 @@ default = "grok-4.5"
         assert_eq!(acme.api_key.as_deref(), Some("sk-acme"));
         // Format default header plus provider-supplied header.
         assert_eq!(
-            acme.info.extra_headers.get("anthropic-version").map(String::as_str),
+            acme.info
+                .extra_headers
+                .get("anthropic-version")
+                .map(String::as_str),
             Some("2023-06-01")
         );
         assert_eq!(
@@ -12733,7 +12846,9 @@ default = "grok-4.5"
             Some("t1")
         );
 
-        let goo = resolved.get("goo/g-pro").expect("gemini prefixed key present");
+        let goo = resolved
+            .get("goo/g-pro")
+            .expect("gemini prefixed key present");
         assert_eq!(goo.info.api_backend, ApiBackend::Gemini);
         assert_eq!(goo.info.auth_scheme, AuthScheme::GoogleApiKey);
 
@@ -12980,7 +13095,10 @@ default = "grok-4.5"
             .iter()
             .find(|e| e.path.contains("chat/completions"))
             .expect("chat/completions request logged");
-        assert_eq!(logged.authorization.as_deref(), Some("Bearer secret-bearer"));
+        assert_eq!(
+            logged.authorization.as_deref(),
+            Some("Bearer secret-bearer")
+        );
     }
 
     /// End-to-end wire check: a messages provider sends `x-api-key` plus the
@@ -13025,7 +13143,10 @@ default = "grok-4.5"
         assert_eq!(logged.header("x-api-key"), Some("sk-ant-secret"));
         assert_eq!(logged.header("anthropic-version"), Some("2023-06-01"));
         // The credential must NOT also ride in Authorization.
-        assert!(logged.authorization.is_none(), "messages must not send Bearer");
+        assert!(
+            logged.authorization.is_none(),
+            "messages must not send Bearer"
+        );
     }
 
     /// End-to-end: a gemini provider sends `x-goog-api-key` to the
