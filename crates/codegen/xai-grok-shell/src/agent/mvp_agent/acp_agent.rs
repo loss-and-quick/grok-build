@@ -345,15 +345,26 @@ impl acp::Agent for MvpAgent {
         // built-in xAI methods, so xAI stays the default (`auth_methods.first()`
         // is unchanged and the BYOK invariant below still holds). A plugin
         // qualifies when it is enabled + trusted, ships a sidecar, and declares
-        // `oauthLabel`. Skipped under `preferred_method=api_key` (fail-closed to
-        // api-key only, so `authenticate` would reject the interactive method
-        // anyway). The registry is built lazily, so ensure it first.
+        // `oauthLabel`; one entry per declared account when it also declares
+        // `oauthAccounts`, so a plugin holding several accounts of one provider
+        // is reachable account by account. Skipped under
+        // `preferred_method=api_key` (fail-closed to api-key only, so
+        // `authenticate` would reject the interactive method anyway). The
+        // registry is built lazily, so ensure it first.
         self.ensure_plugin_registry();
         if !matches!(preferred_method, Some(crate::auth::PreferredAuthMethod::ApiKey))
             && let Some(registry) = self.plugin_registry_handle.snapshot()
         {
-            for (plugin, label) in registry.oauth_login_providers() {
-                auth_methods.push(auth_method::plugin_oauth_auth_method(plugin, label));
+            for provider in registry.oauth_login_providers() {
+                auth_methods
+                    .push(
+                        auth_method::plugin_oauth_auth_method(
+                            provider.plugin,
+                            provider.label,
+                            provider.account_id,
+                            provider.account_label,
+                        ),
+                    );
             }
         }
         xai_grok_telemetry::unified_log::info(
@@ -847,8 +858,12 @@ impl acp::Agent for MvpAgent {
                 Ok(self.auth_response_with_meta())
             }
             id if id.starts_with(auth_method::PLUGIN_OAUTH_METHOD_PREFIX) => {
-                let plugin = match auth_method::parse_plugin_oauth_id(&arguments.method_id) {
-                    Some(name) if !name.is_empty() => name.to_string(),
+                let (plugin, account) = match auth_method::parse_plugin_oauth_id(
+                    &arguments.method_id,
+                ) {
+                    Some((name, account)) if !name.is_empty() => {
+                        (name.to_string(), account.map(str::to_string))
+                    }
                     _ => {
                         emit_login_span(false, id, None, Some("invalid_plugin_oauth_id"));
                         return Err(
@@ -886,6 +901,7 @@ impl acp::Agent for MvpAgent {
                 if cmd_tx
                     .send(crate::session::SessionCommand::StartPluginOauthFlow {
                         plugin: plugin.clone(),
+                        account: account.clone(),
                         reason: "sign_in".to_string(),
                         respond_to: reply_tx,
                     })
@@ -904,7 +920,11 @@ impl acp::Agent for MvpAgent {
                 xai_grok_telemetry::unified_log::info(
                     "auth: driving plugin oauth sign-in",
                     None,
-                    Some(serde_json::json!({ "plugin" : plugin, "method" : id })),
+                    Some(
+                        serde_json::json!(
+                            { "plugin" : plugin, "account" : account, "method" : id }
+                        ),
+                    ),
                 );
                 let signed_in = reply_rx.await.unwrap_or(false);
                 if !signed_in {

@@ -219,6 +219,47 @@ pub struct PluginManifest {
     /// a login provider. See [`PluginManifest::oauth_login_label`].
     #[serde(default)]
     pub oauth_label: Option<String>,
+
+    /// Accounts the plugin holds for its provider, each advertised as its own
+    /// `/login` entry (`{"id": "...", "label": "..."}`). Absent or empty means
+    /// the plugin gets exactly one account-less entry — the behaviour before
+    /// accounts existed. See [`PluginManifest::oauth_login_accounts`].
+    #[serde(default)]
+    pub oauth_accounts: Option<Vec<ManifestOauthAccount>>,
+}
+
+/// One entry of a manifest's `oauthAccounts` array.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestOauthAccount {
+    /// Stable selector for this account, handed back to the plugin as the
+    /// `ownerHint` of the credential events it serves.
+    pub id: String,
+    /// Human-facing account name shown next to the provider in the picker.
+    /// Defaults to `id` when absent or blank.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// A validated account a plugin advertises as its own `/login` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OauthAccount {
+    pub id: String,
+    pub label: String,
+}
+
+/// Max length of an OAuth account id.
+const MAX_OAUTH_ACCOUNT_ID_LEN: usize = 64;
+
+/// Whether `id` is a usable OAuth account selector: 1-64 chars, not blank, no
+/// ASCII control characters, and no `#` — the shell's method id is
+/// `plugin-oauth:<plugin>#<account>`, so a `#` inside the account would make it
+/// ambiguous to split.
+fn is_valid_oauth_account_id(id: &str) -> bool {
+    !id.trim().is_empty()
+        && id.len() <= MAX_OAUTH_ACCOUNT_ID_LEN
+        && !id.contains('#')
+        && !id.chars().any(|c| c.is_ascii_control())
 }
 
 /// One model-visible tool declared in a sidecar plugin's manifest (`tools`
@@ -363,6 +404,60 @@ impl PluginManifest {
     /// not advertised as a `/login` provider.
     pub fn oauth_login_label(&self) -> Option<&str> {
         self.oauth_label.as_deref()
+    }
+
+    /// Validated accounts from the manifest's `oauthAccounts` array, in
+    /// declaration order.
+    ///
+    /// Empty means "one account-less `/login` entry" — the behaviour before
+    /// accounts existed — which is also what an absent or empty array, or a
+    /// manifest that never opted into interactive login (`oauthLabel`), yields.
+    ///
+    /// Follows the component-loading convention: an entry with an unusable id
+    /// (blank, over-long, containing `#` or a control character) or a duplicate
+    /// id is warned about and skipped rather than failing the whole plugin. A
+    /// missing or blank `label` falls back to the id.
+    pub fn oauth_login_accounts(&self) -> Vec<OauthAccount> {
+        let Some(accounts) = &self.oauth_accounts else {
+            return Vec::new();
+        };
+        if self.oauth_login_label().is_none() {
+            if !accounts.is_empty() {
+                tracing::warn!(
+                    plugin = %self.name,
+                    "manifest declares oauthAccounts but no `oauthLabel`; ignoring them"
+                );
+            }
+            return Vec::new();
+        }
+        let mut out: Vec<OauthAccount> = Vec::new();
+        for account in accounts {
+            if !is_valid_oauth_account_id(&account.id) {
+                tracing::warn!(
+                    plugin = %self.name,
+                    account = %account.id,
+                    "skipping oauth account with invalid id (1-{MAX_OAUTH_ACCOUNT_ID_LEN} \
+                     non-blank chars, no `#`, no control characters)"
+                );
+                continue;
+            }
+            if out.iter().any(|a| a.id == account.id) {
+                tracing::warn!(plugin = %self.name, account = %account.id,
+                    "skipping duplicate oauth account declaration");
+                continue;
+            }
+            let label = account
+                .label
+                .as_deref()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .unwrap_or(&account.id);
+            out.push(OauthAccount {
+                id: account.id.clone(),
+                label: label.to_string(),
+            });
+        }
+        out
     }
 
     /// Manifest-declared default config object for the sidecar, or `{}` when
@@ -876,6 +971,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            oauth_accounts: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1);
@@ -909,6 +1005,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            oauth_accounts: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(dirs.is_empty());
@@ -944,6 +1041,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            oauth_accounts: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(
@@ -979,6 +1077,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            oauth_accounts: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1, "path within plugin root should be accepted");
@@ -1014,6 +1113,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            oauth_accounts: None,
         };
         assert!(
             manifest.hooks_path(&root).is_none(),
@@ -1050,6 +1150,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            oauth_accounts: None,
         };
         assert!(
             manifest.mcp_config_path(&root).is_none(),
@@ -1079,6 +1180,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            oauth_accounts: None,
         }
     }
 
@@ -1394,5 +1496,143 @@ mod tests {
         let json = r#"{ "name": "plain", "plugin": "./index.ts", "oauth_label": "Nope" }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(manifest.oauth_login_label().is_none());
+    }
+
+    // ── Per-account login entries (`oauthAccounts`) ─────────────────────
+
+    #[test]
+    fn oauth_accounts_parse_in_declaration_order() {
+        let json = r#"{
+            "name": "example-auth",
+            "plugin": "./index.ts",
+            "oauthLabel": "Acme",
+            "oauthAccounts": [
+                { "id": "work", "label": "work@example.com" },
+                { "id": "personal", "label": "personal@example.com" }
+            ]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let accounts = manifest.oauth_login_accounts();
+        assert_eq!(
+            accounts,
+            vec![
+                OauthAccount {
+                    id: "work".to_string(),
+                    label: "work@example.com".to_string(),
+                },
+                OauthAccount {
+                    id: "personal".to_string(),
+                    label: "personal@example.com".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn oauth_accounts_absent_or_empty_means_no_accounts() {
+        // Both spellings of "this plugin has no accounts" behave identically,
+        // and identically to a manifest authored before the field existed.
+        for json in [
+            r#"{ "name": "example-auth", "plugin": "./index.ts", "oauthLabel": "Acme" }"#,
+            r#"{ "name": "example-auth", "plugin": "./index.ts", "oauthLabel": "Acme",
+                 "oauthAccounts": [] }"#,
+        ] {
+            let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+            assert!(
+                manifest.oauth_login_accounts().is_empty(),
+                "no accounts means a single account-less login entry"
+            );
+            assert_eq!(manifest.oauth_login_label(), Some("Acme"));
+        }
+    }
+
+    #[test]
+    fn oauth_accounts_label_defaults_to_id() {
+        let json = r#"{
+            "name": "example-auth",
+            "plugin": "./index.ts",
+            "oauthLabel": "Acme",
+            "oauthAccounts": [{ "id": "work" }, { "id": "personal", "label": "  " }]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let labels: Vec<String> = manifest
+            .oauth_login_accounts()
+            .into_iter()
+            .map(|a| a.label)
+            .collect();
+        assert_eq!(labels, vec!["work", "personal"]);
+    }
+
+    #[test]
+    fn oauth_accounts_skip_invalid_entries() {
+        let long_id = "a".repeat(MAX_OAUTH_ACCOUNT_ID_LEN + 1);
+        let json = format!(
+            r#"{{
+                "name": "example-auth",
+                "plugin": "./index.ts",
+                "oauthLabel": "Acme",
+                "oauthAccounts": [
+                    {{ "id": "work" }},
+                    {{ "id": "" }},
+                    {{ "id": "   " }},
+                    {{ "id": "has#hash" }},
+                    {{ "id": "ctrl\u0007char" }},
+                    {{ "id": "{long_id}" }},
+                    {{ "id": "work", "label": "duplicate" }}
+                ]
+            }}"#
+        );
+        let manifest: PluginManifest = serde_json::from_str(&json).unwrap();
+        // Only the first `work` survives: blank / whitespace-only / `#` /
+        // control char / over-long / duplicate are each warned and skipped.
+        assert_eq!(
+            manifest
+                .oauth_login_accounts()
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["work"]
+        );
+    }
+
+    #[test]
+    fn oauth_accounts_entry_missing_id_fails_to_parse() {
+        // `id` is the selector handed to the plugin, so it is required; a
+        // manifest that omits it is a parse error, not a silent empty id.
+        let json = r#"{
+            "name": "example-auth",
+            "plugin": "./index.ts",
+            "oauthLabel": "Acme",
+            "oauthAccounts": [{ "label": "work@example.com" }]
+        }"#;
+        assert!(serde_json::from_str::<PluginManifest>(json).is_err());
+    }
+
+    #[test]
+    fn oauth_accounts_without_oauth_label_are_ignored() {
+        // Accounts narrow an advertised sign-in; without `oauthLabel` there is
+        // no login entry for them to narrow.
+        let json = r#"{
+            "name": "example-auth",
+            "plugin": "./index.ts",
+            "oauthAccounts": [{ "id": "work" }]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.oauth_login_accounts().is_empty());
+    }
+
+    #[test]
+    fn oauth_accounts_snake_case_is_ignored_as_unknown() {
+        // The wire field is camelCase `oauthAccounts`; a snake_case spelling is
+        // an unknown field (silently ignored) and declares no accounts.
+        let json = r#"{
+            "name": "example-auth",
+            "plugin": "./index.ts",
+            "oauthLabel": "Acme",
+            "oauth_accounts": [{ "id": "work" }]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.oauth_accounts.is_none());
+        assert!(manifest.oauth_login_accounts().is_empty());
     }
 }

@@ -500,6 +500,29 @@ mod tests {
         );
     }
 
+    /// The `/login` path end to end: the account the user picked is advertised
+    /// inside the ACP method id, parsed back out at `authenticate`, and reaches
+    /// the plugin as `ownerHint`. Covers everything between the picker and the
+    /// wire except the session-actor hop, which only moves the parsed value.
+    #[tokio::test]
+    async fn account_picked_in_login_reaches_the_plugin() {
+        use crate::agent::auth_method::{parse_plugin_oauth_id, plugin_oauth_auth_method};
+
+        let method = plugin_oauth_auth_method("acme", "Acme", Some("work"), Some("Work"));
+        let (plugin, account) =
+            parse_plugin_oauth_id(method.id()).expect("advertised id is a plugin-oauth id");
+        assert_eq!((plugin, account), ("acme", Some("work")));
+
+        let (seam, last) = seam_capturing(HookEventName::StartOauthFlow);
+        seam.start_oauth_flow("sign_in", Some(plugin), account)
+            .await;
+        assert_eq!(
+            captured(&last).get("ownerHint").and_then(|v| v.as_str()),
+            Some("work"),
+            "the picked account must select which credential the plugin mints"
+        );
+    }
+
     /// `None` = "the plugin's default account": no `ownerHint` key at all, so
     /// a plugin written against the pre-account wire sees an unchanged payload.
     #[tokio::test]

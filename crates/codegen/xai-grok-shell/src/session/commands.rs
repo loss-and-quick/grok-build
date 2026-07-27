@@ -261,6 +261,10 @@ pub enum SessionCommand {
     StartPluginOauthFlow {
         /// The plugin whose sign-in handler to run (the seam targets only it).
         plugin: String,
+        /// Which of the plugin's accounts to authorize, parsed off the
+        /// `plugin-oauth:<plugin>#<account>` method id the user picked. `None`
+        /// means the plugin's default account.
+        account: Option<String>,
         /// Context passed to the plugin (`sign_in`).
         reason: String,
         respond_to: oneshot::Sender<bool>,

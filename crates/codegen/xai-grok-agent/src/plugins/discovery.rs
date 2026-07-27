@@ -686,6 +686,7 @@ fn collect_plugin(
                 tools: None,
                 config: None,
                 oauth_label: None,
+                oauth_accounts: None,
             }
         }
         Err(e) => {

@@ -942,6 +942,7 @@ mod tests {
             tools: None,
             config: Some(serde_json::json!({ "participants": ["default"], "rounds": 1 })),
             oauth_label: None,
+            oauth_accounts: None,
         };
 
         let dp = DiscoveredPlugin {

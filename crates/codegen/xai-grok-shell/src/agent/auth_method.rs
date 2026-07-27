@@ -482,33 +482,106 @@ pub fn grok_com_auth_method(
 }
 
 /// Method-id prefix for a plugin-provided interactive OAuth sign-in. The full
-/// id is `plugin-oauth:<plugin-name>`; build one with [`plugin_oauth_method_id`]
-/// and recover the plugin name with [`parse_plugin_oauth_id`].
+/// id is `plugin-oauth:<plugin-name>` or, when the entry targets one of the
+/// plugin's accounts, `plugin-oauth:<plugin-name>#<account>`; build one with
+/// [`plugin_oauth_method_id`] and take both halves apart with
+/// [`parse_plugin_oauth_id`].
 pub const PLUGIN_OAUTH_METHOD_PREFIX: &str = "plugin-oauth:";
 
-/// Build the ACP method id advertising `plugin`'s interactive OAuth sign-in.
-pub fn plugin_oauth_method_id(plugin: &str) -> String {
-    format!("{PLUGIN_OAUTH_METHOD_PREFIX}{plugin}")
+/// Separator between the plugin name and the account selector. `#` rather than
+/// `:`, which already terminates [`PLUGIN_OAUTH_METHOD_PREFIX`]; the manifest
+/// parser rejects an account id containing it, so the split is unambiguous.
+pub const PLUGIN_OAUTH_ACCOUNT_SEPARATOR: char = '#';
+
+/// Meta key carrying the provider (plugin) display name on an advertised
+/// method, so a client renders the entry without re-parsing the method id.
+pub const AUTH_METHOD_META_PROVIDER_LABEL: &str = "providerLabel";
+
+/// Meta key carrying the account selector, present only on account-scoped
+/// entries.
+pub const AUTH_METHOD_META_ACCOUNT_ID: &str = "accountId";
+
+/// Meta key carrying the account's display name, present only on
+/// account-scoped entries.
+pub const AUTH_METHOD_META_ACCOUNT_LABEL: &str = "accountLabel";
+
+/// Build the ACP method id advertising `plugin`'s interactive OAuth sign-in,
+/// optionally scoped to one of the accounts the plugin declares.
+///
+/// `None` — and, normalized to the same thing, `Some("")` — yields the bare
+/// `plugin-oauth:<plugin>`, so a plugin without accounts advertises exactly the
+/// id it did before accounts existed.
+pub fn plugin_oauth_method_id(plugin: &str, account: Option<&str>) -> String {
+    match account.filter(|a| !a.is_empty()) {
+        Some(account) => {
+            format!("{PLUGIN_OAUTH_METHOD_PREFIX}{plugin}{PLUGIN_OAUTH_ACCOUNT_SEPARATOR}{account}")
+        }
+        None => format!("{PLUGIN_OAUTH_METHOD_PREFIX}{plugin}"),
+    }
 }
 
-/// The plugin name inside a `plugin-oauth:<plugin>` method id, or `None` when
-/// `id` is not a plugin-oauth id. An empty remainder (`plugin-oauth:`) yields
-/// `Some("")`; callers must reject an empty name.
-pub fn parse_plugin_oauth_id(id: &acp::AuthMethodId) -> Option<&str> {
-    id.0.as_ref().strip_prefix(PLUGIN_OAUTH_METHOD_PREFIX)
+/// The plugin name and account selector inside a `plugin-oauth:<plugin>` or
+/// `plugin-oauth:<plugin>#<account>` method id, or `None` when `id` is not a
+/// plugin-oauth id at all.
+///
+/// An empty plugin name (`plugin-oauth:`) yields `Some(("", None))`; callers
+/// must reject an empty name. A separator with nothing after it
+/// (`plugin-oauth:acme#`) names no account, so it parses as account-less
+/// rather than as an account whose id is empty —
+/// [`plugin_oauth_method_id`] never emits that form.
+pub fn parse_plugin_oauth_id(id: &acp::AuthMethodId) -> Option<(&str, Option<&str>)> {
+    let rest = id.0.as_ref().strip_prefix(PLUGIN_OAUTH_METHOD_PREFIX)?;
+    Some(match rest.split_once(PLUGIN_OAUTH_ACCOUNT_SEPARATOR) {
+        Some((plugin, account)) => (plugin, Some(account).filter(|a| !a.is_empty())),
+        None => (rest, None),
+    })
 }
 
 /// A `/login` method entry for a plugin's interactive OAuth sign-in. `plugin` is
 /// the kebab-case plugin name; `label` is the human-facing name the plugin
 /// declares via the manifest `oauthLabel` field. Mirrors the shape of
 /// [`oidc_auth_method`] / [`xai_api_key_auth_method`].
-pub fn plugin_oauth_auth_method(plugin: &str, label: &str) -> acp::AuthMethod {
+///
+/// `account_id`/`account_label` scope the entry to one of the plugin's declared
+/// accounts, so a plugin holding several accounts of one provider advertises
+/// one entry per account. The provider label stays the method `name`; both
+/// labels are repeated in `meta` (as [`AUTH_METHOD_META_PROVIDER_LABEL`],
+/// [`AUTH_METHOD_META_ACCOUNT_ID`] and [`AUTH_METHOD_META_ACCOUNT_LABEL`]) so a
+/// client can render provider and account in separate columns without
+/// re-parsing the id — the same way `external_provider` is carried on the
+/// `grok.com` method.
+pub fn plugin_oauth_auth_method(
+    plugin: &str,
+    label: &str,
+    account_id: Option<&str>,
+    account_label: Option<&str>,
+) -> acp::AuthMethod {
+    let mut meta = acp::Meta::new();
+    meta.insert(
+        AUTH_METHOD_META_PROVIDER_LABEL.to_owned(),
+        serde_json::json!(label),
+    );
+    if let Some(account_id) = account_id {
+        meta.insert(
+            AUTH_METHOD_META_ACCOUNT_ID.to_owned(),
+            serde_json::json!(account_id),
+        );
+        meta.insert(
+            AUTH_METHOD_META_ACCOUNT_LABEL.to_owned(),
+            serde_json::json!(account_label.unwrap_or(account_id)),
+        );
+    }
+    let description = match account_label.or(account_id) {
+        Some(account) => format!("Sign in via the {label} plugin as {account}"),
+        None => format!("Sign in via the {label} plugin"),
+    };
     acp::AuthMethod::Agent(
         acp::AuthMethodAgent::new(
-            acp::AuthMethodId::new(plugin_oauth_method_id(plugin)),
+            acp::AuthMethodId::new(plugin_oauth_method_id(plugin, account_id)),
             label.to_string(),
         )
-        .description(Some(format!("Sign in via the {label} plugin"))),
+        .description(Some(description))
+        .meta(Some(meta)),
     )
 }
 
@@ -602,13 +675,13 @@ mod tests {
     /// non-plugin id parses to `None`.
     #[test]
     fn plugin_oauth_id_round_trips() {
-        assert_eq!(plugin_oauth_method_id("acme"), "plugin-oauth:acme");
-        let id = acp::AuthMethodId::new(plugin_oauth_method_id("acme"));
-        assert_eq!(parse_plugin_oauth_id(&id), Some("acme"));
+        assert_eq!(plugin_oauth_method_id("acme", None), "plugin-oauth:acme");
+        let id = acp::AuthMethodId::new(plugin_oauth_method_id("acme", None));
+        assert_eq!(parse_plugin_oauth_id(&id), Some(("acme", None)));
         // A bare prefix yields an empty name (callers must reject it).
         assert_eq!(
             parse_plugin_oauth_id(&acp::AuthMethodId::new(PLUGIN_OAUTH_METHOD_PREFIX)),
-            Some("")
+            Some(("", None))
         );
         // Built-in ids are not plugin-oauth ids.
         assert_eq!(
@@ -621,27 +694,73 @@ mod tests {
         );
     }
 
+    /// An account-scoped id round-trips too, and `#` (not `:`) separates the
+    /// account so the `plugin-oauth:` prefix stays unambiguous.
+    #[test]
+    fn plugin_oauth_id_round_trips_with_an_account() {
+        assert_eq!(
+            plugin_oauth_method_id("acme", Some("work")),
+            "plugin-oauth:acme#work"
+        );
+        let id = acp::AuthMethodId::new(plugin_oauth_method_id("acme", Some("work")));
+        assert_eq!(parse_plugin_oauth_id(&id), Some(("acme", Some("work"))));
+        // Two accounts of one plugin are distinct ids that keep the plugin.
+        let other = acp::AuthMethodId::new(plugin_oauth_method_id("acme", Some("personal")));
+        assert_ne!(id, other);
+        assert_eq!(
+            parse_plugin_oauth_id(&other),
+            Some(("acme", Some("personal")))
+        );
+    }
+
+    /// An empty account is not an account: it normalizes away on the way out
+    /// and parses back as account-less, so no id can ever carry an empty
+    /// selector into `start_oauth_flow`.
+    #[test]
+    fn plugin_oauth_empty_account_is_account_less() {
+        assert_eq!(
+            plugin_oauth_method_id("acme", Some("")),
+            "plugin-oauth:acme",
+            "an empty account must not emit a dangling separator"
+        );
+        assert_eq!(
+            parse_plugin_oauth_id(&acp::AuthMethodId::new("plugin-oauth:acme#")),
+            Some(("acme", None)),
+        );
+        // The plugin half is still reported verbatim when it is empty, so the
+        // caller's empty-name guard keeps working with a separator present.
+        assert_eq!(
+            parse_plugin_oauth_id(&acp::AuthMethodId::new("plugin-oauth:#work")),
+            Some(("", Some("work"))),
+        );
+    }
+
     /// A plugin-oauth id classifies as `PluginOauth`: session-based-like and
     /// interactive, never api-key.
     #[test]
     fn plugin_oauth_kind_classification() {
-        let id = acp::AuthMethodId::new(plugin_oauth_method_id("acme"));
-        let kind = AuthMethodKind::from_id(&id);
-        assert_eq!(kind, AuthMethodKind::PluginOauth);
-        assert!(!kind.is_api_key());
-        assert!(kind.is_session_based());
-        assert!(kind.needs_interactive_login());
-        // The shared wrapper agrees (drives the session auth gate).
-        assert!(is_session_based_method(&id));
-        // Session-expired messaging (not the api-key hint).
-        assert_eq!(kind.auth_error_message(), AUTH_ERROR_SESSION_EXPIRED);
+        for id in [
+            plugin_oauth_method_id("acme", None),
+            plugin_oauth_method_id("acme", Some("work")),
+        ] {
+            let id = acp::AuthMethodId::new(id);
+            let kind = AuthMethodKind::from_id(&id);
+            assert_eq!(kind, AuthMethodKind::PluginOauth);
+            assert!(!kind.is_api_key());
+            assert!(kind.is_session_based());
+            assert!(kind.needs_interactive_login());
+            // The shared wrapper agrees (drives the session auth gate).
+            assert!(is_session_based_method(&id));
+            // Session-expired messaging (not the api-key hint).
+            assert_eq!(kind.auth_error_message(), AUTH_ERROR_SESSION_EXPIRED);
+        }
     }
 
     /// The advertised method entry carries the plugin id, the label as its
     /// name, and a "Sign in via the <label> plugin" description.
     #[test]
     fn plugin_oauth_auth_method_shape() {
-        let method = plugin_oauth_auth_method("acme", "Acme Sign-In");
+        let method = plugin_oauth_auth_method("acme", "Acme Sign-In", None, None);
         assert_eq!(method.id().0.as_ref(), "plugin-oauth:acme");
         assert_eq!(method.name(), "Acme Sign-In");
         assert_eq!(
@@ -652,6 +771,104 @@ mod tests {
         assert_eq!(
             AuthMethodKind::from_id(method.id()),
             AuthMethodKind::PluginOauth
+        );
+        // The provider label is in meta as well as in `name`; with no account,
+        // the account keys are absent rather than empty.
+        let meta = method.meta().expect("meta should be set");
+        assert_eq!(
+            meta.get(AUTH_METHOD_META_PROVIDER_LABEL)
+                .and_then(|v| v.as_str()),
+            Some("Acme Sign-In")
+        );
+        assert!(meta.get(AUTH_METHOD_META_ACCOUNT_ID).is_none());
+        assert!(meta.get(AUTH_METHOD_META_ACCOUNT_LABEL).is_none());
+    }
+
+    /// An account-scoped entry keeps the provider label as its name and carries
+    /// the account in meta, so the picker can show both without re-parsing the
+    /// method id.
+    #[test]
+    fn plugin_oauth_auth_method_carries_the_account_in_meta() {
+        let method = plugin_oauth_auth_method(
+            "example-auth",
+            "Acme Sign-In",
+            Some("work"),
+            Some("work@example.com"),
+        );
+        assert_eq!(method.id().0.as_ref(), "plugin-oauth:example-auth#work");
+        assert_eq!(
+            method.name(),
+            "Acme Sign-In",
+            "the name stays the human-facing provider label"
+        );
+        assert_eq!(
+            method.description(),
+            Some("Sign in via the Acme Sign-In plugin as work@example.com")
+        );
+        let meta = method.meta().expect("meta should be set");
+        assert_eq!(
+            meta.get(AUTH_METHOD_META_PROVIDER_LABEL)
+                .and_then(|v| v.as_str()),
+            Some("Acme Sign-In")
+        );
+        assert_eq!(
+            meta.get(AUTH_METHOD_META_ACCOUNT_ID)
+                .and_then(|v| v.as_str()),
+            Some("work")
+        );
+        assert_eq!(
+            meta.get(AUTH_METHOD_META_ACCOUNT_LABEL)
+                .and_then(|v| v.as_str()),
+            Some("work@example.com")
+        );
+    }
+
+    /// A label-less account still renders: the id doubles as its label rather
+    /// than leaving the picker with two identical-looking rows.
+    #[test]
+    fn plugin_oauth_auth_method_falls_back_to_the_account_id_as_label() {
+        let method = plugin_oauth_auth_method("example-auth", "Acme", Some("work"), None);
+        let meta = method.meta().expect("meta should be set");
+        assert_eq!(
+            meta.get(AUTH_METHOD_META_ACCOUNT_LABEL)
+                .and_then(|v| v.as_str()),
+            Some("work")
+        );
+        assert_eq!(
+            method.description(),
+            Some("Sign in via the Acme plugin as work")
+        );
+    }
+
+    /// Two accounts of one plugin advertise as two distinct, individually
+    /// routable methods — the whole point of account-scoped ids.
+    #[test]
+    fn two_accounts_of_one_plugin_are_two_routable_methods() {
+        let methods = [
+            plugin_oauth_auth_method(
+                "example-auth",
+                "Acme",
+                Some("work"),
+                Some("work@example.com"),
+            ),
+            plugin_oauth_auth_method(
+                "example-auth",
+                "Acme",
+                Some("personal"),
+                Some("personal@example.com"),
+            ),
+        ];
+        let routed: Vec<(&str, Option<&str>)> = methods
+            .iter()
+            .map(|m| parse_plugin_oauth_id(m.id()).expect("plugin-oauth id"))
+            .collect();
+        assert_eq!(
+            routed,
+            vec![
+                ("example-auth", Some("work")),
+                ("example-auth", Some("personal")),
+            ],
+            "each entry must route to the same plugin but a different account"
         );
     }
 

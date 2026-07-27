@@ -31,6 +31,22 @@ pub struct SidecarSpec {
     pub config: serde_json::Value,
 }
 
+/// One `/login` entry a plugin advertises: its interactive sign-in, optionally
+/// narrowed to a single declared account. Produced by
+/// [`PluginRegistry::oauth_login_providers`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OauthLoginProvider<'a> {
+    /// Kebab-case plugin name — the `start_oauth_flow` dispatch target.
+    pub plugin: &'a str,
+    /// Human-facing provider name from the manifest `oauthLabel`.
+    pub label: &'a str,
+    /// Account selector inside the plugin, or `None` when the plugin declares
+    /// no accounts.
+    pub account_id: Option<&'a str>,
+    /// Human-facing account name. `Some` exactly when `account_id` is.
+    pub account_label: Option<&'a str>,
+}
+
 /// A loaded plugin with resolved components, ready for use by the session.
 #[derive(Debug, Clone)]
 pub struct LoadedPlugin {
@@ -60,6 +76,10 @@ pub struct LoadedPlugin {
     /// only when the plugin opts into being advertised as a `/login` provider;
     /// paired with a sidecar entry it becomes a selectable OAuth sign-in method.
     pub oauth_label: Option<String>,
+    /// Validated accounts from the manifest `oauthAccounts` field, in
+    /// declaration order. Empty means the plugin's sign-in is advertised once,
+    /// without an account (the behaviour before accounts existed).
+    pub oauth_accounts: Vec<super::manifest::OauthAccount>,
     /// Resolved skill directories.
     pub skill_dirs: Vec<PathBuf>,
     pub command_dirs: Vec<PathBuf>,
@@ -214,6 +234,7 @@ impl PluginRegistry {
                 });
 
             // Capture inline data before consuming the manifest
+            let oauth_accounts = dp.manifest.oauth_login_accounts();
             let inline_hooks = dp.manifest.inline_hooks().cloned();
             let inline_mcp_servers = dp.manifest.inline_mcp_servers().cloned();
             let inline_lsp_servers = dp.manifest.inline_lsp_servers().cloned();
@@ -240,6 +261,7 @@ impl PluginRegistry {
                 version: dp.manifest.version,
                 description: dp.manifest.description,
                 oauth_label: dp.manifest.oauth_label,
+                oauth_accounts,
                 skill_names,
                 agent_names,
                 skill_dirs: dp.skill_dirs,
@@ -337,22 +359,41 @@ impl PluginRegistry {
         self.mcp_owners.get(server_name).map(|s| s.as_str())
     }
 
-    /// Plugins that advertise an interactive OAuth sign-in as a `/login`
-    /// provider, as `(plugin_name, label)` pairs in the registry's stable order.
+    /// The `/login` entries plugins advertise for their interactive OAuth
+    /// sign-in, in the registry's stable order.
     ///
     /// A plugin qualifies when it is enabled and trusted, ships a sidecar entry
     /// (only a sidecar handler can mint a credential across the interactive
     /// `start_oauth_flow` seam — a command/http hook can merely pass through),
-    /// and declares the manifest `oauthLabel`. The label is the human-facing
-    /// name shown in the picker.
-    pub fn oauth_login_providers(&self) -> Vec<(&str, &str)> {
+    /// and declares the manifest `oauthLabel`.
+    ///
+    /// A plugin that declares `oauthAccounts` yields one entry per account, so
+    /// a plugin holding several accounts of one provider is reachable account
+    /// by account; one that declares none yields a single account-less entry.
+    pub fn oauth_login_providers(&self) -> Vec<OauthLoginProvider<'_>> {
         self.active_plugins()
             .into_iter()
             .filter(|p| p.sidecar.is_some())
-            .filter_map(|p| {
-                p.oauth_label
-                    .as_deref()
-                    .map(|label| (p.name.as_str(), label))
+            .filter_map(|p| p.oauth_label.as_deref().map(|label| (p, label)))
+            .flat_map(|(p, label)| {
+                let plugin = p.name.as_str();
+                if p.oauth_accounts.is_empty() {
+                    return vec![OauthLoginProvider {
+                        plugin,
+                        label,
+                        account_id: None,
+                        account_label: None,
+                    }];
+                }
+                p.oauth_accounts
+                    .iter()
+                    .map(|account| OauthLoginProvider {
+                        plugin,
+                        label,
+                        account_id: Some(account.id.as_str()),
+                        account_label: Some(account.label.as_str()),
+                    })
+                    .collect()
             })
             .collect()
     }
@@ -720,6 +761,7 @@ mod tests {
                 tools: None,
                 config: None,
                 oauth_label: None,
+                oauth_accounts: None,
             },
             id: PluginId::new(scope, &root, name),
             root: root.clone(),
@@ -1349,6 +1391,7 @@ mod tests {
                 }]),
                 config: Some(serde_json::json!({ "participants": ["alice"] })),
                 oauth_label: None,
+                oauth_accounts: None,
             },
             id: PluginId::new(PluginScope::User, root, name),
             root: root.to_path_buf(),
@@ -1418,5 +1461,110 @@ mod tests {
                 .sidecar_spec()
                 .is_none()
         );
+    }
+
+    // ── `/login` entries (`oauthLabel` + `oauthAccounts`) ───────────────
+
+    /// Build a one-plugin registry from a manifest authored as JSON — the same
+    /// shape a real `plugin.json` has, so the wire fields are exercised — with
+    /// a sidecar entry written to `root` so `SidecarSpec` resolves.
+    fn oauth_registry(root: &Path, manifest_json: serde_json::Value) -> PluginRegistry {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("index.ts"), "export default {};").unwrap();
+        let manifest: PluginManifest = serde_json::from_value(manifest_json).unwrap();
+        let name = manifest.name.clone();
+        let dp = DiscoveredPlugin {
+            manifest,
+            id: PluginId::new(PluginScope::User, root, &name),
+            root: root.to_path_buf(),
+            canonical_root: root.to_path_buf(),
+            scope: PluginScope::User,
+            origin: PluginOrigin::UserGrok,
+            trusted: true,
+            skill_dirs: vec![],
+            command_dirs: vec![],
+            agent_dirs: vec![],
+            hooks_path: None,
+            mcp_config_path: None,
+            lsp_config_path: None,
+            conflict: None,
+        };
+        PluginRegistry::from_discovered(vec![dp], &[], &[name])
+    }
+
+    #[test]
+    fn oauth_login_providers_yield_one_entry_per_declared_account() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = oauth_registry(
+            &tmp.path().join("example-auth"),
+            serde_json::json!({
+                "name": "example-auth",
+                "plugin": "./index.ts",
+                "oauthLabel": "Acme",
+                "oauthAccounts": [
+                    { "id": "work", "label": "work@example.com" },
+                    { "id": "personal", "label": "personal@example.com" },
+                ],
+            }),
+        );
+
+        assert_eq!(
+            reg.oauth_login_providers(),
+            vec![
+                OauthLoginProvider {
+                    plugin: "example-auth",
+                    label: "Acme",
+                    account_id: Some("work"),
+                    account_label: Some("work@example.com"),
+                },
+                OauthLoginProvider {
+                    plugin: "example-auth",
+                    label: "Acme",
+                    account_id: Some("personal"),
+                    account_label: Some("personal@example.com"),
+                },
+            ],
+            "one plugin holding two accounts must be reachable account by account"
+        );
+    }
+
+    #[test]
+    fn oauth_login_providers_without_accounts_yield_one_account_less_entry() {
+        // Unchanged pre-accounts behaviour: exactly one entry, no account.
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = oauth_registry(
+            &tmp.path().join("example-auth"),
+            serde_json::json!({
+                "name": "example-auth",
+                "plugin": "./index.ts",
+                "oauthLabel": "Acme",
+            }),
+        );
+
+        assert_eq!(
+            reg.oauth_login_providers(),
+            vec![OauthLoginProvider {
+                plugin: "example-auth",
+                label: "Acme",
+                account_id: None,
+                account_label: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn oauth_login_providers_skip_plugins_without_a_sidecar() {
+        // Only a sidecar handler can mint a credential across the interactive
+        // seam, so accounts alone must not advertise a login entry.
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = oauth_registry(
+            &tmp.path().join("example-auth"),
+            serde_json::json!({
+                "name": "example-auth",
+                "oauthLabel": "Acme",
+                "oauthAccounts": [{ "id": "work" }],
+            }),
+        );
+        assert!(reg.oauth_login_providers().is_empty());
     }
 }
