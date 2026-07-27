@@ -86,17 +86,29 @@ pub trait PluginCredentialSeam: Send + Sync + std::fmt::Debug + 'static {
     /// describes the context (`bootstrap`, `outbound`, …); `base_url` is the
     /// outbound endpoint the credential is resolved *for*, so the plugin can
     /// scope its reply to the target provider (empty when the fire site has no
-    /// specific target).
-    async fn resolve(&self, reason: &str, base_url: &str) -> Option<PluginCredential>;
+    /// specific target). `account` is the configured `auth_account` selector —
+    /// which of the plugin's accounts for this provider the core wants; `None`
+    /// asks for the plugin's default account.
+    async fn resolve(
+        &self,
+        reason: &str,
+        base_url: &str,
+        account: Option<&str>,
+    ) -> Option<PluginCredential>;
 
     /// Mint a fresh credential on a `401`/expiry. `owner_id` is the owner of the
     /// credential being refreshed, when known; `base_url` is the outbound
     /// endpoint the refreshed credential is destined for (see [`Self::resolve`]).
+    /// `account` is the requested `auth_account` selector, a separate question
+    /// from `owner_id`: the former says *which account the core wants*, the
+    /// latter *whose token went stale*. They differ when nothing is cached yet
+    /// or when the cached token belongs to another account.
     async fn refresh(
         &self,
         reason: &str,
         owner_id: Option<&str>,
         base_url: &str,
+        account: Option<&str>,
     ) -> Option<PluginCredential>;
 
     /// Drive the whole interactive authorization flow and return the final
@@ -104,11 +116,13 @@ pub trait PluginCredentialSeam: Send + Sync + std::fmt::Debug + 'static {
     /// `sign_in`, …). `target_plugin`, when `Some(name)`, restricts the flow to
     /// that single plugin's handler (used when the user picks one plugin's
     /// sign-in from `/login`); `None` keeps the all-subscribers behavior so the
-    /// change is additive.
+    /// change is additive. `account` names which of the plugin's accounts to
+    /// authorize (see [`Self::resolve`]).
     async fn start_oauth_flow(
         &self,
         reason: &str,
         target_plugin: Option<&str>,
+        account: Option<&str>,
     ) -> Option<PluginCredential>;
 }
 
@@ -202,7 +216,12 @@ impl HookCredentialSeam {
 
 #[async_trait::async_trait]
 impl PluginCredentialSeam for HookCredentialSeam {
-    async fn resolve(&self, reason: &str, base_url: &str) -> Option<PluginCredential> {
+    async fn resolve(
+        &self,
+        reason: &str,
+        base_url: &str,
+        account: Option<&str>,
+    ) -> Option<PluginCredential> {
         if !self.has_subscriber(HookEventName::ResolveCredential) {
             return None;
         }
@@ -211,7 +230,7 @@ impl PluginCredentialSeam for HookCredentialSeam {
             HookPayload::ResolveCredential {
                 reason: reason.to_string(),
                 base_url: base_url.to_string(),
-                owner_hint: None,
+                owner_hint: account.map(str::to_string),
             },
         );
         let value = dispatch_replace(
@@ -229,6 +248,7 @@ impl PluginCredentialSeam for HookCredentialSeam {
         reason: &str,
         owner_id: Option<&str>,
         base_url: &str,
+        account: Option<&str>,
     ) -> Option<PluginCredential> {
         if !self.has_subscriber(HookEventName::RefreshCredential) {
             return None;
@@ -239,6 +259,7 @@ impl PluginCredentialSeam for HookCredentialSeam {
                 reason: reason.to_string(),
                 base_url: base_url.to_string(),
                 owner_id: owner_id.map(str::to_string),
+                owner_hint: account.map(str::to_string),
             },
         );
         let value = dispatch_replace(
@@ -255,6 +276,7 @@ impl PluginCredentialSeam for HookCredentialSeam {
         &self,
         reason: &str,
         target_plugin: Option<&str>,
+        account: Option<&str>,
     ) -> Option<PluginCredential> {
         if !self.has_subscriber(HookEventName::StartOauthFlow) {
             return None;
@@ -263,7 +285,7 @@ impl PluginCredentialSeam for HookCredentialSeam {
             HookEventName::StartOauthFlow,
             HookPayload::StartOauthFlow {
                 reason: reason.to_string(),
-                owner_hint: None,
+                owner_hint: account.map(str::to_string),
             },
         );
         // When a specific plugin is targeted, dispatch against a registry
@@ -340,9 +362,14 @@ mod tests {
     /// A plugin-handler `StartOauthFlow` spec for `plugin`, exactly as
     /// `sidecar_plugin_hook_specs` registers one per sidecar.
     fn oauth_spec(plugin: &str) -> HookSpec {
+        spec_for(plugin, HookEventName::StartOauthFlow)
+    }
+
+    /// A plugin-handler spec for `plugin` on any credential `event`.
+    fn spec_for(plugin: &str, event: HookEventName) -> HookSpec {
         HookSpec {
-            name: format!("plugin/{plugin}/sidecar:start_oauth_flow"),
-            event: HookEventName::StartOauthFlow,
+            name: format!("plugin/{plugin}/sidecar:{event}"),
+            event,
             handler_type: HandlerType::Plugin,
             configured_matcher: None,
             matcher: None,
@@ -360,14 +387,18 @@ mod tests {
     }
 
     /// Records every invoked plugin name and mints a `tok-<plugin>` credential.
+    /// Also stashes the last forwarded envelope so a test can assert what rode
+    /// the wire (e.g. `ownerHint`).
     struct RecordingInvoker {
         seen: Arc<Mutex<Vec<String>>>,
+        last_envelope: Arc<Mutex<Option<serde_json::Value>>>,
     }
 
     impl PluginHookInvoker for RecordingInvoker {
         fn invoke<'a>(&'a self, req: PluginHookRequest) -> PluginHookFuture<'a> {
             let plugin = req.plugin.clone();
             self.seen.lock().unwrap().push(plugin.clone());
+            *self.last_envelope.lock().unwrap() = Some(req.payload.clone());
             Box::pin(async move {
                 Ok(PluginHookResponse::Replace {
                     payload: Some(serde_json::json!({ "token": format!("tok-{plugin}") })),
@@ -377,13 +408,117 @@ mod tests {
     }
 
     fn seam_with(registry: HookRegistry, seen: Arc<Mutex<Vec<String>>>) -> HookCredentialSeam {
+        seam_recording(registry, seen, Arc::new(Mutex::new(None)))
+    }
+
+    fn seam_recording(
+        registry: HookRegistry,
+        seen: Arc<Mutex<Vec<String>>>,
+        last_envelope: Arc<Mutex<Option<serde_json::Value>>>,
+    ) -> HookCredentialSeam {
         HookCredentialSeam::new(
             registry,
-            Arc::new(RecordingInvoker { seen }),
+            Arc::new(RecordingInvoker {
+                seen,
+                last_envelope,
+            }),
             "sess".to_string(),
             "/tmp".to_string(),
             "/tmp".to_string(),
         )
+    }
+
+    /// A seam with a single `acme` subscriber for `event`, plus the handle that
+    /// captures the envelope the plugin received.
+    fn seam_capturing(event: HookEventName) -> (HookCredentialSeam, CapturedEnvelope) {
+        let mut registry = HookRegistry::default();
+        registry.append_specs(vec![spec_for("acme", event)]);
+        let last = Arc::new(Mutex::new(None));
+        let seam = seam_recording(registry, Arc::new(Mutex::new(Vec::new())), last.clone());
+        (seam, last)
+    }
+
+    /// Handle onto the last envelope a plugin handler received.
+    type CapturedEnvelope = Arc<Mutex<Option<serde_json::Value>>>;
+
+    /// The envelope the plugin received, or a panic when nothing fired.
+    fn captured(last: &CapturedEnvelope) -> serde_json::Value {
+        last.lock()
+            .unwrap()
+            .clone()
+            .expect("plugin handler was invoked")
+    }
+
+    // ── `auth_account` → `ownerHint` on all three events ─────────────────
+    //
+    // The account selector is what lets one sidecar plugin hold credentials for
+    // several accounts of the same provider. These drive the real dispatcher so
+    // they prove the value reaches the wire envelope, not just the seam.
+
+    #[tokio::test]
+    async fn resolve_forwards_account_as_owner_hint() {
+        let (seam, last) = seam_capturing(HookEventName::ResolveCredential);
+        seam.resolve("outbound", "https://example.test/v1", Some("work"))
+            .await;
+        assert_eq!(
+            captured(&last).get("ownerHint").and_then(|v| v.as_str()),
+            Some("work")
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_forwards_account_alongside_owner_id() {
+        let (seam, last) = seam_capturing(HookEventName::RefreshCredential);
+        seam.refresh(
+            "unauthorized",
+            Some("stale-owner"),
+            "https://example.test/v1",
+            Some("personal"),
+        )
+        .await;
+        let envelope = captured(&last);
+        // Two independent questions: whose token is stale vs. which account the
+        // core wants back.
+        assert_eq!(
+            envelope.get("ownerId").and_then(|v| v.as_str()),
+            Some("stale-owner")
+        );
+        assert_eq!(
+            envelope.get("ownerHint").and_then(|v| v.as_str()),
+            Some("personal")
+        );
+    }
+
+    #[tokio::test]
+    async fn start_oauth_flow_forwards_account_as_owner_hint() {
+        let (seam, last) = seam_capturing(HookEventName::StartOauthFlow);
+        seam.start_oauth_flow("sign_in", Some("acme"), Some("work"))
+            .await;
+        assert_eq!(
+            captured(&last).get("ownerHint").and_then(|v| v.as_str()),
+            Some("work")
+        );
+    }
+
+    /// `None` = "the plugin's default account": no `ownerHint` key at all, so
+    /// a plugin written against the pre-account wire sees an unchanged payload.
+    #[tokio::test]
+    async fn no_account_omits_owner_hint_on_every_event() {
+        let (seam, last) = seam_capturing(HookEventName::ResolveCredential);
+        seam.resolve("outbound", "https://example.test/v1", None)
+            .await;
+        assert!(captured(&last).get("ownerHint").is_none());
+
+        let (seam, last) = seam_capturing(HookEventName::RefreshCredential);
+        seam.refresh("unauthorized", None, "https://example.test/v1", None)
+            .await;
+        let envelope = captured(&last);
+        assert!(envelope.get("ownerHint").is_none());
+        assert!(envelope.get("ownerId").is_none());
+
+        let (seam, last) = seam_capturing(HookEventName::StartOauthFlow);
+        seam.start_oauth_flow("sign_in", Some("acme"), None).await;
+        assert!(captured(&last).get("ownerHint").is_none());
     }
 
     #[tokio::test]
@@ -393,7 +528,7 @@ mod tests {
         registry.append_specs(vec![oauth_spec("alpha"), oauth_spec("beta")]);
         let seam = seam_with(registry, seen.clone());
 
-        let cred = seam.start_oauth_flow("sign_in", Some("beta")).await;
+        let cred = seam.start_oauth_flow("sign_in", Some("beta"), None).await;
 
         assert_eq!(cred.map(|c| c.token), Some("tok-beta".to_string()));
         assert_eq!(
@@ -412,7 +547,7 @@ mod tests {
 
         // Targeting a plugin that isn't a subscriber runs nothing and returns
         // None, so the caller can report a helpful failure.
-        let cred = seam.start_oauth_flow("sign_in", Some("ghost")).await;
+        let cred = seam.start_oauth_flow("sign_in", Some("ghost"), None).await;
         assert!(cred.is_none());
         assert!(seen.lock().unwrap().is_empty());
     }
@@ -426,7 +561,7 @@ mod tests {
 
         // `None` keeps the additive all-subscribers behavior: Intercept stops
         // at the first handler.
-        let cred = seam.start_oauth_flow("sign_in", None).await;
+        let cred = seam.start_oauth_flow("sign_in", None, None).await;
         assert_eq!(cred.map(|c| c.token), Some("tok-alpha".to_string()));
         assert_eq!(*seen.lock().unwrap(), vec!["alpha".to_string()]);
     }

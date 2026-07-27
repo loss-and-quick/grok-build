@@ -66,6 +66,7 @@ impl xai_grok_sampler::BearerResolver for StaticBearerResolver {
 async fn resolve_custom_provider_auth(
     seam: Option<Arc<dyn crate::auth::credential_seam::PluginCredentialSeam>>,
     base_url: &str,
+    auth_account: Option<&str>,
 ) -> (
     Option<xai_grok_sampler::SharedBearerResolver>,
     Option<xai_grok_sampler::AuthScheme>,
@@ -79,8 +80,13 @@ async fn resolve_custom_provider_auth(
     };
     let now_ms = chrono::Utc::now().timestamp_millis();
     // `base_url` also rides the payload as a first-class field so the plugin can
-    // scope its reply to this exact custom-provider endpoint.
-    match seam.resolve(&format!("outbound:{base_url}"), base_url).await {
+    // scope its reply to this exact custom-provider endpoint, and the model's
+    // `auth_account` rides it as `ownerHint` so a plugin holding several
+    // accounts for that endpoint knows which one is wanted.
+    match seam
+        .resolve(&format!("outbound:{base_url}"), base_url, auth_account)
+        .await
+    {
         Some(cred) if cred.is_unexpired(now_ms) => {
             let resolver: xai_grok_sampler::SharedBearerResolver =
                 Arc::new(StaticBearerResolver(cred.token));
@@ -101,12 +107,17 @@ async fn resolve_custom_provider_auth(
 ///
 /// xAI endpoints are never routed here (their `401` is healed by the session
 /// `AuthManager` path), and a missing seam / plugin passthrough returns `false`
-/// (fail-open: the `401` then surfaces as before). `owner_id` is not retained
-/// across turns — the seam scopes by `base_url`; a future provider needing the
-/// owner would have to carry it back from `resolve`.
+/// (fail-open: the `401` then surfaces as before).
+///
+/// `owner_id` is still `None` — it is not retained across turns, and the plugin
+/// owns durable storage of whose token is stale. `auth_account` *is* threaded:
+/// it comes from the failed model's catalog entry, so a plugin holding several
+/// accounts for this endpoint refreshes the one the model is configured for
+/// rather than guessing from `base_url` alone.
 async fn refresh_custom_provider_credential(
     seam: Option<Arc<dyn crate::auth::credential_seam::PluginCredentialSeam>>,
     base_url: &str,
+    auth_account: Option<&str>,
 ) -> bool {
     if crate::util::is_xai_api_url(base_url) {
         return false;
@@ -114,7 +125,9 @@ async fn refresh_custom_provider_credential(
     let Some(seam) = seam else {
         return false;
     };
-    seam.refresh("outbound_401", None, base_url).await.is_some()
+    seam.refresh("outbound_401", None, base_url, auth_account)
+        .await
+        .is_some()
 }
 
 /// Gate inputs bundled with the composed decision so the 401-recovery log can
@@ -479,8 +492,12 @@ impl SessionActor {
                     std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
                 })
         } else {
-            let (resolver, scheme_override) =
-                resolve_custom_provider_auth(self.build_credential_seam(), &cfg.base_url).await;
+            let (resolver, scheme_override) = resolve_custom_provider_auth(
+                self.build_credential_seam(),
+                &cfg.base_url,
+                model_facts.auth_account.as_deref(),
+            )
+            .await;
             if let Some(scheme) = scheme_override {
                 auth_scheme = scheme;
             }
@@ -1003,8 +1020,14 @@ impl SessionActor {
             matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401);
         if is_credential_401
             && auth_provider.is_none()
-            && refresh_custom_provider_credential(self.build_credential_seam(), &failed_base_url)
-                .await
+            && refresh_custom_provider_credential(
+                self.build_credential_seam(),
+                &failed_base_url,
+                self.model_auth_facts(&failed_model_id)
+                    .auth_account
+                    .as_deref(),
+            )
+            .await
         {
             tracing::info!(
                 session_id = % self.session_info.id.0, base_url = % failed_base_url,
@@ -1446,11 +1469,27 @@ mod custom_provider_auth_tests {
     use super::*;
     use crate::auth::credential_seam::{PluginCredential, PluginCredentialSeam};
 
+    /// Resolves the credential it was built with, recording the `auth_account`
+    /// selector the caller asked for.
     #[derive(Debug)]
-    struct MockSeam(Option<PluginCredential>);
+    struct MockSeam(Option<PluginCredential>, std::sync::Mutex<Option<String>>);
+    impl MockSeam {
+        fn new(cred: Option<PluginCredential>) -> Self {
+            Self(cred, std::sync::Mutex::new(None))
+        }
+        fn seen_account(&self) -> Option<String> {
+            self.1.lock().unwrap().clone()
+        }
+    }
     #[async_trait::async_trait]
     impl PluginCredentialSeam for MockSeam {
-        async fn resolve(&self, _reason: &str, _base_url: &str) -> Option<PluginCredential> {
+        async fn resolve(
+            &self,
+            _reason: &str,
+            _base_url: &str,
+            account: Option<&str>,
+        ) -> Option<PluginCredential> {
+            *self.1.lock().unwrap() = account.map(str::to_string);
             self.0.clone()
         }
         async fn refresh(
@@ -1458,6 +1497,7 @@ mod custom_provider_auth_tests {
             _r: &str,
             _o: Option<&str>,
             _base_url: &str,
+            _account: Option<&str>,
         ) -> Option<PluginCredential> {
             None
         }
@@ -1465,6 +1505,7 @@ mod custom_provider_auth_tests {
             &self,
             _r: &str,
             _target_plugin: Option<&str>,
+            _account: Option<&str>,
         ) -> Option<PluginCredential> {
             None
         }
@@ -1485,9 +1526,9 @@ mod custom_provider_auth_tests {
     /// anthropic-OAuth acceptance at the config layer.
     #[tokio::test]
     async fn custom_provider_seam_hit_forces_bearer() {
-        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockSeam(Some(oauth_cred())));
+        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockSeam::new(Some(oauth_cred())));
         let (resolver, scheme) =
-            resolve_custom_provider_auth(Some(seam), "https://api.anthropic.com").await;
+            resolve_custom_provider_auth(Some(seam), "https://api.anthropic.com", None).await;
         assert_eq!(
             resolver
                 .expect("bearer resolver wired")
@@ -1501,9 +1542,9 @@ mod custom_provider_auth_tests {
     /// Plugin passthrough (declines to resolve): keep the provider's static key.
     #[tokio::test]
     async fn custom_provider_seam_passthrough_keeps_static_key() {
-        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockSeam(None));
+        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockSeam::new(None));
         let (resolver, scheme) =
-            resolve_custom_provider_auth(Some(seam), "https://api.anthropic.com").await;
+            resolve_custom_provider_auth(Some(seam), "https://api.anthropic.com", None).await;
         assert!(resolver.is_none());
         assert!(scheme.is_none());
     }
@@ -1512,7 +1553,7 @@ mod custom_provider_auth_tests {
     #[tokio::test]
     async fn custom_provider_no_seam_is_noop() {
         let (resolver, scheme) =
-            resolve_custom_provider_auth(None, "https://api.anthropic.com").await;
+            resolve_custom_provider_auth(None, "https://api.anthropic.com", None).await;
         assert!(resolver.is_none());
         assert!(scheme.is_none());
     }
@@ -1521,9 +1562,9 @@ mod custom_provider_auth_tests {
     /// would resolve a credential — the first-party auth path is untouched.
     #[tokio::test]
     async fn xai_endpoint_never_uses_seam() {
-        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockSeam(Some(oauth_cred())));
+        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockSeam::new(Some(oauth_cred())));
         let (resolver, scheme) =
-            resolve_custom_provider_auth(Some(seam), "https://api.x.ai/v1").await;
+            resolve_custom_provider_auth(Some(seam), "https://api.x.ai/v1", None).await;
         assert!(
             resolver.is_none(),
             "xAI endpoint must not take a plugin bearer"
@@ -1534,25 +1575,68 @@ mod custom_provider_auth_tests {
     /// An expired plugin credential is ignored (falls back to the static key).
     #[tokio::test]
     async fn expired_credential_falls_back() {
-        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockSeam(Some(PluginCredential {
+        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockSeam::new(Some(PluginCredential {
             token: "stale".into(),
             needs_token_auth_header: false,
             expires_at_ms: Some(1),
             owner_id: None,
         })));
         let (resolver, scheme) =
-            resolve_custom_provider_auth(Some(seam), "https://api.anthropic.com").await;
+            resolve_custom_provider_auth(Some(seam), "https://api.anthropic.com", None).await;
         assert!(resolver.is_none());
         assert!(scheme.is_none());
+    }
+
+    /// The model's configured `auth_account` reaches the plugin, so one sidecar
+    /// can hold several accounts for the same custom endpoint.
+    #[tokio::test]
+    async fn custom_provider_forwards_configured_account() {
+        let seam = Arc::new(MockSeam::new(Some(oauth_cred())));
+        let (resolver, _) = resolve_custom_provider_auth(
+            Some(seam.clone() as Arc<dyn PluginCredentialSeam>),
+            "https://example.test/v1",
+            Some("work"),
+        )
+        .await;
+        assert!(resolver.is_some());
+        assert_eq!(seam.seen_account().as_deref(), Some("work"));
+    }
+
+    /// No configured `auth_account` → nothing extra reaches the plugin, which is
+    /// exactly the pre-selector behaviour.
+    #[tokio::test]
+    async fn custom_provider_without_account_sends_none() {
+        let seam = Arc::new(MockSeam::new(Some(oauth_cred())));
+        let (resolver, _) = resolve_custom_provider_auth(
+            Some(seam.clone() as Arc<dyn PluginCredentialSeam>),
+            "https://example.test/v1",
+            None,
+        )
+        .await;
+        assert!(resolver.is_some());
+        assert!(seam.seen_account().is_none());
     }
 
     /// A seam whose `refresh` mints a fresh credential (the resolve arm is
     /// irrelevant to the 401-recovery path).
     #[derive(Debug)]
-    struct MockRefreshSeam(Option<PluginCredential>);
+    struct MockRefreshSeam(Option<PluginCredential>, std::sync::Mutex<Option<String>>);
+    impl MockRefreshSeam {
+        fn new(cred: Option<PluginCredential>) -> Self {
+            Self(cred, std::sync::Mutex::new(None))
+        }
+        fn seen_account(&self) -> Option<String> {
+            self.1.lock().unwrap().clone()
+        }
+    }
     #[async_trait::async_trait]
     impl PluginCredentialSeam for MockRefreshSeam {
-        async fn resolve(&self, _reason: &str, _base_url: &str) -> Option<PluginCredential> {
+        async fn resolve(
+            &self,
+            _reason: &str,
+            _base_url: &str,
+            _account: Option<&str>,
+        ) -> Option<PluginCredential> {
             None
         }
         async fn refresh(
@@ -1560,13 +1644,16 @@ mod custom_provider_auth_tests {
             _r: &str,
             _o: Option<&str>,
             _base_url: &str,
+            account: Option<&str>,
         ) -> Option<PluginCredential> {
+            *self.1.lock().unwrap() = account.map(str::to_string);
             self.0.clone()
         }
         async fn start_oauth_flow(
             &self,
             _r: &str,
             _target_plugin: Option<&str>,
+            _account: Option<&str>,
         ) -> Option<PluginCredential> {
             None
         }
@@ -1575,31 +1662,55 @@ mod custom_provider_auth_tests {
     /// Custom (non-xAI) provider 401: the seam refreshes → recovery fires.
     #[tokio::test]
     async fn custom_provider_refresh_hit_recovers() {
-        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockRefreshSeam(Some(oauth_cred())));
-        assert!(refresh_custom_provider_credential(Some(seam), "https://api.anthropic.com").await);
+        let seam: Arc<dyn PluginCredentialSeam> =
+            Arc::new(MockRefreshSeam::new(Some(oauth_cred())));
+        assert!(
+            refresh_custom_provider_credential(Some(seam), "https://api.anthropic.com", None).await
+        );
     }
 
     /// The plugin declines to refresh (passthrough): no recovery, the 401
     /// surfaces as before.
     #[tokio::test]
     async fn custom_provider_refresh_passthrough_no_recovery() {
-        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockRefreshSeam(None));
-        assert!(!refresh_custom_provider_credential(Some(seam), "https://api.anthropic.com").await);
+        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockRefreshSeam::new(None));
+        assert!(
+            !refresh_custom_provider_credential(Some(seam), "https://api.anthropic.com", None)
+                .await
+        );
     }
 
     /// No seam (no plugin host): the 401 is not seam-recoverable.
     #[tokio::test]
     async fn custom_provider_refresh_no_seam_no_recovery() {
-        assert!(!refresh_custom_provider_credential(None, "https://api.anthropic.com").await);
+        assert!(!refresh_custom_provider_credential(None, "https://api.anthropic.com", None).await);
+    }
+
+    /// The failed model's `auth_account` rides the 401 refresh, so the plugin
+    /// re-mints the account the model is configured for rather than guessing
+    /// from `base_url` alone (two accounts can share one endpoint).
+    #[tokio::test]
+    async fn custom_provider_refresh_forwards_configured_account() {
+        let seam = Arc::new(MockRefreshSeam::new(Some(oauth_cred())));
+        assert!(
+            refresh_custom_provider_credential(
+                Some(seam.clone() as Arc<dyn PluginCredentialSeam>),
+                "https://example.test/v1",
+                Some("personal"),
+            )
+            .await
+        );
+        assert_eq!(seam.seen_account().as_deref(), Some("personal"));
     }
 
     /// An xAI endpoint is never refreshed through the plugin seam even if the
     /// plugin would mint one — first-party 401s heal via the `AuthManager` path.
     #[tokio::test]
     async fn xai_endpoint_never_refreshes_via_seam() {
-        let seam: Arc<dyn PluginCredentialSeam> = Arc::new(MockRefreshSeam(Some(oauth_cred())));
+        let seam: Arc<dyn PluginCredentialSeam> =
+            Arc::new(MockRefreshSeam::new(Some(oauth_cred())));
         assert!(
-            !refresh_custom_provider_credential(Some(seam), "https://api.x.ai/v1").await,
+            !refresh_custom_provider_credential(Some(seam), "https://api.x.ai/v1", None).await,
             "xAI endpoint must not take a plugin refresh"
         );
     }

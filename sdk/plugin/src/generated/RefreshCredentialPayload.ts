@@ -3,4 +3,12 @@
 /**
  * `refresh_credential` payload.
  */
-export type RefreshCredentialPayload = { reason: string, baseUrl: string, ownerId?: string | null, };
+export type RefreshCredentialPayload = { reason: string, baseUrl: string, 
+/**
+ * Whose token went stale.
+ */
+ownerId?: string | null, 
+/**
+ * Which account the core wants back — independent of `owner_id`.
+ */
+ownerHint?: string | null, };

@@ -404,8 +404,11 @@ impl SessionActor {
             // guarded above): a plugin that owns a *different* provider's
             // credential (e.g. an Anthropic OAuth bearer) sees an xAI target and
             // passes through, so its token never rides this xAI session request.
+            // No account selector: this is the first-party cli-chat-proxy
+            // metadata refresh, not a `[[provider]]`-backed model, so there is
+            // no configured `auth_account` to name.
             credential_provider
-                .resolve_credential("outbound", base_url)
+                .resolve_credential("outbound", base_url, None)
                 .await;
         }
         let provider: Arc<dyn xai_grok_auth::AuthCredentialProvider> =

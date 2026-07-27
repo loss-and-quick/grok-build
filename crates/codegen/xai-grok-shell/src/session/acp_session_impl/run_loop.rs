@@ -556,7 +556,7 @@ if let Some(ref tp)
             SessionCommand::StartPluginOauthFlow { plugin, reason, respond_to } => { let s
             = session.clone(); tokio::task::spawn_local(async move { let ok = match s
             .build_credential_seam() { Some(seam) => seam.start_oauth_flow(& reason,
-            Some(& plugin)). await .is_some(), None => false, }; let _ = respond_to
+            Some(& plugin), None). await .is_some(), None => false, }; let _ = respond_to
             .send(ok); }); } SessionCommand::ReloadPlugins {
             registry } => { if ! session.startup_hints.is_subagent { let registry =
             session.preserve_session_plugin_dirs(registry); session

@@ -652,6 +652,14 @@ pub enum HookPayload {
         /// The owner id of the credential being refreshed, if known.
         #[serde(rename = "ownerId", skip_serializing_if = "Option::is_none")]
         owner_id: Option<String>,
+        /// Hint identifying which credential the core expects back (e.g. an
+        /// account label). Distinct from `owner_id`: that names *whose token is
+        /// stale*, this names *which account the core wants*. They differ when
+        /// the stale token belongs to a different account than the one the
+        /// caller is configured for, or when nothing is cached yet. `None` when
+        /// the core has no expectation.
+        #[serde(rename = "ownerHint", skip_serializing_if = "Option::is_none")]
+        owner_hint: Option<String>,
     },
     /// An interactive authorization about to start, offered to a
     /// `start_oauth_flow` Intercept hook which drives the whole flow and returns
@@ -1308,6 +1316,7 @@ mod tests {
             reason: "unauthorized".into(),
             base_url: "https://api.x.ai/v1".into(),
             owner_id: None,
+            owner_hint: None,
         };
         let value = serde_json::to_value(&refresh).unwrap();
         assert_eq!(
@@ -1319,7 +1328,27 @@ mod tests {
             Some("https://api.x.ai/v1")
         );
         assert!(value.get("ownerId").is_none());
+        assert!(value.get("ownerHint").is_none());
         assert_eq!(refresh.match_value(), None);
+
+        // `ownerId` (whose token is stale) and `ownerHint` (which account the
+        // core wants) are independent fields and both ride the wire camelCased.
+        let refresh = HookPayload::RefreshCredential {
+            reason: "unauthorized".into(),
+            base_url: "https://example.test/v1".into(),
+            owner_id: Some("stale-owner".into()),
+            owner_hint: Some("work".into()),
+        };
+        let value = serde_json::to_value(&refresh).unwrap();
+        assert_eq!(
+            value.get("ownerId").and_then(|v| v.as_str()),
+            Some("stale-owner")
+        );
+        assert_eq!(
+            value.get("ownerHint").and_then(|v| v.as_str()),
+            Some("work")
+        );
+        assert!(value.get("owner_hint").is_none(), "leaked snake_case key");
 
         let oauth = HookPayload::StartOauthFlow {
             reason: "missing_credential".into(),

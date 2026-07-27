@@ -528,8 +528,12 @@ pub struct ResolveCredentialPayload {
 pub struct RefreshCredentialPayload {
     pub reason: String,
     pub base_url: String,
+    /// Whose token went stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_id: Option<String>,
+    /// Which account the core wants back — independent of `owner_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_hint: Option<String>,
 }
 
 /// `start_oauth_flow` payload.

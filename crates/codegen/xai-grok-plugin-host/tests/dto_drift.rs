@@ -192,6 +192,7 @@ fn all_payload_samples() -> Vec<HookPayload> {
             reason: "unauthorized".into(),
             base_url: "https://api.x.ai/v1".into(),
             owner_id: Some("acct-1".into()),
+            owner_hint: Some("primary".into()),
         },
         HookPayload::StartOauthFlow {
             reason: "missing_credential".into(),
