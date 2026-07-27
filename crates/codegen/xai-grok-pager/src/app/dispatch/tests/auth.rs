@@ -659,3 +659,275 @@ fn auth_complete_preserves_show_resolved_model_when_absent() {
 
     assert!(!app.show_resolved_model);
 }
+
+// ---------------------------------------------------------------------------
+// Login-method picker
+// ---------------------------------------------------------------------------
+
+fn picker_auth_method(id: &str, name: &str) -> acp::AuthMethod {
+    acp::AuthMethod::Agent(acp::AuthMethodAgent::new(
+        acp::AuthMethodId::new(id),
+        name.to_string(),
+    ))
+}
+
+/// Advertise one non-interactive and two interactive methods, so a filter that
+/// stopped working would change what the picker shows.
+fn advertise_two_interactive_methods(app: &mut AppView) {
+    app.auth_methods = vec![
+        picker_auth_method("xai.api_key", "API key"),
+        picker_auth_method("grok.com", "xAI"),
+        picker_auth_method("plugin-oauth:example-auth", "Acme OAuth"),
+    ];
+    app.login_method_id = None;
+    app.login_label = None;
+}
+
+fn open_picker(app: &AppView) -> crate::views::auth_method_modal::AuthMethodPickerState {
+    app.auth_method_picker
+        .clone()
+        .expect("picker should be open")
+}
+
+/// One interactive method is not a choice: `/login` must start the flow
+/// directly, exactly as before the picker existed.
+#[test]
+fn login_with_one_interactive_method_skips_the_picker() {
+    let mut app = test_app_with_agent();
+    app.auth_methods = vec![
+        picker_auth_method("xai.api_key", "API key"),
+        picker_auth_method("grok.com", "xAI"),
+    ];
+    app.login_method_id = None;
+
+    let effects = dispatch(Action::Login, &mut app);
+
+    assert!(
+        app.auth_method_picker.is_none(),
+        "one interactive method must not open a picker"
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Authenticate { method_id, .. }, Effect::PollAuthUrl { .. }]
+            if method_id.0.as_ref() == "grok.com"
+    ));
+}
+
+/// Zero interactive methods stays fail-closed.
+#[test]
+fn login_with_no_interactive_method_skips_the_picker() {
+    let mut app = test_app_with_agent();
+    app.auth_methods = vec![picker_auth_method("xai.api_key", "API key")];
+    app.login_method_id = None;
+
+    let effects = dispatch(Action::Login, &mut app);
+
+    assert!(app.auth_method_picker.is_none());
+    assert!(effects.is_empty());
+    assert!(matches!(
+        app.auth_state,
+        AuthState::Pending { error: Some(_) }
+    ));
+}
+
+#[test]
+fn login_with_two_interactive_methods_opens_the_picker() {
+    let mut app = test_app_with_agent();
+    advertise_two_interactive_methods(&mut app);
+
+    let effects = dispatch(Action::Login, &mut app);
+
+    assert!(effects.is_empty(), "the picker must not start auth itself");
+    let picker = open_picker(&app);
+    let ids: Vec<String> = picker
+        .entries
+        .iter()
+        .map(|e| e.method_id.0.to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["grok.com", "plugin-oauth:example-auth"],
+        "only interactive methods are offered"
+    );
+    assert!(!picker.switch_account, "/login authenticates in place");
+    // Opened from a session: the welcome view is the only one that renders it.
+    assert_eq!(app.active_view, ActiveView::Welcome);
+    assert_eq!(app.auth_return_view, Some(ActiveView::Agent(AgentId(0))));
+}
+
+/// The picker defaults to the configured method rather than to any particular
+/// kind, and badges nothing as current (the pager is not told which credential
+/// is in use).
+#[test]
+fn picker_defaults_to_the_configured_method_and_badges_nothing() {
+    let mut app = test_app_with_agent();
+    advertise_two_interactive_methods(&mut app);
+    app.login_method_id = Some(acp::AuthMethodId::new("plugin-oauth:example-auth"));
+
+    dispatch(Action::Login, &mut app);
+
+    let picker = open_picker(&app);
+    assert_eq!(
+        picker.selected_method_id().map(|id| id.0.to_string()),
+        Some("plugin-oauth:example-auth".to_string())
+    );
+    assert!(
+        picker.entries.iter().all(|e| !e.is_current),
+        "a merely-defaulted method must not be badged as the current credential"
+    );
+}
+
+/// Opening the picker must not clobber `auth_state`: an in-flight
+/// `Authenticating` owns the abort handle for the running task, and dropping
+/// it would orphan that task past `abort_prior_auth`.
+#[test]
+fn opening_the_picker_keeps_an_in_flight_auth_abortable() {
+    let rt = test_runtime();
+    let mut app = test_app_with_agent();
+    let (prior_task, _) = install_live_auth_task(&mut app, &rt);
+    app.auth_methods.push(picker_auth_method(
+        "plugin-oauth:example-auth",
+        "Acme OAuth",
+    ));
+
+    dispatch(Action::Login, &mut app);
+
+    assert!(app.auth_method_picker.is_some());
+    assert!(
+        matches!(
+            &app.auth_state,
+            AuthState::Authenticating {
+                handle: Some(_),
+                ..
+            }
+        ),
+        "the in-flight task's abort handle must survive opening the picker, got {:?}",
+        app.auth_state
+    );
+
+    dispatch(
+        Action::ChooseAuthMethod {
+            method_id: acp::AuthMethodId::new("plugin-oauth:example-auth"),
+            switch_account: false,
+        },
+        &mut app,
+    );
+    rt.block_on(async {
+        assert!(
+            prior_task.await.unwrap_err().is_cancelled(),
+            "choosing a method must abort the prior in-flight auth task"
+        );
+    });
+}
+
+#[test]
+fn choosing_a_method_authenticates_with_it_and_closes_the_picker() {
+    let mut app = test_app_with_agent();
+    advertise_two_interactive_methods(&mut app);
+    dispatch(Action::Login, &mut app);
+
+    let effects = dispatch(
+        Action::ChooseAuthMethod {
+            method_id: acp::AuthMethodId::new("plugin-oauth:example-auth"),
+            switch_account: false,
+        },
+        &mut app,
+    );
+
+    assert!(app.auth_method_picker.is_none());
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Authenticate { method_id, .. }, Effect::PollAuthUrl { .. }]
+            if method_id.0.as_ref() == "plugin-oauth:example-auth"
+    ));
+    assert_eq!(
+        app.login_method_id.as_ref().map(|id| id.0.to_string()),
+        Some("plugin-oauth:example-auth".to_string())
+    );
+    assert_eq!(app.login_label.as_deref(), Some("Acme OAuth"));
+}
+
+/// `switch_account` is carried from the dispatcher that opened the picker, so
+/// `/switch-account` still logs out first.
+#[test]
+fn switch_account_picker_choice_runs_the_switch_account_flow() {
+    let mut app = test_app_with_agent();
+    advertise_two_interactive_methods(&mut app);
+
+    let effects = dispatch(Action::SwitchAccount, &mut app);
+    assert!(effects.is_empty());
+    assert!(
+        open_picker(&app).switch_account,
+        "the picker must remember it was opened to switch accounts"
+    );
+
+    let effects = dispatch(
+        Action::ChooseAuthMethod {
+            method_id: acp::AuthMethodId::new("plugin-oauth:example-auth"),
+            switch_account: true,
+        },
+        &mut app,
+    );
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SwitchAccount { method_id, .. }, Effect::PollAuthUrl { .. }]
+            if method_id.0.as_ref() == "plugin-oauth:example-auth"
+    ));
+}
+
+/// Esc closes the picker *and* returns to the view it was opened from,
+/// clearing `auth_return_view` (a stale value also disables foreign-session
+/// polling).
+#[test]
+fn closing_the_picker_restores_the_originating_view() {
+    let mut app = test_app_with_agent();
+    advertise_two_interactive_methods(&mut app);
+    dispatch(Action::Login, &mut app);
+    assert_eq!(app.active_view, ActiveView::Welcome);
+
+    dispatch(Action::CloseAuthMethodPicker, &mut app);
+
+    assert!(app.auth_method_picker.is_none());
+    assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
+    assert_eq!(app.auth_return_view, None);
+}
+
+/// The same Esc from the welcome screen closes the picker without moving the
+/// user anywhere.
+#[test]
+fn closing_the_picker_from_welcome_stays_on_welcome() {
+    let mut app = test_app();
+    advertise_two_interactive_methods(&mut app);
+    dispatch(Action::Login, &mut app);
+    assert!(app.auth_method_picker.is_some());
+    assert_eq!(app.auth_return_view, None);
+
+    let effects = dispatch(Action::CloseAuthMethodPicker, &mut app);
+
+    assert!(effects.is_empty());
+    assert!(app.auth_method_picker.is_none());
+    assert_eq!(app.active_view, ActiveView::Welcome);
+}
+
+/// A method that vanished between opening the picker and choosing must not
+/// start an auth flow for an unadvertised id.
+#[test]
+fn choosing_an_unadvertised_method_fails_closed() {
+    let mut app = test_app_with_agent();
+    advertise_two_interactive_methods(&mut app);
+
+    let effects = dispatch(
+        Action::ChooseAuthMethod {
+            method_id: acp::AuthMethodId::new("plugin-oauth:gone"),
+            switch_account: false,
+        },
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    assert!(matches!(
+        app.auth_state,
+        AuthState::Pending { error: Some(_) }
+    ));
+}

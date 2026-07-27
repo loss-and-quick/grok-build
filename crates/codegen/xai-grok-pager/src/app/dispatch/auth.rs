@@ -10,6 +10,7 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView, AuthMode, AuthState};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
+use agent_client_protocol as acp;
 
 // ---------------------------------------------------------------------------
 // Auth dispatch
@@ -32,17 +33,84 @@ pub(super) fn ensure_login_method(app: &mut AppView) {
     if app.login_method_id.is_some() {
         return;
     }
-    let (label, method_id, start_mode) =
-        crate::acp::find_interactive_login_method(&app.auth_methods);
-    if let Some(id) = method_id {
-        app.login_label = label;
-        app.login_method_id = Some(id);
-        app.auth_start_mode = match start_mode {
-            crate::acp::AuthStartMode::Pending => AuthMode::Pending,
-            crate::acp::AuthStartMode::Command => AuthMode::Command,
-        };
-    }
     // No interactive method: leave login_method_id unset (fail-closed).
+    let Some(method) = app
+        .auth_methods
+        .iter()
+        .find(|method| is_interactive(method))
+        .cloned()
+    else {
+        return;
+    };
+    adopt_login_method(app, &method);
+}
+
+/// Whether `method` can be started from the login screen at all.
+fn is_interactive(method: &acp::AuthMethod) -> bool {
+    xai_grok_shell::agent::auth_method::AuthMethodKind::from_id(method.id())
+        .needs_interactive_login()
+}
+
+/// Adopt `method` as the login method: label, id, and start mode.
+///
+/// The single source of truth for that assignment — shared by the implicit
+/// single-method path ([`ensure_login_method`]) and the explicit
+/// picker-chosen path ([`dispatch_choose_auth_method`]) so the two cannot
+/// drift. External auth providers launch a command; everything else starts in
+/// the pending flow.
+fn adopt_login_method(app: &mut AppView, method: &acp::AuthMethod) {
+    app.login_label = Some(method.name().to_string());
+    app.login_method_id = Some(method.id().clone());
+    let is_external_provider = method
+        .meta()
+        .as_ref()
+        .and_then(|meta| meta.get("external_provider"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    app.auth_start_mode = if is_external_provider {
+        AuthMode::Command
+    } else {
+        AuthMode::Pending
+    };
+}
+
+/// Open the login-method picker when there is a real choice to make.
+///
+/// Returns `true` when the picker took over and the caller must not start an
+/// auth flow. With zero or one interactive method there is nothing to pick, so
+/// this is a no-op and the caller behaves exactly as before.
+///
+/// Deliberately does **not** touch `auth_state`: an in-flight
+/// `Authenticating` holds the abort handle for the running auth task, and
+/// dropping it here would orphan that task past [`abort_prior_auth`].
+fn open_auth_method_picker(app: &mut AppView, switch_account: bool) -> bool {
+    if app
+        .auth_methods
+        .iter()
+        .filter(|m| is_interactive(m))
+        .count()
+        < 2
+    {
+        return false;
+    }
+    app.auth_method_picker = Some(crate::views::auth_method_modal::AuthMethodPickerState::new(
+        &app.auth_methods,
+        // The agent does not tell the pager which credential it actually
+        // authenticated with, so no row is badged "current".
+        // `login_method_id` is only a default and would mis-badge a
+        // machine that has never logged in.
+        None,
+        app.login_method_id.as_ref(),
+        switch_account,
+    ));
+    // Only the welcome view renders the picker, so surface it the same way
+    // `dispatch_login` surfaces the auth UI. `auth_return_view` is what
+    // `Action::CloseAuthMethodPicker` restores from.
+    if !matches!(app.active_view, ActiveView::Welcome) {
+        app.auth_return_view = Some(app.active_view);
+        show_welcome(app);
+    }
+    true
 }
 
 /// Error when no interactive login method is available (empty auth_methods,
@@ -83,17 +151,17 @@ fn abort_prior_auth(app: &mut AppView) {
     }
 }
 
-/// Log out, then start a new login flow in a single sequential task.
-pub(super) fn dispatch_switch_account(app: &mut AppView) -> Vec<Effect> {
-    ensure_login_method(app);
-
-    let Some(method_id) = app.login_method_id.clone() else {
-        app.auth_state = AuthState::Pending {
-            error: Some(no_login_method_error(app)),
-        };
-        return vec![];
-    };
-
+/// Start the auth flow for `method_id`, aborting any prior in-flight attempt.
+///
+/// `switch_account` selects the flow: `true` logs out first
+/// ([`Effect::SwitchAccount`]), `false` authenticates in place
+/// ([`Effect::Authenticate`]). It is always passed in by the caller, never
+/// inferred from `auth_state`.
+fn start_auth_flow(
+    app: &mut AppView,
+    method_id: acp::AuthMethodId,
+    switch_account: bool,
+) -> Vec<Effect> {
     abort_prior_auth(app);
 
     let request_seq = app.next_auth_request_seq;
@@ -106,14 +174,75 @@ pub(super) fn dispatch_switch_account(app: &mut AppView) -> Vec<Effect> {
         mode: app.auth_start_mode,
     };
 
-    vec![
+    let start = if switch_account {
         Effect::SwitchAccount {
             request_seq,
             method_id,
             use_oauth: app.auth_use_oauth,
-        },
-        Effect::PollAuthUrl { request_seq },
-    ]
+        }
+    } else {
+        Effect::Authenticate {
+            request_seq,
+            method_id,
+            use_oauth: app.auth_use_oauth,
+            force_interactive: true,
+        }
+    };
+    vec![start, Effect::PollAuthUrl { request_seq }]
+}
+
+/// Log out, then start a new login flow in a single sequential task.
+pub(super) fn dispatch_switch_account(app: &mut AppView) -> Vec<Effect> {
+    ensure_login_method(app);
+
+    if open_auth_method_picker(app, true) {
+        return vec![];
+    }
+
+    let Some(method_id) = app.login_method_id.clone() else {
+        app.auth_state = AuthState::Pending {
+            error: Some(no_login_method_error(app)),
+        };
+        return vec![];
+    };
+
+    start_auth_flow(app, method_id, true)
+}
+
+/// User picked a method in the login-method picker. Adopts it, then runs the
+/// same flow the direct `/login` and `/switch-account` paths run.
+pub(super) fn dispatch_choose_auth_method(
+    app: &mut AppView,
+    method_id: acp::AuthMethodId,
+    switch_account: bool,
+) -> Vec<Effect> {
+    app.auth_method_picker = None;
+
+    let Some(method) = app
+        .auth_methods
+        .iter()
+        .find(|method| method.id() == &method_id)
+        .cloned()
+    else {
+        app.auth_state = AuthState::Pending {
+            error: Some("Login method is no longer available".to_string()),
+        };
+        return vec![];
+    };
+    adopt_login_method(app, &method);
+
+    // The picker already stashed `auth_return_view` and switched to welcome
+    // if it was opened from a session, so the auth UI is visible either way.
+    start_auth_flow(app, method_id, switch_account)
+}
+
+/// Dismiss the login-method picker without choosing. Returns the user to
+/// whatever view the picker was opened from by reusing the cancel-login
+/// restore, so `auth_return_view` can never be left stale (a stale value also
+/// disables foreign-session polling).
+pub(super) fn dispatch_close_auth_method_picker(app: &mut AppView) -> Vec<Effect> {
+    app.auth_method_picker = None;
+    dispatch_cancel_login(app)
 }
 
 /// Scan the trailing run of session-event / system blocks for a
@@ -211,6 +340,13 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
 /// with an external auth provider configured appeared to do nothing.
 pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
     ensure_login_method(app);
+
+    // More than one interactive method: let the user pick instead of silently
+    // starting the default one.
+    if open_auth_method_picker(app, false) {
+        return vec![];
+    }
+
     let Some(method_id) = app.login_method_id.clone() else {
         app.auth_state = AuthState::Pending {
             error: Some(no_login_method_error(app)),
@@ -220,33 +356,14 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
 
     // Surface the auth UI when triggered from inside a session. `show_welcome`
     // resets ephemeral state here, covering the AuthComplete / cancel-login
-    // fallbacks too (`auth_return_view` is only ever set here).
+    // fallbacks too (`auth_return_view` is only ever set here and by the
+    // picker, which routes back through the same restore).
     if !matches!(app.active_view, ActiveView::Welcome) {
         app.auth_return_view = Some(app.active_view);
         show_welcome(app);
     }
 
-    abort_prior_auth(app);
-
-    let request_seq = app.next_auth_request_seq;
-    app.next_auth_request_seq += 1;
-    app.auth_code_input.reset();
-    app.auth_state = AuthState::Authenticating {
-        request_seq,
-        handle: None,
-        auth_url: None,
-        mode: app.auth_start_mode,
-    };
-
-    vec![
-        Effect::Authenticate {
-            request_seq,
-            method_id,
-            use_oauth: app.auth_use_oauth,
-            force_interactive: true,
-        },
-        Effect::PollAuthUrl { request_seq },
-    ]
+    start_auth_flow(app, method_id, false)
 }
 
 /// Cancel a login that was started from inside a session and restore the

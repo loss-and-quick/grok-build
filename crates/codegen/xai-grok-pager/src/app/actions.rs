@@ -629,6 +629,16 @@ pub enum Action {
     PermissionCancel,
     /// Log out: remove credentials and return to the login screen.
     Logout,
+    /// User picked a login method in the welcome-screen picker. Runs the
+    /// authenticate flow, or the switch-account flow when `switch_account`
+    /// is set — carried from whichever dispatcher opened the picker.
+    ChooseAuthMethod {
+        method_id: acp::AuthMethodId,
+        switch_account: bool,
+    },
+    /// Dismiss the login-method picker without choosing, returning to the
+    /// view the picker was opened from.
+    CloseAuthMethodPicker,
     /// Log out and immediately start a new login flow.
     SwitchAccount,
     /// User pressed login on the welcome screen.

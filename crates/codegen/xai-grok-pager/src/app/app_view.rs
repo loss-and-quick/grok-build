@@ -1100,6 +1100,12 @@ pub struct AppView {
     pub has_claude_import: bool,
     /// When set, the welcome screen renders an interactive import modal instead of normal content.
     pub import_claude_modal: Option<crate::views::import_claude_modal::ImportClaudeModalState>,
+    /// When set, the welcome screen renders the login-method picker over its
+    /// normal content. Opened by `/login` / `/switch-account` when more than
+    /// one interactive auth method is advertised; only the welcome view
+    /// renders and drives it, which is why opening it from a session stashes
+    /// [`Self::auth_return_view`] and shows welcome.
+    pub auth_method_picker: Option<crate::views::auth_method_modal::AuthMethodPickerState>,
     /// Doc viewer overlay for the welcome screen (release notes via Ctrl+L).
     pub welcome_doc_viewer: Option<crate::views::modal::ActiveModal>,
     /// Whether the pager uses fullscreen (alt-screen) or inline mode.
@@ -1455,6 +1461,7 @@ impl AppView {
             relaunch: None,
             has_claude_import: false,
             import_claude_modal: None,
+            auth_method_picker: None,
             welcome_doc_viewer: None,
             screen_mode: ScreenMode::Inline,
             show_resolved_model: true,
@@ -2357,6 +2364,7 @@ impl AppView {
                     sp_entries_query: &self.session_picker_entries_query,
                     has_claude_import: self.has_claude_import,
                     import_claude_modal: &mut self.import_claude_modal,
+                    auth_method_picker: &mut self.auth_method_picker,
                     welcome_doc_viewer: &mut self.welcome_doc_viewer,
                     changelog_markdown: &self.changelog_markdown,
                     show_changelog_action: self.welcome_show_changelog_action,
@@ -2946,6 +2954,8 @@ struct WelcomeInputCtx<'a> {
     sp_entries_query: &'a Option<String>,
     has_claude_import: bool,
     import_claude_modal: &'a mut Option<crate::views::import_claude_modal::ImportClaudeModalState>,
+    /// Login-method picker overlay, when open. Intercepts all welcome input.
+    auth_method_picker: &'a mut Option<crate::views::auth_method_modal::AuthMethodPickerState>,
     welcome_doc_viewer: &'a mut Option<crate::views::modal::ActiveModal>,
     changelog_markdown: &'a Option<String>,
     /// Whether the welcome menu currently includes a "Changelog" row (above
@@ -2963,6 +2973,33 @@ struct WelcomeInputCtx<'a> {
 }
 /// Welcome view input -- auth-state-aware routing.
 fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutcome {
+    if let Some(picker) = ctx.auth_method_picker.as_mut() {
+        use crate::views::auth_method_modal::AuthMethodPickerOutcome;
+        let switch_account = picker.switch_account;
+        let outcome_to_input = |o: AuthMethodPickerOutcome| match o {
+            AuthMethodPickerOutcome::Chosen(method_id) => {
+                InputOutcome::Action(Action::ChooseAuthMethod {
+                    method_id,
+                    switch_account,
+                })
+            }
+            AuthMethodPickerOutcome::Cancelled => {
+                InputOutcome::Action(Action::CloseAuthMethodPicker)
+            }
+            AuthMethodPickerOutcome::Changed => InputOutcome::Changed,
+            AuthMethodPickerOutcome::Unchanged => InputOutcome::Unchanged,
+        };
+        if let Event::Key(key) = ev {
+            if key.kind == crossterm::event::KeyEventKind::Release {
+                return InputOutcome::Unchanged;
+            }
+            return outcome_to_input(picker.handle_key(key));
+        }
+        if let Event::Mouse(mouse) = ev {
+            return outcome_to_input(picker.handle_mouse(mouse.kind, mouse.column, mouse.row));
+        }
+        return InputOutcome::Unchanged;
+    }
     if let Some(modal) = ctx.import_claude_modal.as_mut() {
         use crate::views::import_claude_modal::ImportClaudeModalOutcome;
         let outcome_to_input = |o: ImportClaudeModalOutcome| match o {
@@ -4170,6 +4207,16 @@ impl AppView {
                                 compact,
                             );
                         }
+                        if let Some(picker) = self.auth_method_picker.as_mut() {
+                            let theme = crate::theme::Theme::current();
+                            crate::views::auth_method_modal::render_auth_method_picker(
+                                f.buffer_mut(),
+                                view_area,
+                                picker,
+                                compact,
+                                &theme,
+                            );
+                        }
                         if let Some(dialog) = self.new_worktree_dialog.as_ref() {
                             crate::views::new_worktree_dialog::render_new_worktree_dialog(
                                 view_area,
@@ -4612,6 +4659,7 @@ impl AppView {
             self.active_view, ActiveView::Agent(id) if self.agents.get(& id)
             .is_some_and(| a | a.extensions_modal.is_some() || a.active_modal.is_some())
         ) || self.import_claude_modal.is_some()
+            || self.auth_method_picker.is_some()
             || self.new_worktree_dialog.is_some()
             || self.welcome_doc_viewer.is_some()
             || matches!(
@@ -5518,6 +5566,7 @@ pub(crate) mod tests {
             relaunch: None,
             has_claude_import: false,
             import_claude_modal: None,
+            auth_method_picker: None,
             welcome_doc_viewer: None,
             screen_mode: ScreenMode::Inline,
             pending_effects: Vec::new(),
