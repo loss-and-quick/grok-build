@@ -89,6 +89,22 @@ impl ModelState {
             })
     }
 
+    /// Whether the current model targets the native first-party xAI provider,
+    /// read from ACP model `meta["firstParty"]` (stamped by the shell from the
+    /// resolved `base_url`).
+    ///
+    /// Defaults to `true` when the key is absent so older shells keep the
+    /// current behavior until they start advertising the flag.
+    pub fn current_model_is_first_party(&self) -> bool {
+        self.current
+            .as_ref()
+            .and_then(|id| self.available.get(id))
+            .and_then(|info| info.meta.as_ref())
+            .and_then(|meta| meta.get("firstParty"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true)
+    }
+
     /// Whether the current model accepts image input, read from the model's
     /// `meta` (the ACP extension point — same source as `totalContextTokens`).
     ///
@@ -445,6 +461,31 @@ mod tests {
         );
         state.current = Some(id);
         state
+    }
+
+    #[test]
+    fn current_model_is_first_party_defaults_true_when_meta_absent() {
+        // No current model, empty meta, and a meta without the key all default
+        // permissive so older shells keep today's behavior until they start
+        // advertising `meta.firstParty`.
+        assert!(ModelState::default().current_model_is_first_party());
+        assert!(state_with_meta(None).current_model_is_first_party());
+        assert!(
+            state_with_meta(Some(serde_json::json!({ "totalContextTokens": 256000 })))
+                .current_model_is_first_party()
+        );
+    }
+
+    #[test]
+    fn current_model_is_first_party_honors_explicit_meta() {
+        assert!(
+            state_with_meta(Some(serde_json::json!({ "firstParty": true })))
+                .current_model_is_first_party()
+        );
+        assert!(
+            !state_with_meta(Some(serde_json::json!({ "firstParty": false })))
+                .current_model_is_first_party()
+        );
     }
 
     #[test]

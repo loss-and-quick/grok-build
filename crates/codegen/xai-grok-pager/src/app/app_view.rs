@@ -343,9 +343,9 @@ impl VoiceState {
     /// it). `/voice` and toggle-style starts leave this false.
     pub(crate) fn hold(&self) -> bool {
         matches!(
-            self, Self::ColdStart { hold, .. } | Self::Recording { hold, .. }
-if * hold
-        )
+                    self, Self::ColdStart { hold, .. } | Self::Recording { hold, .. }
+        if * hold
+                )
     }
 }
 /// Entry in the session picker list on the welcome screen.
@@ -1077,6 +1077,11 @@ pub struct AppView {
     pub startup_warnings: Vec<crate::startup::StartupWarning>,
     /// Whether the user authenticated with an API key (shown in the version badge).
     pub is_api_key_auth: bool,
+    /// Whether the session credential is a grok.com account login (web login,
+    /// OIDC, or an external provider with an xAI issuer). Mirrored from the
+    /// shell's [`xai_grok_shell::auth::AuthMeta::is_first_party_account`]; see
+    /// [`Self::grok_account_features_apply`] for what it gates.
+    pub is_first_party_account: bool,
     /// Latest version string from a background update check. Set when
     /// a newer version is detected; rendered as a notification on the
     /// welcome screen.
@@ -1143,9 +1148,53 @@ impl AppView {
     pub fn is_zdr_blocked(&self) -> bool {
         self.is_zdr && !self.zdr_access_enabled
     }
-    /// User is not gated (no gate from remote settings or subscription fallback).
+    /// Whether the model backing the *active* surface is served by xAI, read
+    /// from ACP model `meta.firstParty`.
+    ///
+    /// Resolves the agent's own model when a session is focused, because
+    /// `self.models` tracks the shell-level default and only follows the
+    /// active agent on a catalog refresh (`x.ai/models/update`).
+    pub fn active_model_is_first_party(&self) -> bool {
+        if let ActiveView::Agent(id) = self.active_view
+            && let Some(agent) = self.agents.get(&id)
+            && agent.session.models.current.is_some()
+        {
+            return agent.session.models.current_model_is_first_party();
+        }
+        self.models.current_model_is_first_party()
+    }
+
+    /// Whether grok.com account features apply to what the user is doing right
+    /// now. Gates the subscription paywall, the tier slash-command deny list
+    /// and the subscription watch.
+    ///
+    /// Both conditions are necessary:
+    /// - the credential is a grok.com account — a plain API key is BYOK and a
+    ///   plugin-OAuth credential belongs to another vendor, so neither has a
+    ///   grok.com plan to gate on;
+    /// - the active model is served by xAI — an xAI account driving a custom
+    ///   provider's model is spending that provider's quota, so a grok.com
+    ///   subscription tier says nothing about what it may run.
+    ///
+    /// This is a live predicate on purpose: `has_access` and the subscription
+    /// watch re-read it, so switching models takes effect immediately. The two
+    /// gates that are *stored* (`usage_visible`, `tier_restricted_commands`)
+    /// are fanned out to slash registries and must be recomputed explicitly —
+    /// see [`Self::refresh_account_feature_gates`].
+    pub fn grok_account_features_apply(&self) -> bool {
+        self.is_first_party_account && self.active_model_is_first_party()
+    }
+
+    /// User is not gated (no gate from remote settings or subscription
+    /// fallback), or the gate does not apply to this session at all.
+    ///
+    /// The gate is a grok.com subscription paywall. Painting it over a BYOK or
+    /// plugin-OAuth session — or over an xAI account running a custom
+    /// provider's model — blocks work the grok.com plan does not pay for. The
+    /// server still authorizes every request it actually serves; this predicate
+    /// only decides whether the pager shows the paywall.
     pub fn has_access(&self) -> bool {
-        self.gate.is_none()
+        self.gate.is_none() || !self.grok_account_features_apply()
     }
     /// True when the user should not see the prompt (gate, subscription, or ZDR).
     pub fn is_access_blocked(&self) -> bool {
@@ -1192,15 +1241,14 @@ impl AppView {
             );
         }
         self.subscription_tier = meta.subscription_tier.clone();
+        self.is_first_party_account = meta.is_first_party_account;
         let was_api_key = self.is_api_key_auth;
         self.is_api_key_auth = meta.auth_mode.as_deref().is_some_and(is_api_key_label)
             || meta
                 .subscription_tier
                 .as_deref()
                 .is_some_and(is_api_key_label);
-        self.usage_visible = meta.team_name.is_none() && !self.is_api_key_auth;
-        self.sync_billing_surface_to_agents();
-        self.apply_tier_restrictions();
+        self.refresh_account_feature_gates();
         if self.is_api_key_auth {
             self.ensure_voice_for_api_key();
         } else if was_api_key && is_restricted_tier(self.subscription_tier.as_deref()) {
@@ -1399,6 +1447,7 @@ impl AppView {
             reconnect_pending: false,
             startup_warnings: Vec::new(),
             is_api_key_auth: false,
+            is_first_party_account: false,
             pending_update_version: None,
             foreign_resume_launch_generation: 0,
             foreign_resume_launch: None,
@@ -1506,19 +1555,60 @@ impl AppView {
             dashboard.set_auto_mode_available(available);
         }
     }
+    /// Recompute the two account-scoped gates that are *stored* rather than
+    /// derived on read — the usage/billing surface and the tier-restricted
+    /// slash commands — and fan them out to every slash registry.
+    ///
+    /// Call this wherever an input of [`Self::grok_account_features_apply`]
+    /// changes: auth meta, a subscription-tier push, or a model switch.
+    pub fn refresh_account_feature_gates(&mut self) {
+        self.usage_visible = self.expect_usage_visible();
+        self.sync_billing_surface_to_agents();
+        self.apply_tier_restrictions();
+    }
+    /// Account-scoped, not model-scoped: the usage readout is about the
+    /// grok.com account itself, so it stays available while that account
+    /// happens to be driving a custom provider's model. A team plan bills
+    /// centrally and an API key has no consumer billing surface at all.
+    fn expect_usage_visible(&self) -> bool {
+        self.team_name.is_none() && !self.is_api_key_auth && self.is_first_party_account
+    }
+    /// Model-scoped as well as account-scoped — see
+    /// [`Self::grok_account_features_apply`].
+    fn expect_tier_restricted(&self) -> bool {
+        self.team_name.is_none()
+            && !self.is_api_key_auth
+            && self.grok_account_features_apply()
+            && is_restricted_tier(self.subscription_tier.as_deref())
+    }
+    /// Recompute the stored account gates when they diverge from what their
+    /// inputs now imply. Checked per frame; the fan-out runs only on change.
+    ///
+    /// The model half of [`Self::grok_account_features_apply`] moves through
+    /// many paths — `/model`, a remote `ModelChanged` broadcast, `/new`,
+    /// resuming a session, switching to an agent parked on another model — and
+    /// a gate that only settles on the next auth-meta push would show the wrong
+    /// slash commands until then. Mirrors
+    /// [`Self::resync_announcement_slash_gate_on_divergence`].
+    pub fn resync_account_feature_gates_on_divergence(&mut self) {
+        if self.usage_visible != self.expect_usage_visible()
+            || self.tier_restricted_commands.is_empty() == self.expect_tier_restricted()
+        {
+            self.refresh_account_feature_gates();
+        }
+    }
     /// Recompute the tier-restricted slash commands from the current auth
     /// state and sync the deny list into every slash surface (welcome
     /// prompt, all agents, dashboard) so restricted commands hide/show in
     /// lockstep. Mirrors [`Self::apply_voice_mode_enabled`].
     ///
-    /// Called from [`Self::apply_auth_meta`] (startup / login) and from the
-    /// `x.ai/settings/update` handler when the subscription tier changes, so
-    /// a mid-session upgrade lifts the restrictions without a restart.
+    /// Reached through [`Self::refresh_account_feature_gates`] from
+    /// [`Self::apply_auth_meta`] (startup / login), the `x.ai/settings/update`
+    /// handler when the subscription tier changes, and every model switch — so
+    /// a mid-session upgrade or a hop to a custom provider's model settles
+    /// without a restart.
     pub fn apply_tier_restrictions(&mut self) {
-        let restricted = self.team_name.is_none()
-            && !self.is_api_key_auth
-            && is_restricted_tier(self.subscription_tier.as_deref());
-        let names: Vec<String> = if restricted {
+        let names: Vec<String> = if self.expect_tier_restricted() {
             TIER_RESTRICTED_COMMANDS
                 .iter()
                 .map(|n| (*n).to_string())
@@ -3842,6 +3932,7 @@ impl AppView {
     }
     fn draw_inner(&mut self, terminal: &mut PagerTerminal) {
         self.resync_announcement_slash_gate_on_divergence();
+        self.resync_account_feature_gates_on_divergence();
         if self.screen_mode.is_minimal() {
             if let Some(hooks) = crate::minimal_hook::hooks() {
                 (hooks.draw)(self, terminal);
@@ -5419,6 +5510,7 @@ pub(crate) mod tests {
             welcome_shimmer_frame: 0,
             startup_warnings: Vec::new(),
             is_api_key_auth: false,
+            is_first_party_account: true,
             pending_update_version: None,
             foreign_resume_launch_generation: 0,
             foreign_resume_launch: None,
@@ -6573,16 +6665,40 @@ pub(crate) mod tests {
     fn apply_auth_meta_enables_billing_surface_for_personal_users() {
         let mut app = test_app();
         app.usage_visible = false;
-        let meta = xai_grok_shell::auth::AuthMeta::default();
+        let meta = xai_grok_shell::auth::AuthMeta {
+            is_first_party_account: true,
+            ..Default::default()
+        };
         app.apply_auth_meta(&meta);
         assert!(app.usage_visible);
+    }
+
+    #[test]
+    fn apply_auth_meta_records_is_xai_auth_true() {
+        let mut app = test_app();
+        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
+            is_first_party_account: true,
+            ..Default::default()
+        });
+        assert!(app.is_first_party_account);
+    }
+
+    #[test]
+    fn apply_auth_meta_records_is_xai_auth_false() {
+        let mut app = test_app();
+        app.is_first_party_account = true;
+        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+        assert!(!app.is_first_party_account);
     }
     #[test]
     fn apply_auth_meta_clears_api_key_flag_and_restores_billing_on_personal_login() {
         let mut app = test_app();
         app.is_api_key_auth = true;
         app.usage_visible = false;
-        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
+            is_first_party_account: true,
+            ..Default::default()
+        });
         assert!(!app.is_api_key_auth);
         assert!(app.usage_visible);
     }
@@ -6612,6 +6728,7 @@ pub(crate) mod tests {
         assert!(app.tier_restricted_commands.is_empty());
         app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
             auth_mode: Some("Oidc".into()),
+            is_first_party_account: true,
             subscription_tier: Some("Free".into()),
             ..Default::default()
         });
@@ -6647,6 +6764,23 @@ pub(crate) mod tests {
             );
         app.welcome_prompt.set_voice_visible(true);
     }
+
+    fn set_current_model_first_party(app: &mut AppView, first_party: bool) {
+        use agent_client_protocol as acp;
+        use std::sync::Arc;
+
+        let id = acp::ModelId::new(Arc::from("test-model"));
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "firstParty".to_string(),
+            serde_json::Value::Bool(first_party),
+        );
+        app.models.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "Test Model".to_string()).meta(Some(meta)),
+        );
+        app.models.current = Some(id);
+    }
     fn assert_tier_restricted_commands_absent(app: &AppView) {
         let reg = app.welcome_prompt.slash_controller.registry();
         for name in TIER_RESTRICTED_COMMANDS {
@@ -6670,7 +6804,10 @@ pub(crate) mod tests {
     fn apply_auth_meta_restricts_usage_for_free_tier() {
         let mut app = test_app();
         advertise_media_tools(&mut app);
-        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
+            is_first_party_account: true,
+            ..Default::default()
+        });
         assert_eq!(
             app.tier_restricted_commands,
             expected_tier_restricted_commands()
@@ -6678,11 +6815,100 @@ pub(crate) mod tests {
         assert_tier_restricted_commands_absent(&app);
         assert!(app.usage_visible);
     }
+
+    #[test]
+    fn apply_auth_meta_skips_tier_gate_for_custom_provider_model() {
+        let mut app = test_app();
+        advertise_media_tools(&mut app);
+        set_current_model_first_party(&mut app, false);
+        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
+            is_first_party_account: true,
+            ..Default::default()
+        });
+        assert!(app.tier_restricted_commands.is_empty());
+        assert_tier_restricted_commands_present(&app);
+    }
+
+    #[test]
+    /// A BYOK or plugin-OAuth session has no grok.com plan: no tier deny list,
+    /// and no usage/billing surface either.
+    fn apply_auth_meta_skips_account_gates_for_non_first_party_session() {
+        let mut app = test_app();
+        advertise_media_tools(&mut app);
+        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+        assert!(app.tier_restricted_commands.is_empty());
+        assert_tier_restricted_commands_present(&app);
+        assert!(!app.usage_visible);
+    }
+
+    /// The paywall is a grok.com subscription gate; it must not block a
+    /// session that is not spending a grok.com plan.
+    #[test]
+    fn gate_does_not_block_a_non_first_party_session() {
+        let mut app = test_app();
+        app.gate = Some(xai_grok_shell::auth::GateInfo {
+            message: "Subscribe".into(),
+            url: None,
+            label: None,
+        });
+        app.is_first_party_account = true;
+        assert!(
+            !app.has_access(),
+            "grok.com account on an xAI model is gated"
+        );
+        app.is_first_party_account = false;
+        assert!(app.has_access(), "BYOK / plugin-OAuth session is not gated");
+    }
+
+    /// Same gate, same account — but the model is served by a custom provider,
+    /// so the grok.com plan is not what is paying for the turn.
+    #[test]
+    fn gate_does_not_block_a_custom_provider_model() {
+        let mut app = test_app();
+        app.gate = Some(xai_grok_shell::auth::GateInfo {
+            message: "Subscribe".into(),
+            url: None,
+            label: None,
+        });
+        set_current_model_first_party(&mut app, true);
+        assert!(!app.has_access());
+        set_current_model_first_party(&mut app, false);
+        assert!(app.has_access());
+    }
+
+    /// The model half of the gate moves without any auth traffic, so the
+    /// stored deny list has to resettle on its own.
+    #[test]
+    fn tier_gate_resyncs_when_the_model_switches_provider() {
+        let mut app = test_app();
+        advertise_media_tools(&mut app);
+        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
+            is_first_party_account: true,
+            ..Default::default()
+        });
+        assert!(
+            !app.tier_restricted_commands.is_empty(),
+            "free tier on grok"
+        );
+
+        set_current_model_first_party(&mut app, false);
+        app.resync_account_feature_gates_on_divergence();
+        assert!(app.tier_restricted_commands.is_empty());
+        assert_tier_restricted_commands_present(&app);
+
+        set_current_model_first_party(&mut app, true);
+        app.resync_account_feature_gates_on_divergence();
+        assert_eq!(
+            app.tier_restricted_commands,
+            expected_tier_restricted_commands()
+        );
+    }
     #[test]
     fn apply_auth_meta_restricts_usage_for_x_basic_tier() {
         let mut app = test_app();
         advertise_media_tools(&mut app);
         let meta = xai_grok_shell::auth::AuthMeta {
+            is_first_party_account: true,
             subscription_tier: Some("X Basic".into()),
             ..Default::default()
         };
@@ -6698,6 +6924,7 @@ pub(crate) mod tests {
         let mut app = test_app();
         advertise_media_tools(&mut app);
         let meta = xai_grok_shell::auth::AuthMeta {
+            is_first_party_account: true,
             subscription_tier: Some("SuperGrok".into()),
             ..Default::default()
         };
@@ -6706,7 +6933,10 @@ pub(crate) mod tests {
         assert_tier_restricted_commands_present(&app);
         let mut app = test_app();
         advertise_media_tools(&mut app);
-        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
+            is_first_party_account: true,
+            ..Default::default()
+        });
         assert!(!app.tier_restricted_commands.is_empty());
         app.subscription_tier = Some("SuperGrok".into());
         app.apply_tier_restrictions();
@@ -6741,10 +6971,14 @@ pub(crate) mod tests {
     #[test]
     fn is_voice_tier_restricted_tracks_tier() {
         let mut app = test_app();
-        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
+            is_first_party_account: true,
+            ..Default::default()
+        });
         assert!(app.is_voice_tier_restricted());
         let mut app = test_app();
         let meta = xai_grok_shell::auth::AuthMeta {
+            is_first_party_account: true,
             subscription_tier: Some("SuperGrok".into()),
             ..Default::default()
         };
@@ -6775,6 +7009,7 @@ pub(crate) mod tests {
         };
         app.gate = Some(gate.clone());
         let meta = xai_grok_shell::auth::AuthMeta {
+            is_first_party_account: true,
             gate: Some(gate),
             ..Default::default()
         };

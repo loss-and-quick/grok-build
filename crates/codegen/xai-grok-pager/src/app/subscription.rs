@@ -43,12 +43,15 @@ pub(crate) const SUBSCRIPTION_CHECK_DEBOUNCE: std::time::Duration =
 pub(crate) const GATE_VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl AppView {
-    /// Consumer xAI session auth: not an API key, not an enterprise team.
-    /// Subscription gates and the watch only apply to these sessions.
+    /// Consumer grok.com session: not an API key, not an enterprise team, and
+    /// currently spending a grok.com plan rather than a custom provider's
+    /// quota. Subscription gates and the watch only apply to these sessions —
+    /// see [`AppView::grok_account_features_apply`].
     fn is_consumer_session(&self) -> bool {
         matches!(self.auth_state, AuthState::Done)
             && !self.is_api_key_auth
             && self.team_name.is_none()
+            && self.grok_account_features_apply()
     }
 
     /// `None` tier counts as potentially-free so detection works before the

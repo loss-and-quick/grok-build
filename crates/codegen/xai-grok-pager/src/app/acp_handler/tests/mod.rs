@@ -178,6 +178,9 @@ pub(super) fn last_session_event(sb: &ScrollbackState) -> Option<SessionEvent> {
 pub(super) fn make_app_with_agent(session_id: &str) -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
+    // These fixtures stand in for a signed-in grok.com session; without this the
+    // account gates (usage surface, tier deny list) are off by construction.
+    app.is_first_party_account = true;
     let id = AgentId(0);
     let agent = make_agent(Some(session_id));
     app.agents.insert(id, agent);

@@ -1591,6 +1591,10 @@ pub(in crate::app::dispatch) fn set_default_model_inner(
     if app.models.available.contains_key(id) {
         app.models.set_current(id.clone(), None);
     }
+    // Hopping between an xAI model and a custom provider's flips
+    // `grok_account_features_apply`, so the stored account gates have to be
+    // recomputed here — nothing else re-reads them until the next auth meta.
+    app.refresh_account_feature_gates();
     true
 }
 

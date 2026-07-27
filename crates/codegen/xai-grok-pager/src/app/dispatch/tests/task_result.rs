@@ -716,10 +716,10 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
     // PersistPreferredModel effect emitted.
     assert_eq!(effects.len(), 1);
     assert!(matches!(
-        &effects[0],
-        Effect::PersistPreferredModel { model_id: mid, .. }
-if *mid == model_id.clone()
-    ));
+            &effects[0],
+            Effect::PersistPreferredModel { model_id: mid, .. }
+    if *mid == model_id.clone()
+        ));
 }
 
 #[test]
@@ -1818,6 +1818,7 @@ fn verify_check_with_gated_meta_shows_gate() {
     let _effs = app.impose_gate(test_gate());
 
     let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta {
+        is_first_party_account: true,
         gate: Some(test_gate()),
         ..Default::default()
     })
@@ -1989,7 +1990,11 @@ fn gate_verify_timeout_stale_generation_is_ignored() {
     // First deferral resolves (access confirmed) ...
     let _effs = app.impose_gate(test_gate());
     let stale_gen = app.gate_verify_gen;
-    let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta::default()).unwrap();
+    let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta {
+        is_first_party_account: true,
+        ..Default::default()
+    })
+    .unwrap();
     dispatch_task_result(
         TaskResult::CheckSubscriptionComplete {
             verify: None,
@@ -2030,6 +2035,7 @@ fn verified_gate_via_check_complete_starts_paywall_chain() {
     let _effs = app.impose_gate(test_gate());
 
     let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta {
+        is_first_party_account: true,
         gate: Some(test_gate()),
         ..Default::default()
     })
@@ -2057,6 +2063,7 @@ fn verified_gate_via_check_complete_starts_paywall_chain() {
     // Steady-state paywall-poller responses (already gated) must NOT fan
     // out extra timers.
     let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta {
+        is_first_party_account: true,
         gate: Some(test_gate()),
         ..Default::default()
     })
