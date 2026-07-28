@@ -1295,12 +1295,38 @@ pub(crate) async fn spawn_session_actor(
                 Some(Arc::new(registry))
             }
         };
+    // Plugin-contributed hooks: each active plugin's `hooks.json`, its inline
+    // manifest hooks, and the synthetic per-event sidecar specs. Hook *discovery*
+    // above knows nothing about plugins — it reads hook files and config layers
+    // only — so without this append a freshly spawned session carries no plugin
+    // hooks at all: every plugin seam (`session_start`, `provider_request`, the
+    // credential events, `permission_ask`, …) stays dead until an unrelated
+    // `/hooks reload` or `ReloadPlugins` fan-out happens to rebuild the registry.
+    // Append them here, beside the host that will serve them, so a plain session
+    // works on its own.
+    let hook_count_before = built_hook_registry.as_ref().map_or(0, |r| r.len());
+    let built_hook_registry = crate::session::plugin_host::registry_with_plugin_specs(
+        built_hook_registry,
+        plugin_registry.as_deref(),
+    );
+    // Only when specs were actually added: a session with no plugin hooks must
+    // not log a second, identical count claiming plugin specs it lacks — this
+    // line is the signal that says whether the plugin surface is live.
+    if let Some(ref registry) = built_hook_registry
+        && registry.len() > hook_count_before
+    {
+        tracing::info!(
+            hook_count = registry.len(),
+            plugin_specs = registry.len() - hook_count_before,
+            "appended plugin hook specs"
+        );
+    }
     let hook_registry_for_handle = built_hook_registry.clone();
     // TS plugin sidecar host: built once from the initial registry snapshot when
     // any loaded plugin declares a sidecar. `None` (no sidecar plugins) keeps
     // startup free of any plugin-host machinery. Sidecars spawn lazily on the
     // first matching hook; the synthetic `Plugin` hook specs that route events
-    // here are appended by the hooks_adapter merge path (see
+    // here were appended just above (see
     // `session::plugin_host::sidecar_plugin_hook_specs`).
     // Per-plugin config source: `[plugins.<name>]` tables from the effective
     // config.toml. Merged over each plugin's manifest `config` defaults inside

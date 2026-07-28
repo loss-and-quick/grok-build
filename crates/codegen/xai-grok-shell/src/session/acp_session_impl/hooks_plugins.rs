@@ -650,49 +650,14 @@ impl SessionActor {
         // Clone the Arc out of the RefCell so the borrow is dropped immediately.
         let plugin_registry_snapshot = self.plugin_registry.borrow().clone();
         if let Some(ref pr) = plugin_registry_snapshot {
-            for plugin in pr.active_plugins() {
-                if let Some(ref hooks_path) = plugin.hooks_path {
-                    let (specs, warnings) =
-                        xai_grok_agent::plugins::hooks_adapter::parse_plugin_hooks(
-                            hooks_path,
-                            &plugin.name,
-                            &plugin.root_str(),
-                            &plugin.data_dir_str(),
-                        );
-                    for w in &warnings {
-                        tracing::warn!("{w}");
-                    }
-                    registry.append_specs(specs);
-                }
-                if let Some(ref inline_value) = plugin.inline_hooks {
-                    let (specs, warnings) =
-                        xai_grok_agent::plugins::hooks_adapter::parse_plugin_hooks_from_value(
-                            inline_value,
-                            &plugin.name,
-                            &plugin.root_str(),
-                            &plugin.data_dir_str(),
-                        );
-                    for w in &warnings {
-                        tracing::warn!("{w}");
-                    }
-                    registry.append_specs(specs);
-                }
-                // TS sidecar plugins: register `HandlerType::Plugin` specs for all
-                // canonical events so the dispatcher routes them to the sidecar via
-                // the injected `PluginHookInvoker`. Registering the full event set
-                // (rather than probing subscriptions here) is cheap: the host
-                // short-circuits events a plugin didn't subscribe to after its
-                // handshake. Merged in the same plugin loop as command/http hooks
-                // so it inherits the identical load lifecycle and precedence.
-                if plugin.sidecar_spec().is_some() {
-                    registry.append_specs(
-                        crate::session::plugin_host::sidecar_plugin_hook_specs(
-                            &plugin.name,
-                            &plugin.root,
-                        ),
-                    );
-                }
+            // File, inline, and sidecar specs in one shot — the same collection
+            // session spawn and the snapshot path use, so a reload can't honour
+            // a spec kind the others miss.
+            let (specs, warnings) = crate::session::plugin_host::plugin_hook_specs(pr);
+            for w in &warnings {
+                tracing::warn!("{w}");
             }
+            registry.append_specs(specs);
         }
         let hook_count = registry.len();
         {
@@ -863,46 +828,13 @@ impl SessionActor {
         let t_hooks = std::time::Instant::now();
         let mut hooks_reloaded = 0usize;
         if let Some(ref new_registry) = new_registry_snapshot {
-            let mut new_specs = Vec::new();
-            for plugin in new_registry.active_plugins() {
-                // File-based hooks
-                if let Some(ref hooks_path) = plugin.hooks_path {
-                    let (specs, warnings) =
-                        xai_grok_agent::plugins::hooks_adapter::parse_plugin_hooks(
-                            hooks_path,
-                            &plugin.name,
-                            &plugin.root_str(),
-                            &plugin.data_dir_str(),
-                        );
-                    for w in &warnings {
-                        tracing::warn!("{w}");
-                    }
-                    new_specs.extend(specs);
-                }
-                // Inline hooks
-                if let Some(ref inline_value) = plugin.inline_hooks {
-                    let (specs, warnings) =
-                        xai_grok_agent::plugins::hooks_adapter::parse_plugin_hooks_from_value(
-                            inline_value,
-                            &plugin.name,
-                            &plugin.root_str(),
-                            &plugin.data_dir_str(),
-                        );
-                    for w in &warnings {
-                        tracing::warn!("{w}");
-                    }
-                    new_specs.extend(specs);
-                }
-                // TS sidecar plugins: synthetic `HandlerType::Plugin` specs for
-                // all canonical events (see `sidecar_plugin_hook_specs`). Named
-                // `plugin/…` so the `remove_by_prefix("plugin/")` below re-cleans
-                // them on each snapshot, exactly like command/http plugin hooks.
-                if plugin.sidecar_spec().is_some() {
-                    new_specs.extend(crate::session::plugin_host::sidecar_plugin_hook_specs(
-                        &plugin.name,
-                        &plugin.root,
-                    ));
-                }
+            // File, inline, and sidecar specs from the incoming snapshot. Every
+            // one is named `plugin/…`, so the `remove_by_prefix("plugin/")`
+            // below re-cleans the previous contribution before re-appending.
+            let (new_specs, warnings) =
+                crate::session::plugin_host::plugin_hook_specs(new_registry);
+            for w in &warnings {
+                tracing::warn!("{w}");
             }
             hooks_reloaded = new_specs.len();
             {

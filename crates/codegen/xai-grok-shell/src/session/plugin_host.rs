@@ -241,9 +241,10 @@ fn registered_sidecar_plugins(
 /// one per canonical event in [`SIDECAR_HOOK_EVENTS`] — so the dispatcher routes
 /// those events to the plugin's sidecar via the injected invoker.
 ///
-/// Registered beside the command/http plugin-hook appends in the hooks_adapter
-/// merge path (`reload_hooks_impl` / `apply_plugin_registry_snapshot`), so they
-/// inherit the same load lifecycle and precedence.
+/// Emitted beside the command/http plugin hooks by [`plugin_hook_specs`], the
+/// one place every merge path (session spawn, `reload_hooks_impl`,
+/// `apply_plugin_registry_snapshot`) collects plugin specs, so they inherit the
+/// same load lifecycle and precedence.
 pub(crate) fn sidecar_plugin_hook_specs(
     plugin_name: &str,
     source_dir: &std::path::Path,
@@ -278,6 +279,87 @@ pub(crate) fn sidecar_plugin_hook_specs(
             }
         })
         .collect()
+}
+
+/// Every hook spec a plugin registry contributes, in the order the merge paths
+/// append them: per active plugin, its `hooks.json` file specs, then its inline
+/// manifest hook specs, then the synthetic sidecar specs. The single definition
+/// of "what plugins add to a hook registry" — session spawn, `/hooks reload`,
+/// and the plugin-registry snapshot all route through it, so no path can go
+/// blind to a spec kind the others honour.
+///
+/// Adapter warnings are returned rather than logged so each caller can log them
+/// in its own context. Every spec is named `plugin/…`, which is what lets the
+/// snapshot path re-clean its previous contribution with
+/// `remove_by_prefix("plugin/")` before re-appending.
+pub(crate) fn plugin_hook_specs(registry: &PluginRegistry) -> (Vec<HookSpec>, Vec<String>) {
+    let mut specs = Vec::new();
+    let mut warnings = Vec::new();
+    for plugin in registry.active_plugins() {
+        // File-based hooks (`hooks.json`, or the manifest's `hooks` path).
+        if let Some(ref hooks_path) = plugin.hooks_path {
+            let (file_specs, file_warnings) =
+                xai_grok_agent::plugins::hooks_adapter::parse_plugin_hooks(
+                    hooks_path,
+                    &plugin.name,
+                    &plugin.root_str(),
+                    &plugin.data_dir_str(),
+                );
+            specs.extend(file_specs);
+            warnings.extend(file_warnings);
+        }
+        // Inline manifest hooks (`"hooks": { … }` instead of a path).
+        if let Some(ref inline_value) = plugin.inline_hooks {
+            let (inline_specs, inline_warnings) =
+                xai_grok_agent::plugins::hooks_adapter::parse_plugin_hooks_from_value(
+                    inline_value,
+                    &plugin.name,
+                    &plugin.root_str(),
+                    &plugin.data_dir_str(),
+                );
+            specs.extend(inline_specs);
+            warnings.extend(inline_warnings);
+        }
+        // TS sidecar plugins: synthetic `HandlerType::Plugin` specs for all
+        // canonical events so the dispatcher routes them to the sidecar via the
+        // injected `PluginHookInvoker`. Registering the full event set (rather
+        // than probing subscriptions here) is cheap: the host short-circuits
+        // events a plugin didn't subscribe to after its handshake.
+        if plugin.sidecar_spec().is_some() {
+            specs.extend(sidecar_plugin_hook_specs(&plugin.name, &plugin.root));
+        }
+    }
+    (specs, warnings)
+}
+
+/// Append every [`plugin_hook_specs`] contribution to a session's hook registry,
+/// returning the registry the session should run with.
+///
+/// Hook *discovery* builds the registry from hook files and config layers and
+/// knows nothing about plugins, so this is what puts a plugin on the dispatcher
+/// at all. Without it a freshly spawned session has no plugin hooks: every seam
+/// — `session_start`, `provider_request`, the credential events,
+/// `permission_ask` — stays dead until an unrelated `/hooks reload` or
+/// `ReloadPlugins` fan-out happens to rebuild the registry.
+///
+/// Returns the input unchanged when no active plugin contributes a spec, so a
+/// plugin-less session keeps a `None` registry and skips the machinery.
+pub(crate) fn registry_with_plugin_specs(
+    registry: Option<Arc<xai_grok_hooks::discovery::HookRegistry>>,
+    plugin_registry: Option<&PluginRegistry>,
+) -> Option<Arc<xai_grok_hooks::discovery::HookRegistry>> {
+    let (specs, warnings) = plugin_registry.map(plugin_hook_specs).unwrap_or_default();
+    // Logged even when nothing was contributed: an unreadable `hooks.json` warns
+    // and yields no specs, and session startup is where that must surface.
+    for w in &warnings {
+        tracing::warn!("session spawn: {w}");
+    }
+    if specs.is_empty() {
+        return registry;
+    }
+    let mut merged = registry.map(|arc| (*arc).clone()).unwrap_or_default();
+    merged.append_specs(specs);
+    Some(Arc::new(merged))
 }
 
 /// The shell's [`xai_grok_plugin_host::AgentOrchestrator`]: routes every
@@ -851,6 +933,411 @@ mod tests {
             .find(|s| s.event == HookEventName::StartOauthFlow)
             .unwrap();
         assert_eq!(oauth.timeout_ms, DEFAULT_INTERACTIVE_GATE_TIMEOUT_MS);
+    }
+
+    /// A `DiscoveredPlugin` rooted at `parent/<name>`, exactly as discovery
+    /// would hand it to [`PluginRegistry::from_discovered`]. `sidecar` writes the
+    /// entry file too: the manifest's `plugin` field only resolves to a
+    /// `SidecarSpec` when that file is really on disk.
+    fn discovered_plugin(
+        parent: &std::path::Path,
+        name: &str,
+        sidecar: bool,
+        trusted: bool,
+    ) -> xai_grok_agent::plugins::discovery::DiscoveredPlugin {
+        use xai_grok_agent::plugins::discovery::{DiscoveredPlugin, PluginId};
+        use xai_grok_agent::plugins::{PluginOrigin, PluginScope};
+
+        let root = parent.join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut manifest = serde_json::json!({ "name": name });
+        if sidecar {
+            std::fs::write(root.join("index.ts"), "export default {};").unwrap();
+            manifest["plugin"] = serde_json::json!("./index.ts");
+        }
+        DiscoveredPlugin {
+            manifest: serde_json::from_value(manifest).unwrap(),
+            id: PluginId::new(PluginScope::User, &root, name),
+            root: root.clone(),
+            canonical_root: root,
+            scope: PluginScope::User,
+            origin: PluginOrigin::UserGrok,
+            trusted,
+            skill_dirs: vec![],
+            command_dirs: vec![],
+            agent_dirs: vec![],
+            hooks_path: None,
+            mcp_config_path: None,
+            lsp_config_path: None,
+            conflict: None,
+        }
+    }
+
+    /// The `hooks` block a test plugin declares: one `post_tool_use` command
+    /// hook, in the settings-file shape both the file and inline parsers take.
+    fn hooks_json(command: &str) -> serde_json::Value {
+        serde_json::json!({
+            "hooks": {
+                "PostToolUse": [{ "hooks": [{ "type": "command", "command": command }] }]
+            }
+        })
+    }
+
+    /// Give a discovered plugin inline manifest hooks (`plugin.inline_hooks`).
+    fn with_inline_hooks(
+        mut dp: xai_grok_agent::plugins::discovery::DiscoveredPlugin,
+        hooks: serde_json::Value,
+    ) -> xai_grok_agent::plugins::discovery::DiscoveredPlugin {
+        dp.manifest.hooks = Some(xai_grok_agent::plugins::manifest::PathOrInline::Inline(
+            hooks,
+        ));
+        dp
+    }
+
+    /// Write a real `hooks.json` into the plugin root and point discovery at it
+    /// (`plugin.hooks_path`) — the file must exist, since the adapter reads it.
+    fn with_hooks_file(
+        mut dp: xai_grok_agent::plugins::discovery::DiscoveredPlugin,
+        hooks: serde_json::Value,
+    ) -> xai_grok_agent::plugins::discovery::DiscoveredPlugin {
+        let path = dp.root.join("hooks.json");
+        std::fs::write(&path, serde_json::to_string(&hooks).unwrap()).unwrap();
+        dp.hooks_path = Some(path);
+        dp
+    }
+
+    /// A registry built the production way, so `active_plugins()`'s real
+    /// enabled/trusted rules — the filter `registry_with_plugin_specs` leans on
+    /// — actually run instead of being simulated by a hand-picked plugin list.
+    fn plugin_registry(
+        plugins: Vec<xai_grok_agent::plugins::discovery::DiscoveredPlugin>,
+        enabled: &[&str],
+    ) -> PluginRegistry {
+        let enabled: Vec<String> = enabled.iter().map(|s| (*s).to_string()).collect();
+        PluginRegistry::from_discovered(plugins, &[], &enabled)
+    }
+
+    /// A registry holding one non-plugin hook, standing in for what discovery
+    /// found in the user's config layer before any plugin append.
+    fn registry_with_config_layer_hook() -> xai_grok_hooks::discovery::HookRegistry {
+        let mut registry = xai_grok_hooks::discovery::HookRegistry::default();
+        registry.append_specs(vec![HookSpec {
+            name: "global/audit".to_string(),
+            event: HookEventName::PreToolUse,
+            handler_type: HandlerType::Command,
+            configured_matcher: None,
+            matcher: None,
+            enabled: true,
+            command: Some(std::path::PathBuf::from("/bin/true")),
+            command_raw: Some("/bin/true".to_string()),
+            url: None,
+            url_raw: None,
+            plugin: None,
+            plugin_handler: None,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            source_dir: std::path::PathBuf::from("/ws"),
+            extra_env: std::collections::HashMap::new(),
+            layer: xai_grok_hooks::config::HookProvenance::User,
+        }]);
+        registry
+    }
+
+    /// The spawn-time append is what puts a sidecar plugin on the dispatcher at
+    /// all: hook discovery reads files and config layers only, so a session that
+    /// skipped this step ran with no plugin hooks and every sidecar seam silently
+    /// dead. Built from a real `PluginRegistry` — a test that seeds the hook
+    /// registry with `sidecar_plugin_hook_specs` itself cannot catch that.
+    #[test]
+    fn sidecar_specs_reach_the_dispatcher_from_a_plugin_registry_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = plugin_registry(
+            vec![discovered_plugin(tmp.path(), "council", true, true)],
+            &["council"],
+        );
+
+        // `None` = what discovery hands a session with no hook files at all.
+        let registry = registry_with_plugin_specs(None, Some(&plugins))
+            .expect("a sidecar plugin must produce a registry");
+
+        // Looked up the way the dispatcher looks it up, not merely counted:
+        // `start_oauth_flow` is the seam whose silent death exposed the gap.
+        assert!(registry.has_enabled_hooks_for_canonical(HookEventName::StartOauthFlow));
+        let oauth = registry.hooks_for_canonical(HookEventName::StartOauthFlow);
+        assert_eq!(oauth.len(), 1);
+        assert_eq!(oauth[0].handler_type, HandlerType::Plugin);
+        assert_eq!(oauth[0].name, "plugin/council/sidecar:start_oauth_flow");
+        assert_eq!(oauth[0].source_dir, tmp.path().join("council"));
+
+        // Every other canonical sidecar event is reachable too, so no seam is
+        // left dead by an append that only half-populated the registry.
+        for &event in SIDECAR_HOOK_EVENTS {
+            assert!(
+                registry.has_enabled_hooks_for_canonical(event),
+                "sidecar event {event} is unreachable"
+            );
+        }
+    }
+
+    /// `credential_seam::registry_for_plugin` narrows to one plugin's sign-in by
+    /// filtering `spec.plugin == Some(<name>)`, so specs that arrived without
+    /// attribution would either vanish from that filter or run the wrong flow.
+    #[test]
+    fn appended_specs_are_attributed_to_their_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = plugin_registry(
+            vec![
+                discovered_plugin(tmp.path(), "council", true, true),
+                discovered_plugin(tmp.path(), "notary", true, true),
+            ],
+            &["council", "notary"],
+        );
+
+        let registry = registry_with_plugin_specs(None, Some(&plugins)).expect("registry built");
+        let oauth = registry.hooks_for_canonical(HookEventName::StartOauthFlow);
+        assert_eq!(oauth.len(), 2);
+        assert!(oauth.iter().all(|s| s.plugin.is_some()));
+
+        // The exact narrowing `registry_for_plugin` performs.
+        let targeted: Vec<&str> = oauth
+            .iter()
+            .filter(|s| s.plugin.as_deref() == Some("council"))
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(targeted, ["plugin/council/sidecar:start_oauth_flow"]);
+    }
+
+    /// The append must merge, not replace: a session that already loaded hooks
+    /// from its config layer keeps them once a sidecar plugin joins.
+    #[test]
+    fn pre_existing_hooks_survive_the_append() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = plugin_registry(
+            vec![discovered_plugin(tmp.path(), "council", true, true)],
+            &["council"],
+        );
+
+        let existing = Arc::new(registry_with_config_layer_hook());
+        let merged =
+            registry_with_plugin_specs(Some(existing), Some(&plugins)).expect("registry built");
+
+        // Both hooks live on `pre_tool_use`; neither displaces the other.
+        let pre = merged.hooks_for_canonical(HookEventName::PreToolUse);
+        assert!(
+            pre.iter()
+                .any(|s| s.name == "global/audit" && s.handler_type == HandlerType::Command),
+            "config-layer hook was dropped by the plugin append"
+        );
+        assert!(pre.iter().any(
+            |s| s.plugin.as_deref() == Some("council") && s.handler_type == HandlerType::Plugin
+        ));
+        assert!(merged.has_enabled_hooks_for_canonical(HookEventName::StartOauthFlow));
+    }
+
+    /// A session with no plugins keeps its registry byte-for-byte — including
+    /// staying `None`, so no plugin machinery is armed for a plain session.
+    #[test]
+    fn no_plugin_registry_returns_the_input_unchanged() {
+        assert!(registry_with_plugin_specs(None, None).is_none());
+
+        let existing = Arc::new(registry_with_config_layer_hook());
+        let same = registry_with_plugin_specs(Some(existing.clone()), None).expect("kept");
+        assert!(Arc::ptr_eq(&existing, &same), "registry was rebuilt");
+    }
+
+    /// Plugins that ship skills/commands but declare no hooks and no sidecar
+    /// entry add no specs: the dispatcher has nothing to route to them.
+    #[test]
+    fn plugins_without_hooks_return_the_input_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = plugin_registry(
+            vec![discovered_plugin(tmp.path(), "skills-only", false, true)],
+            &["skills-only"],
+        );
+        assert!(plugins.active_plugins().len() == 1, "plugin is active");
+        assert!(registry_with_plugin_specs(None, Some(&plugins)).is_none());
+
+        let existing = Arc::new(registry_with_config_layer_hook());
+        let same =
+            registry_with_plugin_specs(Some(existing.clone()), Some(&plugins)).expect("kept");
+        assert!(Arc::ptr_eq(&existing, &same), "registry was rebuilt");
+    }
+
+    /// A plugin whose hooks live in a `hooks.json` is just as dark as a sidecar
+    /// when the spawn path skips it — the file kind flows through the very same
+    /// [`plugin_hook_specs`] collection, so spawn must pick it up.
+    #[test]
+    fn file_hooks_reach_the_dispatcher_from_a_plugin_registry_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = plugin_registry(
+            vec![with_hooks_file(
+                discovered_plugin(tmp.path(), "linter", false, true),
+                hooks_json("./lint.sh"),
+            )],
+            &["linter"],
+        );
+
+        let registry = registry_with_plugin_specs(None, Some(&plugins))
+            .expect("a file-hooks plugin must produce a registry");
+        let post = registry.hooks_for_canonical(HookEventName::PostToolUse);
+        assert_eq!(post.len(), 1);
+        assert_eq!(post[0].handler_type, HandlerType::Command);
+        // Namespaced `plugin/<name>/…` so the snapshot path's
+        // `remove_by_prefix("plugin/")` can re-clean it.
+        assert!(
+            post[0].name.starts_with("plugin/linter/"),
+            "unexpected hook name: {}",
+            post[0].name
+        );
+        assert_eq!(
+            post[0].layer,
+            xai_grok_hooks::config::HookProvenance::Plugin
+        );
+        // The adapter's env injection rode along, so `$GROK_PLUGIN_ROOT` in the
+        // hook's command resolves at spawn exactly as it does after a reload.
+        assert_eq!(
+            post[0]
+                .extra_env
+                .get("GROK_PLUGIN_ROOT")
+                .map(String::as_str),
+            Some(tmp.path().join("linter").to_string_lossy().as_ref())
+        );
+    }
+
+    /// Same for hooks declared inline in the manifest (`"hooks": { … }`): no
+    /// file on disk, and previously invisible to a freshly spawned session.
+    #[test]
+    fn inline_hooks_reach_the_dispatcher_from_a_plugin_registry_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = plugin_registry(
+            vec![with_inline_hooks(
+                discovered_plugin(tmp.path(), "inliner", false, true),
+                hooks_json("echo inline"),
+            )],
+            &["inliner"],
+        );
+        assert!(
+            plugins.get("inliner").unwrap().hooks_path.is_none(),
+            "inline hooks must not resolve a file path"
+        );
+
+        let registry = registry_with_plugin_specs(None, Some(&plugins))
+            .expect("an inline-hooks plugin must produce a registry");
+        let post = registry.hooks_for_canonical(HookEventName::PostToolUse);
+        assert_eq!(post.len(), 1);
+        assert_eq!(post[0].handler_type, HandlerType::Command);
+        assert!(
+            post[0].name.starts_with("plugin/inliner/"),
+            "unexpected hook name: {}",
+            post[0].name
+        );
+        assert_eq!(
+            post[0].layer,
+            xai_grok_hooks::config::HookProvenance::Plugin
+        );
+    }
+
+    /// All three kinds from one plugin, in the order the reload paths append
+    /// them: file hooks, inline hooks, then the synthetic sidecar specs. The
+    /// shared collection is what keeps spawn and the two reload paths identical.
+    #[test]
+    fn plugin_hook_specs_collects_file_inline_and_sidecar_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = plugin_registry(
+            vec![with_inline_hooks(
+                with_hooks_file(
+                    discovered_plugin(tmp.path(), "everything", true, true),
+                    hooks_json("./from-file.sh"),
+                ),
+                hooks_json("echo from-inline"),
+            )],
+            &["everything"],
+        );
+
+        let (specs, warnings) = plugin_hook_specs(&plugins);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(specs.len(), 2 + SIDECAR_HOOK_EVENTS.len());
+        // File first, inline second (the inline parser labels specs from the
+        // synthetic `plugin.json` path), sidecar specs last.
+        assert!(specs[0].name.starts_with("plugin/everything/hooks:"));
+        assert!(specs[1].name.starts_with("plugin/everything/plugin:"));
+        assert!(
+            specs[2..]
+                .iter()
+                .all(|s| s.handler_type == HandlerType::Plugin)
+        );
+    }
+
+    /// Adapter warnings come back to the caller instead of being swallowed, and
+    /// a plugin that produced only warnings adds nothing: the registry is
+    /// returned untouched rather than rebuilt around an empty spec list.
+    #[test]
+    fn unreadable_hook_files_warn_without_contributing_specs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut dp = discovered_plugin(tmp.path(), "broken", false, true);
+        // Points at a file that was never written — what a plugin whose
+        // `hooks.json` vanished (or is unreadable) looks like at load time.
+        dp.hooks_path = Some(dp.root.join("hooks.json"));
+        let plugins = plugin_registry(vec![dp], &["broken"]);
+
+        let (specs, warnings) = plugin_hook_specs(&plugins);
+        assert!(specs.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("broken") && warnings[0].contains("hooks file"),
+            "unexpected warning: {}",
+            warnings[0]
+        );
+
+        let existing = Arc::new(registry_with_config_layer_hook());
+        let same =
+            registry_with_plugin_specs(Some(existing.clone()), Some(&plugins)).expect("kept");
+        assert!(Arc::ptr_eq(&existing, &same), "registry was rebuilt");
+    }
+
+    /// The original bug was not in this function — it was that *nothing called
+    /// it at spawn*, so every session started with an unpopulated registry. That
+    /// wiring has no unit-testable seam: it lives inside `spawn_session_actor`, a
+    /// ~100-argument async fn, and the crate allows `dead_code`, so dropping the
+    /// call compiles clean and silent. A source-level assertion is the only cheap
+    /// guard; without it the regression this test file exists for can come back
+    /// with every behavioural test still green.
+    #[test]
+    fn session_spawn_still_calls_the_append() {
+        let spawn_src = include_str!("acp_session_impl/spawn.rs");
+        assert!(
+            spawn_src.contains("registry_with_plugin_specs("),
+            "spawn_session_actor no longer appends plugin hook specs: every \
+             plugin seam (session_start, provider_request, the credential \
+             events, permission_ask) and every plugin-declared hooks.json or \
+             inline hook is dead until a /hooks reload"
+        );
+    }
+
+    /// `active_plugins()` is `enabled && trusted`; both halves must keep a
+    /// sidecar off the dispatcher, driven through the registry's own rules
+    /// rather than a hand-filtered plugin list.
+    #[test]
+    fn inactive_sidecar_plugins_contribute_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Absent from the config `enabled` list → disabled (the default).
+        let disabled = plugin_registry(
+            vec![discovered_plugin(tmp.path(), "off-council", true, true)],
+            &[],
+        );
+        assert_eq!(disabled.list().len(), 1, "plugin is present, just disabled");
+        assert!(!disabled.get("off-council").unwrap().enabled);
+        assert!(disabled.active_plugins().is_empty());
+        assert!(registry_with_plugin_specs(None, Some(&disabled)).is_none());
+
+        // Enabled but untrusted → still not active, so its sidecar stays unwired.
+        let untrusted = plugin_registry(
+            vec![discovered_plugin(tmp.path(), "shady-council", true, false)],
+            &["shady-council"],
+        );
+        assert!(untrusted.get("shady-council").unwrap().enabled);
+        assert!(untrusted.active_plugins().is_empty());
+        assert!(registry_with_plugin_specs(None, Some(&untrusted)).is_none());
     }
 
     #[test]
