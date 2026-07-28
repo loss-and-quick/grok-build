@@ -3,176 +3,264 @@ use serde::Serialize;
 /// Maximum serialized size for `toolInput` or `toolResult` in bytes (128 KB).
 pub const MAX_PAYLOAD_SIZE: usize = 128 * 1024;
 
-/// Hook event types.
-///
-/// Deserialization accepts PascalCase, snake_case, camelCase, and per-operation
-/// aliases (e.g. `beforeShellExecution` maps to `PreToolUse`); see the `Deserialize` impl.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookEventName {
-    SessionStart,
-    SessionEnd,
+/// Generates [`HookEventName`] and its `Deserialize`/`parse_key`, `Display`,
+/// `traits()`, and `ALL` from one table, so adding an event is a single row.
+/// Per row: `display` is the canonical rendering (may differ from the variant's
+/// snake_case, e.g. `SubagentEnd` -> `subagent_stop`); `aliases` are the exact
+/// `Deserialize` spellings (disjoint across variants); `traits` is the
+/// `(gate, matcher, hub)` triple. `Serialize` stays derived snake_case (wire unchanged).
+macro_rules! hook_events {
+    ($(
+        $(#[$vmeta:meta])*
+        $variant:ident {
+            display: $display:literal,
+            aliases: [$($alias:literal),* $(,)?],
+            traits: ($gate:ident, $matcher:ident, $hub:literal $(,)?),
+        }
+    ),* $(,)?) => {
+        /// Hook event types. `Ord` follows table order (stable, keeps the
+        /// `SubagentStop`/`SubagentEnd` aliases distinct unlike `Display`).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum HookEventName {
+            $($(#[$vmeta])* $variant),*
+        }
+
+        impl HookEventName {
+            /// Every variant, in canonical display order.
+            pub const ALL: &'static [HookEventName] = &[$(HookEventName::$variant),*];
+
+            /// Source of truth for known spellings, behind `Deserialize` and `parse_key`.
+            fn from_key_str(s: &str) -> Option<Self> {
+                match s {
+                    $($($alias)|* => Some(Self::$variant),)*
+                    _ => None,
+                }
+            }
+
+            /// The event's dispatch traits, generated exhaustively from the table.
+            pub fn traits(self) -> EventTraits {
+                use GateKind::*;
+                use MatcherPolicy::*;
+                match self {
+                    $(Self::$variant => EventTraits {
+                        gate: $gate,
+                        matcher: $matcher,
+                        hub_forward: $hub,
+                    },)*
+                }
+            }
+        }
+
+        impl std::fmt::Display for HookEventName {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(match self { $(Self::$variant => $display,)* })
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for HookEventName {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let s = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Self::from_key_str(&s).ok_or_else(|| {
+                    // Built from the table so it can't drift from the accepted set.
+                    let known = Self::ALL
+                        .iter()
+                        .map(|e| e.to_string())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    serde::de::Error::custom(format!(
+                        "unknown hook event: '{s}'. Expected one of: {known} \
+                         (camelCase and per-operation aliases such as \
+                         beforeShellExecution are also accepted)"
+                    ))
+                })
+            }
+        }
+    };
+}
+
+// Table order is the canonical display order (drives `ALL` and `Ord`).
+// Per-operation aliases map to generic `PreToolUse`/`PostToolUse`.
+hook_events! {
+    SessionStart {
+        display: "session_start",
+        aliases: ["SessionStart", "session_start", "sessionStart"],
+        traits: (Observe, Tested, true),
+    },
+    UserPromptSubmit {
+        display: "user_prompt_submit",
+        aliases: ["UserPromptSubmit", "user_prompt_submit", "beforeSubmitPrompt"],
+        traits: (Observe, Ignored, true),
+    },
+    PreToolUse {
+        display: "pre_tool_use",
+        aliases: [
+            "PreToolUse",
+            "pre_tool_use",
+            "preToolUse",
+            "beforeShellExecution",
+            "beforeMCPExecution",
+            "beforeReadFile",
+        ],
+        traits: (Tool, Tested, false),
+    },
+    PostToolUse {
+        display: "post_tool_use",
+        aliases: [
+            "PostToolUse",
+            "post_tool_use",
+            "postToolUse",
+            "afterShellExecution",
+            "afterMCPExecution",
+            "afterFileEdit",
+            "afterAgentResponse",
+            "afterAgentThought",
+        ],
+        traits: (Observe, Tested, true),
+    },
+    PostToolUseFailure {
+        display: "post_tool_use_failure",
+        aliases: ["PostToolUseFailure", "post_tool_use_failure", "postToolUseFailure"],
+        traits: (Observe, Tested, true),
+    },
+    PermissionDenied {
+        display: "permission_denied",
+        aliases: ["PermissionDenied", "permission_denied", "permissionDenied"],
+        traits: (Observe, Tested, true),
+    },
     /// Fires on a genuine turn-end with stop decision control (a hook can block);
     /// not on user interrupts (API-error turns fire `StopFailure`); observe-only at session end.
-    Stop,
+    Stop {
+        display: "stop",
+        aliases: ["Stop", "stop"],
+        traits: (Stop, Ignored, true),
+    },
     /// Fires when the turn ends due to an API error. Output and exit code are ignored.
-    StopFailure,
-
-    PreToolUse,
-    PostToolUse,
-    PostToolUseFailure,
-    PermissionDenied,
-
-    UserPromptSubmit,
-    Notification,
-
-    SubagentStart,
-    SubagentStop,
-    SubagentEnd,
-
-    PreCompact,
-    PostCompact,
-
+    StopFailure {
+        display: "stop_failure",
+        aliases: ["StopFailure", "stop_failure", "stopFailure"],
+        traits: (Observe, Tested, true),
+    },
+    Notification {
+        display: "notification",
+        aliases: ["Notification", "notification"],
+        traits: (Observe, Tested, true),
+    },
+    SubagentStart {
+        display: "subagent_start",
+        aliases: ["SubagentStart", "subagent_start", "subagentStart"],
+        traits: (Observe, Tested, true),
+    },
+    SubagentStop {
+        display: "subagent_stop",
+        aliases: ["SubagentStop", "subagent_stop", "subagentStop"],
+        traits: (Stop, Tested, true),
+    },
+    /// Legacy alias of `SubagentStop`: kept as a distinct variant so a hook
+    /// registered under either spelling round-trips, then collapsed via
+    /// [`HookEventName::canonical`] for dispatch and dedup.
+    SubagentEnd {
+        display: "subagent_stop",
+        aliases: ["SubagentEnd", "subagent_end", "subagentEnd"],
+        traits: (Stop, Tested, true),
+    },
+    PreCompact {
+        display: "pre_compact",
+        aliases: ["PreCompact", "pre_compact", "preCompact"],
+        traits: (Observe, Tested, true),
+    },
+    PostCompact {
+        display: "post_compact",
+        aliases: ["PostCompact", "post_compact", "postCompact"],
+        traits: (Observe, Tested, true),
+    },
+    SessionEnd {
+        display: "session_end",
+        aliases: ["SessionEnd", "session_end", "sessionEnd"],
+        traits: (Observe, Tested, true),
+    },
+    // Plugin-only seams, kept last so upstream's canonical display order (which
+    // drives `ALL` and `Ord`) is untouched. Not hub-forwarded. ProviderRequest/
+    // ProviderError are reserved (not wired yet). PermissionAsk is wired, but via
+    // the permission manager's bespoke seam rather than this dispatcher, so it
+    // keeps the fire-all `Ignored` matcher and stays plugin-only.
     /// Intercepts the outgoing LLM request; Replace gate. Reserved; not wired yet.
-    ProviderRequest,
+    ProviderRequest {
+        display: "provider_request",
+        aliases: ["ProviderRequest", "provider_request", "providerRequest"],
+        traits: (Replace, Ignored, false),
+    },
     /// Rewrites the names of tool calls in a model response before the shell
     /// dispatches them; Replace gate. The shell-side mirror of `ProviderRequest`,
     /// applied post-sampler with no sampler involvement. Plugin-only, not
     /// hub-forwarded. First-party endpoints are never offered to this seam.
-    ProviderResponse,
+    ProviderResponse {
+        display: "provider_response",
+        aliases: ["ProviderResponse", "provider_response", "providerResponse"],
+        traits: (Replace, Ignored, false),
+    },
     /// Provider failure → retry (model/base_url alias) or fail; Replace gate.
     /// Reserved; not wired yet.
-    ProviderError,
+    ProviderError {
+        display: "provider_error",
+        aliases: ["ProviderError", "provider_error", "providerError"],
+        traits: (Replace, Ignored, false),
+    },
     /// Subagent spec resolution seam; Replace gate. Fired just before a
     /// subagent spawn resolves its definition, so a plugin can substitute the
     /// agent type / model or append system-prompt text. Fail-open: no/late/
     /// unparseable response keeps the requested spec.
-    SubagentResolve,
+    SubagentResolve {
+        display: "subagent_resolve",
+        aliases: ["SubagentResolve", "subagent_resolve", "subagentResolve"],
+        traits: (Replace, Ignored, false),
+    },
     /// Permission prompt seam; Tool gate. Fired by the permission manager's
     /// `permission_ask` seam (in `xai-grok-workspace`) rather than the hook
     /// dispatcher, so it has no `HookPayload` variant and is not part of the
     /// dispatcher-routed sidecar event set. Fail-open: no/late/invalid response
     /// falls back to the interactive prompt.
-    PermissionAsk,
+    PermissionAsk {
+        display: "permission_ask",
+        aliases: ["PermissionAsk", "permission_ask", "permissionAsk"],
+        traits: (Tool, Ignored, false),
+    },
+    // Credential seams: plugin-only, not hub-forwarded. resolve/refresh
+    // substitute the resolved bearer (Replace); the interactive authorization
+    // flow is handed to the plugin wholesale (Intercept).
     /// Credential resolution seam; Replace gate. Fired at the credential
     /// boundary before the built-in resolution, so a plugin can supply a
     /// bearer from an external identity provider. Fail-open: no/late/
     /// passthrough response keeps the built-in resolution.
-    ResolveCredential,
+    ResolveCredential {
+        display: "resolve_credential",
+        aliases: ["ResolveCredential", "resolve_credential", "resolveCredential"],
+        traits: (Replace, Ignored, false),
+    },
     /// Credential refresh seam; Replace gate. Fired on a `401`/expiry before
     /// the built-in refresh, so a plugin can return a freshly minted bearer.
     /// Fail-open: no/late/passthrough response falls back to the built-in
     /// refresh path, which stays available independently of the plugin channel.
-    RefreshCredential,
+    RefreshCredential {
+        display: "refresh_credential",
+        aliases: ["RefreshCredential", "refresh_credential", "refreshCredential"],
+        traits: (Replace, Ignored, false),
+    },
     /// Interactive first-time authorization seam; Intercept gate. Fired when no
     /// usable credential exists (or on an explicit sign-in), a plugin drives the
     /// whole interactive flow (authorize URL / device code / callback / token
     /// exchange) and returns the final bearer for the core to persist. Fail-open:
     /// no/late/passthrough response leaves the core without a plugin credential.
-    StartOauthFlow,
-}
-
-impl<'de> serde::Deserialize<'de> for HookEventName {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            // PascalCase (native) + snake_case + camelCase (third-party compat).
-            // Per-operation hook names (beforeShellExecution, afterFileEdit, etc.)
-            // map to our generic PreToolUse/PostToolUse; the hook script receives the
-            // tool name in JSON input and can filter, or use the `matcher` field.
-            "SessionStart" | "session_start" | "sessionStart" => Ok(Self::SessionStart),
-            "PreToolUse"
-            | "pre_tool_use"
-            | "preToolUse"
-            | "beforeShellExecution"
-            | "beforeMCPExecution"
-            | "beforeReadFile" => Ok(Self::PreToolUse),
-            "PostToolUse"
-            | "post_tool_use"
-            | "postToolUse"
-            | "afterShellExecution"
-            | "afterMCPExecution"
-            | "afterFileEdit"
-            | "afterAgentResponse"
-            | "afterAgentThought" => Ok(Self::PostToolUse),
-            "PostToolUseFailure" | "post_tool_use_failure" | "postToolUseFailure" => {
-                Ok(Self::PostToolUseFailure)
-            }
-            "SessionEnd" | "session_end" | "sessionEnd" => Ok(Self::SessionEnd),
-            "Stop" | "stop" => Ok(Self::Stop),
-            "StopFailure" | "stop_failure" | "stopFailure" => Ok(Self::StopFailure),
-            "Notification" | "notification" => Ok(Self::Notification),
-            "UserPromptSubmit" | "user_prompt_submit" | "beforeSubmitPrompt" => {
-                Ok(Self::UserPromptSubmit)
-            }
-            "PermissionDenied" | "permission_denied" | "permissionDenied" => {
-                Ok(Self::PermissionDenied)
-            }
-            "SubagentStart" | "subagent_start" | "subagentStart" => Ok(Self::SubagentStart),
-            "SubagentStop" | "subagent_stop" | "subagentStop" => Ok(Self::SubagentStop),
-            "SubagentEnd" | "subagent_end" | "subagentEnd" => Ok(Self::SubagentEnd),
-            "PreCompact" | "pre_compact" | "preCompact" => Ok(Self::PreCompact),
-            "PostCompact" | "post_compact" | "postCompact" => Ok(Self::PostCompact),
-            "ProviderRequest" | "provider_request" | "providerRequest" => Ok(Self::ProviderRequest),
-            "ProviderResponse" | "provider_response" | "providerResponse" => {
-                Ok(Self::ProviderResponse)
-            }
-            "ProviderError" | "provider_error" | "providerError" => Ok(Self::ProviderError),
-            "SubagentResolve" | "subagent_resolve" | "subagentResolve" => {
-                Ok(Self::SubagentResolve)
-            }
-            "PermissionAsk" | "permission_ask" | "permissionAsk" => Ok(Self::PermissionAsk),
-            "ResolveCredential" | "resolve_credential" | "resolveCredential" => {
-                Ok(Self::ResolveCredential)
-            }
-            "RefreshCredential" | "refresh_credential" | "refreshCredential" => {
-                Ok(Self::RefreshCredential)
-            }
-            "StartOauthFlow" | "start_oauth_flow" | "startOauthFlow" => Ok(Self::StartOauthFlow),
-            other => Err(serde::de::Error::custom(format!(
-                "unknown hook event: '{other}'. Expected one of: \
-                 SessionStart, PreToolUse, PostToolUse, PostToolUseFailure, \
-                 SessionEnd, Stop, StopFailure, Notification, UserPromptSubmit, \
-                 PermissionDenied, SubagentStart, SubagentStop, \
-                 PreCompact, PostCompact, ProviderRequest, ProviderResponse, ProviderError, \
-                 SubagentResolve, PermissionAsk, ResolveCredential, \
-                 RefreshCredential, StartOauthFlow (camelCase and per-operation aliases \
-                 such as beforeShellExecution are also accepted)"
-            ))),
-        }
-    }
-}
-
-impl std::fmt::Display for HookEventName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SessionStart => write!(f, "session_start"),
-            Self::PreToolUse => write!(f, "pre_tool_use"),
-            Self::PostToolUse => write!(f, "post_tool_use"),
-            Self::PostToolUseFailure => write!(f, "post_tool_use_failure"),
-            Self::SessionEnd => write!(f, "session_end"),
-            Self::Stop => write!(f, "stop"),
-            Self::StopFailure => write!(f, "stop_failure"),
-            Self::Notification => write!(f, "notification"),
-            Self::UserPromptSubmit => write!(f, "user_prompt_submit"),
-            Self::PermissionDenied => write!(f, "permission_denied"),
-            Self::SubagentStart => write!(f, "subagent_start"),
-            Self::SubagentStop | Self::SubagentEnd => write!(f, "subagent_stop"),
-            Self::PreCompact => write!(f, "pre_compact"),
-            Self::PostCompact => write!(f, "post_compact"),
-            Self::ProviderRequest => write!(f, "provider_request"),
-            Self::ProviderResponse => write!(f, "provider_response"),
-            Self::ProviderError => write!(f, "provider_error"),
-            Self::SubagentResolve => write!(f, "subagent_resolve"),
-            Self::PermissionAsk => write!(f, "permission_ask"),
-            Self::ResolveCredential => write!(f, "resolve_credential"),
-            Self::RefreshCredential => write!(f, "refresh_credential"),
-            Self::StartOauthFlow => write!(f, "start_oauth_flow"),
-        }
-    }
+    StartOauthFlow {
+        display: "start_oauth_flow",
+        aliases: ["StartOauthFlow", "start_oauth_flow", "startOauthFlow"],
+        traits: (Intercept, Ignored, false),
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,9 +301,8 @@ pub struct EventTraits {
 }
 
 impl HookEventName {
-    /// Collapse alias variants to their canonical form so a registration and the fired
-    /// event meet on one key regardless of which spelling each used (`SubagentEnd` is an
-    /// alias of `SubagentStop`).
+    /// Collapse aliases so a registration and the fired event meet on one key
+    /// (`SubagentEnd` is an alias of `SubagentStop`).
     pub fn canonical(self) -> Self {
         match self {
             Self::SubagentEnd => Self::SubagentStop,
@@ -223,48 +310,9 @@ impl HookEventName {
         }
     }
 
-    /// The event's dispatch traits. Exhaustive on purpose: a new variant fails to
-    /// compile until its gate, matcher, and hub forwarding are chosen here.
-    pub fn traits(self) -> EventTraits {
-        use GateKind::*;
-        use MatcherPolicy::*;
-        let t = |gate, matcher, hub_forward| EventTraits {
-            gate,
-            matcher,
-            hub_forward,
-        };
-        match self.canonical() {
-            Self::SessionStart => t(Observe, Tested, true),
-            Self::SessionEnd => t(Observe, Tested, true),
-            Self::Stop => t(Stop, Ignored, true),
-            Self::StopFailure => t(Observe, Tested, true),
-            Self::PreToolUse => t(Tool, Tested, false),
-            Self::PostToolUse => t(Observe, Tested, true),
-            Self::PostToolUseFailure => t(Observe, Tested, true),
-            Self::PermissionDenied => t(Observe, Tested, true),
-            Self::UserPromptSubmit => t(Observe, Ignored, true),
-            Self::Notification => t(Observe, Tested, true),
-            Self::SubagentStart => t(Observe, Tested, true),
-            Self::SubagentStop => t(Stop, Tested, true),
-            Self::SubagentEnd => unreachable!("canonicalized above"),
-            Self::PreCompact => t(Observe, Tested, true),
-            Self::PostCompact => t(Observe, Tested, true),
-            // Plugin-only seams, not hub-forwarded. ProviderRequest/ProviderError
-            // are reserved (not wired yet). PermissionAsk is now wired, but via the
-            // permission manager's bespoke seam rather than this dispatcher, so it
-            // keeps the fire-all `Ignored` matcher and stays plugin-only.
-            Self::ProviderRequest => t(Replace, Ignored, false),
-            Self::ProviderResponse => t(Replace, Ignored, false),
-            Self::ProviderError => t(Replace, Ignored, false),
-            Self::SubagentResolve => t(Replace, Ignored, false),
-            Self::PermissionAsk => t(Tool, Ignored, false),
-            // Credential seams: plugin-only, not hub-forwarded. resolve/refresh
-            // substitute the resolved bearer (Replace); the interactive
-            // authorization flow is handed to the plugin wholesale (Intercept).
-            Self::ResolveCredential => t(Replace, Ignored, false),
-            Self::RefreshCredential => t(Replace, Ignored, false),
-            Self::StartOauthFlow => t(Intercept, Ignored, false),
-        }
+    /// Validate a bare event key against the accepted spellings; `None` if unknown.
+    pub fn parse_key(s: &str) -> Option<Self> {
+        Self::from_key_str(s)
     }
 }
 
@@ -1142,7 +1190,10 @@ mod tests {
             Some("https://api.x.ai/v1")
         );
         // Agent identity and the resolved tool catalog ride alongside the body.
-        assert_eq!(value.get("agent").and_then(|v| v.as_str()), Some("reviewer"));
+        assert_eq!(
+            value.get("agent").and_then(|v| v.as_str()),
+            Some("reviewer")
+        );
         assert_eq!(
             value
                 .get("tools")
@@ -1197,7 +1248,10 @@ mod tests {
             Some("messages")
         );
         assert!(value.get("base_url").is_none(), "leaked snake_case baseUrl");
-        assert!(value.get("tool_calls").is_none(), "leaked snake_case toolCalls");
+        assert!(
+            value.get("tool_calls").is_none(),
+            "leaked snake_case toolCalls"
+        );
         let calls = value
             .get("toolCalls")
             .and_then(|v| v.as_array())
@@ -1297,7 +1351,10 @@ mod tests {
             value.get("hookEventName").and_then(|v| v.as_str()),
             Some("resolve_credential")
         );
-        assert_eq!(value.get("reason").and_then(|v| v.as_str()), Some("outbound"));
+        assert_eq!(
+            value.get("reason").and_then(|v| v.as_str()),
+            Some("outbound")
+        );
         // The outbound target rides the payload as camelCase `baseUrl` so a
         // plugin can scope its reply to it.
         assert_eq!(

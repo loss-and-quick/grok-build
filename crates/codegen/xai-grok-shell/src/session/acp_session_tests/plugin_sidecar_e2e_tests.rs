@@ -127,6 +127,7 @@ fn command_spec(event: HookEventName, script: PathBuf, source_dir: &Path) -> Hoo
         timeout_ms: 30_000,
         source_dir: source_dir.to_path_buf(),
         extra_env: HashMap::new(),
+        layer: xai_grok_hooks::config::HookProvenance::File,
     }
 }
 
@@ -373,8 +374,7 @@ async fn demo_plugin_tool_invoke_round_trips_with_call_context() {
         panic!("expected okay output, got {:?}", mcp.output());
     };
     assert_eq!(
-        text,
-        "demo-echo: hello (cwd=/per/call/dir, agent=main)",
+        text, "demo-echo: hello (cwd=/per/call/dir, agent=main)",
         "handler must see the per-call cwd and agent label"
     );
 

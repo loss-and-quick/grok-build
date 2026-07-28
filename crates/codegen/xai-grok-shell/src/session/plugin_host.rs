@@ -157,8 +157,8 @@ pub(crate) fn build_session_plugin_host(
     // Tier 1 orchestration: when this process is a leader, every sidecar gets
     // the session leader's socket (initialize capability + GROK_LEADER_SOCKET
     // env) so a plugin can attach as one more headless ACP client.
-    let leader_socket = crate::leader::active_leader_socket()
-        .map(|p| p.to_string_lossy().into_owned());
+    let leader_socket =
+        crate::leader::active_leader_socket().map(|p| p.to_string_lossy().into_owned());
 
     let sidecar_plugins = registered_sidecar_plugins(
         registry,
@@ -274,6 +274,7 @@ pub(crate) fn sidecar_plugin_hook_specs(
                 timeout_ms,
                 source_dir: source_dir.to_path_buf(),
                 extra_env: std::collections::HashMap::new(),
+                layer: xai_grok_hooks::config::HookProvenance::Plugin,
             }
         })
         .collect()
@@ -304,7 +305,7 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
         use xai_grok_plugin_host::AgentStatusDto;
         use xai_grok_tools::implementations::grok_build::task::types::{
             ModelOverrideProvenance, SubagentEvent, SubagentOwner, SubagentRequest, SubagentResult,
-            SubagentRuntimeOverrides,
+            SubagentRuntimeOverrides, SubagentSpawnRequest,
         };
 
         let id = uuid::Uuid::now_v7().to_string();
@@ -372,10 +373,14 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
             // Session-owned, not turn-owned: a fresh token so turn cancellation
             // can't reap it (per-spawn timeout and agent_cancel still apply).
             cancel_token: tokio_util::sync::CancellationToken::new(),
-            result_tx,
         };
+        // The terminal reply channel rides beside the request in the spawn
+        // envelope (upstream split it out of `SubagentRequest`).
         self.tx
-            .send(SubagentEvent::Spawn(Box::new(request)))
+            .send(SubagentEvent::Spawn(SubagentSpawnRequest {
+                request: Box::new(request),
+                result_tx,
+            }))
             .map_err(|_| "subagent coordinator unavailable (agent shutting down?)".to_string())?;
         Ok(xai_grok_plugin_host::SpawnedSubagent {
             id,
@@ -396,6 +401,9 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
             self.tx
                 .send(SubagentEvent::Query(SubagentQueryRequest {
                     subagent_id: id.to_string(),
+                    // Scope to this session: a plugin may only observe children
+                    // its own session spawned, never another session's.
+                    parent_session_id: Some(self.session_id.clone()),
                     block: false,
                     timeout_ms: None,
                     respond_to,
@@ -403,15 +411,13 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
                 .ok()?;
             let snapshot = rx.await.ok().flatten()?;
             match snapshot.status {
-                SubagentSnapshotStatus::Initializing => {
-                    Some(xai_grok_plugin_host::AgentProgress {
-                        phase: "initializing",
-                        turns: 0,
-                        tool_calls: 0,
-                        tokens_used: 0,
-                        elapsed_ms: snapshot.duration_ms,
-                    })
-                }
+                SubagentSnapshotStatus::Initializing => Some(xai_grok_plugin_host::AgentProgress {
+                    phase: "initializing",
+                    turns: 0,
+                    tool_calls: 0,
+                    tokens_used: 0,
+                    elapsed_ms: snapshot.duration_ms,
+                }),
                 SubagentSnapshotStatus::Running {
                     turn_count,
                     tool_call_count,
@@ -444,6 +450,9 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
             if self
                 .tx
                 .send(SubagentEvent::Cancel(SubagentCancelRequest {
+                    // Same scoping as `progress`: a plugin cannot cancel a
+                    // child belonging to another session.
+                    parent_session_id: Some(self.session_id.clone()),
                     target: SubagentCancelTarget::SubagentId(id.to_string()),
                     respond_to,
                 }))
@@ -500,8 +509,7 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
 /// rides). Fire-and-forget: a closed channel (session tearing down) drops the
 /// emit rather than erroring — a late panel update must never wedge a plugin.
 pub(crate) struct SessionPanelSink {
-    pub(crate) cmd_tx:
-        tokio::sync::mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
+    pub(crate) cmd_tx: tokio::sync::mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
 }
 
 impl xai_grok_plugin_host::PanelSink for SessionPanelSink {
@@ -557,14 +565,9 @@ pub(crate) fn plugin_sidecar_tool_registrations(
             continue;
         };
         for tool in &spec.tools {
-            if let Some(reg) = sidecar_tool_registration(
-                &plugin.name,
-                tool,
-                host,
-                session_id,
-                agent,
-                fallback_cwd,
-            ) {
+            if let Some(reg) =
+                sidecar_tool_registration(&plugin.name, tool, host, session_id, agent, fallback_cwd)
+            {
                 out.push(reg);
             }
         }
@@ -694,12 +697,10 @@ impl xai_tool_runtime::Tool for PluginSidecarTool {
         // Per-call cwd: the dispatch layer's `Cwd` override wins, then the
         // session resources' cwd, then the registration-time fallback.
         let cwd = match xai_grok_tools::types::tool_metadata::shared_resources(&ctx) {
-            Ok(resources) => {
-                xai_grok_tools::types::tool_metadata::resolve_cwd(&ctx, &resources)
-                    .await
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| self.fallback_cwd.clone())
-            }
+            Ok(resources) => xai_grok_tools::types::tool_metadata::resolve_cwd(&ctx, &resources)
+                .await
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| self.fallback_cwd.clone()),
             Err(_) => ctx
                 .extensions
                 .get::<xai_tool_runtime::Cwd>()
@@ -715,13 +716,7 @@ impl xai_tool_runtime::Tool for PluginSidecarTool {
 
         match self
             .host
-            .invoke_tool(
-                &self.plugin,
-                &self.tool,
-                raw,
-                call_context,
-                self.timeout_ms,
-            )
+            .invoke_tool(&self.plugin, &self.tool, raw, call_context, self.timeout_ms)
             .await
         {
             // Handler-reported failure: an ordinary error tool result, the
@@ -871,7 +866,10 @@ mod tests {
         });
         let merged = merge_plugin_config(&defaults, Some(&user));
         // User keys win wholesale (the array is replaced, not concatenated).
-        assert_eq!(merged["participants"], serde_json::json!(["grok", "claude"]));
+        assert_eq!(
+            merged["participants"],
+            serde_json::json!(["grok", "claude"])
+        );
         assert_eq!(merged["rounds"], 3);
         // Manifest-only keys survive.
         assert_eq!(merged["keep"], true);
@@ -1001,7 +999,9 @@ mod tests {
     }
 
     fn test_host() -> Arc<PluginHost> {
-        Arc::new(PluginHost::new(std::env::temp_dir().join("plugin-tool-test")))
+        Arc::new(PluginHost::new(
+            std::env::temp_dir().join("plugin-tool-test"),
+        ))
     }
 
     #[test]

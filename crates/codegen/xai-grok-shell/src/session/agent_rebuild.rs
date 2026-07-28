@@ -51,9 +51,8 @@ use xai_grok_tools::computer::types::{AsyncFileSystem, TerminalBackend};
 use xai_grok_tools::implementations::grok_build::ask_user_question::types::UserQuestionRequest;
 use xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig;
 use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
-use xai_grok_tools::implementations::grok_build::task::types::{
-    MonitorEventBuffer, SubagentEvent, TaskModelValidator,
-};
+use xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer;
+use xai_grok_tools::implementations::grok_build::task::types::{SubagentEvent, TaskModelValidator};
 use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
 use xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig;
 use xai_grok_tools::implementations::lsp::LspBackend;
@@ -122,9 +121,14 @@ pub(crate) struct AgentRebuildSpec {
     pub monitor_event_buffer: Option<MonitorEventBuffer>,
     pub user_question_tx: UnboundedSender<UserQuestionRequest>,
     pub subagent_depth: u32,
+    pub subagents_max_depth: u32,
     pub session_id_str: String,
+    pub blocking_wait_depth: Arc<crate::tools::tool_context::BlockingWaitState>,
     pub respect_gitignore: bool,
     pub path_not_found_hints: bool,
+    /// Fire side of the scheduler mode. The spawn copies the same resolution
+    /// onto [`SessionHandle::scheduler_background_loops`](crate::session::SessionHandle),
+    /// which is what clients read — keep the two on one resolve.
     pub scheduler_background_loops: bool,
     pub mcp_state: Arc<tokio::sync::Mutex<crate::session::mcp_servers::McpState>>,
     pub managed_gateway_tool_client:
@@ -218,7 +222,9 @@ impl AgentRebuildSpec {
             monitor_event_buffer,
             user_question_tx,
             subagent_depth,
+            subagents_max_depth,
             session_id_str,
+            blocking_wait_depth,
             respect_gitignore,
             path_not_found_hints,
             scheduler_background_loops,
@@ -325,13 +331,20 @@ impl AgentRebuildSpec {
                 ChannelBackend, SubagentBackendResource,
             };
             use xai_grok_tools::implementations::grok_build::task::types::{
-                SessionIdResource, SubagentDepthCounter, SubagentEventSender,
+                MaxSubagentDepth, SessionIdResource, SubagentDepthCounter, SubagentEventSender,
             };
-            let backend = SubagentBackendResource(Arc::new(ChannelBackend::new(event_tx.clone())));
+            let backend = SubagentBackendResource(Arc::new(ChannelBackend::for_session(
+                event_tx.clone(),
+                session_id_str.clone(),
+            )));
             agent.tool_bridge().update_resource(backend).await;
             agent
                 .tool_bridge()
                 .update_resource(SubagentDepthCounter(*subagent_depth))
+                .await;
+            agent
+                .tool_bridge()
+                .update_resource(MaxSubagentDepth(*subagents_max_depth))
                 .await;
             agent
                 .tool_bridge()
@@ -340,6 +353,12 @@ impl AgentRebuildSpec {
             agent
                 .tool_bridge()
                 .update_resource(SubagentEventSender(event_tx))
+                .await;
+            agent
+                .tool_bridge()
+                .update_resource(crate::tools::tool_context::subagent_foreground_wait(
+                    Arc::clone(blocking_wait_depth),
+                ))
                 .await;
             if let Some(buffer) = monitor_event_buffer.clone() {
                 agent.tool_bridge().update_resource(buffer).await;
@@ -429,7 +448,9 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         monitor_event_buffer: None,
         user_question_tx: uq_tx,
         subagent_depth: 0,
+        subagents_max_depth: xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH,
         session_id_str: "test-session".to_string(),
+        blocking_wait_depth: Arc::new(crate::tools::tool_context::BlockingWaitState::new()),
         respect_gitignore: false,
         scheduler_background_loops: true,
         path_not_found_hints: false,
@@ -488,14 +509,15 @@ mod tests {
                     .expect("first agent build should succeed");
                 let first_description = task_description(&first);
                 assert!(
-                    first_description
-                    .contains("If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
+                    first_description.contains(
+                        "If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
                          - alpha-public\n\
-                         - zeta-public")
+                         - zeta-public"
+                    )
                 );
-                assert!(! first_description.contains("private-hidden-model"));
-                assert!(! first_description.contains("private-unselectable-model"));
-                assert!(! first_description.contains("internal-alpha"));
+                assert!(!first_description.contains("private-hidden-model"));
+                assert!(!first_description.contains("private-unselectable-model"));
+                assert!(!first_description.contains("internal-alpha"));
                 let validator = first
                     .tool_bridge()
                     .toolset()
@@ -513,11 +535,12 @@ mod tests {
                     .expect("rebuilt agent should succeed");
                 let rebuilt_description = task_description(&rebuilt);
                 assert!(
-                    rebuilt_description
-                    .contains("If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
+                    rebuilt_description.contains(
+                        "If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
                          - alpha-public\n\
                          - beta-public\n\
-                         - zeta-public")
+                         - zeta-public"
+                    )
                 );
             })
             .await;

@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use agent_client_protocol as acp;
+use xai_grok_tools::implementations::grok_build::LoopFireMode;
 use xai_grok_tools::implementations::skills::skill::format_skill_name;
 use xai_grok_tools::implementations::skills::types::SkillInfo;
 
@@ -507,6 +508,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "model",
             "multiline",
             "new",
+            "onboarding",
             "personas",
             "plan",
             "plan-view",
@@ -538,7 +540,9 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "timestamps",
             "title",
             "toggle-mouse-reporting",
+            "tour",
             "transcript",
+            "tutorial",
             "t",
             "usage",
             "view-plan",
@@ -726,9 +730,13 @@ pub(crate) struct ListCommandsRequest {
     pub cwd: Option<String>,
 }
 
-#[derive(serde::Serialize)]
-pub(crate) struct ListCommandsResponse {
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ListCommandsResponse {
     pub commands: Vec<acp::AvailableCommand>,
+    /// Live-session tool names (`None` = unknown / pre-session). Same set as
+    /// `AvailableCommandsUpdate.meta.tools`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
 }
 
 /// Build the available commands list, optionally scoped to a working directory.
@@ -757,6 +765,7 @@ pub(crate) async fn list_commands(
     );
     ListCommandsResponse {
         commands: available_commands(&skills, availability, &workflows),
+        tools: None,
     }
 }
 
@@ -1112,6 +1121,7 @@ pub(super) fn resolve(
     availability: CommandAvailability,
     _skill_rewrite: SkillSlashRewrite,
     workflows: &[crate::session::workflow::registry::WorkflowListing],
+    loop_fire_mode: LoopFireMode,
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
     let Some((command_name, args)) = parse_slash_prefix(&prompt_blocks) else {
         return Ok(prompt_blocks);
@@ -1129,7 +1139,7 @@ pub(super) fn resolve(
         // matching arm fails loudly at the call site instead of silently
         // reusing /loop's prompt builder.
         let mut blocks = match prompt_cmd.name {
-            "loop" => build_loop_prompt_blocks(args),
+            "loop" => build_loop_prompt_blocks(args, loop_fire_mode),
             other => {
                 unreachable!("prompt-only command /{other} has no resolver wired in resolve()")
             }
@@ -1239,7 +1249,7 @@ fn parse_slash_prefix(prompt_blocks: &[acp::ContentBlock]) -> Option<(&str, &str
 /// two front-ends can't drift. Like the pager, there is no host-side interval
 /// default: the model derives the cadence from the request and asks when none
 /// is given.
-fn build_loop_prompt_blocks(args: &str) -> Vec<acp::ContentBlock> {
+fn build_loop_prompt_blocks(args: &str, mode: LoopFireMode) -> Vec<acp::ContentBlock> {
     use xai_grok_tools::implementations::grok_build::{
         loop_schedule_instruction, loop_usage_message,
     };
@@ -1247,7 +1257,7 @@ fn build_loop_prompt_blocks(args: &str) -> Vec<acp::ContentBlock> {
     let text = if args.trim().is_empty() {
         loop_usage_message().to_string()
     } else {
-        loop_schedule_instruction(args)
+        loop_schedule_instruction(args, mode)
     };
 
     vec![acp::ContentBlock::Text(acp::TextContent::new(text))]
@@ -1257,6 +1267,27 @@ fn build_loop_prompt_blocks(args: &str) -> Vec<acp::ContentBlock> {
 mod tests {
     use super::*;
     use xai_grok_tools::implementations::skills::types::SkillScope;
+
+    /// Shadows [`super::resolve`] for the cases that route something other
+    /// than `/loop`: they are indifferent to the fire mode, and pinning it
+    /// here keeps a plumbing change out of every unrelated call site. Tests
+    /// that care about the mode call `super::resolve` directly.
+    fn resolve(
+        prompt_blocks: Vec<acp::ContentBlock>,
+        skills: &[SkillInfo],
+        availability: CommandAvailability,
+        skill_rewrite: SkillSlashRewrite,
+        workflows: &[crate::session::workflow::registry::WorkflowListing],
+    ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
+        super::resolve(
+            prompt_blocks,
+            skills,
+            availability,
+            skill_rewrite,
+            workflows,
+            LoopFireMode::Detached,
+        )
+    }
 
     fn all_gated() -> CommandAvailability {
         CommandAvailability::all_enabled()
@@ -1579,6 +1610,36 @@ mod tests {
     }
 
     #[test]
+    fn resolve_loop_expands_for_the_sessions_fire_mode() {
+        let text_of = |mode| {
+            let outcome = super::resolve(
+                vec![text_block("/loop 1m echo hello")],
+                &[],
+                all_gated(),
+                SkillSlashRewrite::default(),
+                &[],
+                mode,
+            )
+            .unwrap_err();
+            let SlashCommandOutcome::InvokeSkill { blocks, .. } = outcome else {
+                panic!("expected InvokeSkill for /loop");
+            };
+            let Some(acp::ContentBlock::Text(tb)) = blocks.into_iter().next() else {
+                panic!("expected a text block");
+            };
+            tb.text
+        };
+        assert!(
+            text_of(LoopFireMode::Detached).contains("cannot see this conversation"),
+            "detached sessions must get the standalone-prompt framing"
+        );
+        assert!(
+            text_of(LoopFireMode::InSession).contains("arrives as a new turn in this conversation"),
+            "in-session sessions must get the standing-order framing"
+        );
+    }
+
+    #[test]
     fn resolve_passthrough_preserves_original_blocks() {
         // External-harness agents: blocks are passed through verbatim.
         // The prompt assembly layer decides how to format them.
@@ -1830,8 +1891,8 @@ mod tests {
     }
 
     /// Extract the text of the first block produced by `build_loop_prompt_blocks`.
-    fn loop_text(args: &str) -> String {
-        match build_loop_prompt_blocks(args).into_iter().next() {
+    fn loop_text(args: &str, mode: LoopFireMode) -> String {
+        match build_loop_prompt_blocks(args, mode).into_iter().next() {
             Some(acp::ContentBlock::Text(t)) => t.text,
             other => panic!("expected a text block, got {other:?}"),
         }
@@ -1840,7 +1901,7 @@ mod tests {
     #[test]
     fn loop_usage_has_no_10m_default() {
         // The shell client must not advertise a silent 10m default.
-        let usage = loop_text("");
+        let usage = loop_text("", LoopFireMode::Detached);
         assert!(usage.contains("Usage: /loop"), "got: {usage}");
         assert!(
             !usage.contains("10m"),
@@ -1850,7 +1911,7 @@ mod tests {
 
     #[test]
     fn loop_instruction_derives_interval_without_default_or_inline_execute() {
-        let instr = loop_text("every 30 minutes do x");
+        let instr = loop_text("every 30 minutes do x", LoopFireMode::Detached);
         assert!(
             !instr.contains("10m"),
             "instruction must not default: {instr}"
@@ -1872,11 +1933,13 @@ mod tests {
         use xai_grok_tools::implementations::grok_build::{
             loop_schedule_instruction, loop_usage_message,
         };
-        assert_eq!(loop_text(""), loop_usage_message());
-        assert_eq!(
-            loop_text("2h run tests"),
-            loop_schedule_instruction("2h run tests")
-        );
+        assert_eq!(loop_text("", LoopFireMode::Detached), loop_usage_message());
+        for mode in [LoopFireMode::Detached, LoopFireMode::InSession] {
+            assert_eq!(
+                loop_text("2h run tests", mode),
+                loop_schedule_instruction("2h run tests", mode)
+            );
+        }
     }
 
     #[test]

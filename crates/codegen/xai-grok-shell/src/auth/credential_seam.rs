@@ -318,7 +318,8 @@ mod tests {
 
     #[test]
     fn plugin_credential_defaults_and_expiry() {
-        let c: PluginCredential = serde_json::from_value(serde_json::json!({ "token": "t" })).unwrap();
+        let c: PluginCredential =
+            serde_json::from_value(serde_json::json!({ "token": "t" })).unwrap();
         assert!(c.needs_token_auth_header);
         assert_eq!(c.expires_at_ms, None);
         assert!(c.is_unexpired(0));
@@ -383,6 +384,7 @@ mod tests {
             timeout_ms: 300_000,
             source_dir: std::path::PathBuf::from("/tmp"),
             extra_env: std::collections::HashMap::new(),
+            layer: xai_grok_hooks::config::HookProvenance::Plugin,
         }
     }
 

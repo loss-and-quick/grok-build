@@ -50,7 +50,7 @@ use crate::session::slash_commands::{self, BuiltinAction, SlashCommandOutcome};
 use crate::session::storage::SessionUpdate;
 use crate::session::user_message::extract_user_query;
 use crate::session::user_message::{construct_user_message, construct_user_message_minimal};
-use crate::terminal::{DEFAULT_TIMEOUT, TerminalRunRequest};
+use crate::terminal::TerminalRunRequest;
 use crate::tools::ToolContext;
 use agent_client_protocol as acp;
 use agent_client_protocol::ContentBlock;
@@ -207,6 +207,7 @@ pub(crate) struct InputItem {
     /// Typed deferred completion retained while an admitted task wake is queued.
     /// Consumed by Ctrl+C if it removes the wake before the turn starts.
     pub(crate) task_wake_fallback: Option<TaskWakeFallback>,
+    pub(crate) tool_overrides_update: Option<xai_grok_sampling_types::ToolOverridesUpdate>,
     pub(crate) respond_to: oneshot::Sender<PromptTurnResult>,
     /// Fired after the user message is in chat history and a persistence flush
     /// barrier has completed (see `SessionCommand::Prompt::persist_ack`).
@@ -438,8 +439,9 @@ fn managed_gateway_error_to_tool_error(
                     );
                 }
                 _ => {
-                    err.details =
-                        Some(serde_json::json!({ HTTP_STATUS_DETAILS_KEY : status.as_u16(), }));
+                    err.details = Some(serde_json::json!({
+                        HTTP_STATUS_DETAILS_KEY: status.as_u16(),
+                    }));
                 }
             }
             err
@@ -644,6 +646,11 @@ pub(crate) struct SessionActor {
     /// `is_telemetry_enabled() && !is_zdr()` — ZDR teams always have this false.
     pub(crate) telemetry_enabled: bool,
     pub(crate) supports_backend_search: std::cell::Cell<bool>,
+    /// Per-turn override, set at promotion. Not persisted; a reload reverts to the definition seed.
+    pub(crate) tool_overrides: std::cell::RefCell<Option<xai_grok_sampling_types::ToolOverrides>>,
+    /// Configured cutoff a subagent inherits, read off the `SessionHandle` without an actor round-trip.
+    pub(crate) resolved_tool_overrides:
+        std::sync::Arc<arc_swap::ArcSwapOption<xai_grok_sampling_types::ToolOverrides>>,
     pub(crate) compactions_remaining:
         std::cell::Cell<Option<xai_grok_sampling_types::CompactionsRemaining>>,
     pub(crate) compaction_at_tokens:
@@ -896,14 +903,13 @@ pub(crate) struct SessionActor {
     pub(crate) deferred_prefix: TaskSlot<String>,
     /// Extensions to notify at turn and session lifecycle edges. Built once by `session_extension_registry` at actor construction and frozen after.
     pub(crate) extension_registry: xai_agent_lifecycle::LocalExtensionRegistry,
-    /// Local calendar date last surfaced to the model — either stamped into the
-    /// `<user_info>` prefix (at session start, compaction, or resume) or
-    /// announced via a date-rollover `<system-reminder>`. Drives
-    /// [`SessionActor::maybe_inject_date_rollover_reminder`] (date
-    /// rollover: tell the model the date advanced when a long session crosses
-    /// local midnight, since the cached prefix isn't re-stamped per turn). The
-    /// actor is single-threaded, so a `Cell` suffices.
+    /// Local date last surfaced to the model, via the `<user_info>` prefix (session start,
+    /// compaction, model switch) or a date-rollover `<system-reminder>`. Plain resume reuses the
+    /// cached prefix. Drives [`SessionActor::maybe_inject_date_rollover_reminder`].
     pub(crate) last_announced_local_date: std::cell::Cell<chrono::NaiveDate>,
+    /// True when the render-failure fallback stamped a date into a date-free template's prefix, so
+    /// [`SessionActor::maybe_inject_date_rollover_reminder`] still rolls it over.
+    pub(crate) prefix_carries_fallback_date: std::cell::Cell<bool>,
     /// Prompt index when search_tool last ran. -1 = never. Used for turns_since_last_search.
     pub(crate) last_search_prompt_index: std::sync::atomic::AtomicI64,
     /// Timestamp (millis since epoch) of the last successful API request.
@@ -1315,10 +1321,8 @@ const SYSTEM_PROMPT_FILENAME: &str = "system_prompt.txt";
 fn persist_chat_history_jsonl_sync(session_info: &SessionInfo, conversation: &[ConversationItem]) {
     let dir = crate::session::persistence::session_dir(session_info);
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(
-            session_id = % session_info.id.0, ? e,
-            "persist_chat_history_jsonl_sync: failed to create session dir"
-        );
+        tracing::warn!(session_id = %session_info.id.0, ?e,
+            "persist_chat_history_jsonl_sync: failed to create session dir");
         return;
     }
     let final_path = dir.join("chat_history.jsonl");
@@ -1336,10 +1340,8 @@ fn persist_chat_history_jsonl_sync(session_info: &SessionInfo, conversation: &[C
         Ok(())
     })();
     if let Err(e) = result {
-        tracing::warn!(
-            session_id = % session_info.id.0, ? e,
-            "persist_chat_history_jsonl_sync: failed to persist chat_history.jsonl"
-        );
+        tracing::warn!(session_id = %session_info.id.0, ?e,
+            "persist_chat_history_jsonl_sync: failed to persist chat_history.jsonl");
         let _ = std::fs::remove_file(&tmp_path);
     }
 }
@@ -1453,7 +1455,7 @@ mod managed_gateway_descriptor_tests {
             .register_mcp_tools(
                 "server__tool".to_string(),
                 FixtureMcpTool,
-                Some(serde_json::json!({ "type" : "object" })),
+                Some(serde_json::json!({"type": "object"})),
             )
             .await
             .expect("local fixture registration succeeds");
@@ -1474,7 +1476,7 @@ mod managed_gateway_descriptor_tests {
                             tool_name: "Collision".to_string(),
                             call_id: "gateway.collision".to_string(),
                             description: "Gateway collision".to_string(),
-                            json_schema: serde_json::json!({ "type" : "object" }),
+                            json_schema: serde_json::json!({"type": "object"}),
                         },
                         crate::session::managed_mcp::GatewayTool {
                             connector_id: "gateway".to_string(),
@@ -1483,7 +1485,7 @@ mod managed_gateway_descriptor_tests {
                             tool_name: "Search".to_string(),
                             call_id: "gateway.search".to_string(),
                             description: "Gateway search".to_string(),
-                            json_schema: serde_json::json!({ "type" : "object" }),
+                            json_schema: serde_json::json!({"type": "object"}),
                         },
                     ],
                     total_tools: 2,
@@ -1530,7 +1532,7 @@ mod managed_gateway_descriptor_tests {
                             tool_name: "List".to_string(),
                             call_id: "linear.list_issues".to_string(),
                             description: "List issues".to_string(),
-                            json_schema: serde_json::json!({ "type" : "object" }),
+                            json_schema: serde_json::json!({"type": "object"}),
                         },
                         crate::session::managed_mcp::GatewayTool {
                             connector_id: "linear".to_string(),
@@ -1539,7 +1541,7 @@ mod managed_gateway_descriptor_tests {
                             tool_name: "Create".to_string(),
                             call_id: "linear.create_issue".to_string(),
                             description: "Create issue".to_string(),
-                            json_schema: serde_json::json!({ "type" : "object" }),
+                            json_schema: serde_json::json!({"type": "object"}),
                         },
                         crate::session::managed_mcp::GatewayTool {
                             connector_id: "slack".to_string(),
@@ -1548,7 +1550,7 @@ mod managed_gateway_descriptor_tests {
                             tool_name: "Search".to_string(),
                             call_id: "slack.search".to_string(),
                             description: "Search Slack".to_string(),
-                            json_schema: serde_json::json!({ "type" : "object" }),
+                            json_schema: serde_json::json!({"type": "object"}),
                         },
                     ],
                     total_tools: 3,
@@ -1608,6 +1610,10 @@ mod permission_auto_mode_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/plan_approval_resume_tests.rs"]
 mod plan_approval_resume_tests;
+/// Mixed-batch plan.md write + exit_plan_mode snapshot.
+#[cfg(test)]
+#[path = "acp_session_tests/plan_exit_batch_barrier_tests.rs"]
+mod plan_exit_batch_barrier_tests;
 /// Plan-mode edit gate: read-only except the plan file, even under allow-all.
 #[cfg(test)]
 #[path = "acp_session_tests/plan_mode_edit_gate_tests.rs"]
@@ -1935,7 +1941,7 @@ mod managed_gateway_tool_tests {
             .register_mcp_tools(
                 "server__tool".to_string(),
                 FixtureMcpTool,
-                Some(serde_json::json!({ "type" : "object" })),
+                Some(serde_json::json!({"type": "object"})),
             )
             .await
             .expect("local fixture registration succeeds");
@@ -1956,7 +1962,7 @@ mod managed_gateway_tool_tests {
                             tool_name: "Collision".to_string(),
                             call_id: "gateway.collision".to_string(),
                             description: "Gateway collision".to_string(),
-                            json_schema: serde_json::json!({ "type" : "object" }),
+                            json_schema: serde_json::json!({"type": "object"}),
                         },
                         crate::session::managed_mcp::GatewayTool {
                             connector_id: "gateway".to_string(),
@@ -1965,7 +1971,7 @@ mod managed_gateway_tool_tests {
                             tool_name: "Search".to_string(),
                             call_id: "gateway.search".to_string(),
                             description: "Gateway search".to_string(),
-                            json_schema: serde_json::json!({ "type" : "object" }),
+                            json_schema: serde_json::json!({"type": "object"}),
                         },
                     ],
                     total_tools: 2,
@@ -2007,7 +2013,7 @@ mod managed_gateway_tool_tests {
                             tool_name: "List".to_string(),
                             call_id: "linear.list_issues".to_string(),
                             description: "List issues".to_string(),
-                            json_schema: serde_json::json!({ "type" : "object" }),
+                            json_schema: serde_json::json!({"type": "object"}),
                         },
                         crate::session::managed_mcp::GatewayTool {
                             connector_id: "linear".to_string(),
@@ -2016,7 +2022,7 @@ mod managed_gateway_tool_tests {
                             tool_name: "Create".to_string(),
                             call_id: "linear.create_issue".to_string(),
                             description: "Create issue".to_string(),
-                            json_schema: serde_json::json!({ "type" : "object" }),
+                            json_schema: serde_json::json!({"type": "object"}),
                         },
                         crate::session::managed_mcp::GatewayTool {
                             connector_id: "slack".to_string(),
@@ -2025,7 +2031,7 @@ mod managed_gateway_tool_tests {
                             tool_name: "Search".to_string(),
                             call_id: "slack.search".to_string(),
                             description: "Search Slack".to_string(),
-                            json_schema: serde_json::json!({ "type" : "object" }),
+                            json_schema: serde_json::json!({"type": "object"}),
                         },
                     ],
                     total_tools: 3,

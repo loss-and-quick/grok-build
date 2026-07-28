@@ -453,7 +453,8 @@ impl PanelState {
                     secret,
                     ..
                 } => {
-                    let is_focused = matches!(&focused, Some(Focusable::Input(_, fid)) if fid == id);
+                    let is_focused =
+                        matches!(&focused, Some(Focusable::Input(_, fid)) if fid == id);
                     let text = self
                         .inputs
                         .get(id)
@@ -489,8 +490,7 @@ impl PanelState {
                 PanelBlock::Actions { buttons } => {
                     let mut spans = Vec::new();
                     for (idx, btn) in buttons.iter().enumerate() {
-                        let is_focused =
-                            matches!(&focused, Some(Focusable::Button(fb, fi)) if *fb == bi && *fi == idx);
+                        let is_focused = matches!(&focused, Some(Focusable::Button(fb, fi)) if *fb == bi && *fi == idx);
                         let label = match &btn.key {
                             Some(k) => format!(" {} ({}) ", btn.label, k),
                             None => format!(" {} ", btn.label),

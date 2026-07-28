@@ -273,6 +273,7 @@ mod tests {
             timeout_ms: 5000,
             source_dir: std::path::PathBuf::from("/tmp"),
             extra_env: std::collections::HashMap::new(),
+            layer: crate::config::HookProvenance::Plugin,
         }
     }
 

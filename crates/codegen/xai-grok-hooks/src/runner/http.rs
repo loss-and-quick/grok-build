@@ -654,6 +654,7 @@ mod tests {
             extra_env,
             plugin: None,
             plugin_handler: None,
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = HookEventEnvelope {
@@ -735,6 +736,7 @@ mod tests {
             extra_env,
             plugin: None,
             plugin_handler: None,
+            layer: crate::config::HookProvenance::File,
         };
         let envelope = HookEventEnvelope {
             hook_event_name: HookEventName::PreToolUse,

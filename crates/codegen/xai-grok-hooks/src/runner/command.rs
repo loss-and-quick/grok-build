@@ -841,6 +841,7 @@ mod tests {
                 extra_env: std::collections::HashMap::new(),
                 plugin: None,
                 plugin_handler: None,
+                layer: crate::config::HookProvenance::File,
             };
         use crate::config::HandlerType;
         assert_eq!(
@@ -885,6 +886,7 @@ mod tests {
             extra_env: std::collections::HashMap::new(),
             plugin: None,
             plugin_handler: None,
+            layer: crate::config::HookProvenance::File,
         }
     }
 
@@ -1050,6 +1052,7 @@ mod tests {
             extra_env,
             plugin: None,
             plugin_handler: None,
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = make_envelope();
@@ -1110,6 +1113,7 @@ mod tests {
             extra_env: std::collections::HashMap::new(),
             plugin: None,
             plugin_handler: None,
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = make_envelope();
@@ -1242,6 +1246,7 @@ mod tests {
             extra_env,
             plugin: None,
             plugin_handler: None,
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = make_envelope();
@@ -1317,6 +1322,7 @@ mod tests {
             extra_env,
             plugin: None,
             plugin_handler: None,
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = make_envelope();
@@ -1384,6 +1390,7 @@ mod tests {
             extra_env: std::collections::HashMap::new(),
             plugin: None,
             plugin_handler: None,
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = make_envelope();

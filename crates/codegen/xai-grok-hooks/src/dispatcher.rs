@@ -773,6 +773,7 @@ mod tests {
             extra_env: HashMap::new(),
             plugin: None,
             plugin_handler: None,
+            layer: crate::config::HookProvenance::File,
         }
     }
 
@@ -1445,6 +1446,7 @@ mod tests {
             timeout_ms: 5000,
             source_dir: PathBuf::from("/tmp"),
             extra_env: HashMap::new(),
+            layer: crate::config::HookProvenance::Plugin,
         }
     }
 
@@ -1725,7 +1727,9 @@ mod tests {
         let registry =
             registry_from_specs(vec![plugin_spec("flow", HookEventName::StartOauthFlow)]);
         let ctx = plugin_ctx(PluginHookResponse::Replace {
-            payload: Some(serde_json::json!({ "token": "minted", "needs_token_auth_header": true })),
+            payload: Some(
+                serde_json::json!({ "token": "minted", "needs_token_auth_header": true }),
+            ),
         });
         let out = dispatch_intercept(
             &registry,

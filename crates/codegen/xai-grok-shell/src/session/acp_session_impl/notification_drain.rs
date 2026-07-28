@@ -237,6 +237,7 @@ impl SessionActor {
             json_schema,
             origin,
             running_display,
+            tool_overrides_update,
         ) = {
             let Some(front) = state.pending_inputs.front_mut() else {
                 return;
@@ -256,8 +257,10 @@ impl SessionActor {
                 front.json_schema.clone(),
                 front.origin.clone(),
                 running_display,
+                front.tool_overrides_update.take(),
             )
         };
+        self.apply_tool_overrides_update(tool_overrides_update);
         if matches!(origin, super::PromptOrigin::User) {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(false);
@@ -445,7 +448,7 @@ impl SessionActor {
         let Some(buffer) = &self.tool_context.monitor_event_buffer else {
             return;
         };
-        for event in xai_grok_tools::implementations::grok_build::task::types::drain_owned(
+        for event in xai_grok_tools::implementations::grok_build::monitor::types::drain_owned(
             buffer,
             Some(self.session_info.id.0.as_ref()),
         ) {
@@ -497,7 +500,7 @@ impl SessionActor {
         notifications: &[PendingNotification],
         task_output_tool_name: &str,
     ) -> Vec<acp::ContentBlock> {
-        use xai_grok_tools::implementations::grok_build::task::types::MonitorEventNotification;
+        use xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventNotification;
 
         let completion_task_ids: std::collections::HashSet<&str> = notifications
             .iter()
@@ -588,6 +591,7 @@ impl SessionActor {
             json_schema: None,
             origin: super::PromptOrigin::NotificationDrain,
             task_wake_fallback: None,
+            tool_overrides_update: None,
             respond_to,
             persist_ack: None,
             parsed_prompt_tx: None,

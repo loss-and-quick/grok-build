@@ -208,6 +208,7 @@ pub fn render_auth_method_picker(
         &[],
         Some(theme.bg_base),
         false,
+        0,
         modal.inner_x + modal.inner_width.saturating_sub(1),
     );
     // Persist the hit areas: the next click is tested against them.
