@@ -19,9 +19,20 @@ use ratatui::text::{Line, Span};
 
 use xai_grok_plugin_protocol::{PanelBlock, PanelTone, PanelViewModel};
 
+use crate::clipboard::ClipboardDelivery;
 use crate::input::line_editor::{LineEditOutcome, LineEditor};
 use crate::scrollback::blocks::markdown_content::MarkdownContent;
 use crate::theme::Theme;
+use crate::views::copy_link::{copy_feedback_line, copy_link_len, copy_link_line};
+
+/// Copy prompt shown under a Markdown block that contains a URL.
+///
+/// A URL inside a panel is otherwise unreachable: the overlay owns mouse
+/// capture so it cannot be selected, and the panel border chops it across
+/// several rows. Wording and styling come from
+/// [`crate::views::copy_link`] — the same affordance the native sign-in screen
+/// teaches — with a prefix that fits a panel (nothing was auto-opened here).
+const PANEL_COPY_PREFIX: &str = "Click ";
 
 /// One focusable element within a panel, in top-to-bottom order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +79,10 @@ pub(crate) struct PanelState {
     tables: HashMap<usize, TableSel>,
     /// Index into [`Self::focusables`] of the focused element.
     focus: usize,
+    /// Copy-affordance hit rects recorded by the last [`Self::render_content`],
+    /// each paired with the URL that clicking it copies. Rebuilt every render,
+    /// so it always describes what is currently on screen.
+    url_copy_hits: Vec<(Rect, String)>,
 }
 
 impl PanelState {
@@ -89,6 +104,7 @@ impl PanelState {
             inputs,
             tables: HashMap::new(),
             focus: 0,
+            url_copy_hits: Vec::new(),
         }
     }
 
@@ -360,10 +376,37 @@ impl PanelState {
         PanelKeyOutcome::Ignored
     }
 
+    /// The URL a left-click at `(col, row)` copies, from the last render's
+    /// copy-affordance rects. `None` when the click missed every affordance.
+    pub(crate) fn url_at(&self, col: u16, row: u16) -> Option<&str> {
+        self.url_copy_hits
+            .iter()
+            .find(|(rect, _)| rect.contains(ratatui::layout::Position::new(col, row)))
+            .map(|(_, url)| url.as_str())
+    }
+
+    /// Copy-affordance rects from the last render, paired with their URL, so
+    /// the caller can lay OSC 8 hyperlinks over them where the terminal
+    /// supports it. Click-to-copy works regardless.
+    pub(crate) fn url_copy_hits(&self) -> &[(Rect, String)] {
+        &self.url_copy_hits
+    }
+
     /// Render the panel's blocks top-to-bottom into `area`. Takes `&mut self`
     /// so a selectable table can scroll its window to keep the selection
-    /// visible for the current viewport height.
-    pub(crate) fn render_content(&mut self, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    /// visible for the current viewport height, and so the copy-affordance hit
+    /// rects can be recorded.
+    ///
+    /// `copy_delivery` is the outcome of the most recent click-to-copy, shown
+    /// in the feedback slot under the affordance.
+    pub(crate) fn render_content(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        theme: &Theme,
+        copy_delivery: Option<ClipboardDelivery>,
+    ) {
+        self.url_copy_hits.clear();
         if area.width == 0 || area.height == 0 {
             return;
         }
@@ -401,6 +444,41 @@ impl PanelState {
                         }
                         buf.set_line(area.x, y, &line, area.width);
                         y += 1;
+                    }
+                    // A URL rendered as plain text in here cannot be taken out:
+                    // the overlay captures the mouse, so neither selection nor
+                    // shift-drag yields the URL. Offer click-to-copy plus a
+                    // feedback slot, the same way the native sign-in screen does.
+                    if let Some(url) = crate::scrollback::text_selection::first_url(text) {
+                        if y < bottom {
+                            buf.set_line(
+                                area.x,
+                                y,
+                                &copy_link_line(theme, PANEL_COPY_PREFIX),
+                                area.width,
+                            );
+                            let hit_width =
+                                (copy_link_len(PANEL_COPY_PREFIX) as u16).min(area.width);
+                            self.url_copy_hits.push((
+                                Rect {
+                                    x: area.x,
+                                    y,
+                                    width: hit_width,
+                                    height: 1,
+                                },
+                                url.to_string(),
+                            ));
+                            y += 1;
+                        }
+                        if y < bottom {
+                            buf.set_line(
+                                area.x,
+                                y,
+                                &copy_feedback_line(theme, copy_delivery),
+                                area.width,
+                            );
+                            y += 1;
+                        }
                     }
                 }
                 PanelBlock::Table {

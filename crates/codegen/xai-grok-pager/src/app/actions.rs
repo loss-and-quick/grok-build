@@ -667,6 +667,10 @@ pub enum Action {
     SubmitAuthCode(String),
     /// Copy the auth URL to the clipboard during authentication.
     CopyAuthUrl,
+    /// Copy a URL surfaced in a plugin panel (click on the panel's copy
+    /// affordance). The overlay owns mouse capture, so this is the only way a
+    /// URL inside a panel can leave it.
+    CopyPluginPanelUrl(String),
     /// Show the raw auth URL with mouse capture disabled for manual copy.
     ShowRawAuthUrl,
     /// Hide the raw auth URL and re-enable mouse capture.
@@ -2009,6 +2013,9 @@ pub enum Effect {
     },
     /// Clear the auth copy feedback after a delay if its generation is still current.
     ScheduleClearAuthCopyFeedback { generation: u64 },
+    /// Clear a plugin panel's copy feedback after the same delay, if its
+    /// generation is still current.
+    ScheduleClearPanelCopyFeedback { agent_id: AgentId, generation: u64 },
     /// Register the current session in the active-sessions crash-recovery
     /// registry (`~/.grok/active_sessions.json`).
     RegisterActiveSession {
@@ -2505,7 +2512,9 @@ pub enum TaskResult {
     },
     /// Plugin panel button action delivered (fire-and-forget; the boolean is
     /// logged only).
-    PluginPanelActionResult { delivered: bool },
+    PluginPanelActionResult {
+        delivered: bool,
+    },
     /// Marketplace list loaded.
     MarketplaceListLoaded {
         agent_id: AgentId,
@@ -2755,6 +2764,11 @@ pub enum TaskResult {
     },
     /// The 2-second auth copy feedback timer expired.
     AuthCopyFeedbackTimeout {
+        generation: u64,
+    },
+    /// The 2-second plugin-panel copy feedback timer expired.
+    PanelCopyFeedbackTimeout {
+        agent_id: AgentId,
         generation: u64,
     },
     DeepSearchResults {

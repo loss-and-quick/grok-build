@@ -1099,6 +1099,17 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::PanelCopyFeedbackTimeout {
+            agent_id,
+            generation,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && generation == agent.plugin_panel_copy_generation
+            {
+                agent.plugin_panel_copy_delivery = None;
+            }
+            vec![]
+        }
         TaskResult::PaywallCheckTick => {
             let timed_out = app
                 .paywall_check_started

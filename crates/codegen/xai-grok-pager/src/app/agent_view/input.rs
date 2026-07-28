@@ -615,8 +615,7 @@ impl AgentView {
                         return InputOutcome::Unchanged;
                     }
                     // The toggle chord closes the overlay.
-                    if registry.lookup(key, When::AgentScreen)
-                        == Some(ActionId::TogglePluginPanels)
+                    if registry.lookup(key, When::AgentScreen) == Some(ActionId::TogglePluginPanels)
                     {
                         self.plugin_panel_overlay_open = false;
                         return InputOutcome::Changed;
@@ -624,6 +623,11 @@ impl AgentView {
                     self.handle_plugin_panel_key(key)
                 }
                 Event::Paste(text) => self.handle_plugin_panel_paste(text),
+                Event::Mouse(mouse)
+                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) =>
+                {
+                    self.handle_plugin_panel_click(mouse.column, mouse.row)
+                }
                 _ => InputOutcome::Changed,
             };
         }

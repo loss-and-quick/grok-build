@@ -987,9 +987,12 @@ fn choosing_a_method_authenticates_with_it_and_closes_the_picker() {
     );
 
     assert!(app.auth_method_picker.is_none());
+    // No `PollAuthUrl`: `x.ai/auth/get_url` is only ever answered by the
+    // shell's own flows, so polling it for a plugin sign-in just times out into
+    // the paste-a-token screen.
     assert!(matches!(
         effects.as_slice(),
-        [Effect::Authenticate { method_id, .. }, Effect::PollAuthUrl { .. }]
+        [Effect::Authenticate { method_id, .. }]
             if method_id.0.as_ref() == "plugin-oauth:example-auth"
     ));
     assert_eq!(
@@ -1023,7 +1026,7 @@ fn switch_account_picker_choice_runs_the_switch_account_flow() {
 
     assert!(matches!(
         effects.as_slice(),
-        [Effect::SwitchAccount { method_id, .. }, Effect::PollAuthUrl { .. }]
+        [Effect::SwitchAccount { method_id, .. }]
             if method_id.0.as_ref() == "plugin-oauth:example-auth"
     ));
 }
@@ -1081,5 +1084,116 @@ fn choosing_an_unadvertised_method_fails_closed() {
     assert!(matches!(
         app.auth_state,
         AuthState::Pending { error: Some(_) }
+    ));
+}
+
+// ── plugin-oauth: the plugin's panel is the whole sign-in UI ─────────────
+
+/// `/login` with a `plugin-oauth:*` method must not enter the native
+/// auth-URL wait. `x.ai/auth/get_url` is only ever populated by the shell's own
+/// flows, so polling it strands the user on "Waiting for auth URL..." (and then
+/// a token paste box that sends the code nowhere) while the real flow sits in
+/// the plugin's panel.
+#[test]
+fn plugin_oauth_login_skips_the_native_auth_url_wait() {
+    let mut app = test_app_with_agent();
+    app.auth_methods = vec![picker_auth_method(
+        "plugin-oauth:example-auth",
+        "Acme OAuth",
+    )];
+    app.login_method_id = None;
+
+    let effects = dispatch(Action::Login, &mut app);
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PollAuthUrl { .. })),
+        "a plugin sign-in must not poll x.ai/auth/get_url: {effects:?}"
+    );
+    assert!(matches!(
+        app.auth_state,
+        AuthState::Authenticating {
+            mode: AuthMode::Plugin,
+            auth_url: None,
+            ..
+        }
+    ));
+}
+
+/// The plugin publishes its panel into the session, so the pager must stay on
+/// the session rather than detouring to the welcome screen's auth UI — and the
+/// overlay is armed so the panel shows itself when it lands.
+#[test]
+fn plugin_oauth_login_stays_on_the_session_and_surfaces_the_panel() {
+    let mut app = test_app_with_agent();
+    app.auth_methods = vec![picker_auth_method(
+        "plugin-oauth:example-auth",
+        "Acme OAuth",
+    )];
+    app.login_method_id = None;
+    let id = AgentId(0);
+    assert_eq!(app.active_view, ActiveView::Agent(id));
+
+    dispatch(Action::Login, &mut app);
+
+    assert_eq!(
+        app.active_view,
+        ActiveView::Agent(id),
+        "the panel renders in the session, so the user must stay there"
+    );
+    assert!(
+        app.auth_return_view.is_none(),
+        "nothing to return from: there was no detour"
+    );
+
+    // The panel arrives a moment later and opens itself.
+    let vm = xai_grok_plugin_protocol::PanelViewModel {
+        id: "signin".into(),
+        title: "Acme sign-in".into(),
+        blocks: vec![],
+    };
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .apply_plugin_panel("example-auth".into(), vm);
+    assert!(
+        app.agents[&id].plugin_panel_overlay_active(),
+        "the sign-in panel must surface itself, not wait behind F6"
+    );
+}
+
+/// A late `AuthUrlReady` from a superseded attempt must never downgrade a
+/// plugin sign-in to Loopback — that would paint a paste box whose code goes
+/// nowhere, since the plugin reads its code from the panel's own input.
+#[test]
+fn late_auth_url_ready_cannot_downgrade_a_plugin_login_to_loopback() {
+    let mut app = test_app_with_agent();
+    app.auth_methods = vec![picker_auth_method(
+        "plugin-oauth:example-auth",
+        "Acme OAuth",
+    )];
+    app.login_method_id = None;
+    dispatch(Action::Login, &mut app);
+    let AuthState::Authenticating { request_seq, .. } = app.auth_state else {
+        panic!("expected Authenticating");
+    };
+
+    dispatch(
+        Action::TaskComplete(TaskResult::AuthUrlReady {
+            request_seq,
+            auth_url: None,
+            external: false,
+            mode: None,
+        }),
+        &mut app,
+    );
+
+    assert!(matches!(
+        app.auth_state,
+        AuthState::Authenticating {
+            mode: AuthMode::Plugin,
+            ..
+        }
     ));
 }

@@ -136,6 +136,28 @@ pub(super) fn dispatch_copy_auth_url(
         generation: app.auth_clipboard_feedback_generation,
     }]
 }
+
+/// Copy a URL out of the active agent's plugin panel and arm the same
+/// generation-guarded feedback window [`dispatch_copy_auth_url`] uses, so both
+/// surfaces confirm a copy the same way.
+pub(super) fn dispatch_copy_plugin_panel_url(
+    app: &mut AppView,
+    url: &str,
+    copy: impl FnOnce(&str) -> crate::clipboard::ClipboardDelivery,
+) -> Vec<Effect> {
+    let ActiveView::Agent(agent_id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    agent.plugin_panel_copy_delivery = Some(copy(url));
+    agent.plugin_panel_copy_generation = agent.plugin_panel_copy_generation.wrapping_add(1);
+    vec![Effect::ScheduleClearPanelCopyFeedback {
+        agent_id,
+        generation: agent.plugin_panel_copy_generation,
+    }]
+}
 /// Dispatch an action: mutate state, return effects to execute.
 ///
 /// The returned `Vec<Effect>` may be empty (pure state mutation) or contain
@@ -1110,6 +1132,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
         Action::CopyAuthUrl => {
             dispatch_copy_auth_url(app, crate::clipboard::SystemClipboard::try_set)
+        }
+        Action::CopyPluginPanelUrl(url) => {
+            dispatch_copy_plugin_panel_url(app, &url, crate::clipboard::SystemClipboard::try_set)
         }
         Action::ShowRawAuthUrl => {
             app.auth_show_raw_url = true;

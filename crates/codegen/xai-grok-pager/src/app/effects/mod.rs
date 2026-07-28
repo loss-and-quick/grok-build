@@ -78,6 +78,16 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::ScheduleClearPanelCopyFeedback { agent_id, generation } => {
+            tasks
+                .spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    TaskResult::PanelCopyFeedbackTimeout {
+                        agent_id,
+                        generation,
+                    }
+                });
+        }
         Effect::Logout => {
             let tx = acp_tx.clone();
             tasks

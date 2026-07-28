@@ -26,6 +26,55 @@ fn auth_copy_dispatch_preserves_all_delivery_states() {
         ));
     }
 }
+/// A plugin-panel copy runs the same generation-guarded feedback window the
+/// native sign-in copy does, scoped to the agent whose panel was clicked.
+#[test]
+fn plugin_panel_copy_dispatch_preserves_all_delivery_states() {
+    for delivery in [
+        crate::clipboard::ClipboardDelivery::Confirmed,
+        crate::clipboard::ClipboardDelivery::Unverified,
+        crate::clipboard::ClipboardDelivery::Failed,
+    ] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let effects = crate::app::dispatch::router::dispatch_copy_plugin_panel_url(
+            &mut app,
+            "https://accounts.example.com/oauth2/authorize?x=1",
+            |url| {
+                assert_eq!(url, "https://accounts.example.com/oauth2/authorize?x=1");
+                delivery
+            },
+        );
+        assert_eq!(app.agents[&id].plugin_panel_copy_delivery, Some(delivery));
+        assert_eq!(app.agents[&id].plugin_panel_copy_generation, 1);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::ScheduleClearPanelCopyFeedback {
+                agent_id,
+                generation: 1
+            }] if *agent_id == id
+        ));
+
+        // Only the matching generation clears the feedback.
+        dispatch(
+            Action::TaskComplete(TaskResult::PanelCopyFeedbackTimeout {
+                agent_id: id,
+                generation: 99,
+            }),
+            &mut app,
+        );
+        assert_eq!(app.agents[&id].plugin_panel_copy_delivery, Some(delivery));
+        dispatch(
+            Action::TaskComplete(TaskResult::PanelCopyFeedbackTimeout {
+                agent_id: id,
+                generation: 1,
+            }),
+            &mut app,
+        );
+        assert_eq!(app.agents[&id].plugin_panel_copy_delivery, None);
+    }
+}
+
 #[test]
 fn external_prompt_editor_arms_typed_request_and_preserves_composer_modes() {
     use crate::app::agent_view::PromptInputMode;

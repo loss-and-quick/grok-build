@@ -1177,6 +1177,20 @@ fn display_width(text: &str) -> u16 {
     })
 }
 
+/// The first URL in `text`, with unbalanced trailing punctuation stripped.
+///
+/// Shares [`URL_RE`] and [`strip_trailing_url_punctuation`] with
+/// [`url_range_at_col`] so "what counts as a URL" has one definition: a plugin
+/// panel offering click-to-copy on a URL must recognise exactly the URLs the
+/// selection layer does.
+pub fn first_url(text: &str) -> Option<&str> {
+    URL_RE
+        .find_iter(text)
+        .map(|m| strip_trailing_url_punctuation(m.as_str()))
+        // Skip degenerate URLs reduced to just the scheme (e.g. "https://").
+        .find(|url| !url.find("://").is_some_and(|i| url[i + 3..].is_empty()))
+}
+
 /// Try to find a URL that spans the given display column in `text`.
 ///
 /// Scans `text` for URLs matching common schemes (`https?://`, `ftp://`,

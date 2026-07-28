@@ -18,6 +18,7 @@ use crate::app::app_view::{AuthMode, AuthState, SessionPickerEntry, TrustState};
 use crate::startup::StartupWarning;
 use crate::theme::Theme;
 use crate::views::prompt_widget::{PromptFlag, PromptInfo, PromptWidget};
+pub(crate) mod auth_menu;
 mod hero_box;
 pub(crate) mod logo;
 mod menu;
@@ -36,21 +37,24 @@ fn welcome_in_vscode_family() -> bool {
     crate::terminal::terminal_context().brand.is_vscode_family()
 }
 
-/// Build the quit hint spans used in Authenticating sub-screens.
-fn quit_hint_spans(theme: &Theme) -> Vec<Span<'static>> {
-    let key = if welcome_in_vscode_family() {
-        "ctrl+d"
-    } else {
-        "ctrl+q"
-    };
+/// The exit hint spans on the Authenticating sub-screens.
+///
+/// Key and wording come from [`auth_menu::auth_exit_entry`], the same source the
+/// input handler takes the action from, so the hint cannot promise "quit" where
+/// the key returns to a session (or the reverse).
+fn auth_exit_hint_spans(theme: &Theme, mid_session_login: bool) -> Vec<Span<'static>> {
+    let entry = auth_menu::auth_exit_entry(mid_session_login);
     vec![
         Span::styled(
-            key,
+            entry.hint_key,
             Style::default()
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  quit", Style::default().fg(theme.gray)),
+        Span::styled(
+            format!("  {}", entry.label.to_lowercase()),
+            Style::default().fg(theme.gray),
+        ),
     ]
 }
 
@@ -593,6 +597,10 @@ pub struct WelcomeRenderParams<'a> {
     /// welcome screen renders the trust question instead of the normal prompt.
     pub trust_state: &'a TrustState,
     pub login_label: Option<&'a str>,
+    /// The login was started from inside a session (`auth_return_view` is set),
+    /// so leaving the auth screen returns there instead of quitting. Drives the
+    /// exit entry's key and label via [`auth_menu::auth_exit_entry`].
+    pub mid_session_login: bool,
     pub auth_code_input: &'a str,
     pub auth_code_cursor_byte: usize,
     pub clipboard_delivery: Option<crate::clipboard::ClipboardDelivery>,
@@ -694,22 +702,22 @@ pub fn render_welcome(
         AuthState::Pending { error } => {
             let label = params.login_label.unwrap_or("grok.com");
             let login_text = format!("Login with {}", label);
-            let menu = [("l", login_text.as_str()), ("q", "Quit")];
+            // Key + label come from the same place the input handler takes the
+            // action from — see `auth_menu`.
+            let exit = auth_menu::auth_exit_entry(params.mid_session_login);
+            let menu = [("l", login_text.as_str()), (exit.menu_key, exit.label)];
             let msg = error.as_deref().map(|e| (e, theme.accent_error));
-            let info = PromptInfo {
-                model_name: params.model_name,
-                flags: params.flags,
-                multiline: false,
-                usage_warning: None,
-                usage_warning_critical: false,
-            };
+            // No prompt box here. Nothing typed into it can be submitted or
+            // run before auth resolves — Enter is bound to `Action::Login` and
+            // slash commands don't dispatch — so painting an input would only
+            // invite keystrokes it then swallows.
             let (menu_rects, post_flush_escapes) = render_welcome_blocked(
                 content_area,
                 buf,
                 msg,
                 &menu,
                 params.selected,
-                Some((prompt, &info)),
+                None,
                 h_margin,
                 params.compact,
             );
@@ -747,6 +755,8 @@ pub fn render_welcome(
                 params.auth_code_cursor_byte,
                 params.clipboard_delivery,
                 params.show_raw_url,
+                params.login_label,
+                params.mid_session_login,
             );
             WelcomeRenderResult {
                 cursor_pos: None,
@@ -1035,24 +1045,14 @@ fn extract_user_code(url: &str) -> Option<&str> {
     let valid = !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     valid.then_some(code)
 }
-/// Clickable copy prompt shared by Loopback and Command auth modes.
+/// Clickable copy prompt shared by Loopback and Command auth modes. The rest of
+/// the line (`here to copy.`) and its styling come from
+/// [`crate::views::copy_link`], which plugin panels reuse.
 const AUTH_COPY_PREFIX: &str = "If it doesn't open, click ";
-const AUTH_COPY_HERE: &str = "here";
-const AUTH_COPY_SUFFIX: &str = " to copy.";
 
 /// Build the "click here to copy" line with "here" underlined in accent color.
 fn auth_copy_line(theme: &Theme) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(AUTH_COPY_PREFIX, Style::default().fg(theme.gray_bright)),
-        Span::styled(
-            AUTH_COPY_HERE,
-            Style::default()
-                .fg(theme.accent_user)
-                .add_modifier(Modifier::UNDERLINED),
-        ),
-        Span::styled(AUTH_COPY_SUFFIX, Style::default().fg(theme.gray_bright)),
-    ])
-    .alignment(Alignment::Center)
+    crate::views::copy_link::copy_link_line(theme, AUTH_COPY_PREFIX).alignment(Alignment::Center)
 }
 
 /// Number of physical rows the header + blank occupy before the copy line.
@@ -1063,7 +1063,7 @@ fn auth_copy_preceding_rows(header: &str, inner_width: u16) -> u16 {
 
 /// Number of physical rows the copy line occupies when wrapped.
 fn auth_copy_line_rows(inner_width: u16) -> u16 {
-    let copy_len = AUTH_COPY_PREFIX.len() + AUTH_COPY_HERE.len() + AUTH_COPY_SUFFIX.len();
+    let copy_len = crate::views::copy_link::copy_link_len(AUTH_COPY_PREFIX);
     (copy_len as u16).div_ceil(inner_width)
 }
 
@@ -1089,22 +1089,10 @@ fn push_auth_copy_block(
     lines.push(Line::default());
     lines.push(auth_copy_line(theme));
     lines.push(Line::default());
-    lines.push(match clipboard_delivery {
-        Some(crate::clipboard::ClipboardDelivery::Confirmed) => {
-            Line::from(Span::styled("copied!", Style::default().fg(theme.gray)))
-                .alignment(Alignment::Center)
-        }
-        Some(crate::clipboard::ClipboardDelivery::Unverified) => Line::from(Span::styled(
-            "copy sent—verify paste",
-            Style::default().fg(theme.gray),
-        ))
-        .alignment(Alignment::Center),
-        Some(crate::clipboard::ClipboardDelivery::Failed) => {
-            Line::from(Span::styled("copy failed", Style::default().fg(theme.gray)))
-                .alignment(Alignment::Center)
-        }
-        None => Line::default(),
-    });
+    lines.push(
+        crate::views::copy_link::copy_feedback_line(theme, clipboard_delivery)
+            .alignment(Alignment::Center),
+    );
     lines.push(Line::default());
     lines.push(auth_fallback_line(theme));
 }
@@ -1263,6 +1251,7 @@ fn render_browser_status_arm(
     show_raw_url: bool,
     clipboard_delivery: Option<crate::clipboard::ClipboardDelivery>,
     kind: BrowserStatusKind,
+    mid_session_login: bool,
 ) -> (Option<Rect>, Option<Rect>) {
     let h_pad: u16 = content_area.width / 6;
     let inner_width = content_area.width.saturating_sub(h_pad * 2).max(1);
@@ -1351,7 +1340,8 @@ fn render_browser_status_arm(
         (None, None)
     };
 
-    let hints = Line::from(quit_hint_spans(theme)).alignment(Alignment::Center);
+    let hints =
+        Line::from(auth_exit_hint_spans(theme, mid_session_login)).alignment(Alignment::Center);
     Paragraph::new(hints).render(hint_area, buf);
 
     (click_rect, fallback_rect)
@@ -1370,6 +1360,8 @@ fn render_welcome_authenticating(
     auth_code_cursor_byte: usize,
     clipboard_delivery: Option<crate::clipboard::ClipboardDelivery>,
     show_raw_url: bool,
+    login_label: Option<&str>,
+    mid_session_login: bool,
 ) -> (Option<Rect>, Option<Rect>) {
     let top_pad = content_area.height.saturating_sub(logo_line_count) / 10;
 
@@ -1469,7 +1461,7 @@ fn render_welcome_authenticating(
                 ),
                 Span::styled("  submit    ", Style::default().fg(theme.gray)),
             ];
-            hint_spans.extend(quit_hint_spans(theme));
+            hint_spans.extend(auth_exit_hint_spans(theme, mid_session_login));
             let hints = Line::from(hint_spans).alignment(Alignment::Center);
             Paragraph::new(hints).render(hint_area, buf);
 
@@ -1486,6 +1478,7 @@ fn render_welcome_authenticating(
             show_raw_url,
             clipboard_delivery,
             BrowserStatusKind::Command,
+            mid_session_login,
         ),
 
         AuthMode::Device => render_browser_status_arm(
@@ -1498,7 +1491,51 @@ fn render_welcome_authenticating(
             show_raw_url,
             clipboard_delivery,
             BrowserStatusKind::Device,
+            mid_session_login,
         ),
+
+        AuthMode::Plugin => {
+            // The plugin owns this sign-in in its own panel, inside the
+            // session. Nothing the welcome screen could paint here would be
+            // part of the flow — a paste box especially, since the code goes
+            // into the panel's own input — so say where the flow actually is.
+            let [_, logo_area, _, msg_area, _, hint_area, _] = Layout::vertical([
+                Constraint::Length(top_pad),
+                Constraint::Length(logo_line_count),
+                Constraint::Length(2),
+                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(content_area);
+
+            render_logo(logo_area, buf, theme, content_area.height);
+
+            let label = login_label.unwrap_or("the plugin");
+            let lines = vec![
+                Line::from(Span::styled(
+                    format!("Continue signing in with {label} in its panel."),
+                    Style::default().fg(theme.gray_bright),
+                ))
+                .alignment(Alignment::Center),
+                Line::default(),
+                Line::from(Span::styled(
+                    "Open it with F6 in your session.",
+                    Style::default().fg(theme.gray),
+                ))
+                .alignment(Alignment::Center),
+            ];
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .render(msg_area, buf);
+
+            let hints = Line::from(auth_exit_hint_spans(theme, mid_session_login))
+                .alignment(Alignment::Center);
+            Paragraph::new(hints).render(hint_area, buf);
+
+            (None, None)
+        }
 
         AuthMode::Pending => {
             // Connecting: status text
@@ -1522,7 +1559,8 @@ fn render_welcome_authenticating(
             .alignment(Alignment::Center);
             Paragraph::new(msg).render(msg_area, buf);
 
-            let hints = Line::from(quit_hint_spans(theme)).alignment(Alignment::Center);
+            let hints = Line::from(auth_exit_hint_spans(theme, mid_session_login))
+                .alignment(Alignment::Center);
             Paragraph::new(hints).render(hint_area, buf);
 
             (None, None)
@@ -2746,6 +2784,7 @@ mod tests {
             auth_state,
             trust_state,
             login_label: None,
+            mid_session_login: false,
             auth_code_input: "",
             auth_code_cursor_byte: 0,
             clipboard_delivery: None,
@@ -3754,6 +3793,8 @@ mod tests {
             0,
             None,  // clipboard_delivery
             false, // show_raw_url
+            None,  // login_label
+            false, // mid_session_login
         );
 
         let text = buffer_text(&buf);
@@ -3808,7 +3849,9 @@ mod tests {
             "",
             0,
             None,
-            true, // show_raw_url
+            true,  // show_raw_url
+            None,  // login_label
+            false, // mid_session_login
         );
 
         let text = buffer_text(&buf);
@@ -3835,7 +3878,9 @@ mod tests {
             "",
             0,
             None,
-            true, // show_raw_url
+            true,  // show_raw_url
+            None,  // login_label
+            false, // mid_session_login
         );
 
         let text = buffer_text(&buf);
@@ -3873,7 +3918,9 @@ mod tests {
             "",
             0,
             None,
-            true, // show_raw_url
+            true,  // show_raw_url
+            None,  // login_label
+            false, // mid_session_login
         );
 
         let text = buffer_text(&buf);
@@ -3914,6 +3961,8 @@ mod tests {
             0,
             None,  // clipboard_delivery
             false, // show_raw_url
+            None,  // login_label
+            false, // mid_session_login
         );
 
         let text = buffer_text(&buf);
@@ -4092,5 +4141,128 @@ the usual channels. "
                 );
             }
         }
+    }
+
+    /// The auth-pending menu row and the Authenticating hint row both take
+    /// their key + label from `auth_menu::auth_exit_entry` — the same source
+    /// `app_view`'s key handler takes the action from. A drift between what the
+    /// screen says and what the key does is what made this screen read as a
+    /// dead end mid-session.
+    #[test]
+    fn auth_screens_render_the_exit_entry_they_dispatch() {
+        for mid_session in [false, true] {
+            let entry = auth_menu::auth_exit_entry(mid_session);
+            let auth = AuthState::Pending {
+                error: Some("Login failed".into()),
+            };
+            let trust = TrustState::Done;
+            let mut params = render_params(&auth, &trust, None);
+            params.mid_session_login = mid_session;
+
+            let text = render_done_text(&params);
+            assert!(
+                text.contains(entry.label),
+                "the Pending menu must show {:?} (mid_session={mid_session}):\n{text}",
+                entry.label
+            );
+            assert!(
+                text.contains(entry.menu_key),
+                "the Pending menu must show key {:?}:\n{text}",
+                entry.menu_key
+            );
+            if mid_session {
+                assert!(
+                    !text.contains("Quit"),
+                    "a mid-session login does not quit the app:\n{text}"
+                );
+            }
+
+            // The Authenticating hint row advertises the same thing.
+            let area = Rect::new(0, 0, 80, 40);
+            let mut buf = Buffer::empty(area);
+            let theme = Theme::current();
+            render_welcome_authenticating(
+                area,
+                &mut buf,
+                &theme,
+                logo_line_count(area.height),
+                None,
+                AuthMode::Pending,
+                "",
+                0,
+                None,
+                false,
+                None,
+                mid_session,
+            );
+            let text = buffer_text(&buf);
+            assert!(
+                text.contains(&entry.label.to_lowercase()),
+                "the Authenticating hint must show {:?}:\n{text}",
+                entry.label
+            );
+            assert!(text.contains(entry.hint_key), "hint key missing:\n{text}");
+        }
+    }
+
+    /// The auth-pending screen paints no prompt box. Nothing typed into it
+    /// could be submitted (Enter is bound to `Action::Login`) or run (slash
+    /// commands do not dispatch), so an input there only invites keystrokes it
+    /// would then swallow.
+    #[test]
+    fn auth_pending_screen_has_no_prompt_box() {
+        let auth = AuthState::Pending {
+            error: Some("Login failed".into()),
+        };
+        let trust = TrustState::Done;
+        let params = render_params(&auth, &trust, None);
+
+        let text = render_done_text(&params);
+
+        assert!(
+            !text.contains("Ask anything"),
+            "no prompt box while auth is pending:\n{text}"
+        );
+        assert!(text.contains("Login with"), "the login row stays:\n{text}");
+    }
+
+    /// A plugin sign-in has no pager-side auth UI: the plugin publishes its own
+    /// panel with the URL and the code field. The welcome screen must point at
+    /// it and must NOT paint the loopback paste box, whose code goes nowhere.
+    #[test]
+    fn plugin_auth_arm_points_at_the_panel_and_has_no_paste_box() {
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::current();
+
+        render_welcome_authenticating(
+            area,
+            &mut buf,
+            &theme,
+            logo_line_count(area.height),
+            None,
+            AuthMode::Plugin,
+            "",
+            0,
+            None,
+            false,
+            Some("Acme OAuth"),
+            false,
+        );
+
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Acme OAuth"),
+            "name the plugin driving the sign-in:\n{text}"
+        );
+        assert!(text.contains("F6"), "point at the panel:\n{text}");
+        assert!(
+            !text.contains("Paste your token"),
+            "the loopback paste box must not appear:\n{text}"
+        );
+        assert!(
+            !text.contains("Waiting for auth URL"),
+            "a plugin sign-in never waits on x.ai/auth/get_url:\n{text}"
+        );
     }
 }

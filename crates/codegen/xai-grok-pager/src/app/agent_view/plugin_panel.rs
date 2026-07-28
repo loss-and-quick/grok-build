@@ -23,7 +23,11 @@ impl AgentView {
     /// [`PanelState`] is merged so in-progress input survives; a genuinely new
     /// panel becomes the active one if none is active yet. Does NOT open the
     /// overlay — a fresh panel shows in the sidebar until the user opens it.
-    pub(crate) fn apply_plugin_panel(&mut self, plugin: String, view_model: PanelViewModel) -> bool {
+    pub(crate) fn apply_plugin_panel(
+        &mut self,
+        plugin: String,
+        view_model: PanelViewModel,
+    ) -> bool {
         let key = (plugin, view_model.id.clone());
         match self.plugin_panels.get_mut(&key) {
             Some(state) => state.merge(view_model),
@@ -33,9 +37,32 @@ impl AgentView {
             }
         }
         if self.active_plugin_panel.is_none() {
+            self.active_plugin_panel = Some(key.clone());
+        }
+        if self.plugin_panel_auto_open {
+            self.plugin_panel_auto_open = false;
             self.active_plugin_panel = Some(key);
+            self.plugin_panel_overlay_open = true;
         }
         true
+    }
+
+    /// Put the plugin panels in front of the user now, or as soon as one
+    /// arrives.
+    ///
+    /// Used when a plugin owns a flow the user just asked for (a
+    /// `plugin-oauth:*` `/login`): the panel is the entire UI for it, and it is
+    /// usually published a moment after the request, so waiting for the user to
+    /// discover F6 would look like the flow had stalled.
+    pub(crate) fn surface_plugin_panels(&mut self) {
+        if self.plugin_panels.is_empty() {
+            self.plugin_panel_auto_open = true;
+            return;
+        }
+        self.plugin_panel_overlay_open = true;
+        if self.active_plugin_panel.is_none() {
+            self.active_plugin_panel = self.plugin_panels.keys().next().cloned();
+        }
     }
 
     /// Remove the panel keyed by `(plugin, id)`. Re-points the active panel and
@@ -135,12 +162,59 @@ impl AgentView {
         }
     }
 
+    /// Route a left-click to the open overlay. A click on a Markdown block's
+    /// copy affordance copies that block's URL — the only way to get a URL out
+    /// of a panel, since the overlay owns mouse capture and text selection
+    /// never reaches the terminal.
+    pub(crate) fn handle_plugin_panel_click(&mut self, column: u16, row: u16) -> InputOutcome {
+        let url = self
+            .active_plugin_panel
+            .as_ref()
+            .and_then(|key| self.plugin_panels.get(key))
+            .and_then(|state| state.url_at(column, row))
+            .map(str::to_string);
+        match url {
+            Some(url) => InputOutcome::Action(Action::CopyPluginPanelUrl(url)),
+            None => InputOutcome::Unchanged,
+        }
+    }
+
+    /// OSC 8 hyperlink spans over the active panel's copy affordances, so a
+    /// terminal that supports hyperlinks can open the URL directly. Emitted
+    /// without an occlusion check: the overlay is the topmost surface, and it
+    /// is itself registered as an occluder for everything underneath.
+    pub(crate) fn push_plugin_panel_link_spans(
+        &self,
+        link_spans_out: &mut Vec<xai_ratatui_inline::LinkSpan>,
+    ) {
+        let Some(state) = self
+            .active_plugin_panel
+            .as_ref()
+            .and_then(|key| self.plugin_panels.get(key))
+        else {
+            return;
+        };
+        for (rect, url) in state.url_copy_hits() {
+            link_spans_out.push(xai_ratatui_inline::LinkSpan {
+                row: rect.y,
+                col_start: rect.x,
+                col_end: rect.x.saturating_add(rect.width),
+                url: url.as_str().into(),
+                id: None,
+            });
+        }
+    }
+
     /// Route a bracketed paste to the open overlay's focused input.
     pub(crate) fn handle_plugin_panel_paste(&mut self, text: &str) -> InputOutcome {
         let Some(active) = self.active_plugin_panel.clone() else {
             return InputOutcome::Unchanged;
         };
-        match self.plugin_panels.get_mut(&active).map(|s| s.handle_paste(text)) {
+        match self
+            .plugin_panels
+            .get_mut(&active)
+            .map(|s| s.handle_paste(text))
+        {
             Some(PanelKeyOutcome::Changed) => InputOutcome::Changed,
             _ => InputOutcome::Unchanged,
         }
@@ -242,11 +316,12 @@ impl AgentView {
             content.height = content.height.saturating_sub(2);
         }
 
+        let copy_delivery = self.plugin_panel_copy_delivery;
         if let Some(key) = active
             && content.height > 0
             && let Some(state) = self.plugin_panels.get_mut(&key)
         {
-            state.render_content(content, buf, &theme);
+            state.render_content(content, buf, &theme, copy_delivery);
         }
         rect
     }
@@ -272,6 +347,14 @@ mod tests {
     }
     fn ch(c: char) -> Event {
         ev(KeyCode::Char(c))
+    }
+    fn click(column: u16, row: u16) -> Event {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
     }
 
     fn vm(id: &str, title: &str, blocks: Vec<PanelBlock>) -> PanelViewModel {
@@ -364,7 +447,11 @@ mod tests {
         agent.apply_plugin_panel("b".into(), vm("p", "B", vec![]));
         assert!(agent.remove_plugin_panel("a", "p"));
         assert_eq!(agent.plugin_panels.len(), 1);
-        assert!(agent.plugin_panels.contains_key(&("b".to_string(), "p".to_string())));
+        assert!(
+            agent
+                .plugin_panels
+                .contains_key(&("b".to_string(), "p".to_string()))
+        );
     }
 
     #[test]
@@ -404,7 +491,10 @@ mod tests {
             agent.handle_input(&ch(c), &reg);
         }
         let text = render_overlay_text(&mut agent);
-        assert!(text.contains('\u{2022}'), "secret must render masked:\n{text}");
+        assert!(
+            text.contains('\u{2022}'),
+            "secret must render masked:\n{text}"
+        );
         assert!(
             !text.contains("abcd"),
             "secret raw value must never render:\n{text}"
@@ -423,7 +513,10 @@ mod tests {
         let reg = ActionRegistry::non_vscode_for_test();
         // Focus defaults to the table; the marker starts on row `alpha`.
         let before = render_overlay_text(&mut agent);
-        let marked_before = before.lines().find(|l| l.contains('\u{25b8}')).unwrap_or("");
+        let marked_before = before
+            .lines()
+            .find(|l| l.contains('\u{25b8}'))
+            .unwrap_or("");
         assert!(marked_before.contains("alpha"));
         agent.handle_input(&ch('j'), &reg);
         let after = render_overlay_text(&mut agent);
@@ -513,5 +606,155 @@ mod tests {
             }
             other => panic!("expected PluginPanelAction, got {other:?}"),
         }
+    }
+
+    const SIGNIN_URL: &str = "https://accounts.example.com/oauth2/authorize?response_type=code&client_id=abcdefghijklmnop&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scope=openid+profile&code_challenge=0123456789abcdefghijklmnopqrstuvwxyz&code_challenge_method=S256";
+
+    fn signin_blocks() -> Vec<PanelBlock> {
+        vec![
+            PanelBlock::Markdown {
+                text: format!("Open this URL to sign in:\n\n{SIGNIN_URL}"),
+            },
+            PanelBlock::Input {
+                id: "code".into(),
+                label: "Authorization code".into(),
+                placeholder: None,
+                value: None,
+                secret: false,
+            },
+        ]
+    }
+
+    /// Find the (col, row) of the first cell of `needle` in the rendered
+    /// overlay.
+    fn find_cell(agent: &mut AgentView, needle: &str) -> (u16, u16) {
+        let text = render_overlay_text(agent);
+        let (row, line) = text
+            .lines()
+            .enumerate()
+            .find(|(_, l)| l.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} not rendered:\n{text}"));
+        let col = line.find(needle).expect("checked by find");
+        (col as u16, row as u16)
+    }
+
+    /// A URL in a panel is otherwise unreachable — the overlay owns mouse
+    /// capture, so selection never reaches the terminal. A click on the copy
+    /// affordance must produce the copy action carrying that URL.
+    #[test]
+    fn click_on_the_copy_affordance_copies_the_panel_url() {
+        let mut agent = make_agent();
+        agent.apply_plugin_panel("acme-auth".into(), vm("signin", "Acme", signin_blocks()));
+        agent.toggle_plugin_panel_overlay();
+
+        let (col, row) = find_cell(&mut agent, "Click here to copy.");
+        let reg = ActionRegistry::non_vscode_for_test();
+        let out = agent.handle_input(&click(col, row), &reg);
+
+        match out {
+            InputOutcome::Action(Action::CopyPluginPanelUrl(url)) => {
+                assert_eq!(url, SIGNIN_URL);
+            }
+            other => panic!("expected CopyPluginPanelUrl, got {other:?}"),
+        }
+    }
+
+    /// The affordance must be visible, so the user knows the gesture exists,
+    /// and the confirm-on-copy slot uses the same wording as the native
+    /// sign-in screen.
+    #[test]
+    fn copy_affordance_and_feedback_match_the_native_wording() {
+        let mut agent = make_agent();
+        agent.apply_plugin_panel("acme-auth".into(), vm("signin", "Acme", signin_blocks()));
+        agent.toggle_plugin_panel_overlay();
+
+        let text = render_overlay_text(&mut agent);
+        assert!(
+            text.contains("Click here to copy."),
+            "the copy affordance must be visible:\n{text}"
+        );
+        assert!(
+            !text.contains("copied!"),
+            "the feedback slot starts empty:\n{text}"
+        );
+
+        agent.plugin_panel_copy_delivery = Some(crate::clipboard::ClipboardDelivery::Confirmed);
+        let text = render_overlay_text(&mut agent);
+        assert!(
+            text.contains("copied!"),
+            "a confirmed copy must be acknowledged:\n{text}"
+        );
+    }
+
+    /// A click that misses every affordance stays inert — it must not copy
+    /// some other block's URL or eat the event as a state change.
+    #[test]
+    fn click_away_from_the_affordance_copies_nothing() {
+        let mut agent = make_agent();
+        agent.apply_plugin_panel("acme-auth".into(), vm("signin", "Acme", signin_blocks()));
+        agent.toggle_plugin_panel_overlay();
+
+        let (col, row) = find_cell(&mut agent, "Authorization code");
+        let reg = ActionRegistry::non_vscode_for_test();
+        assert!(matches!(
+            agent.handle_input(&click(col, row), &reg),
+            InputOutcome::Unchanged
+        ));
+    }
+
+    /// A panel with no URL grows no affordance and no OSC 8 span.
+    #[test]
+    fn markdown_without_a_url_gets_no_affordance() {
+        let mut agent = make_agent();
+        let blocks = vec![PanelBlock::Markdown {
+            text: "Nothing to click here.".into(),
+        }];
+        agent.apply_plugin_panel("acme-auth".into(), vm("p", "T", blocks));
+        agent.toggle_plugin_panel_overlay();
+
+        let text = render_overlay_text(&mut agent);
+        assert!(!text.contains("to copy."), "no URL, no affordance:\n{text}");
+        let mut spans = Vec::new();
+        agent.push_plugin_panel_link_spans(&mut spans);
+        assert!(spans.is_empty());
+    }
+
+    /// Where the terminal supports OSC 8, the affordance is also a hyperlink to
+    /// the URL itself. The overlay is topmost, so the span is emitted even
+    /// though the popup is registered as an occluder for everything under it.
+    #[test]
+    fn copy_affordance_carries_an_osc8_link_to_the_url() {
+        let mut agent = make_agent();
+        agent.apply_plugin_panel("acme-auth".into(), vm("signin", "Acme", signin_blocks()));
+        agent.toggle_plugin_panel_overlay();
+        let (col, row) = find_cell(&mut agent, "Click here to copy.");
+
+        let mut spans = Vec::new();
+        agent.push_plugin_panel_link_spans(&mut spans);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].url.as_ref(), SIGNIN_URL);
+        assert_eq!(spans[0].row, row);
+        assert!(spans[0].col_start <= col && col < spans[0].col_end);
+    }
+
+    /// A `plugin-oauth` login arms the overlay, so the panel the plugin is
+    /// about to publish opens itself instead of waiting behind F6.
+    #[test]
+    fn armed_overlay_opens_on_the_next_published_panel() {
+        let mut agent = make_agent();
+        agent.surface_plugin_panels();
+        assert!(!agent.plugin_panel_overlay_active(), "nothing to show yet");
+
+        agent.apply_plugin_panel("acme-auth".into(), vm("signin", "Acme", signin_blocks()));
+        assert!(agent.plugin_panel_overlay_active());
+        assert_eq!(
+            agent.active_plugin_panel,
+            Some(("acme-auth".to_string(), "signin".to_string()))
+        );
+
+        // One-shot: a later panel must not re-open an overlay the user closed.
+        agent.plugin_panel_overlay_open = false;
+        agent.apply_plugin_panel("other".into(), vm("p2", "Other", vec![]));
+        assert!(!agent.plugin_panel_overlay_active());
     }
 }

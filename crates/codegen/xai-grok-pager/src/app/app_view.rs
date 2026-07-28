@@ -17,6 +17,7 @@ use crate::render::draw::CursorState;
 use crate::scrollback::render::ScratchBuffer;
 use crate::views::prompt_widget::PromptWidget;
 use crate::views::welcome::WelcomePromptFocus;
+use crate::views::welcome::auth_menu::auth_exit_entry;
 use agent_client_protocol as acp;
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use indexmap::IndexMap;
@@ -411,6 +412,13 @@ pub enum AuthMode {
     Loopback,
     /// RFC 8628 device flow: device code + copyable URL, no paste box.
     Device,
+    /// A plugin drives the whole sign-in in its own UI panel.
+    ///
+    /// The pager contributes no auth UI here: it never polls `x.ai/auth/get_url`
+    /// (only the shell's own flows ever answer it) and shows no paste box — a
+    /// code pasted into the pager's box would go nowhere, because the plugin
+    /// reads its code from the panel's own input.
+    Plugin,
 }
 /// Folder-trust state for the welcome screen.
 ///
@@ -3640,7 +3648,11 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         {
             return InputOutcome::ActionThenForward(Action::NewSession);
         }
-        if *ctx.prompt_focused {
+        // Only the `Done` screen paints a prompt. While auth is Pending or
+        // Authenticating nothing typed here could be submitted (Enter is bound
+        // to the auth action and slash commands don't dispatch), so keys must
+        // reach the auth bindings below instead of being eaten by the editor.
+        if *ctx.prompt_focused && matches!(ctx.auth_state, AuthState::Done) {
             match ctx.prompt.handle_key(key) {
                 crate::views::prompt_widget::PromptEvent::Edited => {
                     return InputOutcome::Changed;
@@ -3680,14 +3692,15 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 }
             }
             AuthState::Pending { .. } => {
+                // Esc is bound alongside the historical keys: it is the obvious
+                // key for "get me out of here", and mid-session it is what the
+                // menu now advertises.
                 if key!('q').matches(key)
+                    || key!(Esc).matches(key)
                     || key!('c', CONTROL).matches(key)
                     || key!('d', CONTROL).matches(key)
                 {
-                    if ctx.mid_session_login {
-                        return InputOutcome::Action(Action::CancelLogin);
-                    }
-                    return InputOutcome::Action(Action::QuitConfirmed);
+                    return InputOutcome::Action(auth_exit_entry(ctx.mid_session_login).action);
                 }
                 if key!('l').matches(key) || key!(Enter).matches(key) {
                     return InputOutcome::Action(Action::Login);
@@ -3707,10 +3720,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     || key!('q', CONTROL).matches(key)
                     || key!('c', CONTROL).matches(key)
                 {
-                    if ctx.mid_session_login {
-                        return InputOutcome::Action(Action::CancelLogin);
-                    }
-                    return InputOutcome::Action(Action::QuitConfirmed);
+                    return InputOutcome::Action(auth_exit_entry(ctx.mid_session_login).action);
                 }
                 if key!(Enter).matches(key) {
                     let trimmed = ctx.auth_code_input.text().trim().to_string();
@@ -3747,10 +3757,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     || key!('q', CONTROL).matches(key)
                     || key!('c', CONTROL).matches(key)
                 {
-                    if ctx.mid_session_login {
-                        return InputOutcome::Action(Action::CancelLogin);
-                    }
-                    return InputOutcome::Action(Action::QuitConfirmed);
+                    return InputOutcome::Action(auth_exit_entry(ctx.mid_session_login).action);
                 }
             }
         }
@@ -4412,6 +4419,7 @@ impl AppView {
                             auth_state: &self.auth_state,
                             trust_state: &self.trust_state,
                             login_label: self.login_label.as_deref(),
+                            mid_session_login: self.auth_return_view.is_some(),
                             auth_code_input: self.auth_code_input.text(),
                             auth_code_cursor_byte: self.auth_code_input.cursor_byte(),
                             clipboard_delivery: self.auth_clipboard_delivery,
@@ -9432,6 +9440,68 @@ pub(crate) mod tests {
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Action(Action::Login)));
     }
+    /// The auth-pending exit key must dispatch exactly the action its menu
+    /// entry advertises, for both `mid_session_login` values. The label and the
+    /// action used to live in different files and drifted: the menu said "Quit"
+    /// while the key returned to the session, so a mid-session user read the
+    /// screen as retry-or-lose-my-work.
+    #[test]
+    fn welcome_pending_exit_key_dispatches_the_entry_it_advertises() {
+        for mid_session in [false, true] {
+            let entry = crate::views::welcome::auth_menu::auth_exit_entry(mid_session);
+            for key in [
+                key_event(KeyCode::Char('q'), KeyModifiers::NONE),
+                key_event(KeyCode::Esc, KeyModifiers::NONE),
+                key_event(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                key_event(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            ] {
+                let mut app = test_app();
+                app.auth_state = AuthState::Pending {
+                    error: Some("Login failed".into()),
+                };
+                app.auth_return_view = mid_session.then_some(ActiveView::AgentDashboard);
+                // The prompt starts focused; it must not swallow these keys.
+                app.welcome_prompt_focused = true;
+
+                let outcome = app.handle_input(&key);
+                let dispatched_cancel =
+                    matches!(outcome, InputOutcome::Action(Action::CancelLogin));
+                let advertises_cancel = matches!(entry.action, Action::CancelLogin);
+                assert_eq!(
+                    dispatched_cancel, advertises_cancel,
+                    "{key:?} dispatched {outcome:?}, but the menu advertises \
+                     {:?} ({:?})",
+                    entry.label, entry.action
+                );
+                if !advertises_cancel {
+                    // `handle_input` normalises QuitConfirmed to Quit on the
+                    // way out (it is the already-confirmed form).
+                    assert!(
+                        matches!(outcome, InputOutcome::Action(Action::Quit)),
+                        "{key:?} dispatched {outcome:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// While auth is Pending the welcome prompt is not painted and must not
+    /// consume keystrokes: nothing typed there can be submitted or run.
+    #[test]
+    fn welcome_pending_prompt_does_not_swallow_keys() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Pending { error: None };
+        app.welcome_prompt_focused = true;
+
+        let outcome = app.handle_input(&key_event(KeyCode::Char('l'), KeyModifiers::NONE));
+
+        assert!(matches!(outcome, InputOutcome::Action(Action::Login)));
+        assert!(
+            app.welcome_prompt.textarea.text().is_empty(),
+            "no keystroke may land in a prompt the user cannot submit"
+        );
+    }
+
     #[test]
     fn welcome_pending_n_is_unchanged() {
         let mut app = test_app();

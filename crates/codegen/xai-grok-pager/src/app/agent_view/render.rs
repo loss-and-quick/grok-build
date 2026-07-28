@@ -4320,6 +4320,9 @@ impl AgentView {
                     banner_announcements,
                     hidden_announcement_ids,
                 );
+                if self.plugin_panel_overlay_active() {
+                    self.push_plugin_panel_link_spans(link_spans_out);
+                }
             }
         }
         let on_link = self.hovered_link_idx.is_some();
