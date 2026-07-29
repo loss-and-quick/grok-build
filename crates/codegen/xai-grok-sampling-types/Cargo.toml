@@ -20,6 +20,12 @@ xai-grok-tools = { path = "../xai-grok-tools" }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
+# Test-only: pins `ReasoningEffort` against the tool-facing vocabulary in
+# `xai_tool_types::REASONING_EFFORT_VALUES`. That crate cannot depend on this
+# one (this one already depends on xai-grok-tools, so the edge would be a
+# cycle), so the two lists are kept in step by a test rather than by the type
+# system. Dev-only, so no cycle and nothing extra in the shipped graph.
+xai-tool-types = { workspace = true }
 
 [lints]
 workspace = true

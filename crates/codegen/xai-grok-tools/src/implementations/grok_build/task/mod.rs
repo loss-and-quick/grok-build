@@ -310,6 +310,25 @@ impl xai_tool_runtime::Tool for TaskTool {
             }
         }
 
+        // Canonicalize the effort here rather than downstream: the resolution
+        // layer silently ignores a value it cannot parse, which would leave the
+        // model believing an override took effect. `invalid_arguments` lets it
+        // correct the spelling instead. Whether the child's model *supports*
+        // effort at all is a separate, later gate (handle_request drops the
+        // value for a model that has no effort control) — that one is
+        // deliberately silent, since the role default behaves the same way.
+        let reasoning_effort = match input.reasoning_effort.as_deref() {
+            None => None,
+            Some(raw) => xai_tool_types::canonical_reasoning_effort(raw)
+                .map_err(|bad| {
+                    xai_tool_runtime::ToolError::invalid_arguments(format!(
+                        "Task.reasoning_effort must be one of: {}; got '{bad}'",
+                        xai_tool_types::REASONING_EFFORT_VALUES.join(", ")
+                    ))
+                })?
+                .map(str::to_string),
+        };
+
         // 3. Build the subagent request
         let id = input
             .task_id
@@ -340,7 +359,7 @@ impl xai_tool_runtime::Tool for TaskTool {
             runtime_overrides: SubagentRuntimeOverrides {
                 model,
                 model_override_provenance: ModelOverrideProvenance::Tool,
-                reasoning_effort: None,
+                reasoning_effort,
                 persona: None,
                 capability_mode: input.capability_mode,
                 isolation: input.isolation,
@@ -565,6 +584,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -598,6 +618,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -632,6 +653,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -663,6 +685,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -721,6 +744,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -777,6 +801,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -820,6 +845,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -919,6 +945,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            reasoning_effort: None,
             task_id: None,
         }
     }
@@ -1281,6 +1308,33 @@ mod tests {
         assert!(overrides.capability_mode.is_none());
     }
 
+    /// A model-supplied effort must survive deserialization verbatim; the
+    /// canonicalization/rejection happens in the tool body against
+    /// `xai_tool_types::canonical_reasoning_effort`.
+    #[test]
+    fn task_input_parses_reasoning_effort() {
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{"description": "d", "prompt": "p", "reasoning_effort": "xhigh"}"#,
+        )
+        .unwrap();
+        assert_eq!(input.reasoning_effort.as_deref(), Some("xhigh"));
+    }
+
+    /// The two outcomes the tool body branches on. A bogus level must be an
+    /// error the model can see and correct — NOT a silent drop, which would
+    /// leave it believing the override applied.
+    #[test]
+    fn reasoning_effort_argument_is_canonicalized_or_rejected() {
+        assert_eq!(
+            xai_tool_types::canonical_reasoning_effort("HIGH"),
+            Ok(Some("high"))
+        );
+        assert_eq!(
+            xai_tool_types::canonical_reasoning_effort("enormous"),
+            Err("enormous")
+        );
+    }
+
     #[test]
     fn task_input_roundtrips_through_json() {
         let input = TaskToolInput {
@@ -1293,6 +1347,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: Some("test-model".into()),
+            reasoning_effort: Some("xhigh".into()),
             task_id: Some("task-123".into()),
         };
         let json = serde_json::to_string(&input).unwrap();
@@ -1563,6 +1618,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            reasoning_effort: None,
             task_id: None,
         })
         .unwrap();
@@ -1612,6 +1668,7 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -1648,6 +1705,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            reasoning_effort: None,
             task_id: None,
         };
         let json = serde_json::to_string(&input).unwrap();
@@ -1694,6 +1752,7 @@ mod tests {
                 resume_from: Some("prev-id".into()),
                 cwd: None,
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -1760,6 +1819,7 @@ mod tests {
                     resume_from: Some(sentinel.into()),
                     cwd: None,
                     model: None,
+                    reasoning_effort: None,
                     task_id: None,
                 },
             )
@@ -1806,6 +1866,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            reasoning_effort: None,
             task_id: None,
         };
         let json = serde_json::to_string(&input).unwrap();
@@ -1834,6 +1895,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/tmp".into()),
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -1888,6 +1950,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("".into()),
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -1938,6 +2001,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("null".into()),
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -1988,6 +2052,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("  ".into()),
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -2041,6 +2106,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -2075,6 +2141,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -2130,6 +2197,7 @@ mod tests {
                     resume_from: None,
                     cwd: Some(sentinel.into()),
                     model: None,
+                    reasoning_effort: None,
                     task_id: None,
                 },
             )
@@ -2183,6 +2251,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/tmp".into()),
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -2240,6 +2309,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("\"/tmp".into()),
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -2292,6 +2362,7 @@ mod tests {
                 resume_from: None,
                 cwd: Some("/tmp".into()),
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )
@@ -2340,6 +2411,7 @@ mod tests {
                 resume_from: Some("prev-id".into()),
                 cwd: Some("/tmp/some-dir".into()),
                 model: None,
+                reasoning_effort: None,
                 task_id: None,
             },
         )

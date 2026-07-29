@@ -13713,6 +13713,7 @@ dependencies = [
  "tracing",
  "xai-grok-compaction",
  "xai-grok-tools",
+ "xai-tool-types",
 ]
 
 [[package]]
