@@ -215,8 +215,9 @@ pub(crate) fn stream_responses_tracked<'a>(
 
             let event_has_content = responses_event_has_meaningful_content(&event);
 
-            // Track whether ResponseIncomplete should break the loop
-            // after the content-aware idle check below.
+            // Track whether a terminal event (ResponseCompleted /
+            // ResponseIncomplete) should break the loop after the
+            // content-aware idle check below.
             let mut should_break = false;
 
             match event {
@@ -316,8 +317,13 @@ pub(crate) fn stream_responses_tracked<'a>(
                     }
                 }
 
+                // Terminal: nothing legal follows a completed response, and
+                // the Responses API sends no `[DONE]` sentinel — a server
+                // that holds the connection open afterwards would otherwise
+                // idle-time us out and throw away a finished response.
                 ResponseStreamEvent::ResponseCompleted(completed_event) => {
                     final_response = Some(completed_event.response);
+                    should_break = true;
                 }
 
                 ResponseStreamEvent::ResponseIncomplete(incomplete_event) => {
@@ -687,6 +693,34 @@ mod tests {
             })
             .collect();
         assert_eq!(text_tokens, vec!["hello"]);
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::Stop));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// Regression: `response.completed` is terminal. The Responses API sends
+    /// no `[DONE]` sentinel, so a server that keeps the connection open after
+    /// the completed frame used to leave us reading until the idle timeout
+    /// fired, discarding an already-complete response.
+    #[tokio::test(start_paused = true)]
+    async fn completed_without_done_or_eof_yields_completed_promptly() {
+        // Never ends and never yields again: only breaking on the completed
+        // event can finish this stream.
+        let raw = stream::iter(vec![Ok(text_delta_event("hello")), Ok(completed_event())])
+            .chain(stream::pending())
+            .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_millis(100),
+            None,
+        ))
+        .await;
 
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
