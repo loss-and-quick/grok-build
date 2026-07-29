@@ -2265,12 +2265,108 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 /// so they appear inline in the same order the model originally emitted —
 /// which is what lets the server-side prefix KV-cache hit on repeat turns.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
-    let items: Vec<rs::InputItem> = req
+    let mut items: Vec<rs::InputItem> = req
         .items
         .iter()
         .flat_map(conversation_item_to_input_items)
         .collect();
+    drop_dangling_reasoning(&mut items);
     rs::InputParam::Items(items)
+}
+
+/// How an emitted `input[]` entry relates to a reasoning item that precedes
+/// it — the classification the dangling-reasoning filter runs on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReasoningFollower {
+    /// Another reasoning item. A run of them is legal exactly when the item
+    /// after the run is one the run can attach to.
+    Reasoning,
+    /// A model-generated item of the same assistant turn: the message, tool
+    /// call or backend-tool call that a preceding reasoning item belongs to.
+    SameTurn,
+    /// Anything else — user/system input, a tool result, a compaction
+    /// summary, an item reference. A reasoning item before one of these has
+    /// nothing to attach to.
+    Foreign,
+}
+
+/// Classify one emitted `input[]` entry for [`drop_dangling_reasoning`].
+fn reasoning_follower(item: &rs::InputItem) -> ReasoningFollower {
+    match item {
+        rs::InputItem::Item(rs::Item::Reasoning(_)) => ReasoningFollower::Reasoning,
+        // Assistant text is emitted as an `EasyMessage`; user/system text
+        // uses the same variant, so the role is what decides here.
+        rs::InputItem::EasyMessage(m) => match m.role {
+            rs::Role::Assistant => ReasoningFollower::SameTurn,
+            _ => ReasoningFollower::Foreign,
+        },
+        rs::InputItem::Item(rs::Item::Message(rs::MessageItem::Output(_))) => {
+            ReasoningFollower::SameTurn
+        }
+        // Every item the model itself produces. `FunctionCall` and the three
+        // backend-tool calls are what this conversion emits today; the rest
+        // are listed because they are model output too, so a reasoning item
+        // in front of one is attached, not dangling.
+        rs::InputItem::Item(
+            rs::Item::FunctionCall(_)
+            | rs::Item::WebSearchCall(_)
+            | rs::Item::CustomToolCall(_)
+            | rs::Item::CodeInterpreterCall(_)
+            | rs::Item::FileSearchCall(_)
+            | rs::Item::ComputerCall(_)
+            | rs::Item::ImageGenerationCall(_)
+            | rs::Item::LocalShellCall(_)
+            | rs::Item::ShellCall(_)
+            | rs::Item::ApplyPatchCall(_)
+            | rs::Item::McpCall(_)
+            | rs::Item::McpApprovalRequest(_)
+            | rs::Item::McpListTools(_),
+        ) => ReasoningFollower::SameTurn,
+        _ => ReasoningFollower::Foreign,
+    }
+}
+
+/// Drop reasoning items that nothing in the emitted `input[]` attaches to.
+///
+/// The Responses API accepts a `reasoning` item only when the item it
+/// belongs to follows it; otherwise it 400s with `Item 'rs_...' of type
+/// 'reasoning' was provided without its required following item.`
+/// A persisted reasoning-only turn hits exactly that: the trailing
+/// `AssistantItem` has empty content and no tool calls, so it emits nothing,
+/// and the reasoning item is left with no owner — either at the very end of
+/// `input[]` or right before the next user message.
+///
+/// The rule is enforced here, over the whole emitted sequence, rather than at
+/// one call site, so the interleaved case (a reasoning-only turn in the
+/// middle of a conversation) is covered by the same pass. Dropping is the
+/// only conformant repair: the alternative — synthesizing an empty assistant
+/// message as the owner — assumes the API accepts empty-content messages,
+/// which is unverified, and it would also put words in the model's mouth.
+///
+/// A single backward pass suffices: walking from the end, `attached` records
+/// whether the item just visited can host a reasoning item, and a reasoning
+/// item that is kept is itself a valid host for the one before it (a run of
+/// reasoning items therefore survives or drops together).
+///
+/// This is stable under the reordering `response_to_conversation_items`
+/// already performs (it accumulates text and function calls into one
+/// trailing assistant, so `[rs1, fc1, rs2, fc2]` replays as
+/// `[rs1, rs2, fc1, fc2]`): the reasoning run still precedes the turn's
+/// function calls, so both items are correctly kept.
+fn drop_dangling_reasoning(items: &mut Vec<rs::InputItem>) {
+    let mut keep = vec![true; items.len()];
+    let mut attached = false;
+    for (idx, item) in items.iter().enumerate().rev() {
+        match reasoning_follower(item) {
+            // When this one is dropped `attached` stays false, so the
+            // reasoning items ahead of it in the same run drop as well.
+            ReasoningFollower::Reasoning => keep[idx] = attached,
+            ReasoningFollower::SameTurn => attached = true,
+            ReasoningFollower::Foreign => attached = false,
+        }
+    }
+    let mut keep = keep.into_iter();
+    items.retain(|_| keep.next().unwrap_or(true));
 }
 
 /// Walk a serialized Responses API request body and inject the
@@ -4847,6 +4943,158 @@ mod tests {
         assert_eq!(reasoning.summary.len(), 1);
         let rs::SummaryPart::SummaryText(summary) = &reasoning.summary[0];
         assert_eq!(summary.text, "Let me calculate 2+2...");
+    }
+
+    /// The `input[]` array as it goes on the wire, for assertions about item
+    /// order and `type` discriminators.
+    fn wire_input_types(req: &ConversationRequest) -> Vec<String> {
+        let responses_req: rs::CreateResponse = req.into();
+        let body = serde_json::to_value(&responses_req).expect("request serializes");
+        body["input"]
+            .as_array()
+            .expect("input is an array")
+            .iter()
+            .map(|item| {
+                item["type"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("input item without a type: {item}"))
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// A reasoning-only response as persisted by the collector: a `reasoning`
+    /// output item and nothing else, so `response_to_conversation_items`
+    /// appends an empty `Assistant` (the `EmptyReason::ReasoningOnly` shape).
+    fn reasoning_only_turn_items() -> Vec<ConversationItem> {
+        let response = rs::Response {
+            background: None,
+            billing: None,
+            conversation: None,
+            created_at: 1234567890,
+            completed_at: None,
+            error: None,
+            id: "resp_reasoning_only".to_string(),
+            incomplete_details: None,
+            instructions: None,
+            max_output_tokens: None,
+            metadata: None,
+            model: "grok-4".to_string(),
+            object: "response".to_string(),
+            output: vec![rs::OutputItem::Reasoning(rs::ReasoningItem {
+                id: "rs_dangling".to_string(),
+                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
+                    text: "Thinking, but never answering.".to_string(),
+                })],
+                content: None,
+                encrypted_content: Some("enc_reasoning_only".to_string()),
+                status: Some(rs::OutputStatus::Completed),
+            })],
+            parallel_tool_calls: None,
+            previous_response_id: None,
+            prompt: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
+            reasoning: None,
+            safety_identifier: None,
+            service_tier: None,
+            status: rs::Status::Completed,
+            temperature: None,
+            text: None,
+            tool_choice: None,
+            tools: None,
+            top_logprobs: None,
+            top_p: None,
+            truncation: None,
+            usage: None,
+        };
+        let items = response_to_conversation_items(response);
+        // Guard the premise: an empty trailing assistant with no tool calls.
+        let Some(ConversationItem::Assistant(a)) = items.last() else {
+            panic!("expected a trailing Assistant item");
+        };
+        assert!(a.content.is_empty() && a.tool_calls.is_empty());
+        items
+    }
+
+    /// Regression: the Responses API rejects a `reasoning` item that no
+    /// following item claims (`Item 'rs_...' of type 'reasoning' was provided
+    /// without its required following item.`). A persisted reasoning-only
+    /// turn used to serialize as `[..., reasoning]` with nothing after it.
+    #[test]
+    fn test_reasoning_only_turn_does_not_end_input_with_reasoning() {
+        let mut items = vec![
+            ConversationItem::system("You are helpful"),
+            ConversationItem::user("What is 2+2?"),
+        ];
+        items.extend(reasoning_only_turn_items());
+
+        let types = wire_input_types(&ConversationRequest::from_items(items));
+
+        assert_ne!(
+            types.last().map(String::as_str),
+            Some("reasoning"),
+            "input[] must not end with a dangling reasoning item: {types:?}"
+        );
+        assert_eq!(types, vec!["message", "message"], "got {types:?}");
+    }
+
+    /// The interleaved form of the same bug: a reasoning-only turn in the
+    /// middle of a conversation leaves its reasoning item owned by nothing,
+    /// with the next user message — not its own turn's item — behind it.
+    #[test]
+    fn test_reasoning_only_turn_mid_conversation_drops_reasoning() {
+        let mut items = vec![ConversationItem::user("What is 2+2?")];
+        items.extend(reasoning_only_turn_items());
+        items.push(ConversationItem::user("Still there?"));
+
+        let types = wire_input_types(&ConversationRequest::from_items(items));
+
+        assert!(
+            !types.iter().any(|t| t == "reasoning"),
+            "unattached reasoning item survived: {types:?}"
+        );
+    }
+
+    /// The filter must not overreach: a reasoning item whose turn emits only
+    /// tool calls (empty assistant content) is attached and has to be kept,
+    /// including under the reordering that flushes all of a turn's function
+    /// calls after its reasoning siblings.
+    #[test]
+    fn test_reasoning_kept_when_turn_emits_only_tool_calls() {
+        let reasoning = |id: &str| {
+            ConversationItem::Reasoning(rs::ReasoningItem {
+                id: id.to_string(),
+                summary: vec![],
+                content: None,
+                encrypted_content: Some(format!("enc_{id}")),
+                status: None,
+            })
+        };
+        let items = vec![
+            ConversationItem::user("List the files"),
+            reasoning("rs_1"),
+            reasoning("rs_2"),
+            ConversationItem::Assistant(AssistantItem {
+                content: "".into(),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "ls".to_string(),
+                    arguments: "{}".into(),
+                }],
+                model_id: None,
+                model_fingerprint: None,
+                reasoning_effort: None,
+            }),
+        ];
+
+        let types = wire_input_types(&ConversationRequest::from_items(items));
+
+        assert_eq!(
+            types,
+            vec!["message", "reasoning", "reasoning", "function_call"],
+            "attached reasoning items must survive: {types:?}"
+        );
     }
 
     #[test]
