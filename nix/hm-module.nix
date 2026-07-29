@@ -27,6 +27,11 @@
   agentFile = name: path:
     lib.nameValuePair ".grok/agents/${name}.md" {source = path;};
 
+  # The basename must match the script's own `meta.name` — the registry
+  # cross-validates them and rejects the workflow otherwise.
+  workflowFile = name: path:
+    lib.nameValuePair ".grok/workflows/${name}.rhai" {source = path;};
+
   # The canonical reasoning-effort values `ReasoningEffort` deserializes
   # (crates/codegen/xai-grok-sampling-types/src/types.rs). Spelled as an enum so
   # a typo fails at nix eval rather than at grok's config parse.
@@ -242,6 +247,30 @@ in {
       '';
     };
 
+    workflows = mkOption {
+      type = types.attrsOf types.path;
+      default = {};
+      example = literalExpression "{ deep-review = ./workflows/deep-review.rhai; }";
+      description = ''
+        Multi-agent workflow scripts to deploy into grok's user-scope workflow
+        discovery location, `~/.grok/workflows/<name>.rhai` — the user tier
+        resolved by `user_workflow_dir`
+        (crates/codegen/xai-grok-shell/src/session/workflow/registry.rs). Each
+        is a Rhai script whose `meta` block declares the workflow's name,
+        phases and agents; `/workflows` lists them and renders phase/agent
+        progress.
+
+        The attribute name becomes the file's basename (`<name>.rhai`) and
+        **must equal the script's own `meta.name`** — the registry validates
+        the two against each other (`validate_workflow_filename`) and refuses
+        the workflow on a mismatch, so a rename here means renaming in the
+        script too.
+
+        Project-scoped workflows (`<repo>/.grok/workflows/`) take precedence
+        over these; the same `$GROK_HOME` caveat as `settings` applies.
+      '';
+    };
+
     providers = mkOption {
       type = types.listOf providerType;
       default = [];
@@ -284,6 +313,7 @@ in {
             });
       }
       // lib.mapAttrs' pluginFile cfg.plugins
-      // lib.mapAttrs' agentFile cfg.agents;
+      // lib.mapAttrs' agentFile cfg.agents
+      // lib.mapAttrs' workflowFile cfg.workflows;
   };
 }
