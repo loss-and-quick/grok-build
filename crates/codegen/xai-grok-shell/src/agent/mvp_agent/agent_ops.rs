@@ -113,6 +113,7 @@ impl MvpAgent {
             &slug,
             &models,
             &endpoints,
+            &primary.base_url,
             session_key.as_deref(),
             disable_api_key_auth,
             alpha_test_key,

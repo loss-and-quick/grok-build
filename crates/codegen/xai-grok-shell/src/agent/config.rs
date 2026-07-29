@@ -5312,10 +5312,20 @@ fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T
 /// description, session summary, ...), resolved through the catalog so a
 /// `[model.*]` override redirects it to its own endpoint, credentials, and
 /// routing `model`. `None` → caller falls back to the active session's model.
+///
+/// On a catalog miss there is a second, first-party-only tier: mint a synthetic
+/// entry against `endpoints.resolve_inference_base_url()` carrying the session
+/// token / `XAI_API_KEY` / deployment key, which is how the internal aux slugs
+/// (hidden from the on-disk catalog) resolve for a genuine xAI session. That
+/// tier is gated on `session_base_url` — the endpoint of the active session
+/// model — because otherwise a session running entirely on a custom
+/// `[[provider]]` silently emits first-party traffic the moment a stray
+/// `XAI_API_KEY` exists in the environment.
 pub fn resolve_aux_model_sampling_config(
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
     endpoints: &EndpointsConfig,
+    session_base_url: &str,
     session_key: Option<&str>,
     disable_api_key_auth: bool,
     alpha_test_key: Option<String>,
@@ -5343,10 +5353,22 @@ pub fn resolve_aux_model_sampling_config(
             return None;
         }
     }
-    let xai_bearer = session_key
-        .map(|s| s.to_owned())
-        .or_else(|| crate::agent::auth_method::read_xai_api_key_env().ok())
-        .or_else(|| endpoints.deployment_key.clone());
+    // Tier 2 is a first-party route by construction: a first-party bearer sent
+    // to the deployment's inference endpoint for a slug only xAI serves. Skip it
+    // for a session that is not first-party — `is_xai_api_bearer_url`, not
+    // `is_xai_api_url`, because this branch decides where a *credential* is
+    // attached, and that is the helper this crate uses for exactly that
+    // question (it also refuses cleartext/loopback, so a co-located process
+    // cannot harvest the token; a non-first-party session degrading to its own
+    // session client is harmless).
+    let xai_bearer = crate::util::is_xai_api_bearer_url(session_base_url)
+        .then(|| {
+            session_key
+                .map(|s| s.to_owned())
+                .or_else(|| crate::agent::auth_method::read_xai_api_key_env().ok())
+                .or_else(|| endpoints.deployment_key.clone())
+        })
+        .flatten();
     if let Some(bearer) = xai_bearer {
         let entry = ModelEntry {
             info: ModelInfo {
@@ -5405,7 +5427,7 @@ pub fn resolve_aux_model_sampling_config(
     }
     tracing::warn!(
         aux_model = %model_id,
-        "no credentials for auxiliary model; falling back to active model",
+        "aux model has no catalog entry and no first-party route; falling back to active model",
     );
     None
 }
@@ -6534,6 +6556,7 @@ reasoning_effort = "low"
             "grok-build",
             &catalog,
             &endpoints,
+            &endpoints.resolve_inference_base_url(),
             None,
             false,
             None,
@@ -6543,6 +6566,62 @@ reasoning_effort = "low"
         assert_eq!(resolved.model, "v9m-rl-learnability-tp8");
         assert_eq!(resolved.base_url, "https://vendor.example/v1");
         assert_eq!(resolved.api_key.as_deref(), Some("vendor-key"));
+    }
+    /// A catalog miss used to fabricate a direct first-party request from any
+    /// available bearer (session key / `XAI_API_KEY` / deployment key), so every
+    /// aux slug a custom catalog does not list — session summary, image
+    /// describe, the Auto-mode classifier — silently became xAI traffic. A
+    /// session on a custom `[[provider]]` must resolve to `None` so the caller
+    /// degrades to its own session client; a first-party session still resolves.
+    #[test]
+    fn aux_model_catalog_miss_never_fabricates_first_party_request_off_a_custom_session() {
+        let endpoints = EndpointsConfig::default();
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "acme/some-model".to_string(),
+            test_model_entry(
+                "some-model",
+                "https://acme.example/v1",
+                Some("acme-key"),
+                None,
+                None,
+            ),
+        );
+        let aux_slug = crate::models::default_session_summary_model();
+        assert!(
+            find_model_by_id(&catalog, aux_slug).is_none(),
+            "the custom catalog must not list the aux slug for this test to mean anything"
+        );
+        assert!(
+            resolve_aux_model_sampling_config(
+                aux_slug,
+                &catalog,
+                &endpoints,
+                "https://acme.example/v1",
+                // A session bearer is present, which is exactly what the old
+                // code turned into a direct first-party request.
+                Some("session-jwt"),
+                false,
+                None,
+                None,
+            )
+            .is_none(),
+            "a custom-provider session must never resolve an aux model onto a first-party endpoint"
+        );
+        let first_party = resolve_aux_model_sampling_config(
+            aux_slug,
+            &catalog,
+            &endpoints,
+            &endpoints.resolve_inference_base_url(),
+            Some("session-jwt"),
+            false,
+            None,
+            None,
+        )
+        .expect("a first-party session still resolves internal aux slugs");
+        assert_eq!(first_party.model, aux_slug);
+        assert_eq!(first_party.base_url, endpoints.resolve_inference_base_url());
+        assert_eq!(first_party.api_key.as_deref(), Some("session-jwt"));
     }
     /// Cold cache falls back to the session model, never the xAI proxy;
     /// warm cache serves the provider token at the provider endpoint.
@@ -6568,6 +6647,9 @@ reasoning_effort = "low"
                 "proxied-aux",
                 &catalog,
                 &endpoints,
+                // A first-party session, so the resolver's first-party fallback
+                // tier is available: the cold cache must still not use it.
+                &endpoints.resolve_inference_base_url(),
                 Some("session-jwt"),
                 false,
                 None,
@@ -6581,6 +6663,7 @@ reasoning_effort = "low"
             "proxied-aux",
             &catalog,
             &endpoints,
+            &endpoints.resolve_inference_base_url(),
             Some("session-jwt"),
             false,
             None,

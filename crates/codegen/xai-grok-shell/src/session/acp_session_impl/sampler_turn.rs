@@ -800,6 +800,15 @@ impl SessionActor {
         slug: &str,
     ) -> Option<xai_grok_sampler::SamplerConfig> {
         let creds = self.chat_state_handle.get_credentials().await;
+        // The endpoint the active session model talks to. Gates the resolver's
+        // first-party fallback tier so a session on a custom `[[provider]]`
+        // cannot have an aux call rerouted to xAI.
+        let session_base_url = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|c| c.base_url)
+            .unwrap_or_default();
         let session_key = self
             .auth_manager
             .as_ref()
@@ -815,6 +824,7 @@ impl SessionActor {
             slug,
             &models,
             &endpoints,
+            &session_base_url,
             session_key.as_deref(),
             disable_api_key_auth,
             creds.alpha_test_key.clone(),
