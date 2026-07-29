@@ -512,10 +512,24 @@ impl SessionActor {
             ConversationItem::user(user_msg),
         ];
 
-        let model = match model_override {
-            Some(m) => m.to_owned(),
-            None => "grok-build".to_owned(),
-        };
+        // The suggestion rides on the session's client, so the slug must be one
+        // that client's endpoint serves: a custom `[[provider]]` 404s on the
+        // internal default (and on any override it does not declare).
+        let (session_model, session_base_url) = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|c| (c.model, c.base_url))
+            .unwrap_or_default();
+        let model = crate::agent::config::aux_slug_on_session_client(
+            model_override
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .unwrap_or(crate::agent::config::DEFAULT_SESSION_CLIENT_AUX_MODEL),
+            &session_model,
+            &session_base_url,
+            |m| self.models_manager.model_in_catalog(m),
+        );
 
         let request = ConversationRequest {
             items,

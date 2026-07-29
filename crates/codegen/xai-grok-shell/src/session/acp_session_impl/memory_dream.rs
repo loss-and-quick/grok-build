@@ -660,7 +660,8 @@ impl SessionActor {
     }
 
     /// Rewrite a raw memory note into well-structured markdown via a one-shot
-    /// LLM call using the `grok-build` model.
+    /// LLM call on the session's client, using the small helper model when the
+    /// session endpoint serves it (see `aux_slug_on_session_client`).
     ///
     /// Follows the same streaming pattern as [`handle_ai_suggest`]: prepares
     /// a sampling client, builds a system+user prompt, streams the response,
@@ -704,10 +705,26 @@ impl SessionActor {
             ConversationItem::user(user_msg),
         ];
 
+        // The rewrite rides on the session's client, so the slug must be one
+        // that client's endpoint serves: a custom `[[provider]]` 404s on the
+        // internal default.
+        let (session_model, session_base_url) = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|c| (c.model, c.base_url))
+            .unwrap_or_default();
+        let model = crate::agent::config::aux_slug_on_session_client(
+            crate::agent::config::DEFAULT_SESSION_CLIENT_AUX_MODEL,
+            &session_model,
+            &session_base_url,
+            |m| self.models_manager.model_in_catalog(m),
+        );
+
         let request = ConversationRequest {
             items,
             tools: vec![],
-            model: Some("grok-build".to_owned()),
+            model: Some(model),
             temperature: Some(0.3),
             max_output_tokens: Some(1024),
             ..Default::default()

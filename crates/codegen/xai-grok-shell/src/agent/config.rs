@@ -5471,6 +5471,55 @@ pub fn finalize_aux_sampler_config(
         }
     }
 }
+/// Default model for the small one-shot helper calls that ride on the
+/// *session's* own sampling client (shell-command autocomplete, memory-note
+/// rewrite) instead of a routed aux sampler. An internal first-party slug, so
+/// it always goes through [`aux_slug_on_session_client`].
+pub const DEFAULT_SESSION_CLIENT_AUX_MODEL: &str = "grok-build";
+/// Pick the model slug a one-shot auxiliary request may name when it is sent on
+/// the *session's* sampling client (as opposed to a sampler routed by
+/// [`resolve_aux_model_sampling_config`]).
+///
+/// That client points at whatever endpoint the active session model lives on,
+/// and the only slug it is guaranteed to serve is the session model itself.
+/// `requested` is kept when either
+///
+/// * the catalog lists it (`in_catalog`) — a model the endpoint or a
+///   `[model.*]` / `[[provider]]` entry actually declares, or
+/// * the session endpoint is xAI-operated, which serves the compiled-in
+///   internal slugs ([`DEFAULT_SESSION_CLIENT_AUX_MODEL`], ...) even when the
+///   catalog does not list them (they are hidden from OAuth catalogs).
+///
+/// Otherwise fall back to the session model: naming an unknown slug to a custom
+/// `[[provider]]` is a guaranteed 404.
+///
+/// Deliberately [`crate::util::is_xai_api_url`], not `is_xai_api_bearer_url`:
+/// this only decides which slug an already-built client may name — no
+/// credential moves — and a loopback cli-chat-proxy serves the internal slugs
+/// exactly like production.
+///
+/// An empty `session_model` (no chat-state sampling config yet) keeps
+/// `requested`: there is no better slug to name, and such a request has no
+/// usable endpoint either way.
+pub fn aux_slug_on_session_client(
+    requested: &str,
+    session_model: &str,
+    session_base_url: &str,
+    in_catalog: impl Fn(&str) -> bool,
+) -> String {
+    if session_model.is_empty()
+        || in_catalog(requested)
+        || crate::util::is_xai_api_url(session_base_url)
+    {
+        return requested.to_owned();
+    }
+    tracing::debug!(
+        requested_model = %requested,
+        session_model = %session_model,
+        "auxiliary model is not served by the session endpoint; using the session model"
+    );
+    session_model.to_owned()
+}
 /// Re-derive `auth_type` from the model's own credentials so BYOK env-key
 /// models stay on `ApiKey` even when a session token is present. Falls
 /// back to `fallback` when the model isn't in the on-disk catalog.
@@ -6407,6 +6456,65 @@ reasoning_effort = "low"
             "the fallback must stay on the session's own endpoint"
         );
         assert_eq!(cfg.api_key.as_deref(), Some("acme-key"));
+    }
+    /// The autocomplete / memory-rewrite helpers send their request on the
+    /// session's own client, so they used to hand a custom `[[provider]]` a
+    /// hardcoded internal slug it has never heard of. The slug must be
+    /// catalog-guarded and degrade to the session model — while a first-party
+    /// session keeps naming the internal slug, which only lives there.
+    #[test]
+    fn aux_slug_on_session_client_guards_foreign_slug_on_custom_provider() {
+        let empty_catalog = |_: &str| false;
+        assert_eq!(
+            aux_slug_on_session_client(
+                DEFAULT_SESSION_CLIENT_AUX_MODEL,
+                "some-model",
+                "https://acme.example/v1",
+                empty_catalog,
+            ),
+            "some-model",
+            "a custom provider must be named only slugs it declares"
+        );
+        assert_eq!(
+            aux_slug_on_session_client(
+                "another-provider-model",
+                "some-model",
+                "https://acme.example/v1",
+                empty_catalog,
+            ),
+            "some-model",
+            "a client-supplied override is guarded the same way"
+        );
+        assert_eq!(
+            aux_slug_on_session_client(
+                "acme/some-other-model",
+                "some-model",
+                "https://acme.example/v1",
+                |m| m == "acme/some-other-model",
+            ),
+            "acme/some-other-model",
+            "a catalog-listed slug is still honored"
+        );
+        assert_eq!(
+            aux_slug_on_session_client(
+                DEFAULT_SESSION_CLIENT_AUX_MODEL,
+                "grok-4.5",
+                &EndpointsConfig::default().resolve_inference_base_url(),
+                empty_catalog,
+            ),
+            DEFAULT_SESSION_CLIENT_AUX_MODEL,
+            "a first-party session keeps the internal slug (hidden from the catalog)"
+        );
+        assert_eq!(
+            aux_slug_on_session_client(
+                DEFAULT_SESSION_CLIENT_AUX_MODEL,
+                "",
+                "https://acme.example/v1",
+                empty_catalog,
+            ),
+            DEFAULT_SESSION_CLIENT_AUX_MODEL,
+            "with no session model there is no better slug to name"
+        );
     }
     #[test]
     fn resolve_aux_model_honors_grok_build_override() {
