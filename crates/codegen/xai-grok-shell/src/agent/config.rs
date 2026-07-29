@@ -5435,15 +5435,20 @@ pub fn stamp_session_local_sampler_fields(
     }
     cfg.max_retries = max_retries;
 }
-/// Finalize image-describe model + sampler config for user attachments.
-/// Shared so the aux resolve happy path and the `None` fallback cannot
-/// diverge between those entry points.
+/// Finalize the model + sampler config of an auxiliary one-shot call that was
+/// routed through [`resolve_aux_model_sampling_config`] — image description for
+/// user attachments, session-title generation, ... Shared so the aux resolve
+/// happy path and the `None` fallback cannot diverge between those entry
+/// points.
 ///
 /// On aux resolve `Some`, stamp session-local fields onto the helper config.
-/// On `None`, fall back to the active session model and full config (not
-/// forcing `image_description_model` onto the agent endpoint, which 404s on
-/// BYOK / non-proxy routes for internal slugs like `grok-build`).
-pub fn finalize_image_describe_sampler_config(
+/// On `None`, fall back to the active session model *and* its full config. The
+/// helper slug (`[models] image_description` / `session_summary`, both
+/// defaulting to a compiled-in first-party slug) must not be forced onto the
+/// session endpoint: a BYOK / non-proxy route has never heard of it, so every
+/// such request 404s. The session model is the one slug the session endpoint is
+/// known to serve.
+pub fn finalize_aux_sampler_config(
     resolved_aux: Option<SamplerConfig>,
     active_session_config: &SamplerConfig,
     client_identifier: Option<String>,
@@ -6353,7 +6358,7 @@ reasoning_effort = "low"
             model: "composer-session-model".into(),
             ..Default::default()
         };
-        let (model, cfg) = finalize_image_describe_sampler_config(None, &active, None, Some(3));
+        let (model, cfg) = finalize_aux_sampler_config(None, &active, None, Some(3));
         assert_eq!(model, "composer-session-model");
         assert_eq!(cfg.model, "composer-session-model");
         assert_ne!(cfg.model, "grok-build");
@@ -6369,11 +6374,39 @@ reasoning_effort = "low"
             ..Default::default()
         };
         let (model, cfg) =
-            finalize_image_describe_sampler_config(Some(aux), &active, Some("cli".into()), Some(7));
+            finalize_aux_sampler_config(Some(aux), &active, Some("cli".into()), Some(7));
         assert_eq!(model, "grok-build");
         assert_eq!(cfg.model, "grok-build");
         assert_eq!(cfg.client_identifier.as_deref(), Some("cli"));
         assert_eq!(cfg.max_retries, Some(7));
+    }
+    /// Session-title generation used to force the configured summary slug onto
+    /// the session's own config on an aux-resolve miss, so a session on a
+    /// custom `[[provider]]` posted a compiled-in first-party slug the provider
+    /// has never heard of. The `None` arm must keep BOTH the session model and
+    /// the session endpoint.
+    #[test]
+    fn session_summary_fallback_keeps_custom_provider_model_and_endpoint() {
+        let session = SamplerConfig {
+            model: "some-model".into(),
+            base_url: "https://acme.example/v1".into(),
+            api_key: Some("acme-key".into()),
+            ..Default::default()
+        };
+        let (model, cfg) = finalize_aux_sampler_config(None, &session, None, Some(2));
+        assert_eq!(model, "some-model");
+        assert_eq!(cfg.model, "some-model");
+        assert_ne!(
+            model,
+            crate::models::default_session_summary_model(),
+            "a custom provider must never be sent the compiled-in summary slug"
+        );
+        assert_eq!(cfg.base_url, "https://acme.example/v1");
+        assert!(
+            !crate::util::is_xai_api_url(&cfg.base_url),
+            "the fallback must stay on the session's own endpoint"
+        );
+        assert_eq!(cfg.api_key.as_deref(), Some("acme-key"));
     }
     #[test]
     fn resolve_aux_model_honors_grok_build_override() {

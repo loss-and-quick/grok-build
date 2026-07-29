@@ -845,7 +845,7 @@ impl SessionActor {
             .resolve_aux_sampler_config(&self.image_description_model)
             .await;
         let (describe_model, sampler_config) =
-            crate::agent::config::finalize_image_describe_sampler_config(
+            crate::agent::config::finalize_aux_sampler_config(
                 resolved_describe,
                 &active_session_config,
                 self.client_identifier.clone(),
