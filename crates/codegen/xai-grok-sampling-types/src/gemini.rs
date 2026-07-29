@@ -64,6 +64,13 @@ pub struct GeminiFunctionCall {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GeminiFunctionResponse {
+    /// The id of the `functionCall` this responds to. Optional on the wire and
+    /// documented as "populated by the client to match the corresponding
+    /// function call `id`" — it is the only field that distinguishes two
+    /// responses to two calls of the *same* function in one turn, since `name`
+    /// is identical for both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     pub response: serde_json::Value,
 }
@@ -197,19 +204,23 @@ pub struct GeminiUsageMetadata {
 /// * System items collapse into `system_instruction`.
 /// * User content becomes a `"user"` turn; assistant text + tool calls become
 ///   a `"model"` turn (each tool call a `functionCall` part).
-/// * Tool results become a `"user"` turn carrying a `functionResponse` part.
+/// * A run of consecutive tool results collapses into a single `"user"` turn of
+///   `functionResponse` parts (see [`flush_tool_responses`]).
 /// * `tools` map to a single `functionDeclarations` group; sampling knobs map
 ///   to `generationConfig`.
 pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
     let mut contents: Vec<GeminiContent> = Vec::new();
     let mut system_text = String::new();
-    // Maps a tool-call id to the function name it invoked. Gemini pairs a
-    // `functionResponse` to its `functionCall` by name, not id, but the unified
-    // `ToolResultItem` only carries the call id. We recover the name from the
-    // preceding assistant `functionCall` parts, which the builder sees first
-    // because conversation items are processed in order.
+    // Maps a tool-call id to the function name it invoked. `functionResponse`
+    // requires `name`, but the unified `ToolResultItem` only carries the call
+    // id. We recover the name from the preceding assistant `functionCall`
+    // parts, which the builder sees first because conversation items are
+    // processed in order.
     let mut call_id_to_name: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    // Tool results buffered until the next non-tool-result item, so a parallel
+    // batch lands in one turn rather than one turn each.
+    let mut pending_tool_responses: Vec<GeminiPart> = Vec::new();
 
     let push_turn = |contents: &mut Vec<GeminiContent>, role: &str, parts: Vec<GeminiPart>| {
         if !parts.is_empty() {
@@ -229,9 +240,11 @@ pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
                 system_text.push_str(s.content.as_ref());
             }
             ConversationItem::User(u) => {
+                flush_tool_responses(&mut contents, &mut pending_tool_responses);
                 push_turn(&mut contents, "user", content_parts_to_gemini(&u.content));
             }
             ConversationItem::Assistant(a) => {
+                flush_tool_responses(&mut contents, &mut pending_tool_responses);
                 let mut parts: Vec<GeminiPart> = Vec::new();
                 if !a.content.is_empty() {
                     parts.push(GeminiPart {
@@ -254,28 +267,36 @@ pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
             }
             ConversationItem::ToolResult(t) => {
                 // Gemini carries tool output as a `functionResponse` part in a
-                // user turn and pairs it to its `functionCall` by function name.
-                // Recover the name from the preceding call; fall back to the id
-                // when no matching call was seen (degraded, but preserves the
-                // prior behavior rather than dropping the response).
+                // user turn. `name` is required and is the function's name, so
+                // it cannot by itself say *which* call is being answered when a
+                // turn called the same function twice; `id` is what disambiguates
+                // (see `GeminiFunctionResponse::id`). Recover the name from the
+                // preceding call and always echo the id.
+                //
+                // Not expressible: if no matching `functionCall` was seen (a
+                // replayed or truncated history), the function name is
+                // unrecoverable. We fall back to the call id as the name —
+                // wrong, but it keeps the response and the `id` correct rather
+                // than dropping the tool output on the floor.
                 let name = call_id_to_name
                     .get(&t.tool_call_id)
                     .cloned()
                     .unwrap_or_else(|| t.tool_call_id.clone());
                 let response = serde_json::json!({ "content": t.content.as_ref() });
-                push_turn(
-                    &mut contents,
-                    "user",
-                    vec![GeminiPart {
-                        function_response: Some(GeminiFunctionResponse { name, response }),
-                        ..Default::default()
-                    }],
-                );
+                pending_tool_responses.push(GeminiPart {
+                    function_response: Some(GeminiFunctionResponse {
+                        id: Some(t.tool_call_id.clone()),
+                        name,
+                        response,
+                    }),
+                    ..Default::default()
+                });
             }
             // Gemini has no wire slot for backend-tool or reasoning siblings.
             ConversationItem::BackendToolCall(_) | ConversationItem::Reasoning(_) => {}
         }
     }
+    flush_tool_responses(&mut contents, &mut pending_tool_responses);
 
     let system_instruction = (!system_text.is_empty()).then(|| GeminiContent {
         role: None,
@@ -323,6 +344,24 @@ pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
         system_instruction,
         tools,
         generation_config,
+    }
+}
+
+/// Emit the buffered `functionResponse` parts as one `"user"` turn.
+///
+/// Gemini's parallel-function-calling contract is that the responses to a batch
+/// of `functionCall` parts arrive as a single turn whose parts are *only*
+/// `functionResponse`s, so the response count matches the call count and the
+/// two lists line up positionally. Emitting one turn per result loses that
+/// alignment: nothing then tells a server that ignores `id` which response
+/// answers which call, and two calls to the same function become
+/// indistinguishable.
+fn flush_tool_responses(contents: &mut Vec<GeminiContent>, pending: &mut Vec<GeminiPart>) {
+    if !pending.is_empty() {
+        contents.push(GeminiContent {
+            role: Some("user".to_owned()),
+            parts: std::mem::take(pending),
+        });
     }
 }
 
@@ -469,6 +508,91 @@ mod tests {
             "functionResponse must pair by function name, not the call id"
         );
         assert_ne!(fr.name, "call_abc");
+    }
+
+    /// Two calls to the *same* function in one turn: the two responses must stay
+    /// distinguishable. `name` is identical for both, so the only discriminator
+    /// is `functionResponse.id`, and both responses must ride in one turn so
+    /// their order still matches the order of the `functionCall` parts.
+    #[test]
+    fn two_calls_to_one_function_keep_their_results_attributed() {
+        use crate::conversation::{AssistantItem, ToolCall, ToolResultItem};
+        let call = |id: &str, args: &str| ToolCall {
+            id: std::sync::Arc::from(id),
+            name: "read_file".to_owned(),
+            arguments: std::sync::Arc::from(args),
+        };
+        let req = ConversationRequest {
+            items: vec![
+                ConversationItem::user("read both".to_owned()),
+                ConversationItem::Assistant(AssistantItem {
+                    content: std::sync::Arc::from(""),
+                    tool_calls: vec![
+                        call("call_a", r#"{"path":"a.txt"}"#),
+                        call("call_b", r#"{"path":"b.txt"}"#),
+                    ],
+                    model_id: None,
+                    model_fingerprint: None,
+                    reasoning_effort: None,
+                }),
+                ConversationItem::ToolResult(ToolResultItem {
+                    tool_call_id: "call_a".to_owned(),
+                    content: std::sync::Arc::from("body of a"),
+                    images: Vec::new(),
+                }),
+                ConversationItem::ToolResult(ToolResultItem {
+                    tool_call_id: "call_b".to_owned(),
+                    content: std::sync::Arc::from("body of b"),
+                    images: Vec::new(),
+                }),
+            ],
+            ..Default::default()
+        };
+        let g = build_gemini_request(&req);
+
+        // contents = [user, model(2 calls), user(2 functionResponses)] — one turn
+        // for the batch, not one per result.
+        assert_eq!(g.contents.len(), 3, "{:#?}", g.contents);
+        let calls = &g.contents[1].parts;
+        let responses = &g.contents[2].parts;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            responses.len(),
+            2,
+            "both responses belong to the same turn so they line up with the calls",
+        );
+        assert!(
+            responses.iter().all(|p| p.function_response.is_some()),
+            "the response turn carries only functionResponse parts",
+        );
+
+        for (call, response) in calls.iter().zip(responses) {
+            let fc = call.function_call.as_ref().unwrap();
+            let fr = response.function_response.as_ref().unwrap();
+            assert_eq!(fr.name, fc.name, "same function name for both");
+            assert_eq!(
+                fr.id, fc.id,
+                "functionResponse.id must match its functionCall.id",
+            );
+        }
+        // The bodies did not get swapped.
+        let body_of = |part: &GeminiPart| {
+            part.function_response.as_ref().unwrap().response["content"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(body_of(&responses[0]), "body of a");
+        assert_eq!(body_of(&responses[1]), "body of b");
+
+        // And the id survives serialization under its wire key.
+        let json = serde_json::to_value(&g).unwrap();
+        assert_eq!(
+            json.pointer("/contents/2/parts/1/functionResponse/id")
+                .and_then(serde_json::Value::as_str),
+            Some("call_b"),
+            "{json:#}",
+        );
     }
 
     #[test]
