@@ -40,7 +40,26 @@ const DEFAULT_CLIENT_IDENTIFIER: &str = "grok-shell";
 
 /// Product identifier baked into User-Agent strings.
 const AGENT_PRODUCT: &str = "grok-shell";
-const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
+
+/// Diagnostic for a `messages` backend whose model config declares no output
+/// ceiling.
+///
+/// The Messages API requires `max_tokens` on every request and rejects (400)
+/// any value above the *target model's own* output limit. That limit is not
+/// universal: current top-tier Claude models allow 128K output tokens, while
+/// smaller ones cap lower (Haiku-class models are 64K). Nothing reachable from
+/// `apply_message_defaults` identifies which model is on the other end
+/// -- [`SamplerConfig::max_completion_tokens`] is the only *declared* output
+/// ceiling, and [`SamplerConfig::context_window`] is an input budget, not an
+/// output cap. So any built-in default is a guess, and the previous 128K guess
+/// made every request against a lower-ceiling model fail as a generic provider
+/// 400 that the user had to reverse-engineer. Refuse the guess instead and say
+/// what to set.
+const MISSING_MAX_COMPLETION_TOKENS: &str = "the messages backend requires max_completion_tokens: \
+     this model's config declares no output-token ceiling, and the Messages API rejects a \
+     max_tokens above the model's own limit (which the client cannot discover). Set \
+     max_completion_tokens on the model (or provider) entry to the model's documented \
+     max output tokens.";
 
 /// Per-request `x-grok-*` headers. Optional fields are skipped when empty/`None`.
 struct GrokRequestHeaders<'a> {
@@ -1671,17 +1690,47 @@ impl SamplingClient {
     // =========================================================================
 
     /// Apply default configuration to a Messages API request.
+    ///
+    /// Fails with [`SamplingError::InvalidConfiguration`] when `max_tokens` has
+    /// to be defaulted but the model config declares no ceiling to default it
+    /// to; see `MISSING_MAX_COMPLETION_TOKENS`.
     fn apply_message_defaults(&self, request: &mut MessagesRequestWrapper) -> Result<()> {
         // Apply model default if not specified
         if request.inner.model.is_empty() {
             request.inner.model = self.defaults.model.clone();
         }
 
-        if request.inner.max_tokens == 0 {
-            request.inner.max_tokens = self
-                .defaults
-                .max_completion_tokens
-                .unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
+        // `max_tokens` is mandatory on the Messages API and must stay at or
+        // below the target model's output ceiling. The declared
+        // `max_completion_tokens` is the only ceiling the sampler can see, so
+        // clamp to it when it exists and refuse to invent one when it does not.
+        match self.defaults.max_completion_tokens {
+            Some(ceiling) if request.inner.max_tokens == 0 => {
+                request.inner.max_tokens = ceiling;
+            }
+            Some(ceiling) if request.inner.max_tokens > ceiling => {
+                tracing::warn!(
+                    model = %request.inner.model,
+                    requested = request.inner.max_tokens,
+                    ceiling,
+                    "messages: clamping max_tokens to the model's declared ceiling"
+                );
+                request.inner.max_tokens = ceiling;
+            }
+            Some(_) => {}
+            None if request.inner.max_tokens == 0 => {
+                // Logged with the model because the error variant carries a
+                // `&'static str` and cannot name it.
+                tracing::error!(
+                    model = %request.inner.model,
+                    "messages: model config declares no max_completion_tokens; \
+                     refusing to guess a max_tokens ceiling"
+                );
+                return Err(SamplingError::InvalidConfiguration(
+                    MISSING_MAX_COMPLETION_TOKENS,
+                ));
+            }
+            None => {}
         }
 
         // Apply temperature default if not specified
@@ -2701,6 +2750,93 @@ mod tests {
                 .get(HeaderName::from_static("x-api-key"))
                 .is_none()
         );
+    }
+
+    fn messages_client(max_completion_tokens: Option<u32>) -> SamplingClient {
+        SamplingClient::new(SamplerConfig {
+            api_backend: ApiBackend::Messages,
+            auth_scheme: AuthScheme::XApiKey,
+            model: "example-model".to_string(),
+            max_completion_tokens,
+            ..minimal_config()
+        })
+        .expect("client should build")
+    }
+
+    fn messages_request(max_tokens: u32) -> MessagesRequestWrapper {
+        MessagesRequestWrapper::new(messages::MessagesRequest {
+            max_tokens,
+            ..Default::default()
+        })
+    }
+
+    /// Regression: a model whose declared ceiling is below the old built-in
+    /// 128K default must never be sent a larger `max_tokens` -- Anthropic
+    /// answers that with a 400 that reads like a generic request error.
+    #[test]
+    fn messages_defaults_clamp_max_tokens_to_declared_ceiling() {
+        let client = messages_client(Some(64_000));
+
+        // Defaulted (`max_tokens == 0`) resolves to the declared ceiling.
+        let mut defaulted = messages_request(0);
+        client
+            .apply_message_defaults(&mut defaulted)
+            .expect("declared ceiling is enough to default max_tokens");
+        assert_eq!(defaulted.inner.max_tokens, 64_000);
+
+        // A caller-supplied value above the ceiling is clamped down to it.
+        let mut over = messages_request(128_000);
+        client
+            .apply_message_defaults(&mut over)
+            .expect("an over-ceiling request is clamped, not rejected");
+        assert_eq!(over.inner.max_tokens, 64_000);
+
+        // A value at or below the ceiling is left alone.
+        let mut under = messages_request(4_096);
+        client
+            .apply_message_defaults(&mut under)
+            .expect("an under-ceiling request is untouched");
+        assert_eq!(under.inner.max_tokens, 4_096);
+    }
+
+    /// Regression: with no declared ceiling the sampler used to guess 128K,
+    /// which is only valid for top-tier models. Fail early with an actionable
+    /// diagnostic instead of shipping a guess the provider rejects.
+    #[test]
+    fn messages_defaults_reject_absent_ceiling_instead_of_guessing() {
+        let client = messages_client(None);
+
+        let mut request = messages_request(0);
+        let err = client
+            .apply_message_defaults(&mut request)
+            .expect_err("a missing ceiling must not be papered over with a guess");
+
+        assert!(
+            matches!(err, SamplingError::InvalidConfiguration(_)),
+            "expected a configuration error, got: {err:?}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("max_completion_tokens"),
+            "diagnostic must name the field to set: {rendered}"
+        );
+        assert_eq!(
+            request.inner.max_tokens, 0,
+            "no max_tokens may be invented on the failure path"
+        );
+    }
+
+    /// An explicit `max_tokens` stays valid without a declared ceiling: the
+    /// caller has taken responsibility for the value.
+    #[test]
+    fn messages_defaults_keep_explicit_max_tokens_without_declared_ceiling() {
+        let client = messages_client(None);
+
+        let mut request = messages_request(8_192);
+        client
+            .apply_message_defaults(&mut request)
+            .expect("an explicit max_tokens needs no ceiling to fall back on");
+        assert_eq!(request.inner.max_tokens, 8_192);
     }
 
     // Regression: a past change dropped User-Agent from sampling requests.
