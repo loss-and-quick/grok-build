@@ -49,6 +49,8 @@ pub struct GeminiPart {
     pub function_response: Option<GeminiFunctionResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inline_data: Option<GeminiInlineData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_data: Option<GeminiFileData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -80,6 +82,19 @@ pub struct GeminiFunctionResponse {
 pub struct GeminiInlineData {
     pub mime_type: String,
     pub data: String,
+}
+
+/// A media reference the *server* resolves. `fileUri` is not a general URL
+/// fetcher: Gemini resolves URIs it owns (a Files API `.../files/{id}` URI, a
+/// Cloud Storage `gs://` URI on Vertex, or a YouTube link) and rejects anything
+/// else. `mimeType` is documented as required but is omitted when it cannot be
+/// determined, so the server's error names the real problem.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiFileData {
+    pub file_uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -205,7 +220,9 @@ pub struct GeminiUsageMetadata {
 /// * User content becomes a `"user"` turn; assistant text + tool calls become
 ///   a `"model"` turn (each tool call a `functionCall` part).
 /// * A run of consecutive tool results collapses into a single `"user"` turn of
-///   `functionResponse` parts (see [`flush_tool_responses`]).
+///   `functionResponse` parts, and images those results carried follow in the
+///   next `"user"` turn (see [`flush_tool_responses`]).
+/// * Images become `inlineData` or `fileData` (see [`image_part`]).
 /// * `tools` map to a single `functionDeclarations` group; sampling knobs map
 ///   to `generationConfig`.
 pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
@@ -219,8 +236,11 @@ pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
     let mut call_id_to_name: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     // Tool results buffered until the next non-tool-result item, so a parallel
-    // batch lands in one turn rather than one turn each.
+    // batch lands in one turn rather than one turn each. Images attached to
+    // those results are buffered separately: they cannot ride inside the
+    // `functionResponse` turn (see [`flush_tool_responses`]).
     let mut pending_tool_responses: Vec<GeminiPart> = Vec::new();
+    let mut pending_tool_media: Vec<GeminiPart> = Vec::new();
 
     let push_turn = |contents: &mut Vec<GeminiContent>, role: &str, parts: Vec<GeminiPart>| {
         if !parts.is_empty() {
@@ -240,11 +260,19 @@ pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
                 system_text.push_str(s.content.as_ref());
             }
             ConversationItem::User(u) => {
-                flush_tool_responses(&mut contents, &mut pending_tool_responses);
+                flush_tool_responses(
+                    &mut contents,
+                    &mut pending_tool_responses,
+                    &mut pending_tool_media,
+                );
                 push_turn(&mut contents, "user", content_parts_to_gemini(&u.content));
             }
             ConversationItem::Assistant(a) => {
-                flush_tool_responses(&mut contents, &mut pending_tool_responses);
+                flush_tool_responses(
+                    &mut contents,
+                    &mut pending_tool_responses,
+                    &mut pending_tool_media,
+                );
                 let mut parts: Vec<GeminiPart> = Vec::new();
                 if !a.content.is_empty() {
                     parts.push(GeminiPart {
@@ -286,17 +314,31 @@ pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
                 pending_tool_responses.push(GeminiPart {
                     function_response: Some(GeminiFunctionResponse {
                         id: Some(t.tool_call_id.clone()),
-                        name,
+                        name: name.clone(),
                         response,
                     }),
                     ..Default::default()
                 });
+                // Images a tool produced (a screenshot, `read_file` on a PNG)
+                // used to be dropped here, leaving the model to answer about an
+                // image it never saw. They cannot live in the response turn, so
+                // they are queued for the turn that follows it.
+                if !t.images.is_empty() {
+                    pending_tool_media.push(text_part(format!(
+                        "Images returned by the {name} result above:"
+                    )));
+                    pending_tool_media.extend(content_parts_to_gemini(&t.images));
+                }
             }
             // Gemini has no wire slot for backend-tool or reasoning siblings.
             ConversationItem::BackendToolCall(_) | ConversationItem::Reasoning(_) => {}
         }
     }
-    flush_tool_responses(&mut contents, &mut pending_tool_responses);
+    flush_tool_responses(
+        &mut contents,
+        &mut pending_tool_responses,
+        &mut pending_tool_media,
+    );
 
     let system_instruction = (!system_text.is_empty()).then(|| GeminiContent {
         role: None,
@@ -347,7 +389,8 @@ pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
     }
 }
 
-/// Emit the buffered `functionResponse` parts as one `"user"` turn.
+/// Emit the buffered `functionResponse` parts as one `"user"` turn, followed by
+/// any images those results carried.
 ///
 /// Gemini's parallel-function-calling contract is that the responses to a batch
 /// of `functionCall` parts arrive as a single turn whose parts are *only*
@@ -356,45 +399,130 @@ pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
 /// alignment: nothing then tells a server that ignores `id` which response
 /// answers which call, and two calls to the same function become
 /// indistinguishable.
-fn flush_tool_responses(contents: &mut Vec<GeminiContent>, pending: &mut Vec<GeminiPart>) {
+///
+/// That same rule is why tool-result images cannot go where the other formats
+/// put them. `functionResponse.response` is a JSON object with no slot for
+/// image bytes, and adding `inlineData` parts to the response turn would break
+/// the part-count match. So the images follow in their own `"user"` turn, each
+/// group introduced by a text part naming the call it came from — the
+/// association is stated in prose because the format has no structural way to
+/// say it.
+fn flush_tool_responses(
+    contents: &mut Vec<GeminiContent>,
+    pending: &mut Vec<GeminiPart>,
+    pending_media: &mut Vec<GeminiPart>,
+) {
     if !pending.is_empty() {
         contents.push(GeminiContent {
             role: Some("user".to_owned()),
             parts: std::mem::take(pending),
         });
     }
+    if !pending_media.is_empty() {
+        contents.push(GeminiContent {
+            role: Some("user".to_owned()),
+            parts: std::mem::take(pending_media),
+        });
+    }
 }
 
-/// Convert unified content parts into Gemini parts. Base64 `data:` images
-/// become `inlineData`; other parts become text.
+/// Convert unified content parts into Gemini parts.
 fn content_parts_to_gemini(parts: &[ContentPart]) -> Vec<GeminiPart> {
     parts
         .iter()
         .map(|part| match part {
-            ContentPart::Text { text } => GeminiPart {
-                text: Some(text.as_ref().to_owned()),
-                ..Default::default()
-            },
-            ContentPart::Image { url } => {
-                if let Some(rest) = url.strip_prefix("data:")
-                    && let Some((mime_type, data)) = rest.split_once(";base64,")
-                {
-                    GeminiPart {
-                        inline_data: Some(GeminiInlineData {
-                            mime_type: mime_type.to_owned(),
-                            data: data.to_owned(),
-                        }),
-                        ..Default::default()
-                    }
-                } else {
-                    GeminiPart {
-                        text: Some(format!("[image: {url}]")),
-                        ..Default::default()
-                    }
-                }
-            }
+            ContentPart::Text { text } => text_part(text.as_ref().to_owned()),
+            ContentPart::Image { url } => image_part(url.as_ref()),
         })
         .collect()
+}
+
+fn text_part(text: String) -> GeminiPart {
+    GeminiPart {
+        text: Some(text),
+        ..Default::default()
+    }
+}
+
+/// Convert one image reference into the matching Gemini part.
+///
+/// Gemini accepts image bytes exactly two ways: `inlineData` (base64 plus a
+/// mime type) or `fileData` (a URI the server resolves itself). It never
+/// fetches an arbitrary URL on the caller's behalf, so a plain `https://` image
+/// cannot be "passed through" — it becomes `fileData` and the server decides.
+/// That is deliberate: a request Gemini rejects with a URI error is far better
+/// than the previous behavior of pasting the URL into a text part, which left
+/// the model answering blind about an image it never received while looking to
+/// the user like the attachment went through.
+fn image_part(url: &str) -> GeminiPart {
+    if let Some(rest) = url.strip_prefix("data:") {
+        // `data:[<mime>][;<param>]*[;base64],<payload>`; per RFC 2397 `;base64`
+        // is always the last parameter, so any parameters in between (e.g.
+        // `;charset=`) must be trimmed off the mime type rather than folded
+        // into it.
+        let Some((meta, payload)) = rest.split_once(',') else {
+            return text_part("[image omitted: malformed data: URL]".to_owned());
+        };
+        let Some(meta) = meta.strip_suffix(";base64") else {
+            // A percent-encoded (non-base64) data: URL would have to be decoded
+            // and re-encoded to become `inlineData`, and this crate carries no
+            // base64 encoder. Say so instead of shipping something the model
+            // cannot read.
+            return text_part(
+                "[image omitted: data: URL is not base64-encoded, which Gemini's inlineData requires]"
+                    .to_owned(),
+            );
+        };
+        let mime_type = match meta.split(';').next().unwrap_or_default() {
+            "" => DEFAULT_IMAGE_MIME_TYPE,
+            mime => mime,
+        };
+        return GeminiPart {
+            inline_data: Some(GeminiInlineData {
+                mime_type: mime_type.to_owned(),
+                data: payload.to_owned(),
+            }),
+            ..Default::default()
+        };
+    }
+
+    GeminiPart {
+        file_data: Some(GeminiFileData {
+            mime_type: mime_type_from_uri(url).map(str::to_owned),
+            file_uri: url.to_owned(),
+        }),
+        ..Default::default()
+    }
+}
+
+/// Mime type for a `data:` URL that declared none. RFC 2397's default is
+/// `text/plain`, which is never right for an image part, so fall back to the
+/// same guess the Anthropic conversion in [`crate::conversation`] makes.
+const DEFAULT_IMAGE_MIME_TYPE: &str = "image/png";
+
+/// Guess `fileData.mimeType` from the URI's extension.
+///
+/// Returns `None` rather than a guess when the extension says nothing: for a
+/// Files API URI the server already knows the type, and for anything else a
+/// wrong mime type is worse than an absent one — Gemini decodes by the declared
+/// type, so mislabeling a PNG as a JPEG corrupts the image instead of failing.
+fn mime_type_from_uri(uri: &str) -> Option<&'static str> {
+    let path = uri.split(['?', '#']).next().unwrap_or(uri);
+    // Only the last path segment can hold the extension — a dot in the host
+    // (`example.com/photo`) is not one.
+    let last_segment = path.rsplit('/').next().unwrap_or(path);
+    let ext = last_segment.rsplit_once('.')?.1.to_ascii_lowercase();
+    // Gemini's documented image and document input types.
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
+        "pdf" => "application/pdf",
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -611,6 +739,160 @@ mod tests {
         assert_eq!(
             fr.name, "orphan_call",
             "with no matching call, degrade to the id rather than dropping the response"
+        );
+    }
+
+    /// A non-`data:` image URL must reach the wire as a resolvable reference.
+    /// Gemini cannot fetch it and will say so; the old text placeholder said
+    /// nothing and left the model answering blind.
+    #[test]
+    fn http_image_url_becomes_file_data_not_a_text_placeholder() {
+        use crate::conversation::{ContentPart, UserItem};
+        let req = ConversationRequest {
+            items: vec![ConversationItem::User(UserItem {
+                content: vec![
+                    ContentPart::Text {
+                        text: std::sync::Arc::from("what is this?"),
+                    },
+                    ContentPart::Image {
+                        url: std::sync::Arc::from("https://example.com/photo.PNG?v=2"),
+                    },
+                ],
+                ..Default::default()
+            })],
+            ..Default::default()
+        };
+        let g = build_gemini_request(&req);
+        let image = &g.contents[0].parts[1];
+        assert!(
+            image.text.is_none(),
+            "an image must never degrade into a text part: {image:?}",
+        );
+        let fd = image.file_data.as_ref().expect("expected fileData");
+        assert_eq!(fd.file_uri, "https://example.com/photo.PNG?v=2");
+        assert_eq!(
+            fd.mime_type.as_deref(),
+            Some("image/png"),
+            "mime type comes from the extension, case- and query-insensitively",
+        );
+
+        let json = serde_json::to_value(&g).unwrap();
+        assert_eq!(
+            json.pointer("/contents/0/parts/1/fileData/mimeType")
+                .and_then(serde_json::Value::as_str),
+            Some("image/png"),
+            "{json:#}",
+        );
+    }
+
+    /// An extension that says nothing leaves `mimeType` off rather than guessing:
+    /// Gemini decodes by the declared type, so a wrong one corrupts the image.
+    #[test]
+    fn unknown_extension_omits_the_file_data_mime_type() {
+        use crate::conversation::{ContentPart, UserItem};
+        let req = ConversationRequest {
+            items: vec![ConversationItem::User(UserItem {
+                content: vec![ContentPart::Image {
+                    url: std::sync::Arc::from("https://example.com/files/opaque-id"),
+                }],
+                ..Default::default()
+            })],
+            ..Default::default()
+        };
+        let g = build_gemini_request(&req);
+        let fd = g.contents[0].parts[0].file_data.as_ref().unwrap();
+        assert_eq!(fd.file_uri, "https://example.com/files/opaque-id");
+        assert_eq!(fd.mime_type, None);
+        let json = serde_json::to_value(&g).unwrap();
+        assert!(
+            json.pointer("/contents/0/parts/0/fileData/mimeType")
+                .is_none(),
+            "an absent mime type must not serialize as null: {json:#}",
+        );
+    }
+
+    /// `data:` URLs keep going to `inlineData`, including when extra parameters
+    /// sit between the mime type and `;base64`.
+    #[test]
+    fn data_url_becomes_inline_data_with_parameters_stripped() {
+        assert_eq!(
+            image_part("data:image/jpeg;base64,QUJD").inline_data,
+            Some(GeminiInlineData {
+                mime_type: "image/jpeg".to_owned(),
+                data: "QUJD".to_owned(),
+            }),
+        );
+        assert_eq!(
+            image_part("data:image/webp;charset=utf-8;base64,QUJD").inline_data,
+            Some(GeminiInlineData {
+                mime_type: "image/webp".to_owned(),
+                data: "QUJD".to_owned(),
+            }),
+            "a `;charset=` parameter must not end up inside the mime type",
+        );
+
+        // Not expressible: without a base64 payload there is nothing to put in
+        // `inlineData`, so the part says so instead of pretending.
+        let percent_encoded = image_part("data:image/svg+xml,%3Csvg%2F%3E");
+        assert!(percent_encoded.inline_data.is_none());
+        assert!(percent_encoded.file_data.is_none());
+        let text = percent_encoded.text.unwrap();
+        assert!(text.contains("not base64-encoded"), "{text}");
+    }
+
+    /// Images attached to a tool result used to be dropped outright. They now
+    /// ride in the turn after the `functionResponse` turn, which must keep
+    /// carrying only `functionResponse` parts.
+    #[test]
+    fn tool_result_images_reach_the_model_after_the_response_turn() {
+        use crate::conversation::{AssistantItem, ContentPart, ToolCall, ToolResultItem};
+        let req = ConversationRequest {
+            items: vec![
+                ConversationItem::Assistant(AssistantItem {
+                    content: std::sync::Arc::from(""),
+                    tool_calls: vec![ToolCall {
+                        id: std::sync::Arc::from("call_1"),
+                        name: "screenshot".to_owned(),
+                        arguments: std::sync::Arc::from("{}"),
+                    }],
+                    model_id: None,
+                    model_fingerprint: None,
+                    reasoning_effort: None,
+                }),
+                ConversationItem::ToolResult(ToolResultItem {
+                    tool_call_id: "call_1".to_owned(),
+                    content: std::sync::Arc::from("captured"),
+                    images: vec![ContentPart::Image {
+                        url: std::sync::Arc::from("data:image/png;base64,QUJD"),
+                    }],
+                }),
+            ],
+            ..Default::default()
+        };
+        let g = build_gemini_request(&req);
+        // contents = [model(call), user(functionResponse), user(images)]
+        assert_eq!(g.contents.len(), 3, "{:#?}", g.contents);
+        assert_eq!(g.contents[1].parts.len(), 1);
+        assert!(
+            g.contents[1].parts[0].function_response.is_some(),
+            "the response turn stays functionResponse-only",
+        );
+        let media = &g.contents[2];
+        assert_eq!(media.role.as_deref(), Some("user"));
+        assert!(
+            media.parts[0]
+                .text
+                .as_deref()
+                .is_some_and(|t| t.contains("screenshot")),
+            "the images are introduced by the call they came from: {:?}",
+            media.parts[0],
+        );
+        assert_eq!(
+            media.parts[1].inline_data,
+            Some(GeminiInlineData {
+                mime_type: "image/png".to_owned(),
+                data: "QUJD".to_owned(),
+            }),
         );
     }
 
