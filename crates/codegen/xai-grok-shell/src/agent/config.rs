@@ -5626,6 +5626,11 @@ fn expand_providers_into_catalog(
                 auth_scheme: Some(auth_scheme),
                 extra_headers: headers.clone(),
                 context_window,
+                // The output ceiling is an endpoint property as well, and the
+                // messages backend refuses to invent one it cannot derive, so a
+                // `format = "messages"` provider must declare it here (or in a
+                // per-model table, re-applied over this entry below).
+                max_completion_tokens: provider.max_completion_tokens,
                 // Every model this provider serves authenticates as the
                 // provider's account, so two `[[provider]]` entries sharing a
                 // `base_url` stay distinct credentials.
@@ -13719,6 +13724,7 @@ default = "grok-4.5"
             proxy: None,
             models: vec!["m".to_owned()],
             context_window: None,
+            max_completion_tokens: None,
             auth_account: account.map(str::to_owned),
             reasoning_efforts: Vec::new(),
             reasoning_effort: None,
@@ -13766,6 +13772,7 @@ default = "grok-4.5"
                 proxy: Some("http://proxy.test:3128".to_owned()),
                 models: vec!["m".to_owned()],
                 context_window: None,
+                max_completion_tokens: None,
                 auth_account: None,
                 reasoning_efforts: Vec::new(),
                 reasoning_effort: None,
@@ -13780,6 +13787,7 @@ default = "grok-4.5"
                 proxy: None,
                 models: vec!["m".to_owned()],
                 context_window: None,
+                max_completion_tokens: None,
                 auth_account: None,
                 reasoning_efforts: Vec::new(),
                 reasoning_effort: None,
@@ -13835,6 +13843,7 @@ default = "grok-4.5"
                 proxy: None,
                 models: vec!["m".to_owned()],
                 context_window: None,
+                max_completion_tokens: None,
                 auth_account: None,
                 reasoning_efforts: Vec::new(),
                 reasoning_effort: None,
@@ -13874,6 +13883,7 @@ default = "grok-4.5"
             proxy: None,
             models: vec!["m1".to_owned()],
             context_window: None,
+            max_completion_tokens: None,
             auth_account: None,
             reasoning_efforts: Vec::new(),
             reasoning_effort: None,
@@ -13923,6 +13933,10 @@ default = "grok-4.5"
             proxy: None,
             models: vec!["claude-x".to_owned()],
             context_window: None,
+            // The messages backend refuses to guess an output ceiling, so the
+            // provider entry declares one — without it the request fails at
+            // build time and never reaches the mock server.
+            max_completion_tokens: Some(64_000),
             auth_account: None,
             reasoning_efforts: Vec::new(),
             reasoning_effort: None,
@@ -13976,6 +13990,7 @@ default = "grok-4.5"
             proxy: None,
             models: vec!["gemini-x".to_owned()],
             context_window: None,
+            max_completion_tokens: None,
             auth_account: None,
             reasoning_efforts: Vec::new(),
             reasoning_effort: None,
@@ -14018,6 +14033,63 @@ default = "grok-4.5"
             logged.authorization.is_none(),
             "gemini must not send Bearer"
         );
+    }
+
+    /// A `format = "messages"` provider can declare its own output ceiling, and
+    /// every model it serves inherits it — the declaration the sampler now
+    /// requires, which a `[[provider]]` entry had no way to make.
+    ///
+    /// A `[model."<id>/<model>"]` table still refines it for the one model whose
+    /// ceiling differs from its siblings': provider expansion replaces the
+    /// Layer-3 entry wholesale, so the re-apply pass has to carry this field too.
+    #[test]
+    fn provider_max_completion_tokens_declares_and_per_model_table_overrides() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "acme"
+            format = "messages"
+            base_url = "https://example.test/v1"
+            api_key = "sk-test"
+            models = ["m-large", "m-small"]
+            max_completion_tokens = 64000
+
+            [model."acme/m-small"]
+            max_completion_tokens = 8192
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config parses");
+        let catalog = resolve_model_list(&cfg, Some(IndexMap::new()));
+
+        let large = catalog.get("acme/m-large").expect("synthesized");
+        assert_eq!(
+            large.info.max_completion_tokens,
+            Some(64_000),
+            "the provider declaration is the default for every model it serves",
+        );
+        // The ceiling has to survive all the way onto the sampler config; that
+        // is the value the messages request builder reads.
+        let sampling = sampling_config_for_model(
+            large,
+            resolve_credentials(large, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(sampling.max_completion_tokens, Some(64_000));
+
+        let small = catalog.get("acme/m-small").expect("synthesized");
+        assert_eq!(
+            small.info.max_completion_tokens,
+            Some(8192),
+            "a per-model table must still override the provider default",
+        );
+        // The override refines only the ceiling: the rest of the synthesized
+        // entry (wire format, credential, base URL) still comes from the provider.
+        assert_eq!(small.info.api_backend, ApiBackend::Messages);
+        assert_eq!(small.info.base_url, "https://example.test/v1");
     }
 
     /// A `[[provider]]` that lists nothing about reasoning keeps the effort
@@ -14280,6 +14352,7 @@ default = "grok-4.5"
                 base_url = "{}"
                 api_key = "sk-test"
                 models = ["m1"]
+                max_completion_tokens = 64000
                 reasoning_efforts = ["low", {{ value = "high", default = true }}]
                 "#,
                 match format {

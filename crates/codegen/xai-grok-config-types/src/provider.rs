@@ -60,6 +60,25 @@ pub struct ProviderConfig {
     /// not otherwise supply one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<NonZeroU64>,
+    /// Maximum output tokens this provider's models may be asked to generate.
+    ///
+    /// Like the context window above and the effort menu below, an output
+    /// ceiling is a property of the *endpoint*, not of the session, so every
+    /// model this provider serves inherits the declaration.
+    ///
+    /// A `format = "messages"` provider has to declare one. The Messages API
+    /// requires `max_tokens` on every request and rejects any value above the
+    /// target model's own output limit — a limit that differs per model
+    /// (`claude-opus-4-8` allows 128K output tokens, `claude-haiku-4-5` 64K),
+    /// and one that nothing at request-build time can look up. Rather than
+    /// guess a number that is wrong for some models, the sampler refuses to
+    /// invent a ceiling and fails the build, so it must come from here — or
+    /// from a `[model."<id>/<model>"]` table, which overrides this default for
+    /// one model whose ceiling differs from its siblings'.
+    ///
+    /// The other three formats send it only when set, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
     /// Which of a credential plugin's accounts this provider's models
     /// authenticate as. Rides the plugin credential seam as the `ownerHint` on
     /// `resolve_credential` / `refresh_credential` / `start_oauth_flow`, so one
@@ -109,6 +128,7 @@ mod tests {
             proxy = "http://proxy.test:8080"
             models = ["m-large", "m-small"]
             context_window = 128000
+            max_completion_tokens = 64000
             auth_account = "work"
             [headers]
             anthropic-version = "2023-06-01"
@@ -122,6 +142,7 @@ mod tests {
         assert_eq!(p.proxy.as_deref(), Some("http://proxy.test:8080"));
         assert_eq!(p.models, vec!["m-large", "m-small"]);
         assert_eq!(p.context_window.map(|c| c.get()), Some(128000));
+        assert_eq!(p.max_completion_tokens, Some(64000));
         assert_eq!(p.auth_account.as_deref(), Some("work"));
         assert_eq!(
             p.headers.get("anthropic-version").map(String::as_str),
@@ -143,6 +164,9 @@ mod tests {
         assert!(p.proxy.is_none());
         assert!(p.models.is_empty());
         assert!(p.context_window.is_none());
+        // No declared output ceiling: a messages-format endpoint would have to
+        // supply one, and the sampler says so rather than guessing.
+        assert!(p.max_completion_tokens.is_none());
         // Absent selector = "the plugin's default account".
         assert!(p.auth_account.is_none());
         // No effort declaration = the control stays hidden, as before.
