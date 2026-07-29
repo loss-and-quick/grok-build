@@ -27,6 +27,19 @@
   agentFile = name: path:
     lib.nameValuePair ".grok/agents/${name}.md" {source = path;};
 
+  # The canonical reasoning-effort values `ReasoningEffort` deserializes
+  # (crates/codegen/xai-grok-sampling-types/src/types.rs). Spelled as an enum so
+  # a typo fails at nix eval rather than at grok's config parse.
+  reasoningEffortType = types.enum [
+    "none"
+    "minimal"
+    "low"
+    "medium"
+    "high"
+    "xhigh"
+    "max"
+  ];
+
   # One `[[provider]]` registry entry. Fields mirror
   # `xai_grok_config_types::provider::ProviderConfig`
   # (crates/codegen/xai-grok-config-types/src/provider.rs) 1:1, including its
@@ -93,19 +106,71 @@
           not otherwise supply one. `null` omits the field.
         '';
       };
+      auth_account = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          Which of a credential plugin's accounts this provider's models
+          authenticate as, threaded to the plugin credential seam as
+          `ownerHint`. Lets one sidecar hold several accounts for the same
+          provider, so two entries sharing a `base_url` stay distinct
+          credentials. `null` (the default) means the plugin's default account.
+        '';
+      };
+      reasoning_efforts = mkOption {
+        type = types.listOf reasoningEffortType;
+        default = [];
+        example = ["low" "medium" "high"];
+        description = ''
+          Reasoning-effort menu this provider's models offer. A non-empty list
+          implies `supports_reasoning_effort` and — absent an explicit
+          `reasoning_effort` — supplies the default (its first entry), so this
+          is normally the only one of the three you set. Empty (the default)
+          omits the field.
+
+          Effort support is a property of the *endpoint*, so every model the
+          provider serves inherits this menu; override a single model with a
+          `[model."<id>/<model>"]` table in `settings` when its acceptable
+          levels differ from its siblings'.
+        '';
+      };
+      reasoning_effort = mkOption {
+        type = types.nullOr reasoningEffortType;
+        default = null;
+        description = ''
+          Effort sent when the session has not picked one. Set it to pin a
+          default other than the menu's own first entry; `null` (the default)
+          derives it from `reasoning_efforts`.
+        '';
+      };
+      supports_reasoning_effort = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Escape hatch for an endpoint that accepts an effort but whose menu you
+          do not want to enumerate: exposes the control with the client's
+          fallback list. Implied by a non-empty `reasoning_efforts`, so leave it
+          `false` (the default) whenever you set that.
+        '';
+      };
     };
   };
 
   # ProviderConfig applies `skip_serializing_if` to `api_key`, `proxy`,
-  # `context_window` (Option::is_none) and to empty `headers`/`models`. Nix's
-  # TOML writer cannot emit `null`, so drop those keys here before generating:
-  # an omitted key is exactly what the skipped serialization would have
-  # produced, and the round-trip parses back to the same ProviderConfig.
+  # `context_window`, `auth_account`, `reasoning_effort` (Option::is_none), to
+  # empty `headers`/`models`/`reasoning_efforts`, and to a false
+  # `supports_reasoning_effort`. Nix's TOML writer cannot emit `null`, so drop
+  # those keys here before generating: an omitted key is exactly what the
+  # skipped serialization would have produced, and the round-trip parses back
+  # to the same ProviderConfig.
   cleanProvider = p:
     lib.filterAttrs (n: v:
-      v != null
+      v
+      != null
       && !(n == "headers" && v == {})
-      && !(n == "models" && v == []))
+      && !(n == "models" && v == [])
+      && !(n == "reasoning_efforts" && v == [])
+      && !(n == "supports_reasoning_effort" && v == false))
     p;
 in {
   options.programs.grok-build = {
@@ -119,7 +184,7 @@ in {
     };
 
     settings = mkOption {
-      type = tomlFormat.type;
+      inherit (tomlFormat) type;
       default = {};
       description = ''
         Grok Build configuration, written to `~/.grok/config.toml` — the
