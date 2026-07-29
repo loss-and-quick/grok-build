@@ -111,6 +111,25 @@
           not otherwise supply one. `null` omits the field.
         '';
       };
+      max_completion_tokens = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 64000;
+        description = ''
+          Maximum output tokens this provider's models may be asked to generate.
+          Like `context_window`, it describes the *endpoint*, so every model the
+          provider serves inherits it; override a single model with a
+          `[model."<id>/<model>"]` table in `settings` when its ceiling differs
+          from its siblings'.
+
+          A `format = "messages"` provider must set this. The Messages API
+          requires `max_tokens` on every request and rejects a value above the
+          target model's own output limit, which nothing at request-build time
+          can look up — so grok refuses to guess one and fails the request
+          instead. `null` (the default) omits the field, which is correct for
+          the other three formats.
+        '';
+      };
       auth_account = mkOption {
         type = types.nullOr types.str;
         default = null;
@@ -162,7 +181,8 @@
   };
 
   # ProviderConfig applies `skip_serializing_if` to `api_key`, `proxy`,
-  # `context_window`, `auth_account`, `reasoning_effort` (Option::is_none), to
+  # `context_window`, `max_completion_tokens`, `auth_account`,
+  # `reasoning_effort` (Option::is_none), to
   # empty `headers`/`models`/`reasoning_efforts`, and to a false
   # `supports_reasoning_effort`. Nix's TOML writer cannot emit `null`, so drop
   # those keys here before generating: an omitted key is exactly what the
