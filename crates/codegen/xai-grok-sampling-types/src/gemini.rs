@@ -125,6 +125,18 @@ pub struct GeminiGenerationConfig {
     pub max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_config: Option<GeminiThinkingConfig>,
+    /// Output mime type. Required to be `"application/json"` whenever a schema
+    /// is set; left unset otherwise so the model keeps its default `text/plain`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_mime_type: Option<String>,
+    /// Structured-output schema, as JSON Schema.
+    ///
+    /// This is the JSON-Schema-shaped sibling of Gemini's older
+    /// `responseSchema`, which the two must never be sent together with. See
+    /// [`build_gemini_request`] for why this is the one grok maps onto and
+    /// which keywords Gemini's dialect accepts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_json_schema: Option<serde_json::Value>,
 }
 
 /// Gemini's reasoning knob. Unlike the other three formats it takes a token
@@ -214,6 +226,9 @@ pub struct GeminiUsageMetadata {
 // Request builder
 // ============================================================================
 
+/// `responseMimeType` that a structured-output schema requires.
+const STRUCTURED_OUTPUT_MIME_TYPE: &str = "application/json";
+
 /// Convert a unified [`ConversationRequest`] into a Gemini request body.
 ///
 /// * System items collapse into `system_instruction`.
@@ -225,6 +240,32 @@ pub struct GeminiUsageMetadata {
 /// * Images become `inlineData` or `fileData` (see [`image_part`]).
 /// * `tools` map to a single `functionDeclarations` group; sampling knobs map
 ///   to `generationConfig`.
+/// * `json_schema` maps to `generationConfig.responseJsonSchema` plus
+///   `responseMimeType: "application/json"`.
+///
+/// # Structured output
+///
+/// Gemini offers two schema fields and forbids sending both. `responseSchema`
+/// is an OpenAPI 3.0 subset with no `additionalProperties`, `$defs`, `$ref` or
+/// `oneOf` and an upper-case type enum; `responseJsonSchema` takes JSON Schema
+/// as written, supporting `$id`, `$defs`, `$ref`, `$anchor`, `type`, `format`,
+/// `title`, `description`, `enum`, `items`, `prefixItems`, `minItems`,
+/// `maxItems`, `minimum`, `maximum`, `anyOf`, `oneOf`, `properties`,
+/// `additionalProperties`, `required` and the non-standard `propertyOrdering`.
+///
+/// Every schema this crate sends to the other three formats is an OpenAI-style
+/// strict schema — `additionalProperties: false`, sometimes `$defs`/`$ref` —
+/// which `responseSchema` structurally cannot hold but `responseJsonSchema`
+/// can, so `responseJsonSchema` is the target. Outside that keyword list
+/// (`allOf`, `not`, `if`/`then`/`else`, `pattern`, `minLength`, `const`,
+/// `patternProperties`) Gemini rejects the request.
+///
+/// The schema is therefore passed through unmodified. Rewriting it to fit
+/// would silently change the contract the caller asked to enforce, and this
+/// builder has no error channel to report the rewrite through — so an
+/// unsupported keyword surfaces as Gemini's own 400 naming it. That is the
+/// intended failure: loud, at the boundary that actually knows what it
+/// supports, and impossible to mistake for a schema being honored.
 pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
     let mut contents: Vec<GeminiContent> = Vec::new();
     let mut system_text = String::new();
@@ -370,15 +411,27 @@ pub fn build_gemini_request(req: &ConversationRequest) -> GeminiRequest {
         include_thoughts: None,
     });
 
+    // Structured output. The schema is handed over verbatim: whatever the caller
+    // asked to enforce is what the model is constrained by, or the request is
+    // refused — never a schema the caller thinks is being enforced and is not.
+    // `responseMimeType` is mandatory alongside a schema.
+    let response_json_schema = req.json_schema.clone();
+    let response_mime_type = response_json_schema
+        .is_some()
+        .then(|| STRUCTURED_OUTPUT_MIME_TYPE.to_owned());
+
     let generation_config = (req.temperature.is_some()
         || req.top_p.is_some()
         || req.max_output_tokens.is_some()
-        || thinking_config.is_some())
+        || thinking_config.is_some()
+        || response_json_schema.is_some())
     .then_some(GeminiGenerationConfig {
         temperature: req.temperature,
         top_p: req.top_p,
         max_output_tokens: req.max_output_tokens,
         thinking_config,
+        response_mime_type,
+        response_json_schema,
     });
 
     GeminiRequest {
@@ -955,6 +1008,70 @@ mod tests {
         };
         let g = build_gemini_request(&with_temp);
         assert!(g.generation_config.unwrap().thinking_config.is_none());
+    }
+
+    /// A requested schema must reach the wire. Dropping it degraded structured
+    /// output to best-effort text parsing — including for the Auto-mode
+    /// permission classifier, whose verdicts then came from a heuristic.
+    #[test]
+    fn json_schema_reaches_generation_config_as_response_json_schema() {
+        // The strict shape this repo already sends to the other three formats:
+        // `additionalProperties` is exactly what `responseSchema` cannot hold.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "shouldBlock": { "type": "boolean" },
+                "reason": { "type": "string" }
+            },
+            "required": ["shouldBlock", "reason"],
+            "additionalProperties": false
+        });
+        let req = ConversationRequest {
+            items: vec![ConversationItem::user("classify".to_owned())],
+            ..Default::default()
+        }
+        .with_json_schema(schema.clone());
+
+        let g = build_gemini_request(&req);
+        let gc = g.generation_config.as_ref().expect("schema needs a config");
+        assert_eq!(gc.response_json_schema.as_ref(), Some(&schema));
+        assert_eq!(gc.response_mime_type.as_deref(), Some("application/json"));
+
+        let json = serde_json::to_value(&g).unwrap();
+        assert_eq!(
+            json.pointer("/generationConfig/responseJsonSchema"),
+            Some(&schema),
+            "the schema must ride on the request verbatim: {json:#}",
+        );
+        assert_eq!(
+            json.pointer("/generationConfig/responseMimeType")
+                .and_then(serde_json::Value::as_str),
+            Some("application/json"),
+            "a schema without the json mime type is rejected: {json:#}",
+        );
+        // The two schema fields are mutually exclusive on the wire.
+        assert!(
+            json.pointer("/generationConfig/responseSchema").is_none(),
+            "responseSchema must stay absent when responseJsonSchema is set: {json:#}",
+        );
+    }
+
+    /// No schema asked for, no schema keys sent — a plain request keeps its
+    /// default `text/plain` output.
+    #[test]
+    fn absent_json_schema_omits_the_response_schema_keys() {
+        let req = ConversationRequest {
+            items: vec![ConversationItem::user("hi".to_owned())],
+            temperature: Some(0.2),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(build_gemini_request(&req)).unwrap();
+        assert!(
+            json.pointer("/generationConfig/responseJsonSchema")
+                .is_none()
+                && json.pointer("/generationConfig/responseMimeType").is_none(),
+            "{json:#}",
+        );
     }
 
     /// `thinkingConfig` rides alongside the existing knobs rather than
