@@ -122,6 +122,7 @@ export type { IncomingHandlers } from "./rpc.ts";
 export { createPluginContext } from "./context.ts";
 export type {
   PluginAgents,
+  PluginAuth,
   PluginContext,
   PluginLogger,
   PluginStorage,

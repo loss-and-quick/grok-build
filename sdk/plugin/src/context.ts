@@ -40,6 +40,28 @@ export interface PluginUi {
 }
 
 /**
+ * The core's own sign-in screen (`ctx.auth`), for use inside a
+ * `start_oauth_flow` handler.
+ *
+ * A sign-in runs before any session exists, so a panel has nowhere to go: the
+ * user is looking at the core's login screen. These two calls drive it —
+ * `publishUrl` puts the authorize URL on it (with the screen's copy/open
+ * affordances), `awaitCode` reads back what the user submits there. Hosts
+ * without the wiring reject with JSON-RPC `method_not_found` (-32601), so a
+ * plugin can feature-detect and fall back to its own UI.
+ */
+export interface PluginAuth {
+  /** Shows `url` on the login screen. Resolves `false` when no sign-in is
+   * waiting for one (the flow was not started from `/login`, or was already
+   * cancelled). */
+  publishUrl(url: string): Promise<boolean>;
+  /** Waits up to `timeoutMs` (default 300 000, the interactive hook deadline)
+   * for the user to submit a code on the login screen. Resolves `null` when the
+   * sign-in was cancelled, the wait timed out, or no sign-in is running. */
+  awaitCode(timeoutMs?: number): Promise<string | null>;
+}
+
+/**
  * Subagent orchestration (`ctx.agents`). Spawned subagents are real children
  * of the plugin's session — the same coordinator, TUI visibility, and
  * cancellation as the model's Task tool. In sessions without orchestration
@@ -100,6 +122,7 @@ export interface PluginContext {
   readonly storage: PluginStorage;
   readonly agents: PluginAgents;
   readonly ui: PluginUi;
+  readonly auth: PluginAuth;
   /** Fetches the plugin's config from the manifest/settings via `config_get`. */
   config<T = unknown>(): Promise<T>;
 }
@@ -149,6 +172,26 @@ function createUi(host: HostClient): PluginUi {
 /** Slack added to the transport timeout so a server-side wait/long-poll
  * deadline always fires before the RPC's own timeout. */
 const AGENT_RPC_TIMEOUT_SLACK_MS = 5_000;
+/** Mirrors the core's interactive-hook deadline: the longest a sign-in handler
+ * is given, and so the longest a code wait can usefully run. */
+const AUTH_AWAIT_CODE_DEFAULT_TIMEOUT_MS = 300_000;
+
+function createAuth(host: HostClient): PluginAuth {
+  return {
+    async publishUrl(url) {
+      const { shown } = await host.authPublishUrl({ url });
+      return shown;
+    },
+    async awaitCode(timeoutMs) {
+      const budget = timeoutMs ?? AUTH_AWAIT_CODE_DEFAULT_TIMEOUT_MS;
+      const { code } = await host.authAwaitCode(
+        { timeout_ms: budget },
+        { timeoutMs: budget + AGENT_RPC_TIMEOUT_SLACK_MS },
+      );
+      return code ?? null;
+    },
+  };
+}
 /** Mirrors the host's `agent_wait` default budget. */
 const AGENT_WAIT_DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -203,6 +246,7 @@ export function createPluginContext(
     storage: createStorage(host),
     agents: createAgents(host),
     ui: createUi(host),
+    auth: createAuth(host),
     async config<T = unknown>(): Promise<T> {
       const { value } = await host.configGet();
       return value as T;

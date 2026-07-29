@@ -39,30 +39,7 @@ impl AgentView {
         if self.active_plugin_panel.is_none() {
             self.active_plugin_panel = Some(key.clone());
         }
-        if self.plugin_panel_auto_open {
-            self.plugin_panel_auto_open = false;
-            self.active_plugin_panel = Some(key);
-            self.plugin_panel_overlay_open = true;
-        }
         true
-    }
-
-    /// Put the plugin panels in front of the user now, or as soon as one
-    /// arrives.
-    ///
-    /// Used when a plugin owns a flow the user just asked for (a
-    /// `plugin-oauth:*` `/login`): the panel is the entire UI for it, and it is
-    /// usually published a moment after the request, so waiting for the user to
-    /// discover F6 would look like the flow had stalled.
-    pub(crate) fn surface_plugin_panels(&mut self) {
-        if self.plugin_panels.is_empty() {
-            self.plugin_panel_auto_open = true;
-            return;
-        }
-        self.plugin_panel_overlay_open = true;
-        if self.active_plugin_panel.is_none() {
-            self.active_plugin_panel = self.plugin_panels.keys().next().cloned();
-        }
     }
 
     /// Remove the panel keyed by `(plugin, id)`. Re-points the active panel and
@@ -735,26 +712,5 @@ mod tests {
         assert_eq!(spans[0].url.as_ref(), SIGNIN_URL);
         assert_eq!(spans[0].row, row);
         assert!(spans[0].col_start <= col && col < spans[0].col_end);
-    }
-
-    /// A `plugin-oauth` login arms the overlay, so the panel the plugin is
-    /// about to publish opens itself instead of waiting behind F6.
-    #[test]
-    fn armed_overlay_opens_on_the_next_published_panel() {
-        let mut agent = make_agent();
-        agent.surface_plugin_panels();
-        assert!(!agent.plugin_panel_overlay_active(), "nothing to show yet");
-
-        agent.apply_plugin_panel("acme-auth".into(), vm("signin", "Acme", signin_blocks()));
-        assert!(agent.plugin_panel_overlay_active());
-        assert_eq!(
-            agent.active_plugin_panel,
-            Some(("acme-auth".to_string(), "signin".to_string()))
-        );
-
-        // One-shot: a later panel must not re-open an overlay the user closed.
-        agent.plugin_panel_overlay_open = false;
-        agent.apply_plugin_panel("other".into(), vm("p2", "Other", vec![]));
-        assert!(!agent.plugin_panel_overlay_active());
     }
 }

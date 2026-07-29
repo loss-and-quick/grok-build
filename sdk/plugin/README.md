@@ -163,6 +163,36 @@ third argument and the `PluginContext` as its fourth. It is best-effort,
 like the host's notification: a throw is logged and swallowed, never
 crashing the sidecar.
 
+## Interactive sign-in (`ctx.auth`)
+
+A `start_oauth_flow` handler runs *before* any session exists — the user is
+signing in — so there is no session to publish a panel into. What is on
+screen is the core's own login screen, and `ctx.auth` drives it: hand it the
+authorize URL, then read back the code the user submits there.
+
+```ts
+definePlugin({
+  hooks: {
+    async start_oauth_flow(_payload, ctx) {
+      const { url, verifier } = buildAuthorizeUrl();
+      if (!(await ctx.auth.publishUrl(url))) {
+        // No sign-in screen is waiting (the flow was not started from
+        // `/login`) — fall back to whatever UI suits the plugin.
+        return null;
+      }
+      const code = await ctx.auth.awaitCode();
+      if (code === null) return null; // cancelled or timed out
+      return replace(await exchangeCode(code, verifier)); // → the credential
+    },
+  },
+});
+```
+
+`awaitCode()` may be called again after a rejected code: the screen's input
+stays wired for the whole sign-in. Hosts without the sign-in wiring reject
+both calls with JSON-RPC `method_not_found` (-32601), so feature-detect the
+same way as `ctx.agents`.
+
 ## Leader socket (headless ACP access)
 
 When the host process runs in leader mode, each sidecar is told where the
@@ -215,8 +245,9 @@ for editor/typecheck support) are devDependencies only.
 - `src/rpc.ts` — typed wrappers over the wire methods: `initialize` /
   `hook_invoke` / `tool_invoke` / `tool_cancel` / `panel_action` / `shutdown`
   handlers, and `HostClient` for
-  `log_emit`/`storage_*`/`config_get`/`agent_*`/`ui_publish_panel`/`ui_close_panel`.
-- `src/context.ts` — `PluginContext` (`log`, `storage`, `agents`, `ui`,
+  `log_emit`/`storage_*`/`config_get`/`agent_*`/`ui_publish_panel`/`ui_close_panel`/
+  `auth_publish_url`/`auth_await_code`.
+- `src/context.ts` — `PluginContext` (`log`, `storage`, `agents`, `ui`, `auth`,
   `config()`, `workspaceRoot`, `sessionId`) and the per-call
   `ToolCallContext`.
 - `src/define.ts` — `definePlugin()` (hooks + tools) and the gate-aware

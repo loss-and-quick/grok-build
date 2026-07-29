@@ -115,7 +115,6 @@ impl AgentView {
             plugin_panels: indexmap::IndexMap::new(),
             active_plugin_panel: None,
             plugin_panel_overlay_open: false,
-            plugin_panel_auto_open: false,
             plugin_panel_copy_delivery: None,
             plugin_panel_copy_generation: 0,
             modal_buttons: Vec::new(),

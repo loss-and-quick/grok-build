@@ -224,6 +224,39 @@ describe("PluginContext", () => {
     await endpoint.stop();
   });
 
+  test("auth.publishUrl/awaitCode round-trip through the auth_* RPCs", async () => {
+    const reader = new MemoryByteReader();
+    const writer = new MemoryByteWriter();
+    const endpoint = new JsonRpcEndpoint({ reader, writer });
+    endpoint.start();
+    const ctx = createPluginContext(new HostClient(endpoint), INIT_PARAMS);
+
+    const publishP = ctx.auth.publishUrl("https://example.test/authorize");
+    await respondToNext(writer, reader, 1, { shown: true });
+    expect(await publishP).toBe(true);
+    const publishReq = writer.messages[0] as { method: string; params: unknown };
+    expect(publishReq.method).toBe("auth_publish_url");
+    expect(publishReq.params).toEqual({ url: "https://example.test/authorize" });
+
+    // An omitted budget still sends one: the wait is always bounded by the
+    // interactive hook deadline.
+    const codeP = ctx.auth.awaitCode();
+    await respondToNext(writer, reader, 2, { code: "123456" });
+    expect(await codeP).toBe("123456");
+    const codeReq = writer.messages[1] as { method: string; params: unknown };
+    expect(codeReq.method).toBe("auth_await_code");
+    expect(codeReq.params).toEqual({ timeout_ms: 300_000 });
+
+    // A cancelled sign-in answers `code: null`, surfaced as `null`.
+    const cancelledP = ctx.auth.awaitCode(1_000);
+    await respondToNext(writer, reader, 3, { code: null });
+    expect(await cancelledP).toBeNull();
+    const cancelledReq = writer.messages[2] as { params: unknown };
+    expect(cancelledReq.params).toEqual({ timeout_ms: 1_000 });
+
+    await endpoint.stop();
+  });
+
   test("config<T>() calls config_get and returns its value", async () => {
     const reader = new MemoryByteReader();
     const writer = new MemoryByteWriter();

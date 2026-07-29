@@ -65,12 +65,10 @@ fn adopt_login_method(app: &mut AppView, method: &acp::AuthMethod) {
 }
 
 /// The start mode a login with `method` runs in. External auth providers launch
-/// a command; a plugin owns its sign-in end to end in its own panel; everything
-/// else starts pending and is refined by the auth-URL response.
+/// a command; everything else — including a plugin-provided sign-in, which
+/// drives this same screen through the shell's URL/code channels — starts
+/// pending and is refined by the auth-URL response.
 fn auth_start_mode_for(method: &acp::AuthMethod) -> AuthMode {
-    if is_plugin_oauth(method.id()) {
-        return AuthMode::Plugin;
-    }
     let is_external_provider = method
         .meta()
         .as_ref()
@@ -82,12 +80,6 @@ fn auth_start_mode_for(method: &acp::AuthMethod) -> AuthMode {
     } else {
         AuthMode::Pending
     }
-}
-
-/// Whether `method_id` names a plugin-provided interactive OAuth sign-in.
-fn is_plugin_oauth(method_id: &acp::AuthMethodId) -> bool {
-    xai_grok_shell::agent::auth_method::AuthMethodKind::from_id(method_id)
-        == xai_grok_shell::agent::auth_method::AuthMethodKind::PluginOauth
 }
 
 /// Open the login-method picker when there is a real choice to make.
@@ -204,14 +196,10 @@ fn start_auth_flow(
             force_interactive: true,
         }
     };
-    // `x.ai/auth/get_url` is only ever answered by the shell's own flows. Under
-    // a plugin sign-in it stays empty for the poll's full ~3s and then reports
-    // "no URL", which the fallback classifies as Loopback — the paste-a-token
-    // screen, for a flow whose code goes into the plugin's panel instead. Don't
-    // start the poll at all: the panel is the entire UI.
-    if app.auth_start_mode == AuthMode::Plugin {
-        return vec![start];
-    }
+    // Every interactive method polls for the URL, plugin sign-ins included: the
+    // shell registers the same single-flight attempt for them, and the plugin
+    // publishes its authorize URL into it (`auth_publish_url`), so this screen
+    // is what renders the URL and collects the code.
     vec![start, Effect::PollAuthUrl { request_seq }]
 }
 
@@ -256,15 +244,9 @@ pub(super) fn dispatch_choose_auth_method(
     adopt_login_method(app, &method);
 
     // The picker already stashed `auth_return_view` and switched to welcome if
-    // it was opened from a session, so the shell's own auth UI is visible either
-    // way. A plugin sign-in has no welcome UI — undo that detour and go back to
-    // the session, where the plugin's panel will appear.
-    if is_plugin_oauth(&method_id)
-        && let Some(return_view) = app.auth_return_view.take()
-    {
-        restore_auth_return_view(app, return_view);
-    }
-    surface_auth_ui(app, &method_id);
+    // it was opened from a session, so the auth UI is visible either way —
+    // including for a plugin sign-in, which drives that same screen.
+    surface_auth_ui(app);
 
     start_auth_flow(app, method_id, switch_account)
 }
@@ -387,27 +369,17 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
 
-    surface_auth_ui(app, &method_id);
+    surface_auth_ui(app);
 
     start_auth_flow(app, method_id, false)
 }
 
-/// Put the surface that will actually drive this login in front of the user.
-///
-/// For the shell's own flows that is the welcome screen's auth UI, so a
-/// mid-session `/login` detours there and stashes `auth_return_view` to come
-/// back. A plugin sign-in has no welcome-screen UI at all — the plugin publishes
-/// its own panel into the session — so the user must stay where the panel will
-/// appear, and the overlay is armed to open the moment it does.
-fn surface_auth_ui(app: &mut AppView, method_id: &acp::AuthMethodId) {
-    if is_plugin_oauth(method_id) {
-        if let ActiveView::Agent(id) = app.active_view
-            && let Some(agent) = app.agents.get_mut(&id)
-        {
-            agent.surface_plugin_panels();
-        }
-        return;
-    }
+/// Put the surface that will actually drive this login in front of the user:
+/// the welcome screen's auth UI, so a mid-session `/login` detours there and
+/// stashes `auth_return_view` to come back. Every interactive method lands here,
+/// plugin sign-ins included — the plugin publishes its authorize URL onto this
+/// screen and reads the code back from it.
+fn surface_auth_ui(app: &mut AppView) {
     // `show_welcome` resets ephemeral state here, covering the AuthComplete /
     // cancel-login fallbacks too (`auth_return_view` is only ever set here and
     // by the picker, which routes back through the same restore).
@@ -595,12 +567,6 @@ pub(super) fn handle_auth_url_ready(
     } = &mut app.auth_state
         && *current_seq == request_seq
     {
-        // A plugin sign-in never starts the poll, so this can only be a late
-        // reply from a superseded attempt. Never let it downgrade the mode to
-        // Loopback and put a dead paste box in front of the user.
-        if *current_mode == AuthMode::Plugin {
-            return vec![];
-        }
         *current_url = auth_url;
         // Prefer `mode`; fall back to `external` for older agents. An
         // old-agent device login lands on Loopback (harmless paste box;

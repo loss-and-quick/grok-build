@@ -876,11 +876,6 @@ pub struct AgentView {
     /// Whether the full-screen plugin-panel overlay is open. The panels persist
     /// (and show in the sidebar) whether or not the overlay is open.
     pub(crate) plugin_panel_overlay_open: bool,
-    /// Open the overlay on the next panel a plugin publishes. Armed when the
-    /// user starts a flow the plugin owns (a `plugin-oauth:*` login) so its
-    /// panel — the flow's only UI — surfaces itself instead of waiting behind
-    /// F6. Consumed by the first publish.
-    pub(crate) plugin_panel_auto_open: bool,
     /// Outcome of the most recent click-to-copy on a plugin panel's URL, shown
     /// in the panel's feedback slot. Cleared by
     /// [`crate::app::actions::TaskResult::PanelCopyFeedbackTimeout`] — the same

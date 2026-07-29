@@ -968,46 +968,28 @@ impl acp::Agent for MvpAgent {
                         );
                     }
                 };
-                // authenticate() is session-less, but driving the interactive
-                // seam needs a live session's plugin host. Select one; if none
-                // exists yet, guide the user to open a session first.
-                let cmd_tx = self
-                    .sessions
-                    .borrow()
-                    .values()
-                    .next()
-                    .map(|h| h.cmd_tx.clone());
-                let Some(cmd_tx) = cmd_tx else {
-                    emit_login_span(false, id, None, Some("no_active_session"));
-                    return Err(
-                        acp::Error::auth_required()
-                            .data(
-                                format!(
-                                    "Start a session before signing in with the {plugin} plugin, then run /login again."
-                                ),
+                // Sign-in happens before the first session exists, so this runs
+                // on the pre-auth screen the built-in login already drives: the
+                // attempt owns the URL and code channels, and the plugin feeds
+                // them from inside `start_oauth_flow` via `auth_publish_url` /
+                // `auth_await_code` (see `auth::plugin_sign_in`). The single
+                // flight also gives this login `x.ai/auth/cancel` for free.
+                let auth_meta = AuthRequestMeta::from_json(arguments.meta.as_ref());
+                let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+                let (code_tx, code_rx) = tokio::sync::mpsc::channel(1);
+                let (cancel, _guard) = self
+                    .interactive_auth
+                    .begin(
+                        Some(
+                            crate::auth::single_flight::AttemptChannels::new(
+                                code_tx,
+                                url_rx,
                             ),
+                        ),
+                        auth_meta.request_seq,
                     );
-                };
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                if cmd_tx
-                    .send(crate::session::SessionCommand::StartPluginOauthFlow {
-                        plugin: plugin.clone(),
-                        account: account.clone(),
-                        reason: "sign_in".to_string(),
-                        respond_to: reply_tx,
-                    })
-                    .is_err()
-                {
-                    emit_login_span(false, id, None, Some("session_unavailable"));
-                    return Err(
-                        acp::Error::auth_required()
-                            .data(
-                                format!(
-                                    "The {plugin} plugin session is unavailable; try /login again."
-                                ),
-                            ),
-                    );
-                }
+                let prompt = crate::auth::plugin_sign_in::PluginSignInPrompt::global();
+                let _armed = prompt.arm(url_tx, code_rx);
                 xai_grok_telemetry::unified_log::info(
                     "auth: driving plugin oauth sign-in",
                     None,
@@ -1017,17 +999,41 @@ impl acp::Agent for MvpAgent {
                         ),
                     ),
                 );
-                let signed_in = reply_rx.await.unwrap_or(false);
-                if !signed_in {
-                    emit_login_span(false, id, None, Some("plugin_oauth_declined"));
-                    return Err(
-                        acp::Error::auth_required()
-                            .data(
-                                format!(
-                                    "Sign-in via the {plugin} plugin did not complete."
+                let outcome = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => None,
+                    outcome = self.drive_plugin_oauth(&plugin, account.as_deref()) => Some(outcome),
+                };
+                match outcome {
+                    Some(PluginSignInOutcome::SignedIn) => {}
+                    None => {
+                        emit_login_span(false, id, None, Some("login_cancelled"));
+                        return Err(
+                            acp::Error::auth_required().data("Authentication cancelled"),
+                        );
+                    }
+                    Some(PluginSignInOutcome::NoHost) => {
+                        emit_login_span(false, id, None, Some("plugin_oauth_no_host"));
+                        return Err(
+                            acp::Error::auth_required()
+                                .data(
+                                    format!(
+                                        "The {plugin} plugin is not available to sign in with; check that it is enabled and trusted."
+                                    ),
                                 ),
-                            ),
-                    );
+                        );
+                    }
+                    Some(PluginSignInOutcome::Declined) => {
+                        emit_login_span(false, id, None, Some("plugin_oauth_declined"));
+                        return Err(
+                            acp::Error::auth_required()
+                                .data(
+                                    format!(
+                                        "Sign-in via the {plugin} plugin did not complete."
+                                    ),
+                                ),
+                        );
+                    }
                 }
                 self.set_auth_method(arguments.method_id.clone());
                 self.ensure_telemetry_client();

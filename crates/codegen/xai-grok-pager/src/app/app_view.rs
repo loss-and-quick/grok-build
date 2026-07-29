@@ -412,13 +412,6 @@ pub enum AuthMode {
     Loopback,
     /// RFC 8628 device flow: device code + copyable URL, no paste box.
     Device,
-    /// A plugin drives the whole sign-in in its own UI panel.
-    ///
-    /// The pager contributes no auth UI here: it never polls `x.ai/auth/get_url`
-    /// (only the shell's own flows ever answer it) and shows no paste box — a
-    /// code pasted into the pager's box would go nowhere, because the plugin
-    /// reads its code from the panel's own input.
-    Plugin,
 }
 /// Folder-trust state for the welcome screen.
 ///

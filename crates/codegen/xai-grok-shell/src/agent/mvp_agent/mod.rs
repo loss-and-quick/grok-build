@@ -840,6 +840,20 @@ pub struct MvpAgent {
     /// the first session-creating call via [`Self::ensure_plugin_registry`];
     /// this flag keeps that to a single discovery walk.
     plugin_registry_initialized: std::cell::Cell<bool>,
+    /// Agent-level plugin host, built on first use and only ever used to drive
+    /// a plugin's interactive sign-in.
+    ///
+    /// `authenticate()` is session-less by construction — the user is signing
+    /// in, so no session exists yet — while every other plugin host is built
+    /// per session. This one closes that gap: same
+    /// [`crate::session::plugin_host::build_session_plugin_host`] machinery,
+    /// given the synthetic session id stored alongside it and the agent's
+    /// launch dir as workspace root. `None` inside the cell means "no sidecar
+    /// plugin to host"; the cell itself keeps the discovery + host build to one
+    /// attempt per process. A live session's own host is preferred whenever one
+    /// exists, so in-session behaviour is unchanged.
+    sign_in_plugin_host:
+        std::cell::OnceCell<Option<(String, Arc<xai_grok_plugin_host::PluginHost>)>>,
     /// Single-flight guard for the proactive bundle sync background task.
     ///
     /// `maybe_sync_bundle_in_background` is invoked from each post-auth path
@@ -1286,6 +1300,7 @@ mod session_lifecycle;
 mod subagent_coordinator;
 mod agent_ops;
 mod acp_agent;
+pub(crate) use agent_ops::PluginSignInOutcome;
 pub(crate) use session_lifecycle::RegistrySnapshot;
 pub(super) use super::ext_parsers;
 /// Emit the `auth.lifecycle` login span with optional user id and error

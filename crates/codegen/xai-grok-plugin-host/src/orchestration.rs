@@ -27,6 +27,28 @@ pub trait PanelSink: Send + Sync {
 /// Boxed future for the async orchestrator methods (object safety).
 pub type OrchestratorFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Seam the shell implements to put a plugin's interactive sign-in on the
+/// core's own login screen (`auth_publish_url` / `auth_await_code`).
+///
+/// A `start_oauth_flow` handler runs before any session exists, so it has no
+/// session UI to publish into. The shell wires this to the login screen's
+/// existing URL/code channels, which are session-independent; the host stays
+/// ignorant of how that screen works, exactly like [`PanelSink`].
+pub trait SignInSink: Send + Sync {
+    /// Hand the authorize URL to the login screen. `false` when nothing was
+    /// waiting for one (no login running, or it was already cancelled), so the
+    /// plugin can fall back to its own UI.
+    fn publish_url(&self, plugin: &str, url: String) -> bool;
+
+    /// Wait for the user to submit a code on the login screen. Resolves `None`
+    /// when the login is cancelled, times out, or none is running.
+    fn await_code<'a>(
+        &'a self,
+        plugin: &'a str,
+        timeout: Option<std::time::Duration>,
+    ) -> OrchestratorFuture<'a, Option<String>>;
+}
+
 /// A spawn request forwarded from `agent_spawn`, already defaulted by the host
 /// (`plugin` names the requesting plugin, for descriptions/attribution).
 #[derive(Debug, Clone)]

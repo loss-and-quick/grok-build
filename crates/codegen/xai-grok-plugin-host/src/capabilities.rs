@@ -26,7 +26,8 @@ use xai_grok_plugin_protocol::{
     AgentCancelOutcomeDto, AgentCancelParams, AgentCancelResult, AgentDescriptorDto, AgentEventDto,
     AgentEventKindDto, AgentEventsParams, AgentEventsResult, AgentListResult, AgentSendParams,
     AgentSendResult, AgentSpawnParams, AgentSpawnResult, AgentStatusDto, AgentWaitParams,
-    AgentWaitResult, ConfigGetResult, LogEmitParams, LogLevelDto, PanelCloseParams,
+    AgentWaitResult, AuthAwaitCodeParams, AuthAwaitCodeResult, AuthPublishUrlParams,
+    AuthPublishUrlResult, ConfigGetResult, LogEmitParams, LogLevelDto, PanelCloseParams,
     PanelCloseResult, PanelPublishResult, PanelViewModel, StorageDeleteParams, StorageDeleteResult,
     StorageGetParams, StorageGetResult, StorageListParams, StorageListResult, StorageSetParams,
     StorageSetResult,
@@ -34,6 +35,7 @@ use xai_grok_plugin_protocol::{
 
 use crate::orchestration::{
     AgentOrchestrator, AgentOutcome, AgentProgress, AgentSpawnSpec, OrchestratorCancel, PanelSink,
+    SignInSink,
 };
 use crate::rpc::RpcError;
 
@@ -61,6 +63,10 @@ pub struct PluginCapabilities {
     /// case `ui_publish_panel`/`ui_close_panel` answer `method_not_found`
     /// (exactly the pre-wiring behavior, so plugins can feature-detect).
     panel_sink: std::sync::OnceLock<std::sync::Arc<dyn PanelSink>>,
+    /// The injected sign-in seam; unset until the shell wires one, in which
+    /// case `auth_publish_url`/`auth_await_code` answer `method_not_found`
+    /// (exactly the pre-wiring behavior, so plugins can feature-detect).
+    sign_in_sink: std::sync::OnceLock<std::sync::Arc<dyn SignInSink>>,
     /// Subagents spawned by THIS plugin, keyed by id. Lives here (not on the
     /// sidecar) so wait/events state survives a sidecar crash-restart, and so
     /// one plugin can never wait on or cancel another plugin's spawns.
@@ -75,6 +81,7 @@ impl PluginCapabilities {
             storage: PluginStorage::new(storage_path),
             orchestrator: std::sync::OnceLock::new(),
             panel_sink: std::sync::OnceLock::new(),
+            sign_in_sink: std::sync::OnceLock::new(),
             agents: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -89,6 +96,12 @@ impl PluginCapabilities {
     /// (one session, one pager).
     pub fn set_panel_sink(&self, sink: Arc<dyn PanelSink>) {
         let _ = self.panel_sink.set(sink);
+    }
+
+    /// Install the sign-in seam. First call wins; later calls are ignored (one
+    /// process, one login screen).
+    pub fn set_sign_in_sink(&self, sink: Arc<dyn SignInSink>) {
+        let _ = self.sign_in_sink.set(sink);
     }
 
     /// Serve a plugin request, returning the JSON `result` or a JSON-RPC error.
@@ -132,6 +145,8 @@ impl PluginCapabilities {
             "agent_cancel" => self.agent_cancel(params).await,
             "ui_publish_panel" => self.ui_publish_panel(params).await,
             "ui_close_panel" => self.ui_close_panel(params).await,
+            "auth_publish_url" => self.auth_publish_url(params).await,
+            "auth_await_code" => self.auth_await_code(params).await,
             // Reserved: superseded by the cursor-based `agent_events` poll
             // (request/reply framing; state survives sidecar restarts).
             "agent_events_subscribe" => Err(RpcError::method_not_found(method)),
@@ -169,6 +184,31 @@ impl PluginCapabilities {
         let p: PanelCloseParams = parse_params(params)?;
         sink.close_panel(&self.name, &p.id);
         to_result(&PanelCloseResult {})
+    }
+
+    /// The sign-in sink, or the pre-wiring `method_not_found` answer that lets
+    /// plugins feature-detect login-screen support.
+    fn sign_in_sink_for(&self, method: &str) -> Result<Arc<dyn SignInSink>, RpcError> {
+        self.sign_in_sink
+            .get()
+            .cloned()
+            .ok_or_else(|| RpcError::method_not_found(method))
+    }
+
+    async fn auth_publish_url(&self, params: &Value) -> Result<Value, RpcError> {
+        let sink = self.sign_in_sink_for("auth_publish_url")?;
+        let p: AuthPublishUrlParams = parse_params(params)?;
+        let shown = sink.publish_url(&self.name, p.url);
+        to_result(&AuthPublishUrlResult { shown })
+    }
+
+    async fn auth_await_code(&self, params: &Value) -> Result<Value, RpcError> {
+        let sink = self.sign_in_sink_for("auth_await_code")?;
+        let p: AuthAwaitCodeParams = parse_params(params)?;
+        let code = sink
+            .await_code(&self.name, p.timeout_ms.map(Duration::from_millis))
+            .await;
+        to_result(&AuthAwaitCodeResult { code })
     }
 
     /// A handle for one of THIS plugin's spawns; foreign/unknown ids are
@@ -1046,6 +1086,121 @@ mod tests {
             closed.as_slice(),
             &[("my.plugin".to_string(), "status".to_string())]
         );
+    }
+
+    // ── Sign-in seam over a mock sink ───────────────────────────────────────
+
+    /// Records published URLs and hands back a canned code, so tests can assert
+    /// the host routed both calls with the publishing plugin's name.
+    struct MockSignInSink {
+        published: std::sync::Mutex<Vec<(String, String)>>,
+        code: Option<String>,
+        /// The `timeout` each `await_code` was called with.
+        waits: std::sync::Mutex<Vec<Option<Duration>>>,
+    }
+
+    impl SignInSink for MockSignInSink {
+        fn publish_url(&self, plugin: &str, url: String) -> bool {
+            self.published
+                .lock()
+                .unwrap()
+                .push((plugin.to_string(), url));
+            true
+        }
+        fn await_code<'a>(
+            &'a self,
+            _plugin: &'a str,
+            timeout: Option<Duration>,
+        ) -> crate::orchestration::OrchestratorFuture<'a, Option<String>> {
+            self.waits.lock().unwrap().push(timeout);
+            Box::pin(async move { self.code.clone() })
+        }
+    }
+
+    fn caps_with_sign_in_sink(
+        dir: &std::path::Path,
+        code: Option<&str>,
+    ) -> (PluginCapabilities, Arc<MockSignInSink>) {
+        let c = caps(dir, Value::Null);
+        let sink = Arc::new(MockSignInSink {
+            published: std::sync::Mutex::new(Vec::new()),
+            code: code.map(str::to_string),
+            waits: std::sync::Mutex::new(Vec::new()),
+        });
+        c.set_sign_in_sink(Arc::clone(&sink) as Arc<dyn SignInSink>);
+        (c, sink)
+    }
+
+    /// The authorize URL a plugin publishes reaches the sink (the core's login
+    /// screen) tagged with the plugin, and the reply says it was shown.
+    #[tokio::test]
+    async fn auth_publish_url_routes_to_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, sink) = caps_with_sign_in_sink(dir.path(), None);
+
+        let r = c
+            .handle_request(
+                "auth_publish_url",
+                &json!({ "url": "https://example.test/authorize" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r, json!({ "shown": true }));
+        assert_eq!(
+            sink.published.lock().unwrap().as_slice(),
+            &[(
+                "my.plugin".to_string(),
+                "https://example.test/authorize".to_string()
+            )]
+        );
+    }
+
+    /// A code submitted on the login screen comes back through `auth_await_code`,
+    /// and the plugin's `timeout_ms` is forwarded as the wait's budget.
+    #[tokio::test]
+    async fn auth_await_code_returns_the_submitted_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, sink) = caps_with_sign_in_sink(dir.path(), Some("123456"));
+
+        let r = c
+            .handle_request("auth_await_code", &json!({ "timeout_ms": 1_000 }))
+            .await
+            .unwrap();
+        assert_eq!(r, json!({ "code": "123456" }));
+        assert_eq!(
+            sink.waits.lock().unwrap().as_slice(),
+            &[Some(Duration::from_millis(1_000))]
+        );
+    }
+
+    /// No code (cancelled login / timeout) is a normal reply, not an error, so
+    /// the plugin can end its flow cleanly.
+    #[tokio::test]
+    async fn auth_await_code_reports_no_code_as_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, _sink) = caps_with_sign_in_sink(dir.path(), None);
+
+        let r = c
+            .handle_request("auth_await_code", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(r, json!({ "code": null }));
+    }
+
+    /// Without the seam wired both methods answer `method_not_found`, which is
+    /// what lets a plugin feature-detect the login screen (same contract as the
+    /// `agent_*` and `ui_*` families).
+    #[tokio::test]
+    async fn auth_methods_are_method_not_found_without_a_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = caps(dir.path(), Value::Null);
+        for method in ["auth_publish_url", "auth_await_code"] {
+            let err = c
+                .handle_request(method, &json!({ "url": "https://example.test/authorize" }))
+                .await
+                .expect_err("no sink wired");
+            assert_eq!(err.code, RpcError::method_not_found(method).code);
+        }
     }
 
     async fn spawn_one(c: &PluginCapabilities, params: Value) -> String {

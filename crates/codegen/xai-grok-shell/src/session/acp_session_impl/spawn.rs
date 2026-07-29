@@ -1348,7 +1348,7 @@ pub(crate) async fn spawn_session_actor(
         // Arms the `ui_publish_panel` / `ui_close_panel` / `panel_action` seam:
         // panels emit `plugin_panel` / `panel_closed` notifications and button
         // presses route back to the plugin, all through this command channel.
-        cmd_tx.clone(),
+        Some(cmd_tx.clone()),
     );
     // Now that the plugin host exists, fill the deferred `permission_ask` seam so
     // the permission manager can dispatch to sidecar plugins. Only sidecar plugins

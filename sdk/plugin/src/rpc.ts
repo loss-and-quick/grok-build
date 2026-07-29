@@ -39,6 +39,10 @@ import type { PanelPublishResult } from "./generated/PanelPublishResult.ts";
 import type { PanelCloseParams } from "./generated/PanelCloseParams.ts";
 import type { PanelCloseResult } from "./generated/PanelCloseResult.ts";
 import type { PanelActionParams } from "./generated/PanelActionParams.ts";
+import type { AuthPublishUrlParams } from "./generated/AuthPublishUrlParams.ts";
+import type { AuthPublishUrlResult } from "./generated/AuthPublishUrlResult.ts";
+import type { AuthAwaitCodeParams } from "./generated/AuthAwaitCodeParams.ts";
+import type { AuthAwaitCodeResult } from "./generated/AuthAwaitCodeResult.ts";
 
 /** Core→plugin method names, v1 (see wire-contract-v1.md). */
 export const CoreToPluginMethod = {
@@ -66,6 +70,8 @@ export const PluginToCoreMethod = {
   AgentCancel: "agent_cancel",
   UiPublishPanel: "ui_publish_panel",
   UiClosePanel: "ui_close_panel",
+  AuthPublishUrl: "auth_publish_url",
+  AuthAwaitCode: "auth_await_code",
 } as const;
 
 /** Handlers for the core→plugin methods a plugin must serve. */
@@ -226,6 +232,29 @@ export class HostClient {
     return this.endpoint.request<PanelCloseResult>(
       PluginToCoreMethod.UiClosePanel,
       params,
+    );
+  }
+
+  // --- Interactive sign-in (`auth_*`). Only meaningful inside a
+  // `start_oauth_flow` handler, where the core's login screen is on display.
+  // Hosts without the sign-in wiring answer `method_not_found`; feature-detect
+  // by catching that error, exactly like the `agent_*` calls. ---
+
+  authPublishUrl(params: AuthPublishUrlParams): Promise<AuthPublishUrlResult> {
+    return this.endpoint.request<AuthPublishUrlResult>(
+      PluginToCoreMethod.AuthPublishUrl,
+      params,
+    );
+  }
+
+  authAwaitCode(
+    params: AuthAwaitCodeParams,
+    opts?: { timeoutMs?: number },
+  ): Promise<AuthAwaitCodeResult> {
+    return this.endpoint.request<AuthAwaitCodeResult>(
+      PluginToCoreMethod.AuthAwaitCode,
+      params,
+      opts,
     );
   }
 }

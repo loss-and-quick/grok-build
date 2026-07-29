@@ -1810,6 +1810,142 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
         "repeat call must keep the populated snapshot"
     );
 }
+// ── Plugin sign-in without a session ────────────────────────────────────
+//
+// `/login` runs before the first session exists, so the session-scoped plugin
+// host that normally serves `start_oauth_flow` has not been built — that gap is
+// what made a `plugin-oauth:*` method fail from the welcome screen. These cover
+// the agent-level host that closes it, and the preference for a live session's
+// own host when one does exist.
+
+/// A plugin dir discovery accepts, with a TS sidecar entry on disk (the
+/// manifest's `plugin` field only resolves to a sidecar spec when the file
+/// really exists) and the `oauthLabel` that makes it a `/login` provider.
+fn sidecar_plugin_dir(name: &str, sidecar: bool) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manifest = serde_json::json!({ "name": name, "oauthLabel": "Acme" });
+    if sidecar {
+        std::fs::write(dir.path().join("index.ts"), "export default {};").unwrap();
+        manifest["plugin"] = serde_json::json!("./index.ts");
+    }
+    std::fs::write(
+        dir.path().join("plugin.json"),
+        serde_json::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+    dir
+}
+
+fn agent_with_plugin_dir(dir: &tempfile::TempDir) -> MvpAgent {
+    use crate::agent::config::Config as AgentConfig;
+    use crate::auth::{AuthManager, GrokComConfig};
+    let auth_home = tempfile::tempdir().unwrap();
+    let auth_manager =
+        std::sync::Arc::new(AuthManager::new(auth_home.path(), GrokComConfig::default()));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let gateway = GatewaySender::new(tx);
+    let mut cfg = AgentConfig::default();
+    cfg.plugins.cli_plugin_dirs = vec![dir.path().to_path_buf()];
+    MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config")
+}
+
+/// The bug this fixes: with no session at all, the sign-in seam must still
+/// exist and route `start_oauth_flow` to the plugin. Nothing is spawned here —
+/// the host starts sidecars lazily — so this is exactly the state `/login`
+/// from the welcome screen sees.
+#[tokio::test]
+#[serial_test::serial]
+async fn plugin_sign_in_seam_exists_with_no_session_at_all() {
+    use xai_grok_hooks::event::HookEventName;
+    let grok_home = tempfile::tempdir().unwrap();
+    let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let plugin_dir = sidecar_plugin_dir("example-auth", true);
+    let agent = agent_with_plugin_dir(&plugin_dir);
+
+    assert!(agent.sessions.borrow().is_empty(), "no session exists");
+    let seam = agent
+        .plugin_sign_in_seam()
+        .expect("a sidecar plugin must be signable-in without a session");
+    assert!(
+        seam.has_subscriber(HookEventName::StartOauthFlow),
+        "the agent-level registry must carry the sidecar's sign-in subscription"
+    );
+
+    // Built once and kept: a second `/login` in the same process reuses the
+    // same host (and so the same sidecar), not a fresh one.
+    assert!(agent.sign_in_plugin_host.get().is_some());
+    assert!(agent.plugin_sign_in_seam().is_some());
+}
+
+/// A plugin with no sidecar has nothing to run the flow, so no host is held —
+/// the agent stays free of plugin-host machinery exactly as a plain session does.
+#[tokio::test]
+#[serial_test::serial]
+async fn no_sidecar_plugin_means_no_sign_in_host() {
+    let grok_home = tempfile::tempdir().unwrap();
+    let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let plugin_dir = sidecar_plugin_dir("skills-only", false);
+    let agent = agent_with_plugin_dir(&plugin_dir);
+
+    assert!(agent.plugin_sign_in_seam().is_none());
+    assert_eq!(
+        agent.drive_plugin_oauth("skills-only", None).await,
+        crate::agent::mvp_agent::PluginSignInOutcome::NoHost
+    );
+}
+
+/// With a session alive the flow goes to *its* host, through the session
+/// command channel — unchanged behaviour, and no agent-level host is built.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn a_live_session_drives_the_sign_in_through_its_own_host() {
+    use crate::session::SessionCommand;
+    let grok_home = tempfile::tempdir().unwrap();
+    let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let plugin_dir = sidecar_plugin_dir("example-auth", true);
+    let agent = agent_with_plugin_dir(&plugin_dir);
+
+    let mut handle = make_test_handle("grok-4", false, None);
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    handle.cmd_tx = cmd_tx;
+    agent
+        .sessions
+        .borrow_mut()
+        .insert(acp::SessionId::new("sess-1"), handle);
+
+    // The command is sent before the first await, so the drive future is still
+    // parked on the actor's reply when the timeout wins.
+    let finished = tokio::select! {
+        outcome = agent.drive_plugin_oauth("example-auth", Some("work")) => Some(outcome),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => None,
+    };
+    assert!(
+        finished.is_none(),
+        "the login must wait for the session actor's answer"
+    );
+
+    match cmd_rx
+        .try_recv()
+        .expect("the session actor was asked to sign in")
+    {
+        SessionCommand::StartPluginOauthFlow {
+            plugin,
+            account,
+            reason,
+            ..
+        } => {
+            assert_eq!(plugin, "example-auth");
+            assert_eq!(account.as_deref(), Some("work"));
+            assert_eq!(reason, "sign_in");
+        }
+        _ => panic!("the session actor got some other command"),
+    }
+    assert!(
+        agent.sign_in_plugin_host.get().is_none(),
+        "a live session's host must be preferred; no agent-level host is built"
+    );
+}
+
 mod subagent_spawn_context_tests;
 /// No load in flight and no session → the wait returns immediately
 /// (the caller then surfaces "unknown session id" exactly as before).

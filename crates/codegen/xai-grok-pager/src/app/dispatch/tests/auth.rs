@@ -987,12 +987,12 @@ fn choosing_a_method_authenticates_with_it_and_closes_the_picker() {
     );
 
     assert!(app.auth_method_picker.is_none());
-    // No `PollAuthUrl`: `x.ai/auth/get_url` is only ever answered by the
-    // shell's own flows, so polling it for a plugin sign-in just times out into
-    // the paste-a-token screen.
+    // The URL poll rides along for a plugin sign-in too: the plugin publishes
+    // its authorize URL into the shell's single-flight attempt, which is what
+    // `x.ai/auth/get_url` drains.
     assert!(matches!(
         effects.as_slice(),
-        [Effect::Authenticate { method_id, .. }]
+        [Effect::Authenticate { method_id, .. }, Effect::PollAuthUrl { .. }]
             if method_id.0.as_ref() == "plugin-oauth:example-auth"
     ));
     assert_eq!(
@@ -1026,7 +1026,7 @@ fn switch_account_picker_choice_runs_the_switch_account_flow() {
 
     assert!(matches!(
         effects.as_slice(),
-        [Effect::SwitchAccount { method_id, .. }]
+        [Effect::SwitchAccount { method_id, .. }, Effect::PollAuthUrl { .. }]
             if method_id.0.as_ref() == "plugin-oauth:example-auth"
     ));
 }
@@ -1087,15 +1087,14 @@ fn choosing_an_unadvertised_method_fails_closed() {
     ));
 }
 
-// ── plugin-oauth: the plugin's panel is the whole sign-in UI ─────────────
+// ── plugin-oauth: the shell's own login screen drives the sign-in ────────
 
-/// `/login` with a `plugin-oauth:*` method must not enter the native
-/// auth-URL wait. `x.ai/auth/get_url` is only ever populated by the shell's own
-/// flows, so polling it strands the user on "Waiting for auth URL..." (and then
-/// a token paste box that sends the code nowhere) while the real flow sits in
-/// the plugin's panel.
+/// `/login` with a `plugin-oauth:*` method runs the native auth-URL wait like
+/// every other interactive method: the shell registers a single-flight attempt
+/// for it and the plugin publishes its authorize URL into that attempt, so
+/// `x.ai/auth/get_url` is exactly where the URL arrives.
 #[test]
-fn plugin_oauth_login_skips_the_native_auth_url_wait() {
+fn plugin_oauth_login_polls_for_the_native_auth_url() {
     let mut app = test_app_with_agent();
     app.auth_methods = vec![picker_auth_method(
         "plugin-oauth:example-auth",
@@ -1106,26 +1105,26 @@ fn plugin_oauth_login_skips_the_native_auth_url_wait() {
     let effects = dispatch(Action::Login, &mut app);
 
     assert!(
-        !effects
+        effects
             .iter()
             .any(|e| matches!(e, Effect::PollAuthUrl { .. })),
-        "a plugin sign-in must not poll x.ai/auth/get_url: {effects:?}"
+        "a plugin sign-in must poll x.ai/auth/get_url: {effects:?}"
     );
     assert!(matches!(
         app.auth_state,
         AuthState::Authenticating {
-            mode: AuthMode::Plugin,
+            mode: AuthMode::Pending,
             auth_url: None,
             ..
         }
     ));
 }
 
-/// The plugin publishes its panel into the session, so the pager must stay on
-/// the session rather than detouring to the welcome screen's auth UI — and the
-/// overlay is armed so the panel shows itself when it lands.
+/// The sign-in is rendered by the welcome screen, so a mid-session `/login`
+/// detours there and stashes the view to come back to — the same detour the
+/// shell's own flows take.
 #[test]
-fn plugin_oauth_login_stays_on_the_session_and_surfaces_the_panel() {
+fn plugin_oauth_login_detours_to_the_welcome_auth_ui() {
     let mut app = test_app_with_agent();
     app.auth_methods = vec![picker_auth_method(
         "plugin-oauth:example-auth",
@@ -1137,37 +1136,19 @@ fn plugin_oauth_login_stays_on_the_session_and_surfaces_the_panel() {
 
     dispatch(Action::Login, &mut app);
 
+    assert_eq!(app.active_view, ActiveView::Welcome);
     assert_eq!(
-        app.active_view,
-        ActiveView::Agent(id),
-        "the panel renders in the session, so the user must stay there"
-    );
-    assert!(
-        app.auth_return_view.is_none(),
-        "nothing to return from: there was no detour"
-    );
-
-    // The panel arrives a moment later and opens itself.
-    let vm = xai_grok_plugin_protocol::PanelViewModel {
-        id: "signin".into(),
-        title: "Acme sign-in".into(),
-        blocks: vec![],
-    };
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .apply_plugin_panel("example-auth".into(), vm);
-    assert!(
-        app.agents[&id].plugin_panel_overlay_active(),
-        "the sign-in panel must surface itself, not wait behind F6"
+        app.auth_return_view,
+        Some(ActiveView::Agent(id)),
+        "the session must be restored when the login ends"
     );
 }
 
-/// A late `AuthUrlReady` from a superseded attempt must never downgrade a
-/// plugin sign-in to Loopback — that would paint a paste box whose code goes
-/// nowhere, since the plugin reads its code from the panel's own input.
+/// The plugin's authorize URL arrives on the same `AuthUrlReady` path the
+/// built-in flows use, and lands on the loopback screen — URL plus the code box
+/// the plugin's `auth_await_code` drains.
 #[test]
-fn late_auth_url_ready_cannot_downgrade_a_plugin_login_to_loopback() {
+fn a_plugin_published_url_lands_on_the_loopback_screen() {
     let mut app = test_app_with_agent();
     app.auth_methods = vec![picker_auth_method(
         "plugin-oauth:example-auth",
@@ -1182,18 +1163,16 @@ fn late_auth_url_ready_cannot_downgrade_a_plugin_login_to_loopback() {
     dispatch(
         Action::TaskComplete(TaskResult::AuthUrlReady {
             request_seq,
-            auth_url: None,
+            auth_url: Some("https://example.test/authorize".to_string()),
             external: false,
-            mode: None,
+            mode: Some("loopback".to_string()),
         }),
         &mut app,
     );
 
-    assert!(matches!(
-        app.auth_state,
-        AuthState::Authenticating {
-            mode: AuthMode::Plugin,
-            ..
-        }
-    ));
+    let AuthState::Authenticating { mode, auth_url, .. } = &app.auth_state else {
+        panic!("expected Authenticating");
+    };
+    assert_eq!(*mode, AuthMode::Loopback);
+    assert_eq!(auth_url.as_deref(), Some("https://example.test/authorize"));
 }

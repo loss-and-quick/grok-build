@@ -140,6 +140,13 @@ fn spawn_hardener() -> Option<xai_grok_plugin_host::SpawnHardener> {
 /// spawning is deferred until the first matching hook fires.
 /// `subagent_event_tx` (the session's coordinator channel) arms the `agent_*`
 /// orchestration RPCs; without it they answer `method_not_found`.
+///
+/// `cmd_tx` is the session's command channel, which arms the panel RPCs. It is
+/// optional because this is also how the agent-level sign-in host is built
+/// (`MvpAgent::plugin_sign_in_seam`): that host exists before any session, so
+/// there is no channel to route panels onto and `ui_publish_panel` /
+/// `ui_close_panel` answer `method_not_found` there — the sign-in seam is
+/// deliberately the only surface a session-less host serves.
 pub(crate) fn build_session_plugin_host(
     plugin_registry: Option<&PluginRegistry>,
     session_id: &str,
@@ -150,7 +157,7 @@ pub(crate) fn build_session_plugin_host(
             xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
         >,
     >,
-    cmd_tx: tokio::sync::mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
+    cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::session::commands::SessionCommand>>,
 ) -> Option<Arc<PluginHost>> {
     let registry = plugin_registry?;
     let workspace_root = PathBuf::from(workspace_root);
@@ -189,7 +196,15 @@ pub(crate) fn build_session_plugin_host(
     // onto this session's command channel, where the actor emits the
     // corresponding `plugin_panel` / `panel_closed` session notification (and
     // `panel_action` presses flow back the other way).
-    host.set_panel_sink(Arc::new(SessionPanelSink { cmd_tx }));
+    if let Some(cmd_tx) = cmd_tx {
+        host.set_panel_sink(Arc::new(SessionPanelSink { cmd_tx }));
+    }
+    // Interactive sign-in: `auth_publish_url` / `auth_await_code` drive the
+    // core's own login screen, which is session-independent (a sign-in happens
+    // before any session exists). Every host gets the same process-wide prompt,
+    // so a `/login` served from a live session and one served by the
+    // agent-level host reach the identical screen.
+    host.set_sign_in_sink(crate::auth::plugin_sign_in::PluginSignInPrompt::global());
     for spec in &sidecar_plugins {
         tracing::info!(
             plugin = %spec.name,

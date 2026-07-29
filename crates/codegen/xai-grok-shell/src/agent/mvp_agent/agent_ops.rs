@@ -34,6 +34,20 @@ fn should_warn_missing_session(ctx: MissingSessionCtx) -> bool {
         None => ctx.is_session_based_auth,
     }
 }
+/// How a plugin's interactive sign-in ended. Distinguishes "no plugin host
+/// could run it" from "one ran it and it did not complete", so `/login` reports
+/// something the user can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PluginSignInOutcome {
+    /// The plugin returned a credential.
+    SignedIn,
+    /// A handler ran (or was targeted) but produced no credential: the user
+    /// cancelled, the plugin errored, or it does not serve this account.
+    Declined,
+    /// Nothing could run the flow: no active plugin ships a sidecar, so neither
+    /// a session host nor the agent-level host exists.
+    NoHost,
+}
 impl MvpAgent {
     pub fn reload_skills_all_sessions(&self) -> usize {
         let session_ids: Vec<agent_client_protocol::SessionId> = self
@@ -476,6 +490,124 @@ impl MvpAgent {
             "lazily populated plugin registry snapshot"
         );
     }
+    /// The credential seam for a session-less sign-in: a [`HookCredentialSeam`]
+    /// over the agent-level plugin host, built on first use.
+    ///
+    /// `authenticate()` runs before any session exists, so the session-scoped
+    /// plugin host that normally serves `start_oauth_flow` has not been built —
+    /// and with it, no sidecar is running at all. This builds the missing half
+    /// with the same machinery a session uses: the lazily discovered plugin
+    /// registry supplies both the sidecar specs (via
+    /// [`crate::session::plugin_host::build_session_plugin_host`]) and the
+    /// `plugin/…` hook specs the dispatcher routes on (via
+    /// [`crate::session::plugin_host::registry_with_plugin_specs`]).
+    ///
+    /// `None` when no active plugin ships a sidecar — there is nothing to sign
+    /// in with, and no host is held.
+    ///
+    /// [`HookCredentialSeam`]: crate::auth::credential_seam::HookCredentialSeam
+    pub(crate) fn plugin_sign_in_seam(
+        &self,
+    ) -> Option<std::sync::Arc<crate::auth::credential_seam::HookCredentialSeam>> {
+        self.ensure_plugin_registry();
+        let plugin_registry = self.plugin_registry_handle.snapshot()?;
+        let workspace_root = self.launch_cwd.to_string_lossy().into_owned();
+        let host = self
+            .sign_in_plugin_host
+            .get_or_init(|| {
+                // Synthetic, but a real per-process id: a sidecar keys its
+                // storage and logs off `session_id`, so a stable value keeps a
+                // second `/login` in the same process on the same footing as
+                // the first.
+                let session_id = format!("sign-in-{}", uuid::Uuid::now_v7());
+                let plugin_config =
+                    crate::config::resolve_effective_plugins_config(&self.launch_cwd).config;
+                crate::session::plugin_host::build_session_plugin_host(
+                    Some(&plugin_registry),
+                    &session_id,
+                    &workspace_root,
+                    &plugin_config,
+                    // No session ⇒ no subagent coordinator and no panel
+                    // channel: the `agent_*` and `ui_*` RPCs answer
+                    // `method_not_found`, which is what a plugin already
+                    // feature-detects. Sign-in drives the login screen through
+                    // the sink `build_session_plugin_host` installs.
+                    None,
+                    None,
+                )
+                .map(|host| (session_id, host))
+            })
+            .clone()?;
+        let (session_id, host) = host;
+        let hook_registry =
+            crate::session::plugin_host::registry_with_plugin_specs(None, Some(&plugin_registry))?;
+        Some(std::sync::Arc::new(
+            crate::auth::credential_seam::HookCredentialSeam::new(
+                (*hook_registry).clone(),
+                host as std::sync::Arc<dyn xai_grok_hooks::invoker::PluginHookInvoker>,
+                session_id,
+                workspace_root.clone(),
+                workspace_root,
+            ),
+        ))
+    }
+
+    /// Run a plugin's interactive sign-in, wherever a host for it can be found.
+    ///
+    /// A live session's own host is preferred: its sidecar is already running
+    /// with that session's context, so an in-session `/login` behaves exactly as
+    /// before (the actor dispatches through
+    /// [`crate::session::commands::SessionCommand::StartPluginOauthFlow`]). With
+    /// no session — the welcome-screen `/login` this whole path exists for — the
+    /// agent-level host serves it instead.
+    pub(crate) async fn drive_plugin_oauth(
+        &self,
+        plugin: &str,
+        account: Option<&str>,
+    ) -> PluginSignInOutcome {
+        let cmd_tx = self
+            .sessions
+            .borrow()
+            .values()
+            .next()
+            .map(|handle| handle.cmd_tx.clone());
+        if let Some(cmd_tx) = cmd_tx {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            if cmd_tx
+                .send(crate::session::SessionCommand::StartPluginOauthFlow {
+                    plugin: plugin.to_string(),
+                    account: account.map(str::to_string),
+                    reason: "sign_in".to_string(),
+                    respond_to: reply_tx,
+                })
+                .is_ok()
+            {
+                return match reply_rx.await {
+                    Ok(true) => PluginSignInOutcome::SignedIn,
+                    // `false` also covers a session whose registry has no such
+                    // plugin; the agent-level fallback is for *no* session, not
+                    // for a session that answered.
+                    Ok(false) | Err(_) => PluginSignInOutcome::Declined,
+                };
+            }
+            // The actor is gone (session tearing down): fall through to the
+            // agent-level host rather than failing the login.
+        }
+        use crate::auth::credential_seam::PluginCredentialSeam;
+        let Some(seam) = self.plugin_sign_in_seam() else {
+            return PluginSignInOutcome::NoHost;
+        };
+        if seam
+            .start_oauth_flow("sign_in", Some(plugin), account)
+            .await
+            .is_some()
+        {
+            PluginSignInOutcome::SignedIn
+        } else {
+            PluginSignInOutcome::Declined
+        }
+    }
+
     /// Fetch managed configs, merge with client servers, return merged list + earliest expiry.
     pub(super) async fn resolve_mcp_servers(
         &self,
@@ -1890,6 +2022,7 @@ impl MvpAgent {
                 cfg.plugins.cli_plugin_dirs.clone(),
             ),
             plugin_registry_initialized: std::cell::Cell::new(false),
+            sign_in_plugin_host: std::cell::OnceCell::new(),
             models_manager,
             chat_modes: {
                 let chat_modes = crate::agent::chat_modes::ChatModesManager::new(

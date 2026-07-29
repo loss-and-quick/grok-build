@@ -1229,6 +1229,55 @@ pub struct PanelActionParams {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// auth_publish_url / auth_await_code (plugin→core requests) — the sign-in
+// surface a plugin drives while the core's own pre-auth screen is on display.
+//
+// A `start_oauth_flow` handler runs *before* any session exists (the user is
+// signing in), so it cannot rely on a session-scoped UI. These two calls put it
+// on the core's native login screen instead: `auth_publish_url` hands over the
+// authorize URL the screen renders (with its copy/open affordances), and
+// `auth_await_code` blocks until the user submits a code there, resolving with
+// `code: null` when the login is cancelled or no login is running.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `auth_publish_url` request params. Plugin→core. `url` is the authorize URL
+/// the user must visit; the core's login screen shows it verbatim.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AuthPublishUrlParams {
+    pub url: String,
+}
+
+/// `auth_publish_url` reply. Plugin→core. `shown` is `false` when no login was
+/// waiting for a URL (e.g. the flow ran outside `/login`, or it was already
+/// cancelled), so a plugin can fall back to its own UI.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AuthPublishUrlResult {
+    pub shown: bool,
+}
+
+/// `auth_await_code` request params. Plugin→core. `timeout_ms` bounds the wait;
+/// `None` waits for the whole remaining hook deadline.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+pub struct AuthAwaitCodeParams {
+    #[serde(default)]
+    #[ts(type = "number | null", optional = nullable)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// `auth_await_code` reply. Plugin→core. `code` is what the user submitted, or
+/// `None` when the wait ended without one (cancelled login, timeout, or no
+/// login running).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+pub struct AuthAwaitCodeResult {
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ts-rs export
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1330,6 +1379,10 @@ mod bindings_export {
             PanelCloseParams,
             PanelCloseResult,
             PanelActionParams,
+            AuthPublishUrlParams,
+            AuthPublishUrlResult,
+            AuthAwaitCodeParams,
+            AuthAwaitCodeResult,
         );
     }
 }
@@ -1635,7 +1688,10 @@ mod tests {
                 "timeout_ms": 60000,
             }),
         );
-        round_trip(&AgentSpawnResult { id: "a-1".into() }, json!({ "id": "a-1" }));
+        round_trip(
+            &AgentSpawnResult { id: "a-1".into() },
+            json!({ "id": "a-1" }),
+        );
 
         round_trip(
             &AgentWaitParams {
@@ -1736,7 +1792,10 @@ mod tests {
         let p: AgentSendParams =
             serde_json::from_value(json!({ "id": "a-2", "prompt": "go" })).unwrap();
         assert_eq!(p.timeout_ms, None);
-        round_trip(&AgentSendResult { id: "a-9".into() }, json!({ "id": "a-9" }));
+        round_trip(
+            &AgentSendResult { id: "a-9".into() },
+            json!({ "id": "a-9" }),
+        );
     }
 
     /// An agent descriptor deserializes from just a `name`: `description`
@@ -1876,8 +1935,7 @@ mod tests {
         let item: PanelStatusItem =
             serde_json::from_value(json!({ "label": "l", "value": "v" })).unwrap();
         assert_eq!(item.tone, PanelTone::Neutral);
-        let btn: PanelButton =
-            serde_json::from_value(json!({ "id": "b", "label": "L" })).unwrap();
+        let btn: PanelButton = serde_json::from_value(json!({ "id": "b", "label": "L" })).unwrap();
         assert_eq!(btn.key, None);
     }
 
@@ -2137,7 +2195,10 @@ mod tests {
         }
         for (v, s) in [
             (StopFailureKindDto::RateLimit, "rate_limit"),
-            (StopFailureKindDto::AuthenticationFailed, "authentication_failed"),
+            (
+                StopFailureKindDto::AuthenticationFailed,
+                "authentication_failed",
+            ),
             (StopFailureKindDto::InvalidRequest, "invalid_request"),
             (StopFailureKindDto::ServerError, "server_error"),
             (StopFailureKindDto::MaxOutputTokens, "max_output_tokens"),

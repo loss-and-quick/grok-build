@@ -94,6 +94,10 @@ pub struct PluginHost {
     /// server (current and future registrations). `None` keeps
     /// `ui_publish_panel`/`ui_close_panel` answering `method_not_found`.
     panel_sink: std::sync::Mutex<Option<Arc<dyn crate::orchestration::PanelSink>>>,
+    /// The injected sign-in seam, fanned out to every plugin's capability
+    /// server (current and future registrations). `None` keeps
+    /// `auth_publish_url`/`auth_await_code` answering `method_not_found`.
+    sign_in_sink: std::sync::Mutex<Option<Arc<dyn crate::orchestration::SignInSink>>>,
 }
 
 /// One registered plugin: its spec, capability server (shared across restarts),
@@ -136,6 +140,7 @@ impl PluginHost {
             plugins: std::sync::Mutex::new(HashMap::new()),
             agent_orchestrator: std::sync::Mutex::new(None),
             panel_sink: std::sync::Mutex::new(None),
+            sign_in_sink: std::sync::Mutex::new(None),
         }
     }
 
@@ -165,6 +170,7 @@ impl PluginHost {
             plugins: std::sync::Mutex::new(HashMap::new()),
             agent_orchestrator: std::sync::Mutex::new(None),
             panel_sink: std::sync::Mutex::new(None),
+            sign_in_sink: std::sync::Mutex::new(None),
         }
     }
 
@@ -198,6 +204,20 @@ impl PluginHost {
         }
     }
 
+    /// Install the sign-in seam (the core's login screen), fanning it out to
+    /// every registered plugin's capability server; plugins registered later
+    /// inherit it too. Takes `&self`, exactly like [`Self::set_panel_sink`].
+    pub fn set_sign_in_sink(&self, sink: Arc<dyn crate::orchestration::SignInSink>) {
+        *self
+            .sign_in_sink
+            .lock()
+            .expect("sign-in sink slot poisoned") = Some(Arc::clone(&sink));
+        let plugins = self.plugins.lock().expect("registry poisoned");
+        for entry in plugins.values() {
+            entry.caps.set_sign_in_sink(Arc::clone(&sink));
+        }
+    }
+
     /// Register a plugin. Idempotent per name (a re-register replaces the entry,
     /// dropping any prior sidecar on next access).
     pub fn register_plugin(&self, spec: RegisteredPlugin) {
@@ -221,6 +241,14 @@ impl PluginHost {
             .as_ref()
         {
             caps.set_panel_sink(Arc::clone(sink));
+        }
+        if let Some(sink) = self
+            .sign_in_sink
+            .lock()
+            .expect("sign-in sink slot poisoned")
+            .as_ref()
+        {
+            caps.set_sign_in_sink(Arc::clone(sink));
         }
         let entry = Arc::new(PluginEntry {
             caps,

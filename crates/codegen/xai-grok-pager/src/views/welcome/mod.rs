@@ -755,7 +755,6 @@ pub fn render_welcome(
                 params.auth_code_cursor_byte,
                 params.clipboard_delivery,
                 params.show_raw_url,
-                params.login_label,
                 params.mid_session_login,
             );
             WelcomeRenderResult {
@@ -1360,7 +1359,6 @@ fn render_welcome_authenticating(
     auth_code_cursor_byte: usize,
     clipboard_delivery: Option<crate::clipboard::ClipboardDelivery>,
     show_raw_url: bool,
-    login_label: Option<&str>,
     mid_session_login: bool,
 ) -> (Option<Rect>, Option<Rect>) {
     let top_pad = content_area.height.saturating_sub(logo_line_count) / 10;
@@ -1493,49 +1491,6 @@ fn render_welcome_authenticating(
             BrowserStatusKind::Device,
             mid_session_login,
         ),
-
-        AuthMode::Plugin => {
-            // The plugin owns this sign-in in its own panel, inside the
-            // session. Nothing the welcome screen could paint here would be
-            // part of the flow — a paste box especially, since the code goes
-            // into the panel's own input — so say where the flow actually is.
-            let [_, logo_area, _, msg_area, _, hint_area, _] = Layout::vertical([
-                Constraint::Length(top_pad),
-                Constraint::Length(logo_line_count),
-                Constraint::Length(2),
-                Constraint::Length(3),
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Min(0),
-            ])
-            .areas(content_area);
-
-            render_logo(logo_area, buf, theme, content_area.height);
-
-            let label = login_label.unwrap_or("the plugin");
-            let lines = vec![
-                Line::from(Span::styled(
-                    format!("Continue signing in with {label} in its panel."),
-                    Style::default().fg(theme.gray_bright),
-                ))
-                .alignment(Alignment::Center),
-                Line::default(),
-                Line::from(Span::styled(
-                    "Open it with F6 in your session.",
-                    Style::default().fg(theme.gray),
-                ))
-                .alignment(Alignment::Center),
-            ];
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .render(msg_area, buf);
-
-            let hints = Line::from(auth_exit_hint_spans(theme, mid_session_login))
-                .alignment(Alignment::Center);
-            Paragraph::new(hints).render(hint_area, buf);
-
-            (None, None)
-        }
 
         AuthMode::Pending => {
             // Connecting: status text
@@ -3793,7 +3748,6 @@ mod tests {
             0,
             None,  // clipboard_delivery
             false, // show_raw_url
-            None,  // login_label
             false, // mid_session_login
         );
 
@@ -3850,7 +3804,6 @@ mod tests {
             0,
             None,
             true,  // show_raw_url
-            None,  // login_label
             false, // mid_session_login
         );
 
@@ -3879,7 +3832,6 @@ mod tests {
             0,
             None,
             true,  // show_raw_url
-            None,  // login_label
             false, // mid_session_login
         );
 
@@ -3919,7 +3871,6 @@ mod tests {
             0,
             None,
             true,  // show_raw_url
-            None,  // login_label
             false, // mid_session_login
         );
 
@@ -3961,7 +3912,6 @@ mod tests {
             0,
             None,  // clipboard_delivery
             false, // show_raw_url
-            None,  // login_label
             false, // mid_session_login
         );
 
@@ -4192,7 +4142,6 @@ the usual channels. "
                 0,
                 None,
                 false,
-                None,
                 mid_session,
             );
             let text = buffer_text(&buf);
@@ -4226,11 +4175,12 @@ the usual channels. "
         assert!(text.contains("Login with"), "the login row stays:\n{text}");
     }
 
-    /// A plugin sign-in has no pager-side auth UI: the plugin publishes its own
-    /// panel with the URL and the code field. The welcome screen must point at
-    /// it and must NOT paint the loopback paste box, whose code goes nowhere.
+    /// A plugin sign-in renders on this screen like any other: the URL the
+    /// plugin published, with the code box its `auth_await_code` drains. The
+    /// pager cannot tell a plugin's loopback URL from the shell's own, which is
+    /// the point — one sign-in surface, session or no session.
     #[test]
-    fn plugin_auth_arm_points_at_the_panel_and_has_no_paste_box() {
+    fn a_plugin_published_url_renders_with_the_paste_box() {
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         let theme = Theme::current();
@@ -4240,29 +4190,23 @@ the usual channels. "
             &mut buf,
             &theme,
             logo_line_count(area.height),
-            None,
-            AuthMode::Plugin,
+            Some("https://example.test/authorize"),
+            AuthMode::Loopback,
             "",
             0,
             None,
             false,
-            Some("Acme OAuth"),
             false,
         );
 
         let text = buffer_text(&buf);
         assert!(
-            text.contains("Acme OAuth"),
-            "name the plugin driving the sign-in:\n{text}"
-        );
-        assert!(text.contains("F6"), "point at the panel:\n{text}");
-        assert!(
-            !text.contains("Paste your token"),
-            "the loopback paste box must not appear:\n{text}"
+            text.contains("Paste your token"),
+            "the code box must be there for the plugin to read from:\n{text}"
         );
         assert!(
             !text.contains("Waiting for auth URL"),
-            "a plugin sign-in never waits on x.ai/auth/get_url:\n{text}"
+            "the URL arrived; nothing is still waiting:\n{text}"
         );
     }
 }
