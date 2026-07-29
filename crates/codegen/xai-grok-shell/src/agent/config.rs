@@ -3781,54 +3781,8 @@ pub fn resolve_model_list(
                 );
             }
         }
-        let with_provider = model_override.model_provider.as_deref().map(|pid| {
-            match cfg.model_providers.get(pid) {
-                Some(provider) => model_override.with_provider_defaults(provider, pid),
-                None => model_override.with_missing_provider(),
-            }
-        });
-        let effective = with_provider.as_ref().unwrap_or(model_override);
-        let mut entry = effective.apply(key, base, &cfg.endpoints);
-        let session_bearer_unsafe = !crate::util::is_xai_api_bearer_url(&entry.info.base_url)
-            || entry
-                .api_base_url
-                .as_deref()
-                .is_some_and(|url| !crate::util::is_xai_api_bearer_url(url));
-        if let Some(pid) = model_override.model_provider.as_deref()
-            && entry.auth_provider.is_none()
-            && session_bearer_unsafe
-        {
-            entry.auth_provider = Some(crate::auth::AuthProviderRef::fail_closed(format!(
-                "model_provider:{pid} (fail-closed)"
-            )));
-        }
-        tracing::debug!(
-            model_key = %key,
-            base_url = %entry.info.base_url,
-            has_api_key = entry.api_key.is_some(),
-            env_key = ?entry.env_key,
-            auth_provider = entry.auth_provider.as_ref().map(|p| p.name.as_str()),
-            model_provider = model_override.model_provider.as_deref(),
-            had_base,
-            "config model override applied"
-        );
+        let entry = apply_config_model_override(cfg, key, model_override, base, had_base);
         resolved.insert(key.clone(), entry);
-    }
-    for (key, entry) in resolved.iter_mut() {
-        if let Some(ref mut provider) = entry.auth_provider {
-            if provider.is_fail_closed() {
-                continue;
-            }
-            let config = cfg.auth_providers.get(&provider.name);
-            if config.is_none() {
-                tracing::debug!(
-                    model_key = %key,
-                    provider = %provider.name,
-                    "provider ref has no trusted config; failing closed with an empty command"
-                );
-            }
-            provider.attach_trusted_config(config);
-        }
     }
     {
         let default_cw = DEFAULT_CONTEXT_WINDOW;
@@ -3876,13 +3830,97 @@ pub fn resolve_model_list(
     // Expand custom providers AFTER the slug-donor loop so a synthesized
     // entry's wire format is never clobbered by a same-slug built-in with a
     // different backend; global header/scalar defaults below still apply.
-    expand_providers_into_catalog(&mut resolved, &cfg.providers);
+    let synthesized = expand_providers_into_catalog(&mut resolved, &cfg.providers);
+    // Layer 3 ran before expansion, so a `[model."<provider_id>/<model>"]`
+    // table was applied to a bare fallback entry that expansion then replaced
+    // wholesale — the user's override silently vanished. Re-apply it here with
+    // the synthesized entry as the base: a `[[provider]]` declaration is the
+    // default for the models it serves, and the per-model table refines it.
+    // `insert` on an existing key keeps its position, so the catalog order
+    // (and hence bare-slug resolution) is unchanged.
+    for key in synthesized {
+        let Some(model_override) = cfg.config_models.get(&key) else {
+            continue;
+        };
+        let base = resolved.get(&key).cloned();
+        let entry = apply_config_model_override(cfg, &key, model_override, base, true);
+        resolved.insert(key, entry);
+    }
+    // Attach trusted `[auth_provider.<name>]` config once, after every layer
+    // that can mint an `AuthProviderRef` has run — including the re-apply
+    // above, which would otherwise leave a provider-keyed model's helper
+    // unresolved.
+    for (key, entry) in resolved.iter_mut() {
+        if let Some(ref mut provider) = entry.auth_provider {
+            if provider.is_fail_closed() {
+                continue;
+            }
+            let config = cfg.auth_providers.get(&provider.name);
+            if config.is_none() {
+                tracing::debug!(
+                    model_key = %key,
+                    provider = %provider.name,
+                    "provider ref has no trusted config; failing closed with an empty command"
+                );
+            }
+            provider.attach_trusted_config(config);
+        }
+    }
     apply_global_extra_headers(&mut resolved, &cfg.models);
     apply_global_scalar_defaults(&mut resolved, &cfg.models);
     for entry in resolved.values_mut() {
         entry.info.derive_reasoning_effort_fields();
     }
     resolved
+}
+/// Apply one `[model.<id>]` table over `base`, resolving any `model_provider`
+/// reference first and failing its credential closed when the resulting
+/// endpoint is not an xAI bearer URL.
+///
+/// Shared by Layer 3 (the main override loop) and the post-expansion re-apply
+/// for `[[provider]]`-synthesized keys, so both paths get identical merge and
+/// fail-closed semantics.
+fn apply_config_model_override(
+    cfg: &Config,
+    key: &str,
+    model_override: &ConfigModelOverride,
+    base: Option<ModelEntry>,
+    had_base: bool,
+) -> ModelEntry {
+    let with_provider =
+        model_override
+            .model_provider
+            .as_deref()
+            .map(|pid| match cfg.model_providers.get(pid) {
+                Some(provider) => model_override.with_provider_defaults(provider, pid),
+                None => model_override.with_missing_provider(),
+            });
+    let effective = with_provider.as_ref().unwrap_or(model_override);
+    let mut entry = effective.apply(key, base, &cfg.endpoints);
+    let session_bearer_unsafe = !crate::util::is_xai_api_bearer_url(&entry.info.base_url)
+        || entry
+            .api_base_url
+            .as_deref()
+            .is_some_and(|url| !crate::util::is_xai_api_bearer_url(url));
+    if let Some(pid) = model_override.model_provider.as_deref()
+        && entry.auth_provider.is_none()
+        && session_bearer_unsafe
+    {
+        entry.auth_provider = Some(crate::auth::AuthProviderRef::fail_closed(format!(
+            "model_provider:{pid} (fail-closed)"
+        )));
+    }
+    tracing::debug!(
+        model_key = %key,
+        base_url = %entry.info.base_url,
+        has_api_key = entry.api_key.is_some(),
+        env_key = ?entry.env_key,
+        auth_provider = entry.auth_provider.as_ref().map(|p| p.name.as_str()),
+        model_provider = model_override.model_provider.as_deref(),
+        had_base,
+        "config model override applied"
+    );
+    entry
 }
 /// Layer 6 of [`resolve_model_list`]: fold the global `[models].extra_headers`
 /// into every model as a base. The presence check is case-insensitive because
@@ -5480,10 +5518,14 @@ fn provider_format_defaults(
 /// `<model>` resolves via [`find_model_by_id`]'s slug fallback (first catalog
 /// match wins, so a built-in x.ai model of the same name keeps precedence and
 /// the default path is never shadowed).
+///
+/// Returns the keys it synthesized, in insertion order, so the caller can
+/// re-apply any `[model.<key>]` table that expansion just overwrote.
 fn expand_providers_into_catalog(
     resolved: &mut IndexMap<String, ModelEntry>,
     providers: &[xai_grok_config_types::ProviderConfig],
-) {
+) -> Vec<String> {
+    let mut synthesized = Vec::new();
     let fallback_cw =
         NonZeroU64::new(DEFAULT_CONTEXT_WINDOW).unwrap_or(NonZeroU64::new(200_000).unwrap());
     for provider in providers {
@@ -5512,15 +5554,29 @@ fn expand_providers_into_catalog(
                 // provider's account, so two `[[provider]]` entries sharing a
                 // `base_url` stay distinct credentials.
                 auth_account: provider.auth_account.clone(),
+                // Reasoning-effort support is a property of the endpoint, so
+                // every model the provider serves inherits its declaration.
+                // `reasoning_efforts` is the source of truth; the two legacy
+                // fields below are what an author sets when the endpoint takes
+                // an effort but publishes no menu.
+                reasoning_effort: provider.reasoning_effort,
+                supports_reasoning_effort: provider.supports_reasoning_effort,
+                reasoning_efforts: provider.reasoning_efforts.clone(),
                 ..ModelEntryConfig::minimal_for_provider(model)
             };
             let mut model_entry = ModelEntry::from_config_entry(&entry_config);
+            // Derive here as well as in `resolve_model_list`'s final sweep so a
+            // directly-expanded catalog (tests, and any future caller) sees the
+            // same gate/default a fully resolved one does. Idempotent.
+            model_entry.info.derive_reasoning_effort_fields();
             // Proxy is transport-only, so it rides the runtime wrapper rather
             // than the config/`ModelInfo` schema.
             model_entry.proxy = provider.proxy.clone();
-            resolved.insert(key, model_entry);
+            resolved.insert(key.clone(), model_entry);
+            synthesized.push(key);
         }
     }
+    synthesized
 }
 
 pub fn sampling_config_for_model(
@@ -13440,6 +13496,9 @@ default = "grok-4.5"
             models: vec!["m".to_owned()],
             context_window: None,
             auth_account: account.map(str::to_owned),
+            reasoning_efforts: Vec::new(),
+            reasoning_effort: None,
+            supports_reasoning_effort: false,
         };
         let providers = vec![
             entry("acme-work", Some("work")),
@@ -13484,6 +13543,9 @@ default = "grok-4.5"
                 models: vec!["m".to_owned()],
                 context_window: None,
                 auth_account: None,
+                reasoning_efforts: Vec::new(),
+                reasoning_effort: None,
+                supports_reasoning_effort: false,
             },
             ProviderConfig {
                 id: "direct".to_owned(),
@@ -13495,6 +13557,9 @@ default = "grok-4.5"
                 models: vec!["m".to_owned()],
                 context_window: None,
                 auth_account: None,
+                reasoning_efforts: Vec::new(),
+                reasoning_effort: None,
+                supports_reasoning_effort: false,
             },
         ];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
@@ -13547,6 +13612,9 @@ default = "grok-4.5"
                 models: vec!["m".to_owned()],
                 context_window: None,
                 auth_account: None,
+                reasoning_efforts: Vec::new(),
+                reasoning_effort: None,
+                supports_reasoning_effort: false,
             }];
             let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
             expand_providers_into_catalog(&mut catalog, &providers);
@@ -13583,6 +13651,9 @@ default = "grok-4.5"
             models: vec!["m1".to_owned()],
             context_window: None,
             auth_account: None,
+            reasoning_efforts: Vec::new(),
+            reasoning_effort: None,
+            supports_reasoning_effort: false,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -13629,6 +13700,9 @@ default = "grok-4.5"
             models: vec!["claude-x".to_owned()],
             context_window: None,
             auth_account: None,
+            reasoning_efforts: Vec::new(),
+            reasoning_effort: None,
+            supports_reasoning_effort: false,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -13679,6 +13753,9 @@ default = "grok-4.5"
             models: vec!["gemini-x".to_owned()],
             context_window: None,
             auth_account: None,
+            reasoning_efforts: Vec::new(),
+            reasoning_effort: None,
+            supports_reasoning_effort: false,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -13717,6 +13794,324 @@ default = "grok-4.5"
             logged.authorization.is_none(),
             "gemini must not send Bearer"
         );
+    }
+
+    /// A `[[provider]]` that lists nothing about reasoning keeps the effort
+    /// control hidden — the behaviour before the fields existed.
+    #[test]
+    fn provider_without_effort_declaration_keeps_control_hidden() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "acme"
+            base_url = "https://example.test/v1"
+            models = ["m-large"]
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config parses");
+        let catalog = resolve_model_list(&cfg, Some(IndexMap::new()));
+        let info = &catalog.get("acme/m-large").expect("synthesized").info;
+        assert!(!info.supports_reasoning_effort);
+        assert!(info.reasoning_effort.is_none());
+        assert!(info.reasoning_efforts.is_empty());
+        let acp = to_acp_model_info(&catalog);
+        let meta = acp
+            .get(&acp::ModelId::new("acme/m-large"))
+            .expect("acp entry")
+            .meta
+            .clone();
+        assert!(
+            !xai_grok_sampling_types::supports_reasoning_effort_meta(meta.as_ref()),
+            "no declaration must not advertise support",
+        );
+    }
+
+    /// A bare `reasoning_efforts` list is the only thing an author writes: the
+    /// gate and the wire default derive from it, and all three reach ACP meta.
+    #[test]
+    fn provider_reasoning_efforts_reach_acp_model_meta() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "acme"
+            base_url = "https://example.test/v1"
+            models = ["m-large", "m-small"]
+            reasoning_efforts = ["low", { value = "high", default = true }]
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config parses");
+        let catalog = resolve_model_list(&cfg, Some(IndexMap::new()));
+        // Every model the provider serves inherits the declaration.
+        for key in ["acme/m-large", "acme/m-small"] {
+            let info = &catalog.get(key).unwrap_or_else(|| panic!("{key}")).info;
+            assert!(info.supports_reasoning_effort, "{key}: gate derived");
+            assert_eq!(
+                info.reasoning_effort,
+                Some(ReasoningEffort::High),
+                "{key}: default comes from the `default = true` entry",
+            );
+            assert_eq!(info.reasoning_efforts.len(), 2, "{key}: menu preserved");
+        }
+        let acp = to_acp_model_info(&catalog);
+        let meta = acp
+            .get(&acp::ModelId::new("acme/m-large"))
+            .expect("acp entry")
+            .meta
+            .clone();
+        assert!(
+            xai_grok_sampling_types::supports_reasoning_effort_meta(meta.as_ref()),
+            "supportsReasoningEffort must reach meta or the control stays hidden",
+        );
+        assert_eq!(
+            xai_grok_sampling_types::parse_reasoning_effort_meta(meta.as_ref()),
+            Some(ReasoningEffort::High),
+        );
+        let menu = xai_grok_sampling_types::parse_reasoning_efforts_meta(meta.as_ref())
+            .expect("menu in meta");
+        assert_eq!(
+            menu.iter().map(|o| o.value).collect::<Vec<_>>(),
+            vec![ReasoningEffort::Low, ReasoningEffort::High],
+        );
+    }
+
+    /// `supports_reasoning_effort` alone (no menu) exposes the control and
+    /// leaves the client on its fallback list; an explicit `reasoning_effort`
+    /// pins the default over the one the menu would derive.
+    #[test]
+    fn provider_menuless_and_pinned_default_declarations() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "menuless"
+            base_url = "https://example.test/v1"
+            models = ["m"]
+            supports_reasoning_effort = true
+
+            [[provider]]
+            id = "pinned"
+            base_url = "https://example.test/v1"
+            models = ["m"]
+            reasoning_efforts = ["low", { value = "high", default = true }]
+            reasoning_effort = "low"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config parses");
+        let catalog = resolve_model_list(&cfg, Some(IndexMap::new()));
+
+        let menuless = &catalog.get("menuless/m").expect("menuless").info;
+        assert!(menuless.supports_reasoning_effort);
+        assert!(menuless.reasoning_efforts.is_empty());
+        assert!(
+            menuless.reasoning_effort.is_none(),
+            "no menu, no declared default: nothing to derive",
+        );
+
+        let pinned = &catalog.get("pinned/m").expect("pinned").info;
+        assert_eq!(
+            pinned.reasoning_effort,
+            Some(ReasoningEffort::Low),
+            "an explicit reasoning_effort must beat the menu's `default = true`",
+        );
+    }
+
+    /// Precedence: a `[model."<provider_id>/<model>"]` table refines the
+    /// provider declaration. Before providers could declare efforts at all,
+    /// expansion overwrote such a table wholesale — this pins the merge.
+    #[test]
+    fn per_model_override_beats_provider_reasoning_declaration() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "acme"
+            base_url = "https://example.test/v1"
+            models = ["m-large", "m-small"]
+            reasoning_efforts = ["low", { value = "high", default = true }]
+
+            [model."acme/m-large"]
+            reasoning_efforts = ["minimal", "max"]
+            reasoning_effort = "max"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config parses");
+        let catalog = resolve_model_list(&cfg, Some(IndexMap::new()));
+
+        let overridden = &catalog.get("acme/m-large").expect("overridden").info;
+        assert_eq!(
+            overridden
+                .reasoning_efforts
+                .iter()
+                .map(|o| o.value)
+                .collect::<Vec<_>>(),
+            vec![ReasoningEffort::Minimal, ReasoningEffort::Max],
+            "the per-model menu replaces the provider's",
+        );
+        assert_eq!(overridden.reasoning_effort, Some(ReasoningEffort::Max));
+        // Non-reasoning provider fields survive the merge: the override is a
+        // refinement of the synthesized entry, not a replacement of it.
+        assert_eq!(overridden.base_url, "https://example.test/v1");
+        assert_eq!(overridden.model, "m-large");
+        assert_eq!(overridden.api_backend, ApiBackend::ChatCompletions);
+
+        // A sibling with no table keeps the provider declaration.
+        let sibling = &catalog.get("acme/m-small").expect("sibling").info;
+        assert_eq!(sibling.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(sibling.reasoning_efforts.len(), 2);
+    }
+
+    /// A `[model.<id>]` table may also *add* effort support to a provider that
+    /// declared none, and may switch it off for one model of a provider that
+    /// declared it for all.
+    #[test]
+    fn per_model_override_adds_and_removes_provider_effort_support() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "silent"
+            base_url = "https://example.test/v1"
+            models = ["m"]
+
+            [[provider]]
+            id = "loud"
+            base_url = "https://example.test/v1"
+            models = ["m"]
+            supports_reasoning_effort = true
+
+            [model."silent/m"]
+            supports_reasoning_effort = true
+            reasoning_effort = "high"
+
+            [model."loud/m"]
+            supports_reasoning_effort = false
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config parses");
+        let catalog = resolve_model_list(&cfg, Some(IndexMap::new()));
+        let silent = &catalog.get("silent/m").expect("silent").info;
+        assert!(silent.supports_reasoning_effort);
+        assert_eq!(silent.reasoning_effort, Some(ReasoningEffort::High));
+        let loud = &catalog.get("loud/m").expect("loud").info;
+        assert!(
+            !loud.supports_reasoning_effort,
+            "an explicit false must win over the provider declaration",
+        );
+    }
+
+    /// End-to-end per wire format: a provider that declares an effort menu
+    /// puts the selected effort on the outbound request body. The value is
+    /// carried by `ModelInfo` -> `SamplerConfig` -> `ConversationRequest`, so
+    /// the assertion is on the bytes the mock server received.
+    #[tokio::test]
+    async fn provider_reasoning_effort_reaches_the_wire_for_every_format() {
+        use xai_grok_sampling_types::conversation::{ConversationItem, ConversationRequest};
+
+        // (format, request path fragment, JSON pointer, expected value)
+        let cases: [(
+            xai_grok_config_types::ProviderFormat,
+            &str,
+            &str,
+            serde_json::Value,
+        ); 4] = [
+            (
+                xai_grok_config_types::ProviderFormat::ChatCompletions,
+                "chat/completions",
+                "/reasoning_effort",
+                serde_json::json!("high"),
+            ),
+            (
+                xai_grok_config_types::ProviderFormat::Responses,
+                "/responses",
+                "/reasoning/effort",
+                serde_json::json!("high"),
+            ),
+            (
+                xai_grok_config_types::ProviderFormat::Messages,
+                "/messages",
+                "/output_config/effort",
+                serde_json::json!("high"),
+            ),
+            (
+                xai_grok_config_types::ProviderFormat::Gemini,
+                ":streamGenerateContent",
+                "/generationConfig/thinkingConfig/thinkingBudget",
+                serde_json::json!(xai_grok_sampling_types::gemini::thinking_budget_for_effort(
+                    ReasoningEffort::High
+                )),
+            ),
+        ];
+
+        for (format, path_fragment, pointer, want) in cases {
+            let server = xai_grok_test_support::MockInferenceServer::start()
+                .await
+                .unwrap();
+            let raw = format!(
+                r#"
+                [[provider]]
+                id = "acme"
+                format = "{}"
+                base_url = "{}"
+                api_key = "sk-test"
+                models = ["m1"]
+                reasoning_efforts = ["low", {{ value = "high", default = true }}]
+                "#,
+                match format {
+                    xai_grok_config_types::ProviderFormat::ChatCompletions => "chat_completions",
+                    xai_grok_config_types::ProviderFormat::Responses => "responses",
+                    xai_grok_config_types::ProviderFormat::Messages => "messages",
+                    xai_grok_config_types::ProviderFormat::Gemini => "gemini",
+                },
+                server.url(),
+            );
+            let raw: toml::Value = toml::from_str(&raw).unwrap();
+            let cfg = Config::new_from_toml_cfg(&raw).expect("config parses");
+            let catalog = resolve_model_list(&cfg, Some(IndexMap::new()));
+            let entry = catalog.get("acme/m1").expect("synthesized");
+
+            let sampler_config = sampling_config_for_model(
+                entry,
+                resolve_credentials(entry, None),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(
+                sampler_config.reasoning_effort,
+                Some(ReasoningEffort::High),
+                "{format:?}: the declared default must reach SamplerConfig",
+            );
+            let effort = sampler_config.reasoning_effort;
+            let client =
+                xai_grok_sampler::SamplingClient::new(sampler_config).expect("client should build");
+            // Mirrors `xai_chat_state`'s request builder, which copies the
+            // resolved SamplerConfig effort onto every ConversationRequest.
+            let request = ConversationRequest {
+                items: vec![ConversationItem::user("hi".to_owned())],
+                model: Some("m1".to_owned()),
+                reasoning_effort: effort,
+                ..Default::default()
+            };
+            let _ = client.conversation_collect(request).await;
+
+            let requests = server.requests();
+            let logged = requests
+                .iter()
+                .find(|e| e.path.contains(path_fragment))
+                .unwrap_or_else(|| panic!("{format:?}: no request to {path_fragment} logged"));
+            let body = logged
+                .body
+                .as_ref()
+                .unwrap_or_else(|| panic!("{format:?}: request body captured"));
+            assert_eq!(
+                body.pointer(pointer),
+                Some(&want),
+                "{format:?}: expected {pointer} = {want}; got {body:#}",
+            );
+        }
     }
     #[test]
     #[serial_test::serial(remote_sig_disarm)]

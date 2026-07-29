@@ -13222,6 +13222,7 @@ dependencies = [
  "xai-grok-announcements",
  "xai-grok-config",
  "xai-grok-mcp",
+ "xai-grok-sampling-types",
 ]
 
 [[package]]

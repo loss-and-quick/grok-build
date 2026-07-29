@@ -15,6 +15,7 @@ tracing = { workspace = true }
 xai-grok-announcements = { workspace = true }
 xai-grok-config = { workspace = true }
 xai-grok-mcp = { workspace = true }
+xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
 
 [dev-dependencies]
 toml = { workspace = true }
