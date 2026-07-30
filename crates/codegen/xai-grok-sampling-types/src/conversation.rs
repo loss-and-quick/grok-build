@@ -2239,16 +2239,28 @@ impl From<&ConversationRequest> for rs::CreateResponse {
         let input = build_responses_input(req);
         let tools = build_responses_tools(req);
 
-        let tool_choice = req.tool_choice.as_ref().map(|tc| match tc {
-            ConversationToolChoice::Auto => rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Auto),
-            ConversationToolChoice::None => rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::None),
-            ConversationToolChoice::Required => {
-                rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Required)
-            }
-            ConversationToolChoice::Function(name) => {
-                rs::ToolChoiceParam::Function(rs::ToolChoiceFunction { name: name.clone() })
-            }
-        });
+        // Only set `tool_choice` when there are `tools` to constrain — an
+        // OpenAI-compatible endpoint rejects `tool_choice` with no `tools`
+        // (`required` most loudly). Same guard as the Chat Completions
+        // conversion above.
+        let tool_choice =
+            req.tool_choice
+                .as_ref()
+                .filter(|_| !tools.is_empty())
+                .map(|tc| match tc {
+                    ConversationToolChoice::Auto => {
+                        rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Auto)
+                    }
+                    ConversationToolChoice::None => {
+                        rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::None)
+                    }
+                    ConversationToolChoice::Required => {
+                        rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Required)
+                    }
+                    ConversationToolChoice::Function(name) => {
+                        rs::ToolChoiceParam::Function(rs::ToolChoiceFunction { name: name.clone() })
+                    }
+                });
 
         let text = req
             .json_schema
@@ -5458,6 +5470,7 @@ mod tests {
     fn test_tool_choice_to_responses_api() {
         // Test Auto
         let req = ConversationRequest::from_items(vec![ConversationItem::user("test")])
+            .with_tools(vec![make_test_tool()])
             .with_tool_choice(ConversationToolChoice::Auto);
         let responses_req: rs::CreateResponse = (&req).into();
         assert_matches!(
@@ -5467,6 +5480,7 @@ mod tests {
 
         // Test Required
         let req = ConversationRequest::from_items(vec![ConversationItem::user("test")])
+            .with_tools(vec![make_test_tool()])
             .with_tool_choice(ConversationToolChoice::Required);
         let responses_req: rs::CreateResponse = (&req).into();
         assert_matches!(
@@ -5476,6 +5490,7 @@ mod tests {
 
         // Test Function
         let req = ConversationRequest::from_items(vec![ConversationItem::user("test")])
+            .with_tools(vec![make_test_tool()])
             .with_tool_choice(ConversationToolChoice::Function("bash".to_string()));
         let responses_req: rs::CreateResponse = (&req).into();
         let Some(rs::ToolChoiceParam::Function(fc)) = responses_req.tool_choice else {
@@ -5492,6 +5507,36 @@ mod tests {
         let chat_req: ChatCompletionRequest = req.into();
         assert!(chat_req.tool_choice.is_none());
         assert!(chat_req.tools.is_none());
+    }
+
+    /// Regression: the Responses conversion used to map `tool_choice`
+    /// unconditionally, so a toolless request could go out as
+    /// `{"tool_choice": "required"}` with no `tools` — which an
+    /// OpenAI-compatible endpoint rejects. Same guard as the Chat Completions
+    /// twin above, asserted on every mode (`required` is the one that 400s
+    /// loudest, so it must be covered by more than the `Auto` happy path).
+    #[test]
+    fn test_tool_choice_dropped_when_no_tools_responses() {
+        for choice in [
+            ConversationToolChoice::Auto,
+            ConversationToolChoice::None,
+            ConversationToolChoice::Required,
+            ConversationToolChoice::Function("bash".to_string()),
+        ] {
+            let req = ConversationRequest::from_items(vec![ConversationItem::user("test")])
+                .with_tool_choice(choice.clone());
+            let responses_req: rs::CreateResponse = (&req).into();
+            assert!(responses_req.tools.is_none());
+            assert!(
+                responses_req.tool_choice.is_none(),
+                "{choice:?} must be dropped when the request carries no tools",
+            );
+            let body = serde_json::to_value(&responses_req).expect("request serializes");
+            assert!(
+                body.get("tool_choice").is_none(),
+                "tool_choice must not reach the wire without tools; got: {body:#}",
+            );
+        }
     }
 
     // ============================================================================
