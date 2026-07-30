@@ -1,6 +1,11 @@
 use super::*;
 
 fn test_manager() -> ModelsManager {
+    manager_with_catalog(IndexMap::new())
+}
+
+/// [`test_manager`] with a pre-resolved catalog in place of a fetch.
+fn manager_with_catalog(models: IndexMap<String, ModelEntry>) -> ModelsManager {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
@@ -9,7 +14,7 @@ fn test_manager() -> ModelsManager {
     let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
     ModelsManagerBuilder::new(
         None,
-        IndexMap::new(),
+        models,
         acp::ModelId::new("default"),
         auth_manager,
         config::Config::default(),
@@ -1807,6 +1812,107 @@ fn resolve_catalog_key_maps_routing_slug_to_config_key() {
     let persisted = acp::ModelId::new("grok-4.5");
     let key = resolve_catalog_key(&models, &persisted).expect("slug must resolve");
     assert_eq!(key.0.as_ref(), "enterprise-grok-build");
+}
+
+// ── aux slug on the session's own client ─────────────────────────
+
+/// A model entry on a specific endpoint, the shape `[[provider]]` expansion
+/// produces: keyed `<provider>/<model>`, routing slug the bare `<model>`.
+fn provider_entry(model: &str, base_url: &str) -> ModelEntry {
+    let mut entry = make_model_entry(model);
+    entry.info.base_url = base_url.to_string();
+    entry
+}
+
+/// A one-shot that rides the session's own client may only name slugs the
+/// session's endpoint serves. Catalog presence does not establish that: every
+/// configured `[[provider]]` lands in the same catalog, so a second provider's
+/// model passes a presence check and then gets sent to an endpoint that has
+/// never served it. Only comparing the resolved entries' endpoints answers the
+/// routing question — and the answer is the entry's slug, never the caller's
+/// catalog key.
+#[test]
+fn aux_slug_served_with_session_model_compares_endpoints_not_presence() {
+    let mut models = IndexMap::new();
+    models.insert(
+        "session-provider/session-model".to_string(),
+        provider_entry("session-model", "https://session-provider.example/v1"),
+    );
+    models.insert(
+        "session-provider/sibling-model".to_string(),
+        provider_entry("sibling-model", "https://session-provider.example/v1"),
+    );
+    models.insert(
+        "acme/some-model".to_string(),
+        provider_entry("some-model", "https://acme.example/v1"),
+    );
+    let mgr = manager_with_catalog(models);
+
+    // Every id below is in the catalog, which is all the old guard asked.
+    for id in [
+        "session-provider/sibling-model",
+        "acme/some-model",
+        "some-model",
+    ] {
+        assert!(
+            mgr.model_in_catalog(id),
+            "{id} must be in the catalog for this test to mean anything"
+        );
+    }
+
+    // Same endpoint as the session model ⇒ served, and translated to the slug.
+    assert_eq!(
+        mgr.aux_slug_served_with_session_model("session-provider/sibling-model", "session-model")
+            .as_deref(),
+        Some("sibling-model")
+    );
+    // The session model itself, by either spelling.
+    for spelling in ["session-provider/session-model", "session-model"] {
+        assert_eq!(
+            mgr.aux_slug_served_with_session_model(spelling, "session-model")
+                .as_deref(),
+            Some("session-model")
+        );
+    }
+    // Another provider's model — in the catalog, not on this endpoint.
+    for foreign in ["acme/some-model", "some-model"] {
+        assert_eq!(
+            mgr.aux_slug_served_with_session_model(foreign, "session-model"),
+            None,
+            "{foreign} is served by a different endpoint than the session's"
+        );
+    }
+    // Nothing to compare against ⇒ no claim either way.
+    assert_eq!(
+        mgr.aux_slug_served_with_session_model("acme/some-model", ""),
+        None
+    );
+    assert_eq!(
+        mgr.aux_slug_served_with_session_model("not-in-catalog", "session-model"),
+        None
+    );
+}
+
+/// An `api_base_url` override redirects an entry's requests away from the
+/// endpoint it declares, so two entries agreeing on `base_url` alone are not
+/// necessarily on the same endpoint.
+#[test]
+fn aux_slug_served_with_session_model_honors_an_api_base_url_override() {
+    let mut models = IndexMap::new();
+    models.insert(
+        "session-model".to_string(),
+        provider_entry("session-model", "https://shared.example/v1"),
+    );
+    let mut redirected = provider_entry("other-model", "https://shared.example/v1");
+    redirected.api_base_url = Some("https://elsewhere.example/v1".to_string());
+    models.insert("other-model".to_string(), redirected);
+    let mgr = manager_with_catalog(models);
+
+    assert_eq!(
+        mgr.aux_slug_served_with_session_model("other-model", "session-model"),
+        None,
+        "an entry redirected elsewhere is not on the session's endpoint"
+    );
 }
 
 #[test]

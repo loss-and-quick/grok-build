@@ -5503,17 +5503,27 @@ pub const DEFAULT_SESSION_CLIENT_AUX_MODEL: &str = "grok-build";
 /// [`resolve_aux_model_sampling_config`]).
 ///
 /// That client points at whatever endpoint the active session model lives on,
-/// and the only slug it is guaranteed to serve is the session model itself.
-/// `requested` is kept when either
+/// and the only slugs it can serve are that endpoint's own. `served_slug`
+/// answers whether `requested` is one of them: it resolves `requested` in the
+/// catalog, compares the endpoint its entry declares against the session
+/// model's, and returns *that entry's* routing slug when the two agree.
 ///
-/// * the catalog lists it (`in_catalog`) — a model the endpoint or a
-///   `[model.*]` / `[[provider]]` entry actually declares, or
-/// * the session endpoint is xAI-operated, which serves the compiled-in
-///   internal slugs ([`DEFAULT_SESSION_CLIENT_AUX_MODEL`], ...) even when the
-///   catalog does not list them (they are hidden from OAuth catalogs).
+/// It deliberately replaced a catalog-presence predicate. **A guard on catalog
+/// presence is not a guard on routing correctness**: every `[[provider]]` a user
+/// configures lands in the same catalog, so presence says yes to a second
+/// provider's model, and the session's endpoint then rejects by name a slug it
+/// has never served. Presence is also what makes the request happen at all, so
+/// it can never be the thing that keeps it honest. And the value returned is the
+/// entry's slug, never `requested`: a catalog key (`<provider>/<model>`) is a
+/// routing address, not a name any vendor answers to.
 ///
-/// Otherwise fall back to the session model: naming an unknown slug to a custom
-/// `[[provider]]` is a guaranteed 404.
+/// `requested` is kept as typed only when nothing in the catalog can translate
+/// it and the session endpoint is xAI-operated, which serves the compiled-in
+/// internal slugs ([`DEFAULT_SESSION_CLIENT_AUX_MODEL`], ...) even though the
+/// catalog does not list them (they are hidden from OAuth catalogs).
+///
+/// Otherwise fall back to the session model: naming a slug the session endpoint
+/// does not serve is a guaranteed 404.
 ///
 /// Deliberately [`crate::util::is_xai_api_url`], not `is_xai_api_bearer_url`:
 /// this only decides which slug an already-built client may name — no
@@ -5527,12 +5537,12 @@ pub fn aux_slug_on_session_client(
     requested: &str,
     session_model: &str,
     session_base_url: &str,
-    in_catalog: impl Fn(&str) -> bool,
+    served_slug: impl Fn(&str) -> Option<String>,
 ) -> String {
-    if session_model.is_empty()
-        || in_catalog(requested)
-        || crate::util::is_xai_api_url(session_base_url)
-    {
+    if let Some(slug) = served_slug(requested) {
+        return slug;
+    }
+    if session_model.is_empty() || crate::util::is_xai_api_url(session_base_url) {
         return requested.to_owned();
     }
     tracing::debug!(
@@ -6514,28 +6524,29 @@ reasoning_effort = "low"
     }
     /// The autocomplete / memory-rewrite helpers send their request on the
     /// session's own client, so they used to hand a custom `[[provider]]` a
-    /// hardcoded internal slug it has never heard of. The slug must be
-    /// catalog-guarded and degrade to the session model — while a first-party
-    /// session keeps naming the internal slug, which only lives there.
+    /// hardcoded internal slug it has never heard of. The slug must be guarded
+    /// against the session's own endpoint and degrade to the session model —
+    /// while a first-party session keeps naming the internal slug, which only
+    /// lives there.
     #[test]
     fn aux_slug_on_session_client_guards_foreign_slug_on_custom_provider() {
-        let empty_catalog = |_: &str| false;
+        let serves_nothing = |_: &str| None;
         assert_eq!(
             aux_slug_on_session_client(
                 DEFAULT_SESSION_CLIENT_AUX_MODEL,
                 "some-model",
                 "https://acme.example/v1",
-                empty_catalog,
+                serves_nothing,
             ),
             "some-model",
-            "a custom provider must be named only slugs it declares"
+            "a custom provider must be named only slugs it serves"
         );
         assert_eq!(
             aux_slug_on_session_client(
                 "another-provider-model",
                 "some-model",
                 "https://acme.example/v1",
-                empty_catalog,
+                serves_nothing,
             ),
             "some-model",
             "a client-supplied override is guarded the same way"
@@ -6545,17 +6556,17 @@ reasoning_effort = "low"
                 "acme/some-other-model",
                 "some-model",
                 "https://acme.example/v1",
-                |m| m == "acme/some-other-model",
+                |m| (m == "acme/some-other-model").then(|| "some-other-model".to_owned()),
             ),
-            "acme/some-other-model",
-            "a catalog-listed slug is still honored"
+            "some-other-model",
+            "a sibling model on the session's own endpoint is honored — as its slug"
         );
         assert_eq!(
             aux_slug_on_session_client(
                 DEFAULT_SESSION_CLIENT_AUX_MODEL,
                 "grok-4.5",
                 &EndpointsConfig::default().resolve_inference_base_url(),
-                empty_catalog,
+                serves_nothing,
             ),
             DEFAULT_SESSION_CLIENT_AUX_MODEL,
             "a first-party session keeps the internal slug (hidden from the catalog)"
@@ -6565,11 +6576,95 @@ reasoning_effort = "low"
                 DEFAULT_SESSION_CLIENT_AUX_MODEL,
                 "",
                 "https://acme.example/v1",
-                empty_catalog,
+                serves_nothing,
             ),
             DEFAULT_SESSION_CLIENT_AUX_MODEL,
             "with no session model there is no better slug to name"
         );
+    }
+
+    /// The guard used to ask the catalog whether the requested model *exists*.
+    /// Every configured `[[provider]]` lands in that one catalog, so a second
+    /// provider's model — or a client-supplied hint naming one — answered yes and
+    /// then rode the session's client, which carries a different endpoint and
+    /// credential entirely: a 404 by name, the same failure a presence check let
+    /// through on the suggestion path.
+    ///
+    /// Resolving the entry instead keeps slug and endpoint from the same catalog
+    /// entry: a model on the session's endpoint is honored (as that entry's
+    /// slug), one on any other endpoint degrades to the session model.
+    #[test]
+    fn aux_slug_on_session_client_rejects_a_model_from_another_provider() {
+        let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+        catalog.insert(
+            "session-provider/session-model".to_string(),
+            test_model_entry(
+                "session-model",
+                "https://session-provider.example/v1",
+                Some("session-key"),
+                None,
+                None,
+            ),
+        );
+        catalog.insert(
+            "session-provider/sibling-model".to_string(),
+            test_model_entry(
+                "sibling-model",
+                "https://session-provider.example/v1",
+                Some("session-key"),
+                None,
+                None,
+            ),
+        );
+        catalog.insert(
+            "acme/some-model".to_string(),
+            test_model_entry(
+                "some-model",
+                "https://acme.example/v1",
+                Some("acme-key"),
+                None,
+                None,
+            ),
+        );
+        // What the old guard answered: every one of these is in the catalog.
+        for id in [
+            "session-provider/sibling-model",
+            "acme/some-model",
+            "some-model",
+        ] {
+            assert!(
+                find_model_by_id(&catalog, id).is_some(),
+                "{id} must be in the catalog for this test to mean anything"
+            );
+        }
+        // What the endpoint actually serves.
+        let served = |requested: &str| {
+            let requested = find_model_by_id(&catalog, requested)?;
+            let session = find_model_by_id(&catalog, "session-provider/session-model")?;
+            (requested.info.base_url == session.info.base_url).then(|| requested.info.model.clone())
+        };
+        assert_eq!(
+            aux_slug_on_session_client(
+                "session-provider/sibling-model",
+                "session-model",
+                "https://session-provider.example/v1",
+                served,
+            ),
+            "sibling-model",
+            "a sibling on the session's endpoint is served there — and named by slug, not by key"
+        );
+        for foreign in ["acme/some-model", "some-model"] {
+            assert_eq!(
+                aux_slug_on_session_client(
+                    foreign,
+                    "session-model",
+                    "https://session-provider.example/v1",
+                    served,
+                ),
+                "session-model",
+                "{foreign} lives on another endpoint: the session client must not name it"
+            );
+        }
     }
     #[test]
     fn resolve_aux_model_honors_grok_build_override() {

@@ -514,7 +514,8 @@ impl SessionActor {
 
         // The suggestion rides on the session's client, so the slug must be one
         // that client's endpoint serves: a custom `[[provider]]` 404s on the
-        // internal default (and on any override it does not declare).
+        // internal default, and on any override — including a client-supplied
+        // one — that belongs to a different provider.
         let (session_model, session_base_url) = self
             .chat_state_handle
             .get_sampling_config()
@@ -528,7 +529,10 @@ impl SessionActor {
                 .unwrap_or(crate::agent::config::DEFAULT_SESSION_CLIENT_AUX_MODEL),
             &session_model,
             &session_base_url,
-            |m| self.models_manager.model_in_catalog(m),
+            |m| {
+                self.models_manager
+                    .aux_slug_served_with_session_model(m, &session_model)
+            },
         );
 
         let request = ConversationRequest {

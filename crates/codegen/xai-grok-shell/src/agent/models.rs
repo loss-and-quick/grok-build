@@ -578,10 +578,38 @@ impl ModelsManager {
     /// request's `model` must translate it here first.
     pub fn model_routing_slug(&self, model_id: &str) -> Option<String> {
         let cat = self.inner.catalog.read();
-        let models = &cat.models;
-        resolve_catalog_key(models, &acp::ModelId::new(model_id))
-            .and_then(|key| models.get(key.0.as_ref()))
-            .map(|entry| entry.info().model.clone())
+        catalog_entry(&cat.models, model_id).map(|entry| entry.info().model.clone())
+    }
+
+    /// The routing slug `requested` may be named on a sampling client that was
+    /// built for `session_model`, or `None` when it may not be named there at
+    /// all. For [`crate::agent::config::aux_slug_on_session_client`].
+    ///
+    /// Both ids are resolved in the same catalog and the endpoints their entries
+    /// declare are compared, so this answers a question about *routing*. Catalog
+    /// presence cannot answer it: every `[[provider]]` a user configures lands in
+    /// this same catalog, so a presence check says yes to a second provider's
+    /// model while the session's endpoint has never served that name.
+    ///
+    /// The comparison is entry-to-entry, not entry-to-live-config, so both sides
+    /// are derived the same way: a live `SamplerConfig.base_url` can carry a
+    /// credential-resolved override that `ModelInfo.base_url` does not, which
+    /// would read as a spurious mismatch. `api_base_url` is compared too, since
+    /// it can redirect an entry away from the endpoint it declares.
+    ///
+    /// The value returned is the resolved entry's own slug, never `requested`: a
+    /// catalog key is a routing address, not a name an endpoint answers to.
+    pub fn aux_slug_served_with_session_model(
+        &self,
+        requested: &str,
+        session_model: &str,
+    ) -> Option<String> {
+        let cat = self.inner.catalog.read();
+        let requested = catalog_entry(&cat.models, requested)?;
+        let session = catalog_entry(&cat.models, session_model)?;
+        let same_endpoint = requested.info().base_url == session.info().base_url
+            && requested.api_base_url == session.api_base_url;
+        same_endpoint.then(|| requested.info().model.clone())
     }
 
     #[cfg(test)]
@@ -1192,6 +1220,16 @@ impl ModelsManager {
             self.set_current_model_id_internal(new_id);
         }
     }
+}
+
+/// The catalog entry `model_id` resolves to — by config key first, then by
+/// routing slug ([`resolve_catalog_key`]).
+fn catalog_entry<'a>(
+    models: &'a IndexMap<String, ModelEntry>,
+    model_id: &str,
+) -> Option<&'a ModelEntry> {
+    resolve_catalog_key(models, &acp::ModelId::new(model_id))
+        .and_then(|key| models.get(key.0.as_ref()))
 }
 
 // ── Refresh strategy ────────────────────────────────────────────────────────

@@ -718,7 +718,10 @@ impl SessionActor {
             crate::agent::config::DEFAULT_SESSION_CLIENT_AUX_MODEL,
             &session_model,
             &session_base_url,
-            |m| self.models_manager.model_in_catalog(m),
+            |m| {
+                self.models_manager
+                    .aux_slug_served_with_session_model(m, &session_model)
+            },
         );
 
         let request = ConversationRequest {
