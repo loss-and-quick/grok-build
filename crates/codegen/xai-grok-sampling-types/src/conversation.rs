@@ -2292,8 +2292,27 @@ impl From<&ConversationRequest> for rs::CreateResponse {
             prompt: None,
             prompt_cache_key: req.prompt_cache_key.clone(),
             prompt_cache_retention: None,
-            reasoning: Some(rs::Reasoning {
-                effort: req.reasoning_effort.map(|e| e.to_responses_api()),
+            // Send `reasoning` only when an effort was actually requested. A
+            // model that does not reason rejects the parameter outright, and
+            // "no effort requested" is how the caller reports exactly that:
+            // the model catalog only fills `reasoning_effort` in for entries
+            // flagged `supports_reasoning_effort`. Sending
+            // `{"summary": "concise"}` with no effort asked a non-reasoning
+            // model for a reasoning summary and got the whole request refused.
+            //
+            // The `summary` value is left alone on purpose. The vendored
+            // async-openai documents `concise` as supported only for
+            // `computer-use-preview` and reasoning models after `gpt-5`, so it
+            // is wrong for the o3/o4-mini generation — but picking per model
+            // means classifying an arbitrary third-party model by slug, which
+            // is not something this crate can do: it sees only the slug the
+            // user configured, with no provider identity attached. (An
+            // OpenAI-compatible gateway can do it because it knows which
+            // provider it is talking to and gates every such rewrite on that.)
+            // The fix belongs in the model catalog as a per-model summary
+            // style, not in a slug match here.
+            reasoning: req.reasoning_effort.map(|effort| rs::Reasoning {
+                effort: Some(effort.to_responses_api()),
                 summary: Some(rs::ReasoningSummary::Concise),
             }),
             safety_identifier: None,
@@ -5855,8 +5874,16 @@ mod tests {
         }
     }
 
+    /// Regression: with no effort requested, the request used to still carry
+    /// `reasoning: {"summary": "concise"}` — asking a model that may not reason
+    /// at all for a reasoning summary, which a non-reasoning model rejects
+    /// outright. The whole object has to be absent, not just `effort`.
+    ///
+    /// "No effort requested" is the caller's own signal that reasoning config
+    /// does not apply: the model catalog fills `reasoning_effort` in only for
+    /// entries flagged `supports_reasoning_effort`.
     #[test]
-    fn test_responses_request_omits_effort_when_unset() {
+    fn test_responses_request_omits_reasoning_when_effort_unset() {
         let req =
             ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_model("test");
         let resp: crate::rs::CreateResponse = (&req).into();
@@ -5864,6 +5891,29 @@ mod tests {
         assert!(
             json.pointer("/reasoning/effort").is_none(),
             "reasoning.effort must be absent when unset; got: {json:#}",
+        );
+        assert!(
+            json.get("reasoning").is_none(),
+            "the whole reasoning object must be absent when no effort is \
+             requested — a non-reasoning model rejects it; got: {json:#}",
+        );
+
+        // With an effort, the object is sent and keeps its summary style.
+        let req = ConversationRequest {
+            reasoning_effort: Some(crate::ReasoningEffort::High),
+            ..ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_model("test")
+        };
+        let resp: crate::rs::CreateResponse = (&req).into();
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(
+            json.pointer("/reasoning/effort").and_then(|v| v.as_str()),
+            Some("high"),
+            "got: {json:#}",
+        );
+        assert_eq!(
+            json.pointer("/reasoning/summary").and_then(|v| v.as_str()),
+            Some("concise"),
+            "got: {json:#}",
         );
     }
 
