@@ -5562,7 +5562,12 @@ pub fn resolve_chat_state_auth_type(
 /// * `messages` — `x-api-key: <key>` plus a default `anthropic-version`.
 /// * `gemini` — `x-goog-api-key: <key>` (kept out of the URL).
 ///
-/// Provider-supplied `headers` always win over these defaults.
+/// Provider-supplied `headers` always win over these defaults, and so does a
+/// provider-supplied `auth_scheme`: the scheme belongs to the *credential* as
+/// much as to the format, and the format can only guess the common case. The
+/// guess above is right for an API key and wrong for an OAuth bearer, which an
+/// Anthropic-format endpoint accepts only in `Authorization` — see
+/// [`xai_grok_config_types::ProviderConfig::auth_scheme`].
 fn provider_format_defaults(
     format: xai_grok_config_types::ProviderFormat,
 ) -> (
@@ -5580,6 +5585,21 @@ fn provider_format_defaults(
             &[("anthropic-version", "2023-06-01")],
         ),
         ProviderFormat::Gemini => (ApiBackend::Gemini, AuthScheme::GoogleApiKey, &[]),
+    }
+}
+
+/// Translate a `[[provider]] auth_scheme` declaration into the sampler's own
+/// enum.
+///
+/// `xai-grok-config-types` must not depend on the sampler crate, so it declares
+/// its own mirror of `AuthScheme` and the two are joined here — exactly the
+/// arrangement `ProviderFormat` → [`ApiBackend`] already uses above.
+fn provider_auth_scheme(declared: xai_grok_config_types::ProviderAuthScheme) -> AuthScheme {
+    use xai_grok_config_types::ProviderAuthScheme;
+    match declared {
+        ProviderAuthScheme::Bearer => AuthScheme::Bearer,
+        ProviderAuthScheme::XApiKey => AuthScheme::XApiKey,
+        ProviderAuthScheme::GoogleApiKey => AuthScheme::GoogleApiKey,
     }
 }
 
@@ -5605,7 +5625,15 @@ fn expand_providers_into_catalog(
     let fallback_cw =
         NonZeroU64::new(DEFAULT_CONTEXT_WINDOW).unwrap_or(NonZeroU64::new(200_000).unwrap());
     for provider in providers {
-        let (backend, auth_scheme, default_headers) = provider_format_defaults(provider.format);
+        let (backend, format_auth_scheme, default_headers) =
+            provider_format_defaults(provider.format);
+        // A declared scheme wins over the format's guess; unset keeps the guess.
+        // The credential decides which header it is valid in — an OAuth bearer on
+        // an Anthropic-format endpoint has to ride `Authorization`, an API key on
+        // the same endpoint has to ride `x-api-key`.
+        let auth_scheme = provider
+            .auth_scheme
+            .map_or(format_auth_scheme, provider_auth_scheme);
         // Format defaults first, provider headers second so the latter win.
         let mut headers: IndexMap<String, String> = default_headers
             .iter()
@@ -13720,6 +13748,7 @@ default = "grok-4.5"
             format: ProviderFormat::ChatCompletions,
             base_url: "https://example.test/v1".to_owned(),
             api_key: None,
+            auth_scheme: None,
             headers: IndexMap::new(),
             proxy: None,
             models: vec!["m".to_owned()],
@@ -13768,6 +13797,7 @@ default = "grok-4.5"
                 format: ProviderFormat::ChatCompletions,
                 base_url: "https://prox.test/v1".to_owned(),
                 api_key: Some("k".to_owned()),
+                auth_scheme: None,
                 headers: IndexMap::new(),
                 proxy: Some("http://proxy.test:3128".to_owned()),
                 models: vec!["m".to_owned()],
@@ -13783,6 +13813,7 @@ default = "grok-4.5"
                 format: ProviderFormat::ChatCompletions,
                 base_url: "https://direct.test/v1".to_owned(),
                 api_key: Some("k".to_owned()),
+                auth_scheme: None,
                 headers: IndexMap::new(),
                 proxy: None,
                 models: vec!["m".to_owned()],
@@ -13839,6 +13870,7 @@ default = "grok-4.5"
                 format,
                 base_url: "https://p.test/v1".to_owned(),
                 api_key: Some("sk-test".to_owned()),
+                auth_scheme: None,
                 headers: IndexMap::new(),
                 proxy: None,
                 models: vec!["m".to_owned()],
@@ -13879,6 +13911,7 @@ default = "grok-4.5"
             format: ProviderFormat::ChatCompletions,
             base_url: server.url(),
             api_key: Some("secret-bearer".to_owned()),
+            auth_scheme: None,
             headers: IndexMap::new(),
             proxy: None,
             models: vec!["m1".to_owned()],
@@ -13916,6 +13949,9 @@ default = "grok-4.5"
 
     /// End-to-end wire check: a messages provider sends `x-api-key` plus the
     /// default `anthropic-version` header to its own `/messages` endpoint.
+    ///
+    /// This is the *unset* `auth_scheme` case — the format default, which an
+    /// override must not disturb.
     #[tokio::test]
     async fn provider_messages_sends_x_api_key_and_anthropic_version() {
         use xai_grok_config_types::{ProviderConfig, ProviderFormat};
@@ -13929,6 +13965,7 @@ default = "grok-4.5"
             format: ProviderFormat::Messages,
             base_url: server.url(),
             api_key: Some("sk-ant-secret".to_owned()),
+            auth_scheme: None,
             headers: IndexMap::new(),
             proxy: None,
             models: vec!["claude-x".to_owned()],
@@ -13970,6 +14007,145 @@ default = "grok-4.5"
         );
     }
 
+    /// End-to-end wire check for the override: a `format = "messages"` provider
+    /// that declares `auth_scheme = "bearer"` puts its credential in
+    /// `Authorization: Bearer` and sends no `x-api-key` at all, while the
+    /// format's own `anthropic-version` default still rides along.
+    ///
+    /// This is the shape an OAuth subscription token needs. Anthropic accepts
+    /// such a token only in `Authorization`; the same token in `x-api-key` is not
+    /// a valid key, so before this override existed a messages-format provider
+    /// backed by an OAuth credential 401'd on every attempt — including after a
+    /// successful token refresh, which is what made the failure look like an auth
+    /// problem rather than a header-shape one.
+    #[tokio::test]
+    async fn provider_messages_bearer_override_sends_authorization_not_x_api_key() {
+        use xai_grok_config_types::{ProviderAuthScheme, ProviderConfig, ProviderFormat};
+        use xai_grok_sampling_types::conversation::{ConversationItem, ConversationRequest};
+
+        let server = xai_grok_test_support::MockInferenceServer::start()
+            .await
+            .unwrap();
+        let providers = vec![ProviderConfig {
+            id: "anthro-oauth".to_owned(),
+            format: ProviderFormat::Messages,
+            base_url: server.url(),
+            api_key: Some("oauth-access-token".to_owned()),
+            // The credential is a bearer, not an API key, so it must not be sent
+            // in the header the messages format would otherwise pick.
+            auth_scheme: Some(ProviderAuthScheme::Bearer),
+            headers: IndexMap::new(),
+            proxy: None,
+            models: vec!["claude-x".to_owned()],
+            context_window: None,
+            max_completion_tokens: Some(64_000),
+            auth_account: None,
+            reasoning_efforts: Vec::new(),
+            reasoning_effort: None,
+            supports_reasoning_effort: false,
+        }];
+        let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+        expand_providers_into_catalog(&mut catalog, &providers);
+        let entry = catalog
+            .get("anthro-oauth/claude-x")
+            .expect("entry synthesized");
+        // The override survives expansion into the catalog, not just the request.
+        assert_eq!(entry.info.auth_scheme, AuthScheme::Bearer);
+        // Overriding the scheme must not drop the format's required header.
+        assert_eq!(
+            entry
+                .info
+                .extra_headers
+                .get("anthropic-version")
+                .map(String::as_str),
+            Some("2023-06-01")
+        );
+        let creds = resolve_credentials(entry, None);
+        let config = sampling_config_for_model(entry, creds, None, None, None, None);
+        assert_eq!(config.auth_scheme, AuthScheme::Bearer);
+        let client = xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+
+        let request = ConversationRequest {
+            items: vec![ConversationItem::user("hi".to_owned())],
+            model: Some("claude-x".to_owned()),
+            ..Default::default()
+        };
+        let _ = client.conversation_collect(request).await;
+
+        let requests = server.requests();
+        let logged = requests
+            .iter()
+            .find(|e| e.path == "/v1/messages")
+            .expect("messages request logged");
+        assert_eq!(
+            logged.authorization.as_deref(),
+            Some("Bearer oauth-access-token"),
+            "an OAuth credential must ride in Authorization"
+        );
+        assert_eq!(
+            logged.header("x-api-key"),
+            None,
+            "the token must not also be offered as an API key"
+        );
+        assert_eq!(
+            logged.header("anthropic-version"),
+            Some("2023-06-01"),
+            "the format's required version header must survive the override"
+        );
+    }
+
+    /// The override is not messages-specific: every scheme a provider can
+    /// declare reaches the sampler's on-the-wire auth type, whichever format it
+    /// is paired with. Unset keeps the per-format default, which
+    /// `provider_per_format_auth_flows_to_sampler` covers.
+    #[test]
+    fn provider_declared_auth_scheme_overrides_every_format_default() {
+        use xai_grok_config_types::{ProviderAuthScheme, ProviderConfig, ProviderFormat};
+        let formats = [
+            ProviderFormat::ChatCompletions,
+            ProviderFormat::Responses,
+            ProviderFormat::Messages,
+            ProviderFormat::Gemini,
+        ];
+        let schemes = [
+            (ProviderAuthScheme::Bearer, "bearer"),
+            (ProviderAuthScheme::XApiKey, "x-api-key"),
+            (ProviderAuthScheme::GoogleApiKey, "x-goog-api-key"),
+        ];
+        for format in formats {
+            for (declared, want_auth_type) in schemes {
+                let providers = vec![ProviderConfig {
+                    id: "p".to_owned(),
+                    format,
+                    base_url: "https://p.test/v1".to_owned(),
+                    api_key: Some("sk-test".to_owned()),
+                    auth_scheme: Some(declared),
+                    headers: IndexMap::new(),
+                    proxy: None,
+                    models: vec!["m".to_owned()],
+                    context_window: None,
+                    max_completion_tokens: Some(4_096),
+                    auth_account: None,
+                    reasoning_efforts: Vec::new(),
+                    reasoning_effort: None,
+                    supports_reasoning_effort: false,
+                }];
+                let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+                expand_providers_into_catalog(&mut catalog, &providers);
+                let entry = catalog.get("p/m").expect("entry synthesized");
+                let creds = resolve_credentials(entry, None);
+                let config = sampling_config_for_model(entry, creds, None, None, None, None);
+                let client =
+                    xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+                assert_eq!(
+                    client.auth_info().auth_type,
+                    want_auth_type,
+                    "format {format:?} with declared {declared:?} must send {want_auth_type}"
+                );
+            }
+        }
+    }
+
     /// End-to-end: a gemini provider sends `x-goog-api-key` to the
     /// `models/<model>:streamGenerateContent` path and the streamed chunks
     /// collect into a unified response with text and usage.
@@ -13986,6 +14162,7 @@ default = "grok-4.5"
             format: ProviderFormat::Gemini,
             base_url: server.url(),
             api_key: Some("goo-secret".to_owned()),
+            auth_scheme: None,
             headers: IndexMap::new(),
             proxy: None,
             models: vec!["gemini-x".to_owned()],

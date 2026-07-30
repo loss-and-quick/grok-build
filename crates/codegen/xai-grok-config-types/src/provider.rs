@@ -29,6 +29,28 @@ pub enum ProviderFormat {
     Gemini,
 }
 
+/// Which request header a custom provider's credential rides in.
+///
+/// Maps 1:1 onto the sampler's `AuthScheme`
+/// (crates/codegen/xai-grok-sampler/src/config.rs), but lives here so config
+/// parsing does not depend on the sampler crate — the same inversion
+/// [`ProviderFormat`] makes for `ApiBackend`.
+///
+/// Deliberately has no `Default`: the absence of a declaration means "use the
+/// wire format's own scheme", which is a decision only the format table can
+/// make, so "unset" must not collapse into one of these variants here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuthScheme {
+    /// `Authorization: Bearer <credential>`.
+    Bearer,
+    /// `x-api-key: <credential>` (Anthropic API keys).
+    XApiKey,
+    /// `x-goog-api-key: <credential>` (Google Gemini; kept out of the URL so it
+    /// never lands in request logs).
+    GoogleApiKey,
+}
+
 /// A single `[[provider]]` registry entry.
 ///
 /// `id` disambiguates when the same bare model slug is served by more than
@@ -43,10 +65,28 @@ pub struct ProviderConfig {
     pub format: ProviderFormat,
     /// Endpoint base URL, e.g. `https://example.test/v1`.
     pub base_url: String,
-    /// Credential sent per the format's auth scheme (Bearer / `x-api-key` /
-    /// `x-goog-api-key`). May be a `$VAR` or `{file:/path}` reference.
+    /// Credential sent per [`Self::auth_scheme`], defaulting to the format's own
+    /// scheme (Bearer / `x-api-key` / `x-goog-api-key`). May be a `$VAR` or
+    /// `{file:/path}` reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Which header this provider's credential rides in, overriding the wire
+    /// format's default.
+    ///
+    /// This exists because the auth scheme is a property of the *credential*,
+    /// not only of the wire format. An Anthropic-format endpoint authenticated
+    /// by an API key wants `x-api-key` — which is why that is the `messages`
+    /// default — but the very same endpoint authenticated by an OAuth bearer (a
+    /// subscription token minted by an OAuth flow, typically resolved by a
+    /// credential plugin) is accepted *only* on `Authorization: Bearer`; sent as
+    /// `x-api-key` it is by definition not a valid key and every request 401s,
+    /// however often the token is refreshed. One wire format therefore has to be
+    /// able to speak either scheme, chosen per provider entry.
+    ///
+    /// `None` (the default) keeps the format's own scheme, so nothing changes
+    /// for a provider that does not declare one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<ProviderAuthScheme>,
     /// Extra request headers applied verbatim (values may be secret refs).
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub headers: IndexMap<String, String>,
@@ -125,6 +165,7 @@ mod tests {
             format = "messages"
             base_url = "https://example.test/v1"
             api_key = "secret-token"
+            auth_scheme = "bearer"
             proxy = "http://proxy.test:8080"
             models = ["m-large", "m-small"]
             context_window = 128000
@@ -139,6 +180,9 @@ mod tests {
         assert_eq!(p.format, ProviderFormat::Messages);
         assert_eq!(p.base_url, "https://example.test/v1");
         assert_eq!(p.api_key.as_deref(), Some("secret-token"));
+        // A messages-format endpoint whose credential is an OAuth bearer says so
+        // here; the format default alone would send it as `x-api-key`.
+        assert_eq!(p.auth_scheme, Some(ProviderAuthScheme::Bearer));
         assert_eq!(p.proxy.as_deref(), Some("http://proxy.test:8080"));
         assert_eq!(p.models, vec!["m-large", "m-small"]);
         assert_eq!(p.context_window.map(|c| c.get()), Some(128000));
@@ -160,6 +204,8 @@ mod tests {
         let p: ProviderConfig = toml::from_str(toml).unwrap();
         assert_eq!(p.format, ProviderFormat::ChatCompletions);
         assert!(p.api_key.is_none());
+        // Unset = the wire format decides which header the credential rides in.
+        assert!(p.auth_scheme.is_none());
         assert!(p.headers.is_empty());
         assert!(p.proxy.is_none());
         assert!(p.models.is_empty());
@@ -294,6 +340,33 @@ mod tests {
         assert_eq!(root.provider.len(), 2);
         assert_eq!(root.provider[0].id, "a");
         assert_eq!(root.provider[1].format, ProviderFormat::Gemini);
+    }
+
+    /// The declaration is spelled the same way the sampler spells its own
+    /// `AuthScheme`, so one table maps onto the other without translation of the
+    /// wire strings.
+    #[test]
+    fn each_auth_scheme_round_trips() {
+        for (s, want) in [
+            ("bearer", ProviderAuthScheme::Bearer),
+            ("x_api_key", ProviderAuthScheme::XApiKey),
+            ("google_api_key", ProviderAuthScheme::GoogleApiKey),
+        ] {
+            let toml = format!(
+                "id=\"i\"\nbase_url=\"https://e.test\"\nformat=\"messages\"\nauth_scheme=\"{s}\""
+            );
+            let p: ProviderConfig = toml::from_str(&toml).unwrap();
+            assert_eq!(p.auth_scheme, Some(want));
+        }
+    }
+
+    /// An unknown scheme is a config error rather than a silent fallback to the
+    /// format default — a typo there would 401 at request time with nothing to
+    /// point at.
+    #[test]
+    fn rejects_unknown_auth_scheme() {
+        let toml = "id=\"i\"\nbase_url=\"https://e.test\"\nauth_scheme=\"x-api-key\"";
+        assert!(toml::from_str::<ProviderConfig>(toml).is_err());
     }
 
     #[test]

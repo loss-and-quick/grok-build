@@ -45,6 +45,17 @@
     "max"
   ];
 
+  # The auth schemes `ProviderAuthScheme` deserializes
+  # (crates/codegen/xai-grok-config-types/src/provider.rs) — snake_case, matching
+  # the sampler's own `AuthScheme`, so `x_api_key` and not the `x-api-key` header
+  # spelling. An enum so that distinction fails at nix eval rather than at grok's
+  # config parse.
+  providerAuthSchemeType = types.enum [
+    "bearer"
+    "x_api_key"
+    "google_api_key"
+  ];
+
   # One `[[provider]]` registry entry. Fields mirror
   # `xai_grok_config_types::provider::ProviderConfig`
   # (crates/codegen/xai-grok-config-types/src/provider.rs) 1:1, including its
@@ -76,10 +87,31 @@
         type = types.nullOr types.str;
         default = null;
         description = ''
-          Credential sent per the format's auth scheme (Bearer / `x-api-key` /
-          `x-goog-api-key`). Prefer a `{file:/path}` reference over a literal so
-          the secret never lands in the world-readable Nix store. `null` (the
-          default) omits the field entirely.
+          Credential sent per `auth_scheme`, defaulting to the format's own
+          scheme (Bearer / `x-api-key` / `x-goog-api-key`). Prefer a
+          `{file:/path}` reference over a literal so the secret never lands in
+          the world-readable Nix store. `null` (the default) omits the field
+          entirely.
+        '';
+      };
+      auth_scheme = mkOption {
+        type = types.nullOr providerAuthSchemeType;
+        default = null;
+        example = "bearer";
+        description = ''
+          Which header `api_key` rides in, overriding the wire format's default.
+
+          The auth scheme belongs to the *credential* as much as to the format.
+          An Anthropic-format endpoint authenticated by an API key wants
+          `x-api-key`, which is why that is the `messages` default — but the same
+          endpoint authenticated by an OAuth bearer (a subscription token, e.g.
+          one a credential plugin resolves) is accepted only in
+          `Authorization: Bearer`; offered as `x-api-key` it is not a valid key
+          and every request is rejected, no matter how often the token is
+          refreshed. Set `"bearer"` for that case.
+
+          `null` (the default) keeps the format's own scheme, so a provider that
+          does not care never mentions this.
         '';
       };
       headers = mkOption {
@@ -180,8 +212,8 @@
     };
   };
 
-  # ProviderConfig applies `skip_serializing_if` to `api_key`, `proxy`,
-  # `context_window`, `max_completion_tokens`, `auth_account`,
+  # ProviderConfig applies `skip_serializing_if` to `api_key`, `auth_scheme`,
+  # `proxy`, `context_window`, `max_completion_tokens`, `auth_account`,
   # `reasoning_effort` (Option::is_none), to
   # empty `headers`/`models`/`reasoning_efforts`, and to a false
   # `supports_reasoning_effort`. Nix's TOML writer cannot emit `null`, so drop
