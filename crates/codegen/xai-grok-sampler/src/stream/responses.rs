@@ -155,6 +155,12 @@ pub(crate) fn stream_responses_tracked<'a>(
         let mut message_chunk_count: u64 = 0;
         let mut first_token_emitted = false;
         let mut reasoning_acc = String::new();
+        // A content refusal, accumulated from `response.refusal.delta` /
+        // `.done`. `Some` means the model refused (the text may be empty if
+        // the backend sent none). Not forwarded as a `ChannelToken`: a refusal
+        // is not model output, and the shell renders its own notice from
+        // `StopReason::ContentFilter` + `stop_message`.
+        let mut refusal_acc: Option<String> = None;
         let mut last_content_chunk_at = Instant::now();
 
         // Maps Responses API `output_index` to our tool-only `tool_index`.
@@ -279,6 +285,21 @@ pub(crate) fn stream_responses_tracked<'a>(
                             chunk_index,
                         };
                     }
+                }
+
+                // A content refusal. Accumulate the deltas; `.done` carries
+                // the finalized text and wins over whatever streamed. Either
+                // event alone is enough to mark the turn refused, so a backend
+                // that streams a refusal without echoing the `Refusal` part on
+                // the terminal frame still reaches the shell as a refusal.
+                ResponseStreamEvent::ResponseRefusalDelta(refusal_event) => {
+                    refusal_acc
+                        .get_or_insert_with(String::new)
+                        .push_str(&refusal_event.delta);
+                }
+
+                ResponseStreamEvent::ResponseRefusalDone(refusal_event) => {
+                    refusal_acc = Some(refusal_event.refusal);
                 }
 
                 // Start of a Responses FunctionCall — emit initial id+name
@@ -501,6 +522,11 @@ pub(crate) fn stream_responses_tracked<'a>(
 
         let status = response.status.clone();
 
+        // A refusal may be reported only on the terminal frame (as a `Refusal`
+        // content part) rather than streamed, so take it from either source;
+        // the streamed text wins because `.done` is the finalized value.
+        let refusal = refusal_acc.or_else(|| xai_grok_sampling_types::response_refusal(&response));
+
         // Convert to ConversationItem(s); patch in accumulated reasoning
         // text as a fallback when the final response lacks `content` /
         // `summary` (the streaming deltas may have arrived out of band).
@@ -513,8 +539,16 @@ pub(crate) fn stream_responses_tracked<'a>(
             _ => false,
         });
 
+        // Precedence: executable tool calls first — a turn the caller must run
+        // tools for is never reported as filtered. Then a refusal, which the
+        // Responses API reports as a *completed* response, so the status alone
+        // cannot distinguish it from a normal turn: without this the refusal
+        // surfaced as `Stop` with empty content, tripping the empty-response
+        // retry loop instead of the shell's refusal notice.
         let stop_reason = if has_tool_calls {
             Some(StopReason::ToolCalls)
+        } else if refusal.is_some() {
+            Some(StopReason::ContentFilter)
         } else {
             match status {
                 Status::Completed => Some(StopReason::Stop),
@@ -548,7 +582,9 @@ pub(crate) fn stream_responses_tracked<'a>(
             cost_usd_ticks,
             message_chunks_emitted: message_chunk_count,
             doom_loop_signals,
-            stop_message: None, // not reported on the Responses API
+            // Only a refusal reports a stop detail here; an empty explanation
+            // stays `None` so the shell's notice omits the empty section.
+            stop_message: refusal.filter(|r| !r.is_empty()),
         };
 
         yield SamplingEvent::Completed {
@@ -906,6 +942,118 @@ mod tests {
         .await;
 
         assert!(output_observed.load(Ordering::Relaxed));
+    }
+
+    fn refusal_delta_event(delta: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseRefusalDelta(rs_types::ResponseRefusalDeltaEvent {
+            sequence_number: 0,
+            item_id: "item-1".into(),
+            output_index: 0,
+            content_index: 0,
+            delta: delta.into(),
+        })
+    }
+
+    fn refusal_done_event(refusal: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseRefusalDone(rs_types::ResponseRefusalDoneEvent {
+            sequence_number: 0,
+            item_id: "item-1".into(),
+            output_index: 0,
+            content_index: 0,
+            refusal: refusal.into(),
+        })
+    }
+
+    /// Regression: a content refusal must reach the caller as
+    /// `StopReason::ContentFilter` + `stop_message`, the contract the shell's
+    /// refusal notice consumes and the same one the Messages backend produces.
+    ///
+    /// The Responses API reports a refusal on a *completed* response, so this
+    /// used to be indistinguishable from a normal turn: the refusal text was
+    /// dropped, `stop_reason` came out `Stop` with empty content, and the turn
+    /// went into the empty-response retry loop before hard-failing.
+    #[tokio::test]
+    async fn refusal_stream_yields_content_filter_with_explanation() {
+        let raw = stream::iter(vec![
+            Ok(refusal_delta_event("I can't ")),
+            Ok(refusal_delta_event("help with that.")),
+            Ok(refusal_done_event("I can't help with that.")),
+            Ok(completed_event()),
+        ])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        // A refusal is not model output: nothing is streamed as text, so the
+        // shell renders its own notice rather than echoing the refusal twice.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SamplingEvent::ChannelToken { .. })),
+            "refusal must not be forwarded as a content token: {events:?}"
+        );
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::ContentFilter));
+                assert_eq!(
+                    response.stop_message.as_deref(),
+                    Some("I can't help with that."),
+                    "refusal text must ride on stop_message"
+                );
+                assert!(
+                    response.is_empty(),
+                    "refusal must leave the response empty so the shell emits its notice"
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// The same contract when the refusal is only on the terminal frame (as an
+    /// `OutputMessageContent::Refusal` part) and never streamed.
+    #[tokio::test]
+    async fn refusal_on_terminal_frame_only_yields_content_filter() {
+        let mut response = empty_completed_response();
+        response.output = vec![rs_types::OutputItem::Message(rs_types::OutputMessage {
+            id: "msg-1".into(),
+            role: rs_types::AssistantRole::Assistant,
+            status: rs_types::OutputStatus::Completed,
+            content: vec![rs_types::OutputMessageContent::Refusal(
+                rs_types::RefusalContent {
+                    refusal: "policy: declined".into(),
+                },
+            )],
+        })];
+        let completed =
+            rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
+                response,
+                sequence_number: 0,
+            });
+        let raw = stream::iter(vec![Ok(completed)]).boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::ContentFilter));
+                assert_eq!(response.stop_message.as_deref(), Some("policy: declined"));
+                assert!(response.is_empty());
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
     }
 
     fn function_call_added_event(

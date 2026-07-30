@@ -2002,6 +2002,41 @@ impl From<ChatResponseMessage> for ConversationItem {
 // Conversion: rs::Response (Responses API) -> ConversationItem
 // ============================================================================
 
+/// Whether a terminal Responses API `Response` is a content refusal, and the
+/// explanation the model gave for it.
+///
+/// `Some(explanation)` means the model refused; the explanation may be empty
+/// when the backend reported a refusal without text, so the *presence* of the
+/// `Some` — not the string — is the refusal signal.
+///
+/// A refusal arrives as an `OutputMessageContent::Refusal` part inside the
+/// output message (and, while streaming, as `response.refusal.delta` /
+/// `.done`). It is not model output: it never becomes assistant content, so
+/// [`response_to_conversation_items`] drops those parts and the streaming
+/// transform lifts the text here instead, onto
+/// [`ConversationResponse::stop_message`] alongside
+/// [`StopReason::ContentFilter`]. That is the same normalization the Messages
+/// backend applies to `message_delta.stop_details.explanation`.
+///
+/// Multiple refusal parts (never seen in practice) are joined with newlines.
+pub fn response_refusal(response: &rs::Response) -> Option<String> {
+    let mut refusal: Option<String> = None;
+    for item in &response.output {
+        if let rs::OutputItem::Message(msg) = item {
+            for content_part in &msg.content {
+                if let rs::OutputMessageContent::Refusal(refusal_content) = content_part {
+                    let acc = refusal.get_or_insert_with(String::new);
+                    if !acc.is_empty() && !refusal_content.refusal.is_empty() {
+                        acc.push('\n');
+                    }
+                    acc.push_str(&refusal_content.refusal);
+                }
+            }
+        }
+    }
+    refusal
+}
+
 /// Convert a Responses API `Response` into a flat ordered list of
 /// `ConversationItem`s, mirroring the shape of `response.output`.
 ///
@@ -2041,6 +2076,14 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
                 // Accumulate output text into the trailing Assistant item;
                 // there is at most one Message per response in practice.
                 for content_part in msg.content {
+                    // `Refusal` parts are deliberately NOT folded into the
+                    // assistant text: a refusal is surfaced out of band as
+                    // `StopReason::ContentFilter` + `stop_message` (see
+                    // [`response_refusal_text`]), matching the Messages
+                    // backend, where the refusal explanation likewise never
+                    // becomes assistant content. Folding it in would make the
+                    // response look non-empty and suppress the shell's
+                    // refusal notice.
                     if let rs::OutputMessageContent::OutputText(text_content) = content_part {
                         if !content.is_empty() {
                             content.push('\n');
@@ -5037,6 +5080,94 @@ mod tests {
             "input[] must not end with a dangling reasoning item: {types:?}"
         );
         assert_eq!(types, vec!["message", "message"], "got {types:?}");
+    }
+
+    /// Regression: a `Refusal` content part on the terminal response used to
+    /// be dropped on the floor — `response_to_conversation_items` matched only
+    /// `OutputText` and nothing else looked at it — so a refused turn reached
+    /// the caller as an ordinary empty response. It must now be readable via
+    /// [`response_refusal`] (which the streaming transform turns into
+    /// `StopReason::ContentFilter` + `stop_message`) while still staying out
+    /// of the assistant text.
+    #[test]
+    fn test_refusal_part_is_extractable_and_not_assistant_text() {
+        let mut response = bare_responses_response();
+        response.output = vec![rs::OutputItem::Message(rs::OutputMessage {
+            content: vec![rs::OutputMessageContent::Refusal(rs::RefusalContent {
+                refusal: "I'm not able to help with that.".to_string(),
+            })],
+            id: "msg_refusal".to_string(),
+            role: rs::AssistantRole::Assistant,
+            status: rs::OutputStatus::Completed,
+        })];
+
+        assert_eq!(
+            response_refusal(&response).as_deref(),
+            Some("I'm not able to help with that."),
+        );
+
+        let items = response_to_conversation_items(response);
+        let Some(ConversationItem::Assistant(a)) = items.last() else {
+            panic!("expected a trailing Assistant item");
+        };
+        assert!(
+            a.content.is_empty(),
+            "a refusal must not become assistant text: {:?}",
+            a.content
+        );
+
+        // No refusal part => no refusal, even for an otherwise identical shape.
+        let mut plain = bare_responses_response();
+        plain.output = vec![rs::OutputItem::Message(rs::OutputMessage {
+            content: vec![rs::OutputMessageContent::OutputText(
+                rs::OutputTextContent {
+                    text: "Sure.".to_string(),
+                    annotations: vec![],
+                    logprobs: None,
+                },
+            )],
+            id: "msg_ok".to_string(),
+            role: rs::AssistantRole::Assistant,
+            status: rs::OutputStatus::Completed,
+        })];
+        assert_eq!(response_refusal(&plain), None);
+    }
+
+    /// A `rs::Response` with every field at its neutral value and no output.
+    fn bare_responses_response() -> rs::Response {
+        rs::Response {
+            background: None,
+            billing: None,
+            conversation: None,
+            created_at: 1234567890,
+            completed_at: None,
+            error: None,
+            id: "resp_bare".to_string(),
+            incomplete_details: None,
+            instructions: None,
+            max_output_tokens: None,
+            metadata: None,
+            model: "test-model".to_string(),
+            object: "response".to_string(),
+            output: vec![],
+            parallel_tool_calls: None,
+            previous_response_id: None,
+            prompt: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
+            reasoning: None,
+            safety_identifier: None,
+            service_tier: None,
+            status: rs::Status::Completed,
+            temperature: None,
+            text: None,
+            tool_choice: None,
+            tools: None,
+            top_logprobs: None,
+            top_p: None,
+            truncation: None,
+            usage: None,
+        }
     }
 
     /// The interleaved form of the same bug: a reasoning-only turn in the
