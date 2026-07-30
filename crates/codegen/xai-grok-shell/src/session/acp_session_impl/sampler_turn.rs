@@ -684,7 +684,7 @@ impl SessionActor {
             .map(|c| c.model)
             .unwrap_or_default();
         let aux_classifier_sampler = match auto_cfg.classifier_model.as_deref() {
-            Some(slug) => self.resolve_auto_classifier_sampler(slug).await,
+            Some(slug) => self.resolve_aux_sampler_client(slug).await,
             None => None,
         };
         let models = self.models_manager.models();
@@ -831,12 +831,22 @@ impl SessionActor {
             creds.client_version.clone(),
         )
     }
-    /// Resolve a dedicated sampler for the Auto-mode classifier model `slug`,
+    /// Resolve a dedicated sampler client plus the wire model for an auxiliary
+    /// one-shot model `slug` (Auto-mode classifier, next-prompt suggestion, ...),
     /// stamping session-local auth/attribution like image-describe (which relies
     /// on the resolver, not a config override, for `base_url`/`api_backend` so
-    /// credentials stay consistent). `None` ⇒ caller falls back to the session
-    /// client + model.
-    async fn resolve_auto_classifier_sampler(
+    /// credentials stay consistent).
+    ///
+    /// The returned model is the resolved entry's own routing slug and the
+    /// returned client points at that entry's endpoint, so the two cannot
+    /// disagree. That pairing is the whole point of going through here: `slug`
+    /// may live on a different `[[provider]]` than the session runs on, and a
+    /// client built for provider A's endpoint and credential cannot serve
+    /// provider B's slug — the vendor rejects it by name.
+    ///
+    /// `None` ⇒ the aux model has no route of its own; each caller decides
+    /// whether to degrade to the session client + model or to skip the call.
+    pub(super) async fn resolve_aux_sampler_client(
         &self,
         slug: &str,
     ) -> Option<(xai_grok_sampler::SamplingClient, String)> {
@@ -851,7 +861,7 @@ impl SessionActor {
         let model = cfg.model.clone();
         let client = xai_grok_sampler::SamplingClient::new(cfg)
             .map_err(|e| {
-                tracing::warn!(error = %e, "auto classifier aux sampler build failed; using session model")
+                tracing::warn!(error = %e, aux_model = %slug, "aux sampler build failed; caller falls back")
             })
             .ok()?;
         Some((client, model))

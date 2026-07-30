@@ -608,6 +608,13 @@ impl SessionActor {
     /// `<provider>/<model>` form reaches the vendor as the bare `<model>` rather
     /// than as the catalog key. The session model is never used:
     /// a per-turn background call must stay on the small model.
+    ///
+    /// The call then goes out on a **dedicated** sampler resolved for that model
+    /// ([`Self::resolve_aux_sampler_client`]), not on the session's client: the
+    /// suggestion model can live on a different `[[provider]]` than the session,
+    /// and a client is only able to serve the slugs of the endpoint it was built
+    /// for. No route ⇒ skipped, same as an unavailable pin.
+    ///
     /// Temperature, max_output_tokens, and
     /// reasoning_effort are left unset — mirrors [`Self::handle_recap`]: the
     /// proxy may inject provider defaults, a small token cap silently empties
@@ -643,12 +650,27 @@ impl SessionActor {
             return None;
         };
 
-        let sampling_client = match self.prepare_chat_completion(false).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::debug!(error = %e, "prompt suggest: sampling client unavailable");
-                return None;
-            }
+        // Route the suggestion like every other aux model: on its own client,
+        // built for the endpoint the resolved catalog entry declares, naming
+        // that entry's own routing slug. It must not ride the session's client.
+        // The pin can name a different `[[provider]]` than the session runs on —
+        // and a session model switch moves the session's endpoint out from under
+        // it mid-session — so a client carrying provider A's endpoint and
+        // credential would be handed provider B's slug and 404 by name.
+        //
+        // A catalog entry being *present* is not enough to make that safe: it is
+        // what admitted the pin in the first place. Only resolving the entry, and
+        // sending to the endpoint it names, keeps model and endpoint in agreement.
+        //
+        // `None` ⇒ the pin has no route of its own: skip, as this feature does
+        // everywhere else, rather than degrade to the session model — a per-turn
+        // background call must stay on a small cheap model.
+        let Some((sampling_client, model)) = self.resolve_aux_sampler_client(&model).await else {
+            tracing::debug!(
+                model = %model,
+                "prompt suggest: suggestion model has no sampler route; skipping request"
+            );
+            return None;
         };
 
         tracing::debug!(

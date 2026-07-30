@@ -14217,6 +14217,111 @@ default = "grok-4.5"
         );
     }
 
+    /// An aux one-shot used to be sent on the *session's* own sampling client
+    /// with nothing but `model` swapped. A pin that belongs to a different
+    /// `[[provider]]` — or a session model switch moving the session's endpoint
+    /// out from under a pin that used to match it — then handed provider A's
+    /// endpoint and credential provider B's slug, which A rejects by name.
+    ///
+    /// Resolving the pin keeps model and endpoint together: the request must land
+    /// on the pinned provider, on the pinned provider's credential, and the
+    /// session's own provider must see nothing at all.
+    #[tokio::test]
+    async fn aux_pin_on_another_provider_never_rides_the_session_client() {
+        use xai_grok_config_types::ProviderFormat;
+        use xai_grok_sampling_types::conversation::{ConversationItem, ConversationRequest};
+
+        let session_server = xai_grok_test_support::MockInferenceServer::start()
+            .await
+            .unwrap();
+        let pinned_server = xai_grok_test_support::MockInferenceServer::start()
+            .await
+            .unwrap();
+        let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+        expand_providers_into_catalog(
+            &mut catalog,
+            &[
+                wire_test_provider(
+                    "session-provider",
+                    "session-model",
+                    &session_server.url(),
+                    ProviderFormat::Responses,
+                ),
+                wire_test_provider(
+                    "acme",
+                    "some-model",
+                    &pinned_server.url(),
+                    ProviderFormat::Messages,
+                ),
+            ],
+        );
+
+        // The live session runs on its own provider — the state a model switch
+        // leaves behind, and the client the suggestion used to ride on.
+        let session_entry = catalog
+            .get("session-provider/session-model")
+            .expect("session entry synthesized");
+        let session = sampling_config_for_model(
+            session_entry,
+            resolve_credentials(session_entry, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(session.base_url, session_server.url());
+
+        let endpoints = EndpointsConfig::default();
+        let resolved = resolve_aux_model_sampling_config(
+            "acme/some-model",
+            &catalog,
+            &endpoints,
+            &session.base_url,
+            None,
+            false,
+            None,
+            None,
+        )
+        .expect("the pinned provider resolves on its own credential");
+        let (model, cfg) = finalize_aux_sampler_config(Some(resolved), &session, None, Some(1));
+        assert_eq!(model, "some-model");
+        assert_eq!(
+            cfg.base_url,
+            pinned_server.url(),
+            "the pinned model must not be dragged onto the session's endpoint"
+        );
+        assert_eq!(
+            cfg.api_key.as_deref(),
+            Some("acme-key"),
+            "nor be offered the session provider's credential"
+        );
+        let client = xai_grok_sampler::SamplingClient::new(cfg).expect("client should build");
+        let _ = client
+            .conversation_collect(ConversationRequest {
+                items: vec![ConversationItem::user("hi".to_owned())],
+                model: Some(model),
+                ..Default::default()
+            })
+            .await;
+
+        assert_eq!(
+            logged_wire_models(&pinned_server),
+            vec!["some-model"],
+            "the pinned provider must receive its own bare slug"
+        );
+        assert!(
+            pinned_server
+                .requests()
+                .iter()
+                .any(|e| e.path == "/v1/messages"),
+            "and on its own format's endpoint"
+        );
+        assert!(
+            session_server.requests().is_empty(),
+            "the session's provider must never be named another provider's model"
+        );
+    }
+
     /// The override is not messages-specific: every scheme a provider can
     /// declare reaches the sampler's on-the-wire auth type, whichever format it
     /// is paired with. Unset keeps the per-format default, which
