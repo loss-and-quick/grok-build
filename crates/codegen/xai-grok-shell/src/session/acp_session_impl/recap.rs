@@ -603,7 +603,10 @@ impl SessionActor {
     /// tier except env is catalog-guarded against this shell's own model
     /// catalog — when the effective model is not sampleable here (e.g.
     /// `grok-build-0.1` for OAuth users) the request is **skipped
-    /// entirely** instead of fired doomed. The session model is never used:
+    /// entirely** instead of fired doomed. The same lookup also translates the
+    /// id to the catalog entry's routing slug, so a pin spelled in the
+    /// `<provider>/<model>` form reaches the vendor as the bare `<model>` rather
+    /// than as the catalog key. The session model is never used:
     /// a per-turn background call must stay on the small model.
     /// Temperature, max_output_tokens, and
     /// reasoning_effort are left unset — mirrors [`Self::handle_recap`]: the
@@ -621,7 +624,7 @@ impl SessionActor {
 
         let pin = self.models_manager.prompt_suggest_model_pin();
         let Some(model) = prompt_suggest::effective_suggest_model(&pin, model_override, |m| {
-            self.models_manager.model_in_catalog(m)
+            self.models_manager.model_routing_slug(m)
         }) else {
             tracing::debug!(
                 pin = ?pin,

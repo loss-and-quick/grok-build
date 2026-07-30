@@ -14094,6 +14094,129 @@ default = "grok-4.5"
         );
     }
 
+    /// A minimal `[[provider]]` serving exactly one model, for the aux-pin wire
+    /// tests below. `max_completion_tokens` is declared unconditionally because
+    /// the messages backend refuses to invent an output ceiling and fails at
+    /// build time without one.
+    fn wire_test_provider(
+        id: &str,
+        model: &str,
+        base_url: &str,
+        format: xai_grok_config_types::ProviderFormat,
+    ) -> xai_grok_config_types::ProviderConfig {
+        xai_grok_config_types::ProviderConfig {
+            id: id.to_owned(),
+            format,
+            base_url: base_url.to_owned(),
+            api_key: Some(format!("{id}-key")),
+            auth_scheme: None,
+            headers: IndexMap::new(),
+            proxy: None,
+            models: vec![model.to_owned()],
+            context_window: None,
+            max_completion_tokens: Some(64_000),
+            auth_account: None,
+            reasoning_efforts: Vec::new(),
+            reasoning_effort: None,
+            supports_reasoning_effort: false,
+        }
+    }
+
+    /// Wire `model` values logged by the mock server, in arrival order.
+    fn logged_wire_models(server: &xai_grok_test_support::MockInferenceServer) -> Vec<String> {
+        server
+            .requests()
+            .iter()
+            .filter_map(|e| e.body.as_ref())
+            .filter_map(|b| b.get("model").and_then(|m| m.as_str()))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// An aux model pin may be spelled in the provider-qualified form —
+    /// `<provider>/<model>`, the catalog key `[[provider]]` expansion mints. That
+    /// key is a routing address, not a name any vendor answers to: the entry it
+    /// keys carries the bare `<model>` the provider serves. Putting the key on
+    /// the wire as the request's `model` is a 404 by name, and the key's
+    /// *presence* in the catalog is no guard against it — presence is exactly
+    /// what let the request be made in the first place.
+    ///
+    /// End-to-end check for both spellings of the same pin: the request must land
+    /// on the pinned provider's own endpoint carrying the bare slug.
+    #[tokio::test]
+    async fn qualified_aux_pin_sends_the_bare_slug_to_the_pinned_provider() {
+        use xai_grok_sampling_types::conversation::{ConversationItem, ConversationRequest};
+
+        let server = xai_grok_test_support::MockInferenceServer::start()
+            .await
+            .unwrap();
+        let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+        expand_providers_into_catalog(
+            &mut catalog,
+            &[wire_test_provider(
+                "acme",
+                "some-model",
+                &server.url(),
+                xai_grok_config_types::ProviderFormat::Messages,
+            )],
+        );
+        assert!(
+            catalog.contains_key("acme/some-model"),
+            "the qualified form is a catalog key — which is why a presence guard passes"
+        );
+
+        let endpoints = EndpointsConfig::default();
+        // A session that is not first-party, so only the catalog tier can resolve
+        // the pin and no first-party fallback can mask the result.
+        let session = SamplerConfig {
+            model: "session-model".into(),
+            base_url: "https://session-provider.example/v1".into(),
+            api_key: Some("session-key".into()),
+            ..Default::default()
+        };
+        for spelling in ["acme/some-model", "some-model"] {
+            let resolved = resolve_aux_model_sampling_config(
+                spelling,
+                &catalog,
+                &endpoints,
+                &session.base_url,
+                None,
+                false,
+                None,
+                None,
+            )
+            .expect("the provider entry carries a credential, so the pin resolves");
+            let (model, cfg) = finalize_aux_sampler_config(Some(resolved), &session, None, Some(1));
+            assert_eq!(
+                model, "some-model",
+                "pin {spelling:?} must route by key and name the bare slug"
+            );
+            assert_eq!(
+                cfg.base_url,
+                server.url(),
+                "pin {spelling:?} must stay on the pinned provider's endpoint"
+            );
+            let client = xai_grok_sampler::SamplingClient::new(cfg).expect("client should build");
+            let _ = client
+                .conversation_collect(ConversationRequest {
+                    items: vec![ConversationItem::user("hi".to_owned())],
+                    model: Some(model),
+                    ..Default::default()
+                })
+                .await;
+        }
+
+        assert!(
+            server.requests().iter().all(|e| e.path == "/v1/messages"),
+            "both requests must go to the pinned provider's messages endpoint"
+        );
+        assert_eq!(
+            logged_wire_models(&server),
+            vec!["some-model", "some-model"],
+            "both spellings must put the bare slug on the wire, never the catalog key"
+        );
+    }
+
     /// The override is not messages-specific: every scheme a provider can
     /// declare reaches the sampler's on-the-wire auth type, whichever format it
     /// is paired with. Unset keeps the per-format default, which

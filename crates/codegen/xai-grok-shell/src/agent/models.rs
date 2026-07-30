@@ -564,6 +564,26 @@ impl ModelsManager {
         resolve_catalog_key(models, &acp::ModelId::new(model_id)).is_some()
     }
 
+    /// The routing slug `model_id` resolves to in the current catalog — the
+    /// value that may appear as a request's wire `model`. `None` when the
+    /// catalog does not list the id.
+    ///
+    /// This is not [`Self::model_in_catalog`] plus the caller's own string: the
+    /// catalog *key* and the routing slug differ whenever the key is not the
+    /// vendor's own name for the model. A `[[provider]]` entry is keyed
+    /// `<provider>/<model>` and serves the bare `<model>`, so an operator id
+    /// written in the qualified form is present in the catalog **and** wrong on
+    /// the wire — a presence check passes while the vendor still rejects the
+    /// request by name. Anything that forwards an operator-supplied id as a
+    /// request's `model` must translate it here first.
+    pub fn model_routing_slug(&self, model_id: &str) -> Option<String> {
+        let cat = self.inner.catalog.read();
+        let models = &cat.models;
+        resolve_catalog_key(models, &acp::ModelId::new(model_id))
+            .and_then(|key| models.get(key.0.as_ref()))
+            .map(|entry| entry.info().model.clone())
+    }
+
     #[cfg(test)]
     fn prefetched(&self) -> Option<IndexMap<String, ModelEntry>> {
         self.inner.catalog.read().prefetched.clone()

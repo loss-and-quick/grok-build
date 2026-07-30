@@ -31,7 +31,7 @@ pub(crate) const DEFAULT_SUGGEST_MODEL: &str = "grok-build-0.1";
 ///
 /// Precedence: env pin > config.toml/remote pin > client hint (the request's
 /// `model` param) > [`DEFAULT_SUGGEST_MODEL`]. Every tier except the env pin
-/// is catalog-guarded via `in_catalog`: [`DEFAULT_SUGGEST_MODEL`]
+/// is catalog-guarded via `routing_slug`: [`DEFAULT_SUGGEST_MODEL`]
 /// (`grok-build-0.1`) is API-key-only and excluded from OAuth catalogs, so
 /// firing it (or any unavailable pin) would send a doomed per-turn request
 /// that can never render ghost text. Skipping keeps the per-turn cost at
@@ -39,10 +39,23 @@ pub(crate) const DEFAULT_SUGGEST_MODEL: &str = "grok-build-0.1";
 /// call must stay on a small cheap model. The env pin bypasses the guard so
 /// `GROK_PROMPT_SUGGESTIONS_MODEL` keeps working for models the catalog does
 /// not list (mirrors the pager, which forwards the env value unchecked).
+///
+/// `routing_slug` guards *and translates*: it returns the catalog entry's own
+/// routing slug, which is the only form of the id that may go on the wire as a
+/// request's `model`. The two differ whenever the catalog key is not the
+/// vendor's name for the model — a `[[provider]]` entry is keyed
+/// `<provider>/<model>` and serves the bare `<model>` — so a pin spelled in the
+/// qualified form must not be forwarded as typed.
+///
+/// This deliberately replaced a presence predicate (`model_in_catalog`). A
+/// presence check cannot catch that class of bug: a provider-qualified pin IS
+/// in the catalog, which is precisely why the request gets made at all, and it
+/// is still wrong as a `model` value — the vendor rejects it by name with a 404.
+/// A guard on presence is not a guard on correctness.
 pub(crate) fn effective_suggest_model(
     pin: &PromptSuggestModelPin,
     client_hint: Option<&str>,
-    in_catalog: impl Fn(&str) -> bool,
+    routing_slug: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
     let client_hint = client_hint.map(str::trim).filter(|s| !s.is_empty());
     let (model, catalog_guarded) = match pin {
@@ -50,10 +63,14 @@ pub(crate) fn effective_suggest_model(
         PromptSuggestModelPin::Pinned(m) => (m.as_str(), true),
         PromptSuggestModelPin::Unpinned => (client_hint.unwrap_or(DEFAULT_SUGGEST_MODEL), true),
     };
-    if catalog_guarded && !in_catalog(model) {
-        return None;
+    match routing_slug(model) {
+        Some(slug) => Some(slug),
+        // Guarded tiers skip rather than fire a request the catalog cannot back.
+        None if catalog_guarded => None,
+        // Env pin: the explicit escape hatch for a slug the catalog does not
+        // list, so there is nothing to translate it to — forward it verbatim.
+        None => Some(model.to_owned()),
     }
-    Some(model.to_owned())
 }
 
 /// Total character budget for the compact transcript (~6k tokens at the
@@ -319,19 +336,30 @@ mod tests {
 
     // -- effective_suggest_model ---------------------------------------------
 
+    /// Catalog stub for entries whose key is already the routing slug (the
+    /// common shape: a plain `[model.*]` table or a remote catalog entry).
+    fn catalog_of(ids: &'static [&'static str]) -> impl Fn(&str) -> Option<String> {
+        move |m: &str| ids.contains(&m).then(|| m.to_owned())
+    }
+
+    /// Catalog stub that lists nothing.
+    fn empty_catalog(_: &str) -> Option<String> {
+        None
+    }
+
     #[test]
     fn effective_model_default_requires_catalog() {
         // No pin, no hint: the built-in default fires only when this shell's
         // catalog can sample it.
         assert_eq!(
-            effective_suggest_model(&Pin::Unpinned, None, |m| m == DEFAULT_SUGGEST_MODEL)
+            effective_suggest_model(&Pin::Unpinned, None, catalog_of(&[DEFAULT_SUGGEST_MODEL]))
                 .as_deref(),
             Some(DEFAULT_SUGGEST_MODEL)
         );
         // OAuth catalogs exclude grok-build-0.1 → skip the request entirely,
         // never a doomed call (and never the session model).
         assert_eq!(
-            effective_suggest_model(&Pin::Unpinned, None, |_| false),
+            effective_suggest_model(&Pin::Unpinned, None, empty_catalog),
             None
         );
     }
@@ -339,18 +367,23 @@ mod tests {
     #[test]
     fn effective_model_client_hint_beats_default_and_is_guarded() {
         assert_eq!(
-            effective_suggest_model(&Pin::Unpinned, Some("hinted"), |m| m == "hinted").as_deref(),
+            effective_suggest_model(&Pin::Unpinned, Some("hinted"), catalog_of(&["hinted"]))
+                .as_deref(),
             Some("hinted")
         );
         // A hint the shell can't sample skips — no silent fall-through.
         assert_eq!(
-            effective_suggest_model(&Pin::Unpinned, Some("hinted"), |_| false),
+            effective_suggest_model(&Pin::Unpinned, Some("hinted"), empty_catalog),
             None
         );
         // Blank hints are ignored: the default tier applies.
         assert_eq!(
-            effective_suggest_model(&Pin::Unpinned, Some("  "), |m| m == DEFAULT_SUGGEST_MODEL)
-                .as_deref(),
+            effective_suggest_model(
+                &Pin::Unpinned,
+                Some("  "),
+                catalog_of(&[DEFAULT_SUGGEST_MODEL])
+            )
+            .as_deref(),
             Some(DEFAULT_SUGGEST_MODEL)
         );
     }
@@ -358,17 +391,22 @@ mod tests {
     #[test]
     fn effective_model_pin_beats_client_hint_and_is_guarded() {
         assert_eq!(
-            effective_suggest_model(&Pin::Pinned("pinned".into()), Some("hinted"), |m| m
-                == "pinned"
-                || m == "hinted")
+            effective_suggest_model(
+                &Pin::Pinned("pinned".into()),
+                Some("hinted"),
+                catalog_of(&["pinned", "hinted"])
+            )
             .as_deref(),
             Some("pinned")
         );
         // A pinned-but-unavailable model skips — the pin is an explicit
         // choice, not a preference list; no fall-through to hint or default.
         assert_eq!(
-            effective_suggest_model(&Pin::Pinned("pinned".into()), Some("hinted"), |m| m
-                == "hinted"),
+            effective_suggest_model(
+                &Pin::Pinned("pinned".into()),
+                Some("hinted"),
+                catalog_of(&["hinted"])
+            ),
             None
         );
     }
@@ -379,9 +417,48 @@ mod tests {
         // verbatim even when the catalog does not list the model (mirrors
         // the pager, which forwards the env value unchecked).
         assert_eq!(
-            effective_suggest_model(&Pin::Env("custom-model".into()), Some("hinted"), |_| false)
-                .as_deref(),
+            effective_suggest_model(
+                &Pin::Env("custom-model".into()),
+                Some("hinted"),
+                empty_catalog
+            )
+            .as_deref(),
             Some("custom-model")
+        );
+    }
+
+    /// A pin spelled in the provider-qualified form — the catalog key that
+    /// `[[provider]]` expansion mints, `<provider>/<model>` — must go on the
+    /// wire as the bare `<model>` the provider actually serves. The qualified
+    /// key is *in* the catalog, so the old presence guard let it through
+    /// unchanged and the vendor answered 404 on the name it was sent.
+    #[test]
+    fn effective_model_translates_a_provider_qualified_pin_to_its_routing_slug() {
+        // Both spellings of the same catalog entry resolve to its routing slug.
+        let routing_slug = |m: &str| match m {
+            "acme/some-model" | "some-model" => Some("some-model".to_owned()),
+            _ => None,
+        };
+        for spelling in ["acme/some-model", "some-model"] {
+            assert_eq!(
+                effective_suggest_model(&Pin::Pinned(spelling.into()), None, routing_slug)
+                    .as_deref(),
+                Some("some-model"),
+                "pin {spelling:?} must reach the wire as the bare routing slug"
+            );
+        }
+        // A client hint is translated the same way...
+        assert_eq!(
+            effective_suggest_model(&Pin::Unpinned, Some("acme/some-model"), routing_slug)
+                .as_deref(),
+            Some("some-model")
+        );
+        // ...and so is an env pin the catalog happens to know: bypassing the
+        // guard is not licence to put a catalog key on the wire.
+        assert_eq!(
+            effective_suggest_model(&Pin::Env("acme/some-model".into()), None, routing_slug)
+                .as_deref(),
+            Some("some-model")
         );
     }
 
