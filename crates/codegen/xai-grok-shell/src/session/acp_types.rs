@@ -562,6 +562,15 @@ pub fn model_display_name(
 pub struct SessionInfoResponse {
     pub session_id: String,
     pub cwd: String,
+    /// Whether this session's transcript is uploaded to the user's grok.com
+    /// account ([`crate::config::StorageMode::Writeback`]) or stays on this
+    /// machine (`Local`). `Local` is the default and the override is usually a
+    /// server-side remote setting, so this field is the only way a user can
+    /// find out which is in force — see `init_remote_sync` in
+    /// `session::persistence` for why it is reported rather than gated.
+    /// Defaults to `false` so an older shell that omits it reads as `Local`.
+    #[serde(default)]
+    pub syncs_to_backend: bool,
     #[serde(flatten)]
     pub data: SessionInfoData,
 }
@@ -913,5 +922,31 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let roundtripped: TokenUsageCategory = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtripped, original);
+    }
+
+    /// The storage mode a session runs under is otherwise invisible: `Local`
+    /// is the default, the override is usually a server-side remote setting,
+    /// and the CLI flag is hidden. This field is what `/status` prints, so it
+    /// has to survive the wire and read as `Local` from an older shell that
+    /// does not send it.
+    #[test]
+    fn session_info_response_carries_the_storage_mode() {
+        let from_old_shell: SessionInfoResponse = serde_json::from_str(
+            r#"{"sessionId":"s1","cwd":"/w","model":"m","resolvedModelId":null,
+                "modelFingerprint":null,"turns":0,"context":{}}"#,
+        )
+        .expect("an older shell omits the field");
+        assert!(
+            !from_old_shell.syncs_to_backend,
+            "a missing field must read as Local, never as syncing"
+        );
+
+        let mut synced = from_old_shell.clone();
+        synced.syncs_to_backend = true;
+        let json = serde_json::to_string(&synced).unwrap();
+        assert!(json.contains(r#""syncsToBackend":true"#), "{json}");
+        let back: SessionInfoResponse = serde_json::from_str(&json).unwrap();
+        assert!(back.syncs_to_backend);
+        assert_eq!(back.cwd, "/w");
     }
 }

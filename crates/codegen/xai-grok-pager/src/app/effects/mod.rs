@@ -4588,6 +4588,16 @@ fn format_session_info(
     let sandbox_line = xai_grok_sandbox::profile_name()
         .map(|profile| format!("\n  Sandbox: {profile}"))
         .unwrap_or_default();
+    // Always printed, both ways round: writeback is switched on by a
+    // server-side remote setting far more often than by anything the user
+    // typed (the CLI flag is hidden), and nothing else on any surface reports
+    // it. An absent line would be indistinguishable from a line the user
+    // missed, so the local case states itself too.
+    let transcript_line = if info.syncs_to_backend {
+        "\n  Transcript: synced to your grok.com account"
+    } else {
+        "\n  Transcript: stored on this machine only"
+    };
     let turn_line = format!("\n  Turn: {}", info.data.turn_index);
     let conversation_line = info
         .data
@@ -4601,7 +4611,7 @@ fn format_session_info(
     );
     let auth_lines = format_auth_lines(is_api_key_auth, api_key_env_set);
     format!(
-        "{title_line}  Shell version: {version_display}\n{auth_lines}  Session ID: {session_id}{conversation_line}\n  Working directory: {cwd}\n  Model: {model_display}{model_hash_line}{backend_line}{sandbox_line}{turn_line}\n  Context: {used} / {total} tokens ({pct}%)"
+        "{title_line}  Shell version: {version_display}\n{auth_lines}  Session ID: {session_id}{conversation_line}\n  Working directory: {cwd}\n  Model: {model_display}{model_hash_line}{backend_line}{sandbox_line}{transcript_line}{turn_line}\n  Context: {used} / {total} tokens ({pct}%)"
     )
 }
 /// Auth section for `/session-info` — login method + where to manage account/credits.

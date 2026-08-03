@@ -2109,6 +2109,7 @@ fn make_session_info(
     xai_grok_shell::session::SessionInfoResponse {
         session_id: "test-session-id".into(),
         cwd: "/tmp/test".into(),
+        syncs_to_backend: false,
         data: SessionInfoData {
             agent_name: None,
             model: Some(model.into()),
@@ -2187,6 +2188,32 @@ fn format_session_info_session_only_manage_at_grok_com() {
     assert!(!text.contains("console.x.ai"), "{text}");
     assert!(!text.contains("grok login"), "{text}");
 }
+/// `Writeback` uploads the whole transcript to the user's grok.com account,
+/// and it is switched on by a server-side remote setting far more often than
+/// by anything the user typed. `/status` is the only surface that reports it,
+/// so it must say so in both directions — an absent line reads the same as a
+/// line the user missed.
+#[test]
+fn format_session_info_reports_where_the_transcript_goes() {
+    let mut info = make_session_info("auto", None, 1000, 10000);
+
+    assert!(!info.syncs_to_backend, "Local is the default");
+    let local = format_session_info(&info, None, false, false, false);
+    assert!(
+        local.contains("Transcript: stored on this machine only"),
+        "{local}"
+    );
+    assert!(!local.contains("grok.com account"), "{local}");
+
+    info.syncs_to_backend = true;
+    let synced = format_session_info(&info, None, false, false, false);
+    assert!(
+        synced.contains("Transcript: synced to your grok.com account"),
+        "{synced}"
+    );
+    assert!(!synced.contains("this machine only"), "{synced}");
+}
+
 #[test]
 fn format_session_info_shows_conversation_id_when_present() {
     let mut info = make_session_info("auto", None, 1000, 10000);

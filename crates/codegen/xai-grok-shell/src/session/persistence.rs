@@ -2320,6 +2320,30 @@ fn backfill_updates_to_sync(
     backfilled
 }
 
+/// Start the writeback pump for this session, or `None` when it stays local.
+///
+/// Gated on grok.com auth and on the team not being ZDR, and deliberately NOT
+/// on which provider serves the session's model. A conversation run entirely on
+/// a user's own `[[provider]]` gateway still has its whole transcript pushed
+/// here, which can surprise someone who chose that gateway to keep content off
+/// a third party. Resist adding a per-model gate anyway:
+///
+/// - the destination is the user's own signed-in account, reached with that
+///   account's own credential. Nothing crosses hosts, unlike the aux-model case
+///   `resolve_aux_model_sampling_config` guards — that one is a credential
+///   leak, this is the user's data in the user's own account.
+/// - "the session's provider" is not a stable fact. `/model` switches a live
+///   session between a first-party model and a custom one, so a per-turn gate
+///   would leave half a conversation on the backend — worse to resume from than
+///   either consistent answer.
+/// - switching it off would break cross-device resume for exactly the sessions
+///   the user asked to keep, and would do it just as silently.
+///
+/// The repair is that the mode is reportable instead of invisible:
+/// `SessionInfoResponse::syncs_to_backend` carries it and `/status` prints it.
+/// Keep that wired — `Local` is the default and the override is usually a
+/// server-side remote setting (`writeback_enabled`), so nothing else on any
+/// surface tells a user their transcripts are leaving the machine.
 fn init_remote_sync(
     summary: &Summary,
     storage_mode: StorageMode,

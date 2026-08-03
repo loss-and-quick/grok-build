@@ -135,6 +135,7 @@ async fn handle_session_info(
     let response = SessionInfoResponse {
         session_id,
         cwd: session.info.cwd.clone(),
+        syncs_to_backend: agent.is_writeback_storage(),
         data,
     };
 
