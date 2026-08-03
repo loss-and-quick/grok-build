@@ -1970,6 +1970,7 @@ pub(crate) async fn spawn_session_actor(
     if session.permissions.is_auto_mode() {
         session.wire_permission_auto_llm_classifier().await;
     }
+    session.wire_web_fetch_distiller().await;
     session
         .agent
         .borrow()

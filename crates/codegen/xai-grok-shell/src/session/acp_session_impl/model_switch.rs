@@ -132,7 +132,7 @@ impl SessionActor {
     /// `active_agent_type` AND `turn_count == 0` (no user message has
     /// been sent yet). Defense-in-depth: rejects if a turn is in flight.
     pub(super) async fn handle_rebuild_agent_for_definition(
-        &self,
+        self: &Arc<Self>,
         definition: xai_grok_agent::AgentDefinition,
     ) -> Result<(), acp::Error> {
         {
@@ -237,6 +237,10 @@ impl SessionActor {
                 bridge.update_resource(gate).await;
             }
             self.inject_deny_read_globs().await;
+            // A rebuild installs a fresh `Resources`, so the distiller has to be
+            // registered again; without it `web_fetch` silently drops back to
+            // truncating pages for the rest of the session.
+            self.wire_web_fetch_distiller().await;
         }
         {
             let notified = self.mcp_handshakes_done.notified();

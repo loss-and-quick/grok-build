@@ -181,6 +181,8 @@ mod session_setup;
 mod turn_end;
 #[path = "acp_session_impl/updates.rs"]
 mod updates;
+#[path = "acp_session_impl/web_fetch_distill.rs"]
+mod web_fetch_distill;
 use run_loop::*;
 #[path = "acp_session_impl/spawn.rs"]
 mod spawn;
