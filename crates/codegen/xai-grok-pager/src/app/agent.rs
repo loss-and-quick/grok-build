@@ -848,9 +848,29 @@ impl AgentSession {
         tokens_before: Option<u64>,
         estimate_after: u64,
         elapsed_ms: Option<i64>,
+        summary_preview: Option<String>,
     ) {
         self.tracker
-            .defer_compaction(tokens_before, estimate_after, elapsed_ms);
+            .defer_compaction(tokens_before, estimate_after, elapsed_ms, summary_preview);
+    }
+
+    /// Append a completed compaction to the session's history and return the
+    /// scrollback event announcing it. See
+    /// [`AcpUpdateTracker::record_compaction`].
+    pub fn record_compaction(
+        &mut self,
+        tokens_before: Option<u64>,
+        tokens_after: u64,
+        elapsed_ms: Option<i64>,
+        summary_preview: Option<String>,
+    ) -> crate::scrollback::blocks::SessionEvent {
+        self.tracker
+            .record_compaction(tokens_before, tokens_after, elapsed_ms, summary_preview)
+    }
+
+    /// Every compaction this session has completed, oldest first.
+    pub fn compaction_history(&self) -> &[crate::acp::tracker::CompactionRecord] {
+        self.tracker.compaction_history()
     }
     pub fn note_context_used(&mut self, used: u64) {
         self.tracker.note_context_used(used);

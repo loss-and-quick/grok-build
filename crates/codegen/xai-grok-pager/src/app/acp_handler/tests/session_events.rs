@@ -721,6 +721,115 @@
     }
 
     #[test]
+    fn compaction_history_records_the_confirmed_count_not_the_estimate() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        let update = XaiSessionUpdate::AutoCompactCompleted {
+            tokens_before: Some(858_000),
+            tokens_after: 66_000,
+            elapsed_ms: Some(500),
+            summary_preview: Some("refactored the parser".to_string()),
+        };
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(
+            session.compaction_history().is_empty(),
+            "a deferred compaction is not history until the turn confirms it"
+        );
+
+        session.note_context_used(43_000);
+        session.finish_turn(&mut scrollback);
+
+        let history = session.compaction_history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].ordinal, 1);
+        assert_eq!(history[0].tokens_before, Some(858_000));
+        assert_eq!(
+            history[0].tokens_after, 43_000,
+            "history must hold the same confirmed count the scrollback line shows"
+        );
+        assert_eq!(history[0].recovered(), Some(815_000));
+        assert_eq!(history[0].elapsed_ms, Some(500));
+        assert_eq!(
+            history[0].summary_preview.as_deref(),
+            Some("refactored the parser"),
+            "the preview must survive the deferral"
+        );
+    }
+
+    #[test]
+    fn compaction_history_accumulates_in_order() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        for (before, after) in [(800_000u64, 60_000u64), (900_000, 70_000)] {
+            let update = XaiSessionUpdate::AutoCompactCompleted {
+                tokens_before: Some(before),
+                tokens_after: after,
+                elapsed_ms: None,
+                summary_preview: None,
+            };
+            assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+            session.finish_turn(&mut scrollback);
+        }
+
+        let history = session.compaction_history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history.iter().map(|r| r.ordinal).collect::<Vec<_>>(),
+            vec![1, 2],
+            "ordinals number the compactions in the order they ran"
+        );
+        assert_eq!(history[0].tokens_after, 60_000);
+        assert_eq!(history[1].tokens_after, 70_000);
+    }
+
+    #[test]
+    fn replay_compaction_is_recorded_exactly_once() {
+        let mut session = make_session(Some("s1"));
+        session.loading_replay = true;
+        let mut scrollback = ScrollbackState::new();
+        let update = XaiSessionUpdate::AutoCompactCompleted {
+            tokens_before: Some(90_000),
+            tokens_after: 20_000,
+            elapsed_ms: Some(500),
+            summary_preview: None,
+        };
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert_eq!(
+            session.compaction_history().len(),
+            1,
+            "a resumed session's past compactions are recorded as they replay"
+        );
+
+        // The replay path renders immediately rather than deferring, so a
+        // later turn end must not append the same compaction a second time.
+        session.finish_turn(&mut scrollback);
+        assert_eq!(session.compaction_history().len(), 1);
+        assert_eq!(session.compaction_history()[0].tokens_after, 20_000);
+    }
+
+    #[test]
+    fn compaction_history_omits_recovered_without_a_before_count() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        let update = XaiSessionUpdate::AutoCompactCompleted {
+            tokens_before: None,
+            tokens_after: 20_000,
+            elapsed_ms: None,
+            summary_preview: None,
+        };
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        session.finish_turn(&mut scrollback);
+
+        let history = session.compaction_history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].recovered(),
+            None,
+            "an older shell that omits tokens_before yields no recovered figure"
+        );
+    }
+
+    #[test]
     fn apply_unhandled_event_returns_false() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
