@@ -142,6 +142,13 @@ pub async fn dispatch_pre_tool_use(
                     http_info,
                 });
             }
+            // Nothing ran (no subscribed handler): allow, exactly as a no-signal
+            // success would, but record it as skipped so the UI reports no run.
+            HookRunnerResult::Skipped => {
+                run_results.push(HookRunResult::Skipped {
+                    hook_name: spec.name.clone(),
+                });
+            }
             HookRunnerResult::Success
             | HookRunnerResult::Stop(_)
             | HookRunnerResult::Replace(_) => {
@@ -343,6 +350,13 @@ pub async fn dispatch_stop(
                     http_info,
                 });
             }
+            // Nothing ran: contributes no stop signal (the stop proceeds), same
+            // as a no-signal reply, but reported as skipped rather than a run.
+            HookRunnerResult::Skipped => {
+                out.results.push(HookRunResult::Skipped {
+                    hook_name: spec.name.clone(),
+                });
+            }
             HookRunnerResult::Success
             | HookRunnerResult::Decision(_)
             | HookRunnerResult::Replace(_) => {
@@ -421,6 +435,13 @@ pub async fn dispatch_non_blocking(
                     error: err,
                     elapsed,
                     http_info,
+                });
+            }
+            // Nothing ran: an observe dispatch has no decision to make either
+            // way, so only the reporting changes — skipped, not a success.
+            HookRunnerResult::Skipped => {
+                results.push(HookRunResult::Skipped {
+                    hook_name: spec.name.clone(),
                 });
             }
             HookRunnerResult::Decision(_)
@@ -518,6 +539,13 @@ pub async fn dispatch_replace(
                     hook_name: spec.name.clone(),
                     elapsed,
                     http_info,
+                });
+            }
+            // Nothing ran: the payload passes through untouched, exactly as an
+            // explicit passthrough would, and no run is reported.
+            HookRunnerResult::Skipped => {
+                run_results.push(HookRunResult::Skipped {
+                    hook_name: spec.name.clone(),
                 });
             }
             // Explicit passthrough (`Replace(None)`) or any non-replace success:
@@ -618,6 +646,14 @@ pub async fn dispatch_intercept(
                     http_info,
                 });
                 true
+            }
+            // Nothing ran: the operation stays unhandled and the next plugin is
+            // consulted, exactly as a passthrough would, with no run reported.
+            HookRunnerResult::Skipped => {
+                run_results.push(HookRunResult::Skipped {
+                    hook_name: spec.name.clone(),
+                });
+                false
             }
             HookRunnerResult::Replace(None)
             | HookRunnerResult::Success

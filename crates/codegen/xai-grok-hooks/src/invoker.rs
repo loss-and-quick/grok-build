@@ -38,6 +38,18 @@ pub struct PluginHookRequest {
 /// [`crate::runner::plugin`].
 #[derive(Debug, Clone)]
 pub enum PluginHookResponse {
+    /// The plugin has no handler for this event, so nothing ran and no RPC was
+    /// sent. Distinct from [`Self::Observed`], which means a handler *did* run
+    /// and declined to decide: the host registers a spec for every event a
+    /// sidecar *could* serve, so most fired events reach a plugin that never
+    /// subscribed. Collapsing that into `Observed` made those inert seams
+    /// indistinguishable from real runs and lit up the UI with hook activity
+    /// that never happened; [`crate::runner::plugin`] maps this to
+    /// [`crate::runner::HookRunnerResult::Skipped`] instead.
+    ///
+    /// Carries no decision: every gate treats it exactly as it treats a
+    /// no-signal reply (fail-open).
+    NotSubscribed,
     /// Observe gate: the hook ran, no decision.
     Observed,
     /// Tool gate: allow or deny the tool call, with an optional deny reason.

@@ -34,6 +34,18 @@ pub enum HookRunnerResult {
     /// Replace gate: `Some` is the transformed payload, `None` a passthrough.
     Replace(Option<serde_json::Value>),
     Success,
+    /// Nothing ran: the handler provably does not exist, so there is no
+    /// execution to report. Only the plugin runner produces it, for a plugin
+    /// with no handler subscribed to the fired event
+    /// ([`crate::invoker::PluginHookResponse::NotSubscribed`]).
+    ///
+    /// Carries no signal, so every dispatcher decides exactly as it would for a
+    /// no-signal success, but records
+    /// [`HookRunResult::Skipped`](crate::result::HookRunResult::Skipped) so the
+    /// UI does not render a run that never happened. A hook that ran and stayed
+    /// silent is [`Self::Success`]; one that could not run is [`Self::Failed`] —
+    /// both stay visible.
+    Skipped,
     /// Failed: the caller fails open.
     Failed(String),
 }

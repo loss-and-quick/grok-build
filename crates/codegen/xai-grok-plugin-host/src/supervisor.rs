@@ -509,8 +509,12 @@ impl PluginHost {
             let mut state = entry.state.lock().await;
             let sidecar = self.ensure_alive(&entry, &mut state).await?;
             if !state.subscriptions.contains(&canonical_event(&req.event)) {
-                // Not subscribed: no-op without an RPC.
-                return Ok(PluginHookResponse::Observed);
+                // Not subscribed: no-op without an RPC. Reported as its own
+                // variant rather than `Observed` — the caller registers a spec
+                // for every event a sidecar could serve, so this path is the
+                // common case, and calling it "observed" would claim a run that
+                // never happened.
+                return Ok(PluginHookResponse::NotSubscribed);
             }
             sidecar
         };

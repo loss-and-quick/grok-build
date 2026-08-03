@@ -118,6 +118,14 @@ fn response_to_result(
     hook_name: &str,
     mode: GateKind,
 ) -> HookRunnerResult {
+    // Gate-independent: no handler exists, so no hook ran on any gate. Decided
+    // before `mode` so the gate vocabularies below keep interpreting only what a
+    // handler actually returned. `Skipped` carries no signal, exactly like the
+    // no-signal reply each gate already falls back to, so the decision is
+    // unchanged — only the reporting is.
+    if matches!(response, PluginHookResponse::NotSubscribed) {
+        return HookRunnerResult::Skipped;
+    }
     match mode {
         GateKind::Observe => {
             if !matches!(response, PluginHookResponse::Observed) {
@@ -156,6 +164,11 @@ fn response_to_result(
                 );
                 HookRunnerResult::Decision(HookDecision::Allow)
             }
+            // Unreachable: the early return above answers `NotSubscribed` for
+            // every gate. Spelled as the gate's own fail-open rather than a
+            // panic so a future refactor that moves the short-circuit degrades
+            // to today's behaviour instead of killing the turn.
+            PluginHookResponse::NotSubscribed => HookRunnerResult::Decision(HookDecision::Allow),
         },
         GateKind::Stop => match response {
             PluginHookResponse::Stop {
@@ -199,6 +212,9 @@ fn response_to_result(
                 );
                 HookRunnerResult::Stop(StopHookOutcome::default())
             }
+            // Unreachable — see the Tool gate's arm for why this is a fail-open
+            // rather than a panic.
+            PluginHookResponse::NotSubscribed => HookRunnerResult::Stop(StopHookOutcome::default()),
         },
         // Replace substitutes the payload; Intercept hands the operation to the
         // plugin and carries its outcome. Both use the same reply shape: a
@@ -218,6 +234,9 @@ fn response_to_result(
                 );
                 HookRunnerResult::Replace(None)
             }
+            // Unreachable — see the Tool gate's arm for why this is a
+            // passthrough rather than a panic.
+            PluginHookResponse::NotSubscribed => HookRunnerResult::Replace(None),
         },
     }
 }
@@ -455,6 +474,52 @@ mod tests {
         )
         .await;
         assert!(matches!(result, HookRunnerResult::Success));
+    }
+
+    /// The distinction the UI depends on: a plugin with no handler for the
+    /// fired event must be `Skipped`, not `Success`. Both reach here as a
+    /// non-blocking reply, but only `Success` is rendered — reporting the
+    /// former as the latter is what put a green tick on every seam a plugin
+    /// never subscribed to.
+    #[tokio::test]
+    async fn not_subscribed_is_skipped_not_success() {
+        let invoker = Arc::new(MockInvoker {
+            outcome: MockOutcome::Respond(PluginHookResponse::NotSubscribed),
+        });
+        let (result, _) = run_plugin_hook(
+            &plugin_spec(None),
+            &envelope(),
+            &ctx_with(Some(invoker)),
+            GateKind::Observe,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, HookRunnerResult::Skipped),
+            "a plugin with no handler for the event must report Skipped, got {result:?}"
+        );
+    }
+
+    /// The gate is decided before the subscription short-circuit, so an absent
+    /// handler must still fail open on a blocking gate — never deny a tool or
+    /// block a stop just because nobody was listening.
+    #[tokio::test]
+    async fn not_subscribed_fails_open_on_a_blocking_gate() {
+        let invoker = Arc::new(MockInvoker {
+            outcome: MockOutcome::Respond(PluginHookResponse::NotSubscribed),
+        });
+        let (result, _) = run_plugin_hook(
+            &plugin_spec(None),
+            &envelope(),
+            &ctx_with(Some(invoker)),
+            GateKind::Tool,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, HookRunnerResult::Skipped),
+            "an unsubscribed plugin must not produce a deny decision, got {result:?}"
+        );
     }
 
     #[tokio::test]
