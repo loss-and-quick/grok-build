@@ -22,6 +22,14 @@ pub const RATE_LIMITED_ERROR_CODE: i32 = -32003;
 pub const RATE_LIMITED_USER_MESSAGE_OAUTH: &str =
     "You\u{2019}ve hit the rate limit for your plan. Upgrade your account or try again later.";
 
+/// Rate-limit copy for an endpoint that is not xAI's, used when that endpoint
+/// returned no body of its own. Carries no plan, no quota and no purchase
+/// call-to-action on purpose: the endpoint that refused the request holds no
+/// grok.com relationship for the user, so there is nothing of theirs to upgrade
+/// or top up. See [`format_provider_rate_limited_user_message`].
+pub const RATE_LIMITED_USER_MESSAGE_PROVIDER: &str =
+    "The provider serving this model is rate limiting requests. Please wait and try again.";
+
 /// API key / team rate-limit copy. Personal grok.com upgrades do not raise API
 /// team limits; admins purchase credits or a higher spend-based tier.
 /// See https://docs.x.ai/developers/rate-limits#rate-limit-tiers
@@ -44,13 +52,20 @@ pub fn is_free_usage_exhausted_error(detail: &str) -> bool {
     detail.contains(FREE_USAGE_EXHAUSTED_ERROR_CODE)
 }
 
-/// User-facing text for an ACP -32003 rate-limit error.
+/// User-facing text for an ACP -32003 rate-limit error **from a first-party
+/// endpoint**.
 ///
 /// Free-usage code first (consumer-only; intentional before API-key rewrite).
 /// API-key + personal SuperGrok upsell → team credits copy. Else the body
 /// after stripping `API error (status …):` (SamplingError Display prefix).
 /// Empty → OAuth vs API-key fallback. Callers that show this in UI should
 /// still run their usual sanitizer (scrub/cap).
+///
+/// Every branch here describes a grok.com plan, a grok.com free-usage quota or
+/// an xAI team's spend tier, and it is chosen from HTTP status + body text
+/// alone — nothing in the input says whose endpoint answered. A caller serving
+/// a custom `[[provider]]` endpoint must therefore use
+/// [`format_provider_rate_limited_user_message`] instead.
 pub fn format_rate_limited_user_message(
     server_detail: Option<&str>,
     is_api_key_auth: bool,
@@ -72,6 +87,30 @@ pub fn format_rate_limited_user_message(
         RATE_LIMITED_USER_MESSAGE_OAUTH
     }
     .to_string()
+}
+
+/// User-facing text for an ACP -32003 rate-limit error **from an endpoint that
+/// is not first-party** — a custom `[[provider]]` gateway, a BYOK base URL.
+///
+/// The counterpart to [`format_rate_limited_user_message`], which is a
+/// grok.com surface end to end: its free-usage paywall copy, its API-key
+/// team-credits rewrite and its plan-upgrade fallback all name a quota, a plan
+/// or a credit balance the user only holds with xAI. A third-party endpoint is
+/// free to throttle for its own reasons, and 429 is the ordinary way to say so,
+/// so none of that copy can be true of it.
+///
+/// Surface the endpoint's own words after stripping the `API error (status …):`
+/// Display prefix; when it gave none, say only that it throttled the request
+/// ([`RATE_LIMITED_USER_MESSAGE_PROVIDER`]) — never a plan or a call to action.
+/// Callers that show this in UI should still run their usual sanitizer.
+pub fn format_provider_rate_limited_user_message(server_detail: Option<&str>) -> String {
+    // Strip before trimming: the prefix separator ends in a space, so a
+    // pre-trim would leave `API error (status 429): ` (empty body) unstripped.
+    server_detail
+        .map(strip_sampling_api_error_prefix)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(RATE_LIMITED_USER_MESSAGE_PROVIDER)
+        .to_string()
 }
 
 /// Drop `SamplingError::Api`'s Display prefix so users see the IC body, not
@@ -484,6 +523,74 @@ mod tests {
         );
         assert_eq!(
             format_rate_limited_user_message(Some("   "), true),
+            RATE_LIMITED_USER_MESSAGE_API_KEY
+        );
+    }
+
+    // ── A 429 from a custom provider is not a grok.com quota story ──────
+    //
+    // `format_rate_limited_user_message` decides on HTTP status + body text
+    // alone and cannot tell whose endpoint answered, yet every rewrite it
+    // applies names a grok.com plan, the grok.com free-usage quota or an xAI
+    // team's spend tier. A custom `[[provider]]` endpoint throttling its own
+    // traffic would therefore be reported as the user's own plan running out.
+    // `format_provider_rate_limited_user_message` is the copy for that case.
+
+    #[test]
+    fn provider_rate_limited_surfaces_the_endpoint_body() {
+        let body = "rate_limit_exceeded: 20 requests per minute for this key";
+        let wire = format!("API error (status 429 Too Many Requests): {body}");
+        assert_eq!(format_provider_rate_limited_user_message(Some(&wire)), body);
+        assert_eq!(
+            format_provider_rate_limited_user_message(Some(body)),
+            body,
+            "an unprefixed body passes through unchanged"
+        );
+    }
+
+    #[test]
+    fn provider_rate_limited_empty_body_offers_no_plan_or_cta() {
+        for detail in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("API error (status 429): "),
+        ] {
+            let msg = format_provider_rate_limited_user_message(detail);
+            assert_eq!(msg, RATE_LIMITED_USER_MESSAGE_PROVIDER, "detail={detail:?}");
+        }
+        let m = RATE_LIMITED_USER_MESSAGE_PROVIDER.to_ascii_lowercase();
+        for banned in ["plan", "upgrade", "credit", "subscription", "team", "x.ai"] {
+            assert!(
+                !m.contains(banned),
+                "provider rate-limit copy must not mention {banned:?}: {m}"
+            );
+        }
+    }
+
+    /// The first-party rewrites are exactly what must not reach a custom
+    /// provider's 429: the free-usage paywall links grok.com/supergrok, and
+    /// the API-key rewrite bills a team that never served the request.
+    #[test]
+    fn provider_rate_limited_applies_no_first_party_rewrite() {
+        let free = "API error (status 429 Too Many Requests): \
+            subscription:free-usage-exhausted: You have used all your free usage.";
+        let provider = format_provider_rate_limited_user_message(Some(free));
+        assert_ne!(provider, FREE_USAGE_USER_MESSAGE);
+        assert!(!provider.contains("grok.com/supergrok"));
+        // The first-party formatter is unchanged and still paywalls this body.
+        assert_eq!(
+            format_rate_limited_user_message(Some(free), false),
+            FREE_USAGE_USER_MESSAGE
+        );
+
+        let upsell = "API error (status 429 Too Many Requests): slow down, or \
+            upgrade to a Grok subscription: https://grok.com/supergrok";
+        let provider = format_provider_rate_limited_user_message(Some(upsell));
+        assert_ne!(provider, RATE_LIMITED_USER_MESSAGE_API_KEY);
+        assert!(!provider.contains("docs.x.ai"));
+        assert_eq!(
+            format_rate_limited_user_message(Some(upsell), true),
             RATE_LIMITED_USER_MESSAGE_API_KEY
         );
     }

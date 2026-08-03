@@ -300,6 +300,113 @@
         );
     }
 
+    // ── A custom provider's 429 is not the user's grok.com plan ────────
+    //
+    // `apply_retry_state` picks the rate-limit copy from the flattened 429
+    // body, which never says whose endpoint answered. Off a first-party
+    // endpoint every first-party rewrite is false: no plan to upgrade, no
+    // free-usage quota to have exhausted, no xAI team to bill.
+
+    /// A session whose active model is served by a custom `[[provider]]`
+    /// endpoint — `meta.firstParty = false`, the way the shell stamps it.
+    fn custom_provider_session() -> AgentSession {
+        let mut session = make_session(Some("s1"));
+        let id = acp::ModelId::new(std::sync::Arc::from("acme/fast"));
+        session.models.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "Acme Fast".to_string()).meta(
+                serde_json::json!({ "firstParty": false })
+                    .as_object()
+                    .cloned(),
+            ),
+        );
+        session.models.current = Some(id);
+        session
+    }
+
+    fn exhausted_rate_limit(reason: &str) -> RetryState {
+        RetryState::Exhausted {
+            attempts: 3,
+            reason: reason.to_string(),
+            is_rate_limited: true,
+        }
+    }
+
+    /// A bodyless 429 (a bare gateway throttle) must not fall back to the
+    /// plan-upgrade or team-credits copy under either auth flavour.
+    #[test]
+    fn custom_provider_rate_limit_never_claims_the_users_plan_ran_out() {
+        use xai_grok_shell::sampling::error::{
+            RATE_LIMITED_USER_MESSAGE_API_KEY, RATE_LIMITED_USER_MESSAGE_OAUTH,
+            RATE_LIMITED_USER_MESSAGE_PROVIDER,
+        };
+        for is_api_key_auth in [false, true] {
+            let mut session = custom_provider_session();
+            let mut scrollback = ScrollbackState::new();
+            apply_retry_state(
+                &exhausted_rate_limit(""),
+                &mut session,
+                &mut scrollback, is_api_key_auth);
+            match last_session_event(&scrollback) {
+                Some(SessionEvent::RetryFailed { error, .. }) => {
+                    assert_eq!(error, RATE_LIMITED_USER_MESSAGE_PROVIDER);
+                    assert_ne!(error, RATE_LIMITED_USER_MESSAGE_OAUTH);
+                    assert_ne!(error, RATE_LIMITED_USER_MESSAGE_API_KEY);
+                }
+                other => panic!("expected RetryFailed (api_key={is_api_key_auth}), got {other:?}"),
+            }
+        }
+    }
+
+    /// The API-key rewrite bills an xAI team that never served the request,
+    /// so it must not fire for a custom provider — its body stands.
+    #[test]
+    fn custom_provider_rate_limit_keeps_the_providers_own_words() {
+        use xai_grok_shell::sampling::error::RATE_LIMITED_USER_MESSAGE_API_KEY;
+        let body = "slow down, or upgrade to a Grok subscription: https://grok.com/supergrok";
+        let mut session = custom_provider_session();
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &exhausted_rate_limit(&format!("API error (status 429 Too Many Requests): {body}")),
+            &mut session,
+            &mut scrollback, true);
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::RetryFailed { error, .. }) => {
+                assert_eq!(error, body);
+                assert_ne!(error, RATE_LIMITED_USER_MESSAGE_API_KEY);
+            }
+            other => panic!("expected RetryFailed, got {other:?}"),
+        }
+    }
+
+    /// The free-usage arm pushes no block because the driver is supposed to
+    /// show the paywall modal instead. Off a first-party endpoint that modal
+    /// never opens, so this arm must not be taken — otherwise the turn ends
+    /// with nothing on screen at all.
+    #[test]
+    fn custom_provider_free_usage_wording_leaves_a_visible_message() {
+        let mut session = custom_provider_session();
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &exhausted_rate_limit(
+                "API error (status 429 Too Many Requests): \
+                 subscription:free-usage-exhausted: You have used all your free usage.",
+            ),
+            &mut session,
+            &mut scrollback, false);
+        assert!(
+            !session.free_usage_blocked,
+            "a custom provider's 429 must not arm the grok.com paywall"
+        );
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::RetryFailed { error, .. }) => {
+                assert!(!error.is_empty());
+                assert!(!error.contains("grok.com/supergrok"));
+            }
+            other => panic!("expected a visible RetryFailed, got {other:?}"),
+        }
+    }
+
     #[test]
     fn apply_retry_state_credit_limit_exhausted_preserves_in_flight_prompt() {
         let mut session = make_session(Some("s1"));

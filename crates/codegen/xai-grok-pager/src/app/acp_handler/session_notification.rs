@@ -1,5 +1,7 @@
 use super::*;
-use xai_grok_shell::sampling::error::format_rate_limited_user_message;
+use xai_grok_shell::sampling::error::{
+    format_provider_rate_limited_user_message, format_rate_limited_user_message,
+};
 /// Stash a live stop/stop_failure batch under `stash_pid` for the turn marker
 /// to fold. `merge_same_name` merges a same-name repeat instead of standalone.
 pub(super) fn stash_live_stop_batch(
@@ -1326,7 +1328,22 @@ pub(super) fn apply_retry_state(
                 );
             }
             is_credit_limit = super::super::dispatch::is_credit_limit_error(None, reason);
+            // Whose endpoint refused this turn. The rate-limit copy below is
+            // picked from HTTP status + body text, which says nothing about
+            // that, and every first-party rewrite it can apply names a
+            // grok.com plan, the grok.com free-usage quota or an xAI team's
+            // spend tier. A custom `[[provider]]` endpoint is free to answer
+            // 429 for its own throttling, and a session with no grok.com
+            // relationship would then be told its own plan ran out.
+            let first_party_endpoint = session.models.current_model_is_first_party();
+            // Gated on the endpoint, not just classified: this arm pushes NO
+            // block, because the driver is expected to show the paywall modal
+            // on the PromptResponse instead. Off a first-party endpoint that
+            // modal does not open (see `handle_prompt_response`), so taking
+            // this arm would leave the turn with no message at all — fall
+            // through to the generic arm and surface what the provider said.
             let is_free_usage = *rate_limited
+                && first_party_endpoint
                 && xai_grok_shell::sampling::error::is_free_usage_exhausted_error(reason);
             if is_credit_limit {
                 session.credit_limit_blocked = true;
@@ -1337,10 +1354,12 @@ pub(super) fn apply_retry_state(
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
             } else {
                 let error = if *rate_limited {
-                    crate::app::effects::sanitize_user_error(&format_rate_limited_user_message(
-                        Some(reason.as_str()),
-                        is_api_key_auth,
-                    ))
+                    let copy = if first_party_endpoint {
+                        format_rate_limited_user_message(Some(reason.as_str()), is_api_key_auth)
+                    } else {
+                        format_provider_rate_limited_user_message(Some(reason.as_str()))
+                    };
+                    crate::app::effects::sanitize_user_error(&copy)
                 } else {
                     format!("failed after {attempts} retries: {reason}")
                 };

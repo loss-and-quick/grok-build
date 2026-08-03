@@ -1230,11 +1230,18 @@ pub(super) fn handle_prompt_response(
         // notification lost the race with (or never reached) this
         // PromptResponse, detect the free-usage code from the prompt error
         // itself — the flattened 429 body embeds it.
-        let free_usage_blocked = agent.session.free_usage_blocked
-            || result
-                .as_ref()
-                .err()
-                .is_some_and(|e| xai_grok_shell::sampling::error::is_free_usage_exhausted_error(e));
+        //
+        // Gated on `grok_account_features` for the same reason as
+        // `credit_limit_blocked`: this branch opens a modal offering SuperGrok
+        // and suppresses the turn's error, and a free-usage quota is a
+        // grok.com quota. The sniff is body text on a 429 and cannot tell
+        // whose endpoint answered, so a custom provider relaying that wording
+        // would otherwise paywall a session that has no free tier to exhaust.
+        let free_usage_blocked = grok_account_features
+            && (agent.session.free_usage_blocked
+                || result.as_ref().err().is_some_and(|e| {
+                    xai_grok_shell::sampling::error::is_free_usage_exhausted_error(e)
+                }));
         let model_incompatible = agent.session.model_incompatible;
         // Context overflow: the RetryState handler already pushed the actionable
         // block, so the generic TurnFailed + error toast are redundant. Derived

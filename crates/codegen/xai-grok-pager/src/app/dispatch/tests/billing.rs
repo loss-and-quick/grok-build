@@ -1601,3 +1601,119 @@ fn latched_credit_limit_flag_is_inert_without_first_party_account() {
     );
     assert!(has_turn_failed_block(&app));
 }
+
+// ── The free-usage paywall is a grok.com surface ────────────────────
+//
+// Mixed mode: a grok.com account is signed in, but the turn ran on a custom
+// `[[provider]]` endpoint. `is_free_usage_exhausted_error` sniffs body text on
+// a 429 and cannot tell whose endpoint answered, so without a gate a provider
+// relaying that wording paywalls a session with no free tier to exhaust — and
+// the modal replaces the provider's real error, which `rate_limited` has
+// already suppressed.
+
+/// Point agent 0's session at a custom provider's model (`meta.firstParty =
+/// false`, the way the shell stamps it), leaving the account first-party.
+fn use_custom_provider_model(app: &mut AppView) {
+    let id = acp::ModelId::new(std::sync::Arc::from("acme/fast"));
+    let models = &mut app.agents.get_mut(&AgentId(0)).unwrap().session.models;
+    models.available.insert(
+        id.clone(),
+        acp::ModelInfo::new(id.clone(), "Acme Fast".to_string()).meta(
+            serde_json::json!({ "firstParty": false })
+                .as_object()
+                .cloned(),
+        ),
+    );
+    models.current = Some(id);
+}
+
+/// The same sequence as `free_usage_failure_opens_paywall_modal`, on a custom
+/// provider's endpoint: no modal, and the turn keeps a visible failure.
+#[test]
+fn custom_provider_free_usage_wording_shows_no_supergrok_paywall() {
+    use crate::app::acp_handler::apply_session_event_for_test;
+    use xai_grok_shell::extensions::notification::{RetryState, SessionUpdate};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    use_custom_provider_model(&mut app);
+    assert!(
+        app.is_first_party_account,
+        "a grok.com account is signed in"
+    );
+    assert!(
+        !app.grok_account_features_apply(),
+        "but the turn is spending a custom provider's quota"
+    );
+
+    let effects = dispatch(Action::SendPrompt("draw me a cat".into()), &mut app);
+    assert!(matches!(&effects[0], Effect::SendPrompt { .. }));
+    let prompt_id = app.agents[&id].session.current_prompt_id.clone();
+
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        apply_session_event_for_test(
+            &SessionUpdate::RetryState(RetryState::Exhausted {
+                attempts: 2,
+                reason: "API error (status 429 Too Many Requests): \
+                         subscription:free-usage-exhausted: You have used all your free usage."
+                    .into(),
+                is_rate_limited: true,
+            }),
+            &mut agent.session,
+            &mut agent.scrollback,
+        );
+        assert!(
+            !agent.session.free_usage_blocked,
+            "the retry notification must not arm the paywall off a first-party endpoint"
+        );
+    }
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err("API error (status 429 Too Many Requests): \
+                         subscription:free-usage-exhausted: You have used all your free usage."
+                .into()),
+            http_status: Some(429),
+            prompt_id,
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].question_view.is_none(),
+        "no SuperGrok paywall for a custom provider's 429"
+    );
+    assert!(
+        (0..app.agents[&id].scrollback.len()).any(|idx| matches!(
+            app.agents[&id].scrollback.entry(idx).map(|e| &e.block),
+            Some(RenderBlock::SessionEvent(ev))
+                if matches!(ev.event, SessionEvent::RetryFailed { .. })
+        )),
+        "the provider's own rate-limit message must stay on screen"
+    );
+}
+
+/// The error-body fallback (retry notification lost the race) is gated too, so
+/// a latched flag or a raw 429 body cannot reopen the paywall.
+#[test]
+fn free_usage_error_body_opens_no_paywall_off_a_first_party_endpoint() {
+    let mut app = test_app_with_agent();
+    use_custom_provider_model(&mut app);
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .free_usage_blocked = true;
+
+    let _ = fail_turn_with(
+        &mut app,
+        Some(429),
+        "API error (status 429): subscription:free-usage-exhausted: out of free usage",
+    );
+    assert!(
+        app.agents[&AgentId(0)].question_view.is_none(),
+        "a latched free-usage flag must stay inert off a first-party endpoint"
+    );
+    assert!(has_turn_failed_block(&app));
+}
