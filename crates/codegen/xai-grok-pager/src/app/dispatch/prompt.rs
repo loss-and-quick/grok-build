@@ -1115,6 +1115,10 @@ pub(super) fn handle_prompt_response(
     // Both need `&AppView` as a whole, so they are bound before the
     // field-precise `agents` borrow below.
     let billing_refresh = super::billing::silent_billing_refresh(app, agent_id);
+    // Whether a grok.com credit-limit denial can apply to this turn at all.
+    // Bound here because it needs `&AppView` as a whole, unlike the
+    // field-precise `agents` borrow below.
+    let grok_account_features = app.grok_account_features_apply();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         // Discard PromptResponses that don't belong to the currently
         // active prompt -- they belong to a turn the user rewound, or to
@@ -1240,11 +1244,23 @@ pub(super) fn handle_prompt_response(
         // detect credit-limit denials (legacy 403 or pool 402) from
         // the PromptResponse error + HTTP status. Covers races where
         // the retry notification arrives after the PromptResponse.
-        let credit_limit_blocked = agent.session.credit_limit_blocked
-            || result
-                .as_ref()
-                .err()
-                .is_some_and(|e| is_credit_limit_error(http_status, e));
+        //
+        // Gated on `grok_account_features`: this branch strips the turn's
+        // error blocks and opens an upsell offering a grok.com tier upgrade
+        // and a grok.com credit purchase, so it only makes sense when a
+        // grok.com account is driving a first-party model.
+        // `is_credit_limit_error` classifies purely on HTTP status + body
+        // text and cannot tell whose endpoint answered; a custom provider is
+        // free to return 402 for its own spend policy, and taking this branch
+        // then replaces that provider's real error with an offer to top up
+        // credits the user holds no relationship for. Falling through instead
+        // surfaces the provider's own message via `TurnFailed`.
+        let credit_limit_blocked = grok_account_features
+            && (agent.session.credit_limit_blocked
+                || result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| is_credit_limit_error(http_status, e)));
         // A 401/auth failure already surfaced an actionable
         // `ReAuthRequired` prompt via the RetryState handler (which
         // runs before this PromptResponse). Suppress the redundant

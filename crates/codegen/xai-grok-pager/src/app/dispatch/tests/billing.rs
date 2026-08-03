@@ -619,7 +619,10 @@ fn session_usage_complete_no_billing_when_surface_hidden() {
     app.usage_visible = false;
     let before = agent_scrollback_len(&app);
     let effects = complete_session_usage(&mut app, "test-session", Default::default());
-    assert!(effects.is_empty(), "no billing fetch when the surface is hidden");
+    assert!(
+        effects.is_empty(),
+        "no billing fetch when the surface is hidden"
+    );
     // The session block lands, plus an explicit "no billing data" line: the
     // user asked for `/usage`, so the missing credits section is explained
     // rather than silently dropped.
@@ -1472,4 +1475,129 @@ fn turn_end_issues_no_billing_fetch_without_first_party_account() {
         !has_billing_fetch(&end_turn(&mut app)),
         "a turn must not fetch billing without a first-party account"
     );
+}
+
+// ── The credit-limit upsell is a grok.com surface ───────────────────
+//
+// `is_credit_limit_error` classifies on HTTP status + body text alone: any
+// 402 is a credit block, and a 403 is one when the body says "run out of
+// credits". It cannot tell whose endpoint answered. A custom `[[provider]]`
+// returning 402 for its own spend policy therefore used to strip the turn's
+// error blocks and open an upsell offering a grok.com tier upgrade and a
+// grok.com credit purchase — for an account with no grok.com relationship
+// and no credits to top up. This is the surface behind the report that
+// billing UI appears on custom-provider-only setups.
+
+/// Fail the in-flight turn with `error` at `http_status`; return the effects.
+fn fail_turn_with(app: &mut AppView, http_status: Option<u16>, error: &str) -> Vec<Effect> {
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.session.state = AgentState::TurnRunning;
+    agent.turn_started_at = Some(std::time::Instant::now());
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: AgentId(0),
+            result: Err(error.to_string()),
+            http_status,
+            prompt_id: None,
+        }),
+        app,
+    )
+}
+
+fn has_credit_limit_recheck(effects: &[Effect]) -> bool {
+    effects
+        .iter()
+        .any(|e| matches!(e, Effect::CreditLimitRecheck { .. }))
+}
+
+fn has_turn_failed_block(app: &AppView) -> bool {
+    let agent = &app.agents[&AgentId(0)];
+    (0..agent.scrollback.len()).any(|idx| {
+        matches!(
+            agent.scrollback.entry(idx).map(|e| &e.block),
+            Some(RenderBlock::SessionEvent(ev))
+                if matches!(ev.event, SessionEvent::TurnFailed { .. })
+        )
+    })
+}
+
+/// Baseline: on a grok.com account a 402 still opens the credit-limit flow.
+#[test]
+fn pool_402_still_rechecks_credits_for_first_party_account() {
+    let mut app = test_app_with_agent();
+    assert!(app.grok_account_features_apply());
+    let effects = fail_turn_with(
+        &mut app,
+        Some(402),
+        "API error (status 402): quota exhausted",
+    );
+    assert!(
+        has_credit_limit_recheck(&effects),
+        "a first-party 402 must still reach the credit-limit recheck"
+    );
+}
+
+#[test]
+fn custom_provider_402_shows_provider_error_not_a_credits_upsell() {
+    let mut app = test_app_with_agent();
+    // No grok.com account behind this session — only custom providers.
+    app.is_first_party_account = false;
+    assert!(!app.grok_account_features_apply());
+
+    let effects = fail_turn_with(
+        &mut app,
+        Some(402),
+        "API error (status 402): upstream endpoint declined the request",
+    );
+
+    assert!(
+        !has_credit_limit_recheck(&effects),
+        "a custom provider's 402 must not trigger the grok.com credit-limit flow"
+    );
+    assert!(
+        app.agents[&AgentId(0)].question_view.is_none(),
+        "no credit-limit upsell modal for a custom provider's 402"
+    );
+    assert!(
+        has_turn_failed_block(&app),
+        "the provider's own error must surface instead of being stripped"
+    );
+}
+
+/// The legacy 403 wording is likewise a grok.com-only surface. `403` alone was
+/// never enough (only 403 + "run out of credits"), so a plain policy-denial
+/// 403 from any provider was already excluded — this pins the credits-worded
+/// case for a non-grok.com account.
+#[test]
+fn custom_provider_403_with_credits_wording_shows_no_upsell() {
+    let mut app = test_app_with_agent();
+    app.is_first_party_account = false;
+
+    let effects = fail_turn_with(&mut app, Some(403), "you have run out of credits");
+    assert!(
+        !has_credit_limit_recheck(&effects),
+        "a custom provider's 403 must not trigger the grok.com credit-limit flow"
+    );
+    assert!(has_turn_failed_block(&app));
+}
+
+/// A retry notification that already latched `credit_limit_blocked` on the
+/// session must not resurrect the upsell either — the gate is on consumption,
+/// so a stale flag from the retry path stays inert.
+#[test]
+fn latched_credit_limit_flag_is_inert_without_first_party_account() {
+    let mut app = test_app_with_agent();
+    app.is_first_party_account = false;
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .credit_limit_blocked = true;
+
+    let effects = fail_turn_with(&mut app, None, "upstream endpoint declined the request");
+    assert!(
+        !has_credit_limit_recheck(&effects),
+        "a latched credit-limit flag must not open the upsell off a grok.com account"
+    );
+    assert!(has_turn_failed_block(&app));
 }
