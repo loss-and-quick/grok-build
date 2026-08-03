@@ -564,6 +564,30 @@ impl ModelsManager {
         resolve_catalog_key(models, &acp::ModelId::new(model_id)).is_some()
     }
 
+    /// The catalog **key** `model_id` names in the current catalog, or `None`
+    /// when the catalog does not list it. `[`Self::model_in_catalog`]` with the
+    /// answer kept.
+    ///
+    /// This is what an operator-supplied aux model id must be carried as, all
+    /// the way to whatever resolves it into an endpoint and a credential. The
+    /// key is the only spelling that identifies *one* entry: a `[[provider]]`
+    /// block is expanded into `<provider>/<model>` keys whose routing slug is
+    /// the bare `<model>`, so two providers serving one slug produce two entries
+    /// that a bare slug cannot tell apart — [`config::find_by_slug`] answers
+    /// with the last-declared one. Reducing a qualified pin to its slug and
+    /// re-resolving therefore silently moves the request to the other provider's
+    /// endpoint and credential, which is precisely what the user spelled the
+    /// qualification to prevent.
+    ///
+    /// The routing slug is not returned here on purpose. It is derived once, by
+    /// the resolver that also picks the endpoint and the credential, so the wire
+    /// `model` and the route it travels always come from the same entry.
+    pub fn catalog_key(&self, model_id: &str) -> Option<String> {
+        let cat = self.inner.catalog.read();
+        resolve_catalog_key(&cat.models, &acp::ModelId::new(model_id))
+            .map(|key| key.0.as_ref().to_owned())
+    }
+
     /// The routing slug `model_id` resolves to in the current catalog — the
     /// value that may appear as a request's wire `model`. `None` when the
     /// catalog does not list the id.

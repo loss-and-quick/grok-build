@@ -6,16 +6,20 @@
 //! implementation of that trait, and it keeps them by never routing anything
 //! itself:
 //!
-//! 1. The wire slug comes from [`ModelsManager::model_routing_slug`], the one
-//!    translation from a catalog *key* to the name a vendor answers to, and the
-//!    request carries exactly the string the tool handed back.
-//! 2. The request goes out on a sampler resolved for that slug by
+//! 1. The tool is answered with a catalog *key*
+//!    ([`ModelsManager::catalog_key`]), never a routing slug, so the pin's
+//!    provider qualification survives the round trip through the tool. A bare
+//!    slug names the last-declared entry of that slug, which is a different
+//!    provider's endpoint and credential whenever two providers serve one slug.
+//! 2. The request goes out on a sampler resolved for that key by
 //!    [`SessionActor::resolve_aux_sampler_client`] — the same routed-aux path
 //!    prompt suggestion and the Auto-mode classifier use, which pairs the
 //!    resolved catalog entry's endpoint and credential with that entry's own
-//!    slug. Its `None` means "this model has no route of its own", and here it
-//!    means *skip*: riding the session's client would hand one provider's
-//!    endpoint and credential another provider's slug.
+//!    routing slug. One resolution produces both, so the wire `model` and the
+//!    route it travels cannot come from different entries. Its `None` means
+//!    "this model has no route of its own", and here it means *skip*: riding the
+//!    session's client would hand one provider's endpoint and credential another
+//!    provider's slug.
 //! 3. Nothing first-party is fabricated for a session that is not first-party.
 //!    The unpinned default is the session's *own* model, so an unpinned
 //!    distillation stays on whatever provider the session already talks to, and
@@ -54,8 +58,9 @@ use crate::agent::models::ModelsManager;
 /// One distillation request, handed from a `web_fetch` call to the session's
 /// `LocalSet`.
 pub(crate) struct DistillJob {
-    /// The routing slug the tool resolved. Goes on the wire as given.
-    wire_model: String,
+    /// The catalog key the tool placed the pin at. Resolved once, here, into a
+    /// route and the wire slug that route serves.
+    model_key: String,
     system_prompt: String,
     user_prompt: String,
     respond_to: oneshot::Sender<Result<String, String>>,
@@ -76,21 +81,20 @@ impl ChannelWebContentDistiller {
 
 #[async_trait::async_trait]
 impl WebContentDistiller for ChannelWebContentDistiller {
-    /// Translate a configured pin (a catalog key) into the entry's routing slug.
+    /// Place a configured pin in the catalog and answer with its key.
     ///
-    /// Known gap, shared with every other aux pin in the shell and not
-    /// introduced here: the slug is all that survives to `infer`, so when two
-    /// providers serve the same bare slug, re-resolving it picks the
-    /// last-declared entry (`config::find_by_slug`) rather than the one the
-    /// qualified pin named. A pin spelled `<provider>/<model>` can therefore
-    /// leave on the *other* provider's endpoint and credential. Widening the
-    /// seam to carry the key is the fix; until then a user disambiguating two
-    /// same-slug providers should give them distinct slugs.
-    fn routing_slug(&self, model_pin: &str) -> Option<String> {
-        self.models.model_routing_slug(model_pin)
+    /// The key, not the entry's routing slug: a slug is ambiguous by
+    /// construction once two providers serve the same one, and
+    /// `config::find_by_slug` resolves that ambiguity to the last-declared
+    /// entry. Handing the tool a slug would therefore let a pin spelled
+    /// `<provider>/<model>` come back as an id that re-resolves to the *other*
+    /// provider — its endpoint, its credential — with nothing downstream able to
+    /// tell that the qualification had been dropped.
+    fn catalog_key(&self, model_pin: &str) -> Option<String> {
+        self.models.catalog_key(model_pin)
     }
 
-    /// The session's own model, as its catalog entry's routing slug.
+    /// The session's own model, as its catalog key.
     ///
     /// Not a compiled-in first-party slug: that would put a session running
     /// entirely on a custom `[[provider]]` onto xAI the moment a bearer happened
@@ -103,23 +107,23 @@ impl WebContentDistiller for ChannelWebContentDistiller {
     /// for the rest of the conversation. Operators who want a smaller helper
     /// pin one with `[toolset.web_fetch.distill] model`.
     ///
-    /// `None` when the catalog cannot translate the current model id — nothing
-    /// is reachable, so distillation is skipped.
-    fn default_routing_slug(&self) -> Option<String> {
+    /// `None` when the catalog cannot place the current model id — nothing is
+    /// reachable, so distillation is skipped.
+    fn default_catalog_key(&self) -> Option<String> {
         let current = self.models.current_model_id();
-        self.models.model_routing_slug(current.0.as_ref())
+        self.models.catalog_key(current.0.as_ref())
     }
 
     async fn infer(
         &self,
-        wire_model: &str,
+        model_key: &str,
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let (respond_to, answer) = oneshot::channel();
         self.jobs
             .send(DistillJob {
-                wire_model: wire_model.to_owned(),
+                model_key: model_key.to_owned(),
                 system_prompt: system_prompt.to_owned(),
                 user_prompt: user_prompt.to_owned(),
                 respond_to,
@@ -136,12 +140,13 @@ impl WebContentDistiller for ChannelWebContentDistiller {
 /// Serve distillation jobs until the last sender is dropped.
 ///
 /// `resolve` is [`SessionActor::resolve_aux_sampler_client`] in production: it
-/// hands back the client for the endpoint the resolved catalog entry declares,
-/// paired with that entry's own routing slug, or `None` when the model has no
-/// route of its own. `None` **skips**. It must never degrade to the session's
-/// client the way image-describe and session-title do: those name a slug the
-/// session endpoint is known to serve, whereas here the slug was chosen for a
-/// different entry, and a client carries one endpoint and one credential.
+/// takes a catalog key and hands back the client for the endpoint that entry
+/// declares, paired with that entry's own routing slug, or `None` when the model
+/// has no route of its own. `None` **skips**. It must never degrade to the
+/// session's client the way image-describe and session-title do: those name a
+/// slug the session endpoint is known to serve, whereas here the model was
+/// chosen from a different entry, and a client carries one endpoint and one
+/// credential.
 pub(crate) async fn serve_distill_jobs<R, F>(
     mut jobs: mpsc::UnboundedReceiver<DistillJob>,
     session_id: String,
@@ -151,10 +156,10 @@ pub(crate) async fn serve_distill_jobs<R, F>(
     F: std::future::Future<Output = Option<(xai_grok_sampler::SamplingClient, String)>>,
 {
     while let Some(job) = jobs.recv().await {
-        let route = resolve(job.wire_model.clone()).await;
+        let route = resolve(job.model_key.clone()).await;
         let result = run_distill_job(
             route,
-            &job.wire_model,
+            &job.model_key,
             &job.system_prompt,
             &job.user_prompt,
             &session_id,
@@ -162,7 +167,7 @@ pub(crate) async fn serve_distill_jobs<R, F>(
         .await;
         if let Err(error) = &result {
             tracing::debug!(
-                model = %job.wire_model,
+                model = %job.model_key,
                 %error,
                 "web_fetch distillation skipped; the raw page is returned"
             );
@@ -172,29 +177,24 @@ pub(crate) async fn serve_distill_jobs<R, F>(
 }
 
 /// Run one distillation inference against an already-resolved route.
+///
+/// `model` is the routing slug of the entry `resolve` landed on, and the client
+/// is that same entry's endpoint and credential. They are one resolution of one
+/// key, so there is nothing left here to cross-check: the key was carried whole
+/// from the pin, and the slug was derived from it rather than the other way
+/// round.
 async fn run_distill_job(
     route: Option<(xai_grok_sampler::SamplingClient, String)>,
-    wire_model: &str,
+    model_key: &str,
     system_prompt: &str,
     user_prompt: &str,
     session_id: &str,
 ) -> Result<String, String> {
     let Some((client, model)) = route else {
         return Err(format!(
-            "aux model {wire_model:?} has no route of its own; it must not ride the session client"
+            "aux model {model_key:?} has no route of its own; it must not ride the session client"
         ));
     };
-    // The resolver answers with the entry it landed on, and the id it was given
-    // was already that entry's routing slug, so the two agree on every route
-    // worth taking. When they do not, the resolver reached a *different* catalog
-    // entry than the slug names — and its endpoint and credential were chosen
-    // for that other model. Skip rather than re-translate a slug the tool
-    // already resolved, which is the trait's first rule.
-    if model != wire_model {
-        return Err(format!(
-            "aux model {wire_model:?} resolved to a different entry, serving {model:?}"
-        ));
-    }
     let request = ConversationRequest {
         items: vec![
             ConversationItem::system(system_prompt.to_owned()),
@@ -231,9 +231,9 @@ impl SessionActor {
         let weak = Arc::downgrade(self);
         let session_id = self.session_info.id.to_string();
         tokio::task::spawn_local(async move {
-            serve_distill_jobs(jobs_rx, session_id, move |slug| {
+            serve_distill_jobs(jobs_rx, session_id, move |key| {
                 let weak = weak.clone();
-                async move { weak.upgrade()?.resolve_aux_sampler_client(&slug).await }
+                async move { weak.upgrade()?.resolve_aux_sampler_client(&key).await }
             })
             .await;
             tracing::debug!("web_fetch distiller task exiting (channel closed)");
@@ -262,6 +262,8 @@ mod tests {
     /// tests, so the resolver's first-party fallback tier cannot mask a result.
     const SESSION_MODEL: &str = "session-model";
     const AUX_MODEL: &str = "aux-model";
+    /// One slug, two providers. The case a bare slug cannot disambiguate.
+    const SHARED_MODEL: &str = "shared-model";
 
     /// A `[[provider]]` serving one model. `api_key: None` with an
     /// `auth_account` is the plugin-minted-bearer shape: an entry with no
@@ -336,13 +338,13 @@ mod tests {
     /// resolve, stamp and client build, over an explicit catalog and session
     /// config instead of the live actor's.
     fn resolve_route(
-        slug: &str,
+        model_key: &str,
         catalog: &IndexMap<String, ModelEntry>,
         session: &SamplerConfig,
         session_key: Option<&str>,
     ) -> Option<(xai_grok_sampler::SamplingClient, String)> {
         let mut cfg = resolve_aux_model_sampling_config(
-            slug,
+            model_key,
             catalog,
             &EndpointsConfig::default(),
             &session.base_url,
@@ -361,20 +363,20 @@ mod tests {
         models: ModelsManager,
         catalog: IndexMap<String, ModelEntry>,
         session: SamplerConfig,
-        wire_model: &str,
+        model_key: &str,
     ) -> Result<String, String> {
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
-        let served = serve_distill_jobs(jobs_rx, "test-session".to_owned(), move |slug| {
+        let served = serve_distill_jobs(jobs_rx, "test-session".to_owned(), move |model_key| {
             let catalog = catalog.clone();
             let session = session.clone();
             async move {
                 // A signed-in session: the bearer that must not travel.
-                resolve_route(&slug, &catalog, &session, Some("session-jwt"))
+                resolve_route(&model_key, &catalog, &session, Some("session-jwt"))
             }
         });
         let distiller = ChannelWebContentDistiller::new(models, jobs_tx);
         let call = async move {
-            let result = distiller.infer(wire_model, "system", "user").await;
+            let result = distiller.infer(model_key, "system", "user").await;
             // The loop runs until its last sender goes; this is that sender.
             drop(distiller);
             result
@@ -414,12 +416,15 @@ mod tests {
         let distiller =
             ChannelWebContentDistiller::new(models.clone(), mpsc::unbounded_channel().0);
 
-        let pin_slug = distiller
-            .routing_slug("acme/aux-model")
+        let pin_key = distiller
+            .catalog_key("acme/aux-model")
             .expect("the pin is in the catalog — which is why it gets this far");
-        assert_eq!(pin_slug, AUX_MODEL, "a key is translated, never forwarded");
+        assert_eq!(
+            pin_key, "acme/aux-model",
+            "the pin's qualification is carried, not collapsed to the slug"
+        );
 
-        let err = distill_once(models, catalog, session, &pin_slug)
+        let err = distill_once(models, catalog, session, &pin_key)
             .await
             .expect_err("a route-less aux model must not be distilled with");
         assert!(err.contains("no route of its own"), "got: {err}");
@@ -456,10 +461,8 @@ mod tests {
         let distiller =
             ChannelWebContentDistiller::new(models.clone(), mpsc::unbounded_channel().0);
 
-        let pin_slug = distiller
-            .routing_slug("acme/aux-model")
-            .expect("in catalog");
-        let answer = distill_once(models, catalog, session, &pin_slug)
+        let pin_key = distiller.catalog_key("acme/aux-model").expect("in catalog");
+        let answer = distill_once(models, catalog, session, &pin_key)
             .await
             .expect("a pin with its own credential resolves and runs");
         assert!(answer.contains("60 rpm"), "got: {answer}");
@@ -485,6 +488,68 @@ mod tests {
         );
     }
 
+    /// Two providers serving one slug: the qualified pin names the first, and
+    /// the first is where the request must land.
+    ///
+    /// The bare slug cannot express this. `config::find_by_slug` answers a bare
+    /// `shared-model` with the LAST declared entry, so a seam that reduces the
+    /// pin to its slug and lets the sampler resolver re-derive the entry hands
+    /// the request to `b` — `b`'s endpoint, `b`'s credential — after the user
+    /// spelled `a`. The qualified key is the only disambiguator there is, so it
+    /// is the key, not the slug, that has to survive to the resolver.
+    #[tokio::test]
+    async fn a_pin_qualified_to_one_of_two_same_slug_providers_routes_to_that_one() {
+        let session_server = MockInferenceServer::start().await.unwrap();
+        let a_server = MockInferenceServer::start().await.unwrap();
+        let b_server = MockInferenceServer::start().await.unwrap();
+        a_server.set_response("answered by a");
+        b_server.set_response("answered by b");
+        let catalog = catalog_from(vec![
+            provider(
+                "session-provider",
+                SESSION_MODEL,
+                &session_server.url(),
+                Some("session-provider-key"),
+                None,
+            ),
+            provider("a", SHARED_MODEL, &a_server.url(), Some("a-key"), None),
+            // Declared after `a`, so a bare-slug scan lands here.
+            provider("b", SHARED_MODEL, &b_server.url(), Some("b-key"), None),
+        ]);
+        let session = session_config(&catalog, "session-provider/session-model");
+        let models = models_manager(catalog.clone(), "session-provider/session-model");
+        let distiller =
+            ChannelWebContentDistiller::new(models.clone(), mpsc::unbounded_channel().0);
+
+        let pin = distiller
+            .catalog_key("a/shared-model")
+            .expect("the qualified pin is a catalog key");
+        let answer = distill_once(models, catalog, session, &pin)
+            .await
+            .expect("the pinned provider carries its own credential");
+        assert_eq!(answer, "answered by a", "the pin named `a`, not `b`");
+
+        let logged = a_server
+            .requests()
+            .into_iter()
+            .find(|e| e.body.is_some())
+            .expect("the pinned provider received the request");
+        assert_eq!(
+            logged.body.as_ref().and_then(|b| b["model"].as_str()),
+            Some(SHARED_MODEL),
+            "the bare slug still goes on the wire — a key is not a wire model"
+        );
+        assert_eq!(
+            logged.authorization.as_deref(),
+            Some("Bearer a-key"),
+            "on the pinned provider's own credential"
+        );
+        assert!(
+            b_server.requests().is_empty(),
+            "the other provider serving the same slug must never see this request"
+        );
+    }
+
     /// Unpinned distillation stays on the provider the session already talks to.
     /// The alternative — a compiled-in first-party slug — is the fabricated
     /// first-party request the seam's third rule forbids.
@@ -502,21 +567,21 @@ mod tests {
             mpsc::unbounded_channel().0,
         );
         assert_eq!(
-            distiller.default_routing_slug().as_deref(),
-            Some(SESSION_MODEL),
-            "the session's own model, as the slug its entry declares"
+            distiller.default_catalog_key().as_deref(),
+            Some("acme/session-model"),
+            "the session's own model, as the key that names its entry"
         );
     }
 
-    /// Nothing translatable means nothing to send: skip rather than guess.
+    /// Nothing placeable means nothing to send: skip rather than guess.
     #[test]
-    fn an_untranslatable_id_yields_no_slug_at_all() {
+    fn an_id_the_catalog_cannot_place_yields_no_key_at_all() {
         let distiller = ChannelWebContentDistiller::new(
             models_manager(IndexMap::new(), "not-in-any-catalog"),
             mpsc::unbounded_channel().0,
         );
-        assert_eq!(distiller.routing_slug("acme/aux-model"), None);
-        assert_eq!(distiller.default_routing_slug(), None);
+        assert_eq!(distiller.catalog_key("acme/aux-model"), None);
+        assert_eq!(distiller.default_catalog_key(), None);
     }
 
     /// A dropped service task must fail open rather than hang the fetch.

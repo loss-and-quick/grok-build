@@ -16,18 +16,22 @@
 //! nothing because a helper model was unavailable would be strictly worse than
 //! the truncation it replaces, so it is not a reachable state.
 //!
-//! # Why the wire model is resolved *here*
+//! # Why a catalog key, and not a wire model
 //!
-//! [`WebContentDistiller`] deliberately splits "translate a pin" from "run an
-//! inference": a configured `[toolset.web_fetch.distill] model` value is a
-//! catalog *key*, and a catalog key is not a routing slug. Sending the key
-//! verbatim is a vendor 404 whenever the two differ (a `[[provider]]` block is
-//! expanded into `<provider>/<model>` keys whose slug is the bare `<model>`),
-//! and a *presence* check on the catalog does not catch it — the qualified
-//! spelling is present, and still wrong on the wire. So this module never hands
-//! [`WebContentDistiller::infer`] anything but the string
-//! [`WebContentDistiller::routing_slug`] gave back, and an id the catalog cannot
-//! translate skips distillation rather than guessing.
+//! A configured `[toolset.web_fetch.distill] model` value is a catalog *key*,
+//! and a catalog key is not a routing slug: a `[[provider]]` block is expanded
+//! into `<provider>/<model>` keys whose slug is the bare `<model>`, so the key
+//! must never be forwarded as a request's `model`. But it must not be *reduced*
+//! to that slug here either. The qualified key is the only thing that names one
+//! entry when two providers serve the same slug, so translating it early throws
+//! away the disambiguation and lets the host re-resolve to the other provider —
+//! its endpoint, its credential — after the operator spelled one.
+//!
+//! So [`WebContentDistiller`] splits "is this pin in the catalog" from "run an
+//! inference on it": this module hands [`WebContentDistiller::infer`] the key
+//! [`WebContentDistiller::catalog_key`] gave back, and the host resolves that
+//! key exactly once into an endpoint, a credential and the entry's own routing
+//! slug. An id the catalog cannot place skips distillation rather than guessing.
 
 use std::sync::Arc;
 
@@ -57,30 +61,32 @@ pub const DISTILL_SYSTEM_PROMPT: &str = concat!(
 ///
 /// Implementors must honour three rules that this crate cannot enforce:
 ///
-/// 1. [`Self::infer`] receives a routing slug and must put it on the wire as
-///    given. It must not re-translate it and must not substitute a pin.
+/// 1. [`Self::infer`] receives a catalog key and must resolve it exactly once,
+///    putting the resolved entry's own routing slug on the wire. It must not
+///    forward the key as the request's `model`, and it must not re-resolve a
+///    slug it derived along the way — the key is what names the entry.
 /// 2. The call must not ride the session's client under a foreign slug. An
 ///    auxiliary model belongs to whichever provider the catalog entry names, and
 ///    that provider's own endpoint and credential are the ones to use.
 /// 3. A session talking to a custom provider must not have a first-party
 ///    request fabricated on its behalf. When no auxiliary model is reachable for
 ///    the session as configured, return `None` from
-///    [`Self::default_routing_slug`] and let distillation be skipped.
+///    [`Self::default_catalog_key`] and let distillation be skipped.
 #[async_trait::async_trait]
 pub trait WebContentDistiller: Send + Sync {
-    /// Translate a configured model pin (a catalog *key*) into that catalog
-    /// entry's routing slug — the only spelling of the id that may go on the
-    /// wire. Returns `None` when the catalog does not list the id.
-    fn routing_slug(&self, model_pin: &str) -> Option<String>;
+    /// Place a configured model pin in the catalog, answering with the entry's
+    /// catalog *key* — the spelling that names one entry rather than a family of
+    /// same-slug ones. Returns `None` when the catalog does not list the id.
+    fn catalog_key(&self, model_pin: &str) -> Option<String>;
 
-    /// Routing slug to use when nothing is pinned, or `None` when no auxiliary
+    /// Catalog key to use when nothing is pinned, or `None` when no auxiliary
     /// model is available for this session.
-    fn default_routing_slug(&self) -> Option<String>;
+    fn default_catalog_key(&self) -> Option<String>;
 
-    /// Run a single-turn, tool-free completion on `wire_model`.
+    /// Run a single-turn, tool-free completion on the entry `model_key` names.
     async fn infer(
         &self,
-        wire_model: &str,
+        model_key: &str,
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
@@ -149,7 +155,7 @@ pub(super) async fn apply(output: WebFetchOutput, ctx: DistillContext<'_>) -> We
         return output;
     }
 
-    let Some(wire_model) = resolve_wire_model(distiller, ctx.params.distill_model()) else {
+    let Some(model_key) = resolve_model_key(distiller, ctx.params.distill_model()) else {
         return output;
     };
 
@@ -162,7 +168,7 @@ pub(super) async fn apply(output: WebFetchOutput, ctx: DistillContext<'_>) -> We
 
     let answer = match tokio::time::timeout(
         ctx.params.distill_timeout(),
-        distiller.infer(&wire_model, DISTILL_SYSTEM_PROMPT, &user_prompt),
+        distiller.infer(&model_key, DISTILL_SYSTEM_PROMPT, &user_prompt),
     )
     .await
     {
@@ -192,32 +198,33 @@ pub(super) async fn apply(output: WebFetchOutput, ctx: DistillContext<'_>) -> We
     WebFetchOutput::Content(content)
 }
 
-/// The routing slug to put on the wire, or `None` to skip distillation.
+/// The catalog key to distill with, or `None` to skip distillation.
 ///
-/// A pin is *translated*, never forwarded: `routing_slug` both guards (an id the
-/// catalog does not list is not routable) and converts (the entry's own slug is
-/// what the vendor answers to).
-fn resolve_wire_model(distiller: &dyn WebContentDistiller, pin: Option<&str>) -> Option<String> {
+/// A pin is *placed*, never translated: `catalog_key` guards (an id the catalog
+/// does not list is not routable) and normalises the spelling to the one that
+/// names a single entry. Deriving a wire slug is the host's job, downstream of
+/// picking the endpoint, so that the two cannot come from different entries.
+fn resolve_model_key(distiller: &dyn WebContentDistiller, pin: Option<&str>) -> Option<String> {
     match pin {
-        Some(pin) => match distiller.routing_slug(pin) {
-            Some(slug) => Some(slug),
+        Some(pin) => match distiller.catalog_key(pin) {
+            Some(key) => Some(key),
             None => {
                 tracing::warn!(
                     "web_fetch distill_model {pin:?} is not in the model catalog; \
-                     returning the raw page instead of guessing a routing slug"
+                     returning the raw page instead of guessing a route for it"
                 );
                 None
             }
         },
         None => {
-            let slug = distiller.default_routing_slug();
-            if slug.is_none() {
+            let key = distiller.default_catalog_key();
+            if key.is_none() {
                 tracing::debug!(
                     "web_fetch skipping distillation: no auxiliary model is available \
                      for this session"
                 );
             }
-            slug
+            key
         }
     }
 }
@@ -296,12 +303,13 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    /// Records what it was asked to run, so a test can assert on the wire model.
+    /// Records what it was asked to run, so a test can assert on the model id
+    /// that reached the backend.
     struct FakeDistiller {
-        /// `model_pin -> routing slug`. A pin absent from the map is "not in the
+        /// `model_pin -> catalog key`. A pin absent from the map is "not in the
         /// catalog" and must not reach `infer`.
         catalog: Vec<(String, String)>,
-        default_slug: Option<String>,
+        default_key: Option<String>,
         answer: Result<String, String>,
         delay: Option<std::time::Duration>,
         calls: Mutex<Vec<(String, String)>>,
@@ -311,7 +319,7 @@ mod tests {
         fn answering(answer: &str) -> Self {
             Self {
                 catalog: Vec::new(),
-                default_slug: Some("default-slug".into()),
+                default_key: Some("default-key".into()),
                 answer: Ok(answer.into()),
                 delay: None,
                 calls: Mutex::new(Vec::new()),
@@ -333,8 +341,8 @@ mod tests {
             self
         }
 
-        fn with_default_slug(mut self, slug: Option<&str>) -> Self {
-            self.default_slug = slug.map(str::to_owned);
+        fn with_default_key(mut self, slug: Option<&str>) -> Self {
+            self.default_key = slug.map(str::to_owned);
             self
         }
 
@@ -343,8 +351,8 @@ mod tests {
             self
         }
 
-        /// Wire models this distiller was actually asked to infer with.
-        fn wire_models(&self) -> Vec<String> {
+        /// Model ids this distiller was actually asked to infer with.
+        fn inferred_models(&self) -> Vec<String> {
             self.calls
                 .lock()
                 .unwrap()
@@ -360,27 +368,27 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WebContentDistiller for FakeDistiller {
-        fn routing_slug(&self, model_pin: &str) -> Option<String> {
+        fn catalog_key(&self, model_pin: &str) -> Option<String> {
             self.catalog
                 .iter()
-                .find(|(key, _)| key == model_pin)
-                .map(|(_, slug)| slug.clone())
+                .find(|(pin, _)| pin == model_pin)
+                .map(|(_, key)| key.clone())
         }
 
-        fn default_routing_slug(&self) -> Option<String> {
-            self.default_slug.clone()
+        fn default_catalog_key(&self) -> Option<String> {
+            self.default_key.clone()
         }
 
         async fn infer(
             &self,
-            wire_model: &str,
+            model_key: &str,
             _system_prompt: &str,
             user_prompt: &str,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             self.calls
                 .lock()
                 .unwrap()
-                .push((wire_model.to_owned(), user_prompt.to_owned()));
+                .push((model_key.to_owned(), user_prompt.to_owned()));
             if let Some(delay) = self.delay {
                 tokio::time::sleep(delay).await;
             }
@@ -480,14 +488,14 @@ mod tests {
         let out = apply(content(None), ctx(&params, &distiller, None)).await;
         assert_eq!(body(&out), RAW_PAGE);
         assert!(
-            distiller.wire_models().is_empty(),
+            distiller.inferred_models().is_empty(),
             "no prompt must not spend a call"
         );
 
         let out = apply(content(None), ctx(&params, &distiller, Some("   "))).await;
         assert_eq!(body(&out), RAW_PAGE);
         assert!(
-            distiller.wire_models().is_empty(),
+            distiller.inferred_models().is_empty(),
             "a blank prompt is not a prompt"
         );
     }
@@ -501,7 +509,7 @@ mod tests {
         let distiller = FakeDistiller::answering("should not be reached");
         let out = apply(content(None), ctx(&params, &distiller, Some("rate limit?"))).await;
         assert_eq!(body(&out), RAW_PAGE);
-        assert!(distiller.wire_models().is_empty());
+        assert!(distiller.inferred_models().is_empty());
     }
 
     #[tokio::test]
@@ -521,29 +529,34 @@ mod tests {
         assert_eq!(body(&out), RAW_PAGE);
     }
 
-    /// A pin is a catalog *key*; the wire wants the entry's routing slug. Sending
-    /// the key verbatim is the 404-by-name this split exists to prevent, and the
-    /// key's presence in the catalog is no guard — the qualified spelling is
-    /// present and still wrong on the wire.
+    /// The backend is handed the catalog key, whichever spelling the operator
+    /// used. A bare slug is widened to the key it names; a qualified pin is
+    /// passed through as itself rather than narrowed to its slug, because that
+    /// qualification is the only thing distinguishing two providers that serve
+    /// one slug.
     #[tokio::test]
-    async fn a_configured_pin_reaches_the_wire_as_its_routing_slug() {
-        let params = distill_params(DistillParams {
-            model: Some("acme/some-model".into()),
-            ..DistillParams::default()
-        });
-        let distiller = FakeDistiller::answering("distilled")
-            .with_catalog(&[("acme/some-model", "some-model")]);
-        let out = apply(content(None), ctx(&params, &distiller, Some("rate limit?"))).await;
-        assert_eq!(body(&out), "distilled");
-        assert_eq!(
-            distiller.wire_models(),
-            vec!["some-model".to_string()],
-            "the catalog key must be translated, never forwarded"
-        );
+    async fn a_configured_pin_reaches_the_backend_as_its_catalog_key() {
+        for spelling in ["acme/some-model", "some-model"] {
+            let params = distill_params(DistillParams {
+                model: Some(spelling.into()),
+                ..DistillParams::default()
+            });
+            let distiller = FakeDistiller::answering("distilled").with_catalog(&[
+                ("acme/some-model", "acme/some-model"),
+                ("some-model", "acme/some-model"),
+            ]);
+            let out = apply(content(None), ctx(&params, &distiller, Some("rate limit?"))).await;
+            assert_eq!(body(&out), "distilled");
+            assert_eq!(
+                distiller.inferred_models(),
+                vec!["acme/some-model".to_string()],
+                "pin {spelling:?} must reach the backend as the catalog key"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn a_pin_the_catalog_cannot_translate_skips_distillation() {
+    async fn a_pin_the_catalog_cannot_place_skips_distillation() {
         let params = distill_params(DistillParams {
             model: Some("unknown-model".into()),
             ..DistillParams::default()
@@ -552,30 +565,30 @@ mod tests {
         let out = apply(content(None), ctx(&params, &distiller, Some("rate limit?"))).await;
         assert_eq!(body(&out), RAW_PAGE);
         assert!(
-            distiller.wire_models().is_empty(),
-            "an untranslatable pin must not be guessed at on the wire"
+            distiller.inferred_models().is_empty(),
+            "a pin with no catalog entry must not be guessed at"
         );
     }
 
     #[tokio::test]
-    async fn unpinned_distillation_uses_the_backend_default_slug() {
+    async fn unpinned_distillation_uses_the_backend_default_key() {
         let params = WebFetchParams::default();
         let distiller = FakeDistiller::answering("distilled");
         let out = apply(content(None), ctx(&params, &distiller, Some("rate limit?"))).await;
         assert_eq!(body(&out), "distilled");
-        assert_eq!(distiller.wire_models(), vec!["default-slug".to_string()]);
+        assert_eq!(distiller.inferred_models(), vec!["default-key".to_string()]);
     }
 
     /// No auxiliary model is reachable for this session — a custom-provider
     /// session with nothing routable, say. Skip, rather than have a first-party
     /// request fabricated on its behalf.
     #[tokio::test]
-    async fn no_default_slug_available_skips_distillation() {
+    async fn no_default_key_available_skips_distillation() {
         let params = WebFetchParams::default();
-        let distiller = FakeDistiller::answering("should not be reached").with_default_slug(None);
+        let distiller = FakeDistiller::answering("should not be reached").with_default_key(None);
         let out = apply(content(None), ctx(&params, &distiller, Some("rate limit?"))).await;
         assert_eq!(body(&out), RAW_PAGE);
-        assert!(distiller.wire_models().is_empty());
+        assert!(distiller.inferred_models().is_empty());
     }
 
     #[tokio::test]
@@ -591,7 +604,7 @@ mod tests {
         )
         .await;
         assert_eq!(body(&out), RAW_PAGE);
-        assert!(distiller.wire_models().is_empty());
+        assert!(distiller.inferred_models().is_empty());
     }
 
     #[tokio::test]
@@ -607,7 +620,7 @@ mod tests {
         )
         .await;
         assert!(body(&out).starts_with("distilled"));
-        assert_eq!(distiller.wire_models(), vec!["default-slug".to_string()]);
+        assert_eq!(distiller.inferred_models(), vec!["default-key".to_string()]);
     }
 
     #[tokio::test]
@@ -649,7 +662,7 @@ mod tests {
         };
         let out = apply(redirect, ctx(&params, &distiller, Some("rate limit?"))).await;
         assert!(matches!(out, WebFetchOutput::CrossHostRedirect { .. }));
-        assert!(distiller.wire_models().is_empty());
+        assert!(distiller.inferred_models().is_empty());
     }
 
     #[tokio::test]
