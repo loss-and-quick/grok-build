@@ -4021,6 +4021,12 @@ pub fn find_model_by_id<'a>(
 /// the session model the worker falls back to. Not-found-in-catalog ⇒ `false`
 /// (conservative; also covers the Tier-2 synthetic proxy entry). Drives the
 /// built-in `low` effort default.
+///
+/// `aux_model` is the classifier pin as configured — a catalog key — and not the
+/// routing slug the resolver derived from it, so that this lands on the same
+/// entry the request does. A slug would go through [`find_by_slug`] and could
+/// name a different provider's entry, whose reasoning support says nothing about
+/// the model actually being called.
 pub fn effective_classifier_supports_re(
     aux_model: Option<&str>,
     session_model: &str,

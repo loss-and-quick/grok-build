@@ -786,15 +786,22 @@ impl SessionActor {
             .await
             .map(|c| c.model)
             .unwrap_or_default();
-        let aux_classifier_sampler = match auto_cfg.classifier_model.as_deref() {
-            Some(slug) => self.resolve_aux_sampler_client(slug).await,
+        // The configured value is a catalog key and is passed on as one: the
+        // resolver looks the key up before it falls back to a bare-slug scan, so
+        // a pin qualified to one of two providers serving the same slug keeps
+        // naming that provider's entry, endpoint and credential.
+        let classifier_pin = auto_cfg.classifier_model.as_deref();
+        let aux_classifier_sampler = match classifier_pin {
+            Some(key) => self.resolve_aux_sampler_client(key).await,
             None => None,
         };
         let models = self.models_manager.models();
+        // Ask the capability question with the same key, not with the routing
+        // slug the resolver came back with: re-resolving that slug can land on a
+        // different entry, and then the reasoning-effort default would be taken
+        // from a model the request is not going to.
         let effective_supports_re = crate::agent::config::effective_classifier_supports_re(
-            aux_classifier_sampler
-                .as_ref()
-                .map(|(_, model)| model.as_str()),
+            classifier_pin.filter(|_| aux_classifier_sampler.is_some()),
             &session_model,
             &models,
         );
