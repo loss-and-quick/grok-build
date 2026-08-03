@@ -144,6 +144,26 @@ impl DomainMatcher {
     }
 }
 
+/// The built-in preapproved list, precompiled once.
+static PREAPPROVED: std::sync::LazyLock<DomainMatcher> = std::sync::LazyLock::new(|| {
+    let entries: Vec<String> = super::config::DEFAULT_ALLOWED_DOMAINS
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    DomainMatcher::new(&entries)
+});
+
+/// Whether `raw_url` is on the *built-in* preapproved list.
+///
+/// Deliberately not "is this URL allowed": an operator can widen the allowlist
+/// through `[toolset.web_fetch] allowed_domains`, and a user can approve a host
+/// at the permission prompt, but neither makes that host vetted documentation.
+/// Only the built-in set earns the relaxed quoting guidance when a page is
+/// distilled, and only it is trusted enough to hand back verbatim when it fits.
+pub fn is_preapproved_url(raw_url: &str) -> bool {
+    Url::parse(raw_url).is_ok_and(|url| PREAPPROVED.check(&url).is_none())
+}
+
 /// Extract and normalize the domain from a raw URL string.
 ///
 /// Returns `None` for unparseable URLs or URLs with no host.
@@ -211,6 +231,34 @@ mod tests {
     fn www_prefix_stripped() {
         let m = DomainMatcher::new(&["react.dev".into()]);
         assert!(m.check(&url("https://www.react.dev/learn")).is_none());
+    }
+
+    // ── is_preapproved_url ───────────────────────────────────────────────
+
+    #[test]
+    fn preapproved_matches_the_builtin_list() {
+        assert!(is_preapproved_url(
+            "https://docs.rs/reqwest/latest/reqwest/"
+        ));
+        assert!(is_preapproved_url("https://www.react.dev/learn"));
+    }
+
+    #[test]
+    fn preapproved_honours_path_scoped_builtin_entries() {
+        assert!(is_preapproved_url("https://vercel.com/docs/functions"));
+        assert!(!is_preapproved_url("https://vercel.com/blog/anything"));
+    }
+
+    #[test]
+    fn an_operator_widened_allowlist_does_not_make_a_host_preapproved() {
+        // `example.com` can be reachable via `[toolset.web_fetch] allowed_domains`
+        // or a permission prompt; neither makes it vetted documentation.
+        assert!(!is_preapproved_url("https://example.com/page"));
+    }
+
+    #[test]
+    fn preapproved_is_false_for_an_unparseable_url() {
+        assert!(!is_preapproved_url("not a url"));
     }
 
     #[test]

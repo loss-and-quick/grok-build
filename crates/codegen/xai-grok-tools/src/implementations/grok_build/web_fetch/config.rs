@@ -46,6 +46,60 @@ pub struct WebFetchParams {
     /// allow_local = true` or `GROK_WEB_FETCH_ALLOW_LOCAL=1`.
     #[serde(default)]
     pub allow_local: Option<bool>,
+    /// Content distillation settings, from `[toolset.web_fetch.distill]`.
+    /// `None` means every distillation default applies.
+    #[serde(default)]
+    pub distill: Option<Box<DistillParams>>,
+}
+
+/// Settings for the distillation step, under `[toolset.web_fetch.distill]`.
+///
+/// Boxed behind an `Option` on [`WebFetchParams`] rather than flattened into it:
+/// `WebFetchConfig::Enabled` inlines the params struct and is constructed in
+/// several crates, so its payload size is not this module's to spend. Grouping
+/// the knobs here means a future one costs the enum nothing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DistillParams {
+    /// Answer the caller's `prompt` about a page with an auxiliary model instead
+    /// of returning the page's first [`WebFetchParams::max_markdown_length`]
+    /// bytes. Default: `true`.
+    ///
+    /// On by default because the alternative default — truncation — silently
+    /// drops whatever the caller asked about whenever it lives past the cut. The
+    /// spend is bounded without a second knob: nothing is sent unless the caller
+    /// supplied a `prompt`, so the model deciding to ask a question is the same
+    /// decision that authorises the call, and a preapproved page that arrived
+    /// whole is answered from the page itself. Setting this to `false` restores
+    /// the truncate-only behaviour exactly.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Catalog key of the model used for distillation. Unset (the default) means
+    /// "whatever auxiliary model the host resolves for this session".
+    ///
+    /// This is a *key*, not a wire slug: it is translated through the model
+    /// catalog before any request is built, and an id the catalog does not list
+    /// skips distillation rather than being guessed at.
+    ///
+    /// Deliberately its own knob rather than a reuse of the `[models]
+    /// web_search` pin: that pin names the model that synthesises search
+    /// results, a different job with a different prompt shape, and its
+    /// resolution path falls back to a hidden entry pointed at a hard-coded
+    /// first-party endpoint regardless of which provider the session runs on.
+    /// Borrowing the pin would borrow that assumption.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Wall-clock budget for the distillation call in seconds. Default: 60,
+    /// matching [`WebFetchParams::timeout_secs`]. On expiry the raw page is
+    /// returned.
+    pub timeout_secs: Option<u64>,
+    /// Largest slice of page text handed to the distillation model, in bytes.
+    /// Default: 100,000, matching [`WebFetchParams::max_markdown_length`].
+    ///
+    /// A page over this is clamped before the request is built: an oversized
+    /// prompt the helper model rejects would fail open into exactly the
+    /// truncation this feature exists to avoid.
+    pub max_input_bytes: Option<usize>,
 }
 
 register_resource!("grok_build", "WebFetch", WebFetchParams);
@@ -79,6 +133,40 @@ impl WebFetchParams {
 
     pub fn allow_local(&self) -> bool {
         self.allow_local.unwrap_or(false)
+    }
+
+    pub fn distill(&self) -> bool {
+        self.distill
+            .as_ref()
+            .and_then(|d| d.enabled)
+            .unwrap_or(true)
+    }
+
+    /// Configured distillation model pin, if any. A blank string is treated as
+    /// unset so an empty config value cannot become an unroutable pin.
+    pub fn distill_model(&self) -> Option<&str> {
+        self.distill
+            .as_ref()?
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+    }
+
+    pub fn distill_timeout(&self) -> Duration {
+        Duration::from_secs(
+            self.distill
+                .as_ref()
+                .and_then(|d| d.timeout_secs)
+                .unwrap_or(60),
+        )
+    }
+
+    pub fn distill_max_input_bytes(&self) -> usize {
+        self.distill
+            .as_ref()
+            .and_then(|d| d.max_input_bytes)
+            .unwrap_or(100_000)
     }
 
     pub fn allowed_domains(&self) -> Vec<String> {
