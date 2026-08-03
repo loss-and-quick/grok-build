@@ -507,6 +507,12 @@ impl AgentView {
             self.workflows_view = view;
             return;
         }
+        if self.show_providers {
+            let groups = self.providers_groups();
+            let entries = crate::views::providers::flatten(&groups, &self.providers_view.collapsed);
+            self.providers_view.handle_scroll(lines, entries.len());
+            return;
+        }
         if self.show_goal_detail {
             return;
         }

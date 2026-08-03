@@ -169,6 +169,7 @@ mod paste;
 mod plan;
 mod plugin_panel;
 mod prompt;
+mod providers_overlay;
 mod queue;
 mod render;
 pub use render::AppRenderParams;
@@ -912,6 +913,12 @@ pub struct AgentView {
     pub cleared_workflow_runs: std::collections::HashSet<String>,
     pub show_workflows: bool,
     pub workflows_view: crate::views::workflows::WorkflowsViewState,
+    /// Whether the `/providers` resolved-catalog panel is visible.
+    pub show_providers: bool,
+    pub providers_view: crate::views::providers::ProvidersViewState,
+    /// Post-override catalog facts, resolved once when the panel opens (the
+    /// resolve reads config files, so it stays off the render path).
+    pub providers_catalog: std::rc::Rc<crate::acp::resolved_catalog::ResolvedCatalog>,
     /// Live `stop`/`stop_failure` hook runs held for the turn's terminal
     /// marker (driver order: the hooks arrive before the `PromptResponse`
     /// that pushes it). Consumed or flushed by `push_turn_terminal_marker`;

@@ -4273,6 +4273,15 @@ impl AgentView {
                 self.frame_occluder_rects.push(popup);
             }
         }
+        if self.show_providers {
+            let groups = self.providers_groups();
+            let mut view = std::mem::take(&mut self.providers_view);
+            let popup = crate::views::providers::render_providers(buf, area, &groups, &mut view);
+            self.providers_view = view;
+            if let Some(popup) = popup {
+                self.frame_occluder_rects.push(popup);
+            }
+        }
         if self.plugin_panel_overlay_active() {
             let popup = self.draw_plugin_panel_overlay(area, buf);
             self.frame_occluder_rects.push(popup);

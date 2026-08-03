@@ -1005,6 +1005,8 @@ pub enum Action {
     /// Toggle the expanded goal detail overlay.
     ToggleGoalDetail,
     ToggleWorkflows,
+    /// Toggle the `/providers` resolved-catalog panel.
+    ToggleProviders,
     Rewind,
     RewindShowPicker,
     RewindPickerSelect(usize),

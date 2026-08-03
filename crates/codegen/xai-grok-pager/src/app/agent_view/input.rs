@@ -162,6 +162,7 @@ impl AgentView {
             && self.highlighted_link_idx.is_none()
             && !self.show_goal_detail
             && !self.show_workflows
+            && !self.show_providers
             && self.rewind_state.is_none()
             && self.btw_state.is_none()
             && self.jump_state.is_none()
@@ -574,6 +575,9 @@ impl AgentView {
             };
         }
         if let Some(outcome) = self.handle_workflows_overlay_input(ev) {
+            return outcome;
+        }
+        if let Some(outcome) = self.handle_providers_overlay_input(ev) {
             return outcome;
         }
         if self.show_goal_detail && self.goal_state.is_some() {
