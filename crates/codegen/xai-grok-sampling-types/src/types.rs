@@ -1030,6 +1030,24 @@ impl ApiBackend {
     pub fn supports_native_schema(&self) -> bool {
         matches!(self, Self::ChatCompletions | Self::Responses)
     }
+
+    /// Whether a **tool-free** request can carry a response JSON schema that the
+    /// backend actually enforces on the wire.
+    ///
+    /// A superset of [`Self::supports_native_schema`], which asks the stricter
+    /// question the agent turn needs (a schema *alongside* tool calls). Gemini
+    /// enforces `generationConfig.responseJsonSchema`, but only when no
+    /// `functionDeclarations` ride along, so it answers `true` here and `false`
+    /// there.
+    ///
+    /// Messages answers `false` in both: its `output_config.format` is gated
+    /// behind an `anthropic-beta` opt-in this client never sends, so a schema
+    /// put there is not enforced — and a caller that believes otherwise silently
+    /// degrades to parsing free text. One-shot callers must route their schema
+    /// through a tool instead.
+    pub fn enforces_schema_without_tools(&self) -> bool {
+        matches!(self, Self::ChatCompletions | Self::Responses | Self::Gemini)
+    }
 }
 
 /// Sampling client configuration (API key excluded — that stays in the client).

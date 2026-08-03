@@ -13,6 +13,109 @@ use super::*;
 /// String fallbacks remain for tools that surface auth failures without
 /// going through the structured `HttpFailure` path (e.g. JSON-only
 /// `invalid_token` payloads, BYOK key-validation messages).
+/// Told to the model when the Auto-mode classifier's verdict schema rides as a
+/// tool rather than as a native response schema.
+const CLASSIFIER_STRUCTURED_OUTPUT_INSTRUCTION: &str = "Return your verdict by calling the \
+     `StructuredOutput` tool exactly once, with the verdict JSON as its arguments. Do not \
+     answer with text.";
+
+/// Build the one-shot Auto-mode permission classifier request for `backend`.
+///
+/// The classifier exists to obtain an *enforceable* `{thinking, shouldBlock,
+/// reason}` verdict, so the schema has to reach the wire in whichever shape the
+/// backend actually honours. Two shapes, picked by
+/// [`ApiBackend::enforces_schema_without_tools`]:
+///
+/// * natively, as `ConversationRequest::json_schema` — Chat Completions
+///   (`response_format`), Responses (`text.format`), Gemini
+///   (`generationConfig.responseJsonSchema`);
+/// * otherwise as the `StructuredOutput` tool's `input_schema`, the same
+///   mechanism the agent turn uses for exactly this reason (see
+///   [`super::turn::STRUCTURED_OUTPUT_TOOL`]).
+///
+/// Messages takes the second path. Its native `output_config.format` is gated
+/// behind an `anthropic-beta` opt-in this client never sends, so a schema put
+/// there constrains nothing and the verdict quietly degrades to free text that
+/// the caller has to guess at — the failure this split exists to prevent.
+///
+/// The alternative for Messages — sending the beta header — was rejected: it
+/// pins a dated, provider-specific opt-in string that only Anthropic's own
+/// endpoint honours, while a `[[provider]] format = "messages"` gateway would
+/// still drop `output_config`. The tool schema is enforced by every
+/// Messages-shaped endpoint because tool calling is not a beta anywhere.
+///
+/// `tool_choice` is deliberately left unset (`auto`) rather than forcing the
+/// tool: the classifier enables extended thinking whenever a reasoning effort
+/// resolves, and the Messages API rejects a forced `tool_choice` combined with
+/// thinking. The instruction above plus the tool schema carry it instead, and
+/// [`classifier_verdict_text`] still reads a text answer if the model gives one.
+pub(super) fn build_permission_classifier_request(
+    backend: &xai_grok_sampling_types::ApiBackend,
+    model: String,
+    messages: Vec<xai_grok_workspace::permission::ClassifierMessage>,
+    reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
+    session_id: String,
+) -> ConversationRequest {
+    use xai_grok_workspace::permission::ClassifierMessageRole;
+    let mut items = messages
+        .into_iter()
+        .map(|m| match m.role {
+            ClassifierMessageRole::System => ConversationItem::system(m.text),
+            ClassifierMessageRole::User => ConversationItem::user(m.text),
+        })
+        .collect::<Vec<_>>();
+    let schema = xai_grok_workspace::permission::classifier_output_json_schema();
+    let native = backend.enforces_schema_without_tools();
+    let mut tools = Vec::new();
+    if !native {
+        items.push(ConversationItem::system(
+            CLASSIFIER_STRUCTURED_OUTPUT_INSTRUCTION.to_owned(),
+        ));
+        tools.push(xai_grok_sampling_types::ToolSpec {
+            name: super::turn::STRUCTURED_OUTPUT_TOOL.to_owned(),
+            description: Some(super::turn::STRUCTURED_OUTPUT_TOOL_DESCRIPTION.to_owned()),
+            parameters: schema.clone(),
+        });
+    }
+    ConversationRequest {
+        items,
+        tools,
+        hosted_tools: vec![],
+        tool_choice: None,
+        model: Some(model),
+        temperature: None,
+        max_output_tokens: None,
+        json_schema: native.then_some(schema),
+        reasoning_effort,
+        x_grok_conv_id: Some(format!("perm-classifier-{}", uuid::Uuid::new_v4())),
+        x_grok_req_id: Some(format!("xai-perm-auto-{}", uuid::Uuid::new_v4())),
+        x_grok_session_id: Some(session_id),
+        x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
+        ..ConversationRequest::default()
+    }
+}
+
+/// The verdict text a collected classifier response carries.
+///
+/// On the tool path the verdict is the `StructuredOutput` call's arguments, not
+/// assistant text; on the native path it is the assistant text. Both are JSON
+/// for [`xai_grok_workspace::permission::parse_classifier_model_output`], so
+/// this prefers the tool call and falls back to the text a model returns when it
+/// answers in prose despite the instruction.
+pub(super) fn classifier_verdict_text(
+    response: &xai_grok_sampling_types::ConversationResponse,
+) -> String {
+    let tool_args = response.items.iter().find_map(|item| match item {
+        ConversationItem::Assistant(a) => a
+            .tool_calls
+            .iter()
+            .find(|tc| tc.name == super::turn::STRUCTURED_OUTPUT_TOOL)
+            .map(|tc| tc.arguments.as_ref().to_owned()),
+        _ => None,
+    });
+    tool_args.unwrap_or_else(|| response.assistant_text())
+}
+
 pub(super) fn is_auth_tool_error(err: &xai_tool_runtime::ToolError) -> bool {
     if let Some(details) = &err.details
         && let Some(status) = details
@@ -727,39 +830,26 @@ impl SessionActor {
                         }
                     };
                     let session_id = session.session_info.id.to_string();
-                    let items = messages
-                        .into_iter()
-                        .map(|m| match m.role {
-                            xai_grok_workspace::permission::ClassifierMessageRole::System => {
-                                ConversationItem::system(m.text)
-                            }
-                            xai_grok_workspace::permission::ClassifierMessageRole::User => {
-                                ConversationItem::user(m.text)
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    let request = ConversationRequest {
-                        items,
-                        tools: vec![],
-                        hosted_tools: vec![],
-                        tool_choice: None,
-                        model: Some(model),
-                        temperature: None,
-                        max_output_tokens: None,
-                        json_schema: Some(
-                            xai_grok_workspace::permission::classifier_output_json_schema(),
-                        ),
-                        reasoning_effort: classifier_reasoning_effort,
-                        x_grok_conv_id: Some(
-                            format!("perm-classifier-{}", uuid::Uuid::new_v4()),
-                        ),
-                        x_grok_req_id: Some(
-                            format!("xai-perm-auto-{}", uuid::Uuid::new_v4()),
-                        ),
-                        x_grok_session_id: Some(session_id),
-                        x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
-                        ..ConversationRequest::default()
-                    };
+                    let backend = sampling_client.api_backend();
+                    let request = build_permission_classifier_request(
+                        &backend,
+                        model,
+                        messages,
+                        classifier_reasoning_effort,
+                        session_id,
+                    );
+                    // Which shape the verdict schema rode in. A verdict that was
+                    // never schema-constrained parses by luck, so the mechanism
+                    // has to be readable next to the outcome.
+                    tracing::debug!(
+                        backend = ?backend,
+                        schema_mechanism = if request.tools.is_empty() {
+                            "native_response_schema"
+                        } else {
+                            "structured_output_tool"
+                        },
+                        "permission auto classifier request built"
+                    );
                     let fut = sampling_client.conversation_collect(request);
                     let response = tokio::time::timeout(classify_timeout, fut)
                         .await
@@ -769,7 +859,7 @@ impl SessionActor {
                         .map_err(|e| xai_grok_workspace::permission::ClassifierFailure::TransportError(
                             e.to_string(),
                         ))?;
-                    Ok(response.assistant_text())
+                    Ok(classifier_verdict_text(&response))
                 }
                     .await;
                 if let Err(error) = &result {
@@ -1965,5 +2055,123 @@ mod configured_cutoff_tests {
             let inherited = super::resolve_configured_cutoff(seed.clone(), base.as_ref());
             assert_eq!(wire_echo, inherited, "seed={seed:?} base={base:?}");
         }
+    }
+}
+
+/// The Auto-mode permission classifier is only as good as the schema that
+/// actually reaches the provider. These assert on the **emitted request body**
+/// for each wire format, because a schema held in `ConversationRequest` and
+/// dropped by the format builder is exactly the failure that made every
+/// permission decision fall back to a heuristic without a visible error.
+#[cfg(test)]
+mod permission_classifier_request_tests {
+    use xai_grok_sampling_types::{ApiBackend, ReasoningEffort};
+    use xai_grok_workspace::permission::{
+        ClassifierMessage, ClassifierMessageRole, classifier_output_json_schema,
+    };
+
+    fn messages() -> Vec<ClassifierMessage> {
+        vec![
+            ClassifierMessage {
+                role: ClassifierMessageRole::System,
+                text: "you review a command".to_owned(),
+            },
+            ClassifierMessage {
+                role: ClassifierMessageRole::User,
+                text: "## Proposed action\ntool: run_terminal_command".to_owned(),
+            },
+        ]
+    }
+
+    fn request(backend: &ApiBackend) -> xai_grok_sampling_types::ConversationRequest {
+        super::build_permission_classifier_request(
+            backend,
+            "some-model".to_owned(),
+            messages(),
+            Some(ReasoningEffort::Low),
+            "session-1".to_owned(),
+        )
+    }
+
+    /// Messages has no usable native response schema (`output_config.format`
+    /// needs an `anthropic-beta` opt-in this client never sends), so the verdict
+    /// schema must ride as the `StructuredOutput` tool's `input_schema` — and
+    /// must be there in the serialized body, not merely on the request struct.
+    #[test]
+    fn messages_classifier_request_carries_the_schema_as_a_tool() {
+        let req = request(&ApiBackend::Messages);
+        let wire =
+            serde_json::to_value(xai_grok_sampling_types::build_messages_request(&req)).unwrap();
+
+        let tools = wire["tools"].as_array().expect("tools must be emitted");
+        assert_eq!(tools.len(), 1, "{wire:#}");
+        assert_eq!(tools[0]["name"], "StructuredOutput", "{wire:#}");
+        assert_eq!(
+            tools[0]["input_schema"],
+            classifier_output_json_schema(),
+            "the classifier schema must reach the wire verbatim: {wire:#}",
+        );
+        // Nothing may depend on the beta-gated field: a schema parked there is
+        // not enforced, which is precisely how this went unnoticed.
+        assert!(
+            wire.pointer("/output_config/format").is_none(),
+            "output_config.format is beta-gated and must not be relied on: {wire:#}",
+        );
+        // A forced tool_choice is rejected alongside extended thinking, which
+        // the classifier turns on whenever a reasoning effort resolves.
+        assert!(wire.get("tool_choice").is_none(), "{wire:#}");
+        assert!(
+            wire.get("thinking").is_some(),
+            "reasoning effort must still map to thinking: {wire:#}",
+        );
+    }
+
+    /// The two natively-constrained OpenAI-shaped formats keep the schema on
+    /// `json_schema` and gain no synthetic tool.
+    #[test]
+    fn openai_shaped_classifier_requests_stay_on_the_native_schema() {
+        for backend in [ApiBackend::ChatCompletions, ApiBackend::Responses] {
+            let req = request(&backend);
+            assert_eq!(
+                req.json_schema.as_ref(),
+                Some(&classifier_output_json_schema()),
+                "{backend:?}",
+            );
+            assert!(req.tools.is_empty(), "{backend:?}");
+        }
+    }
+
+    /// On the tool path the verdict arrives as tool-call arguments, so reading
+    /// assistant text would find nothing; on the native path it is the text.
+    #[test]
+    fn verdict_text_prefers_the_structured_output_tool_call() {
+        use xai_grok_sampling_types::{
+            AssistantItem, ConversationItem, ConversationResponse, ToolCall,
+        };
+        let response = |items: Vec<ConversationItem>| ConversationResponse {
+            items,
+            stop_reason: None,
+            usage: None,
+            cost_usd_ticks: None,
+            message_chunks_emitted: 0,
+            doom_loop_signals: Vec::new(),
+            stop_message: None,
+        };
+        let verdict = r#"{"thinking":"t","shouldBlock":false,"reason":"r"}"#;
+        let with_tool_call = response(vec![ConversationItem::Assistant(AssistantItem {
+            content: "".into(),
+            tool_calls: vec![ToolCall {
+                id: "id-1".into(),
+                name: "StructuredOutput".to_owned(),
+                arguments: verdict.into(),
+            }],
+            model_id: None,
+            model_fingerprint: None,
+            reasoning_effort: None,
+        })]);
+        assert_eq!(super::classifier_verdict_text(&with_tool_call), verdict);
+
+        let text_only = response(vec![ConversationItem::assistant(verdict.to_owned())]);
+        assert_eq!(super::classifier_verdict_text(&text_only), verdict);
     }
 }

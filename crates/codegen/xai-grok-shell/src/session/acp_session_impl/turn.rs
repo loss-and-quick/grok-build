@@ -5,7 +5,14 @@ use xai_grok_tools::implementations::grok_build::LoopFireMode;
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that can't constrain output natively (Messages API). Intercepted
 /// in the loop, never executed as a real tool.
-const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
+///
+/// Shared with the one-shot Auto-mode permission classifier
+/// (`sampler_turn::build_permission_classifier_request`), which needs the same
+/// mechanism for the same reason.
+pub(crate) const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
+/// Description carried by the synthetic tool wherever it is offered.
+pub(crate) const STRUCTURED_OUTPUT_TOOL_DESCRIPTION: &str = "Return your final answer as JSON \
+     matching the required schema. Call this exactly once, at the end.";
 /// Max times the model may re-call `StructuredOutput` with non-conforming args
 /// before the turn ends with the last validation error.
 const STRUCTURED_OUTPUT_MAX_RETRIES: u32 = 3;
@@ -2087,11 +2094,7 @@ impl SessionActor {
             if structured_output_tool && let Some(schema) = json_schema.clone() {
                 effective_tools.push(ToolSpec {
                     name: STRUCTURED_OUTPUT_TOOL.to_string(),
-                    description: Some(
-                        "Return your final answer as JSON matching the required schema. \
-                         Call this exactly once, at the end."
-                            .to_string(),
-                    ),
+                    description: Some(STRUCTURED_OUTPUT_TOOL_DESCRIPTION.to_string()),
                     parameters: schema,
                 });
             }
