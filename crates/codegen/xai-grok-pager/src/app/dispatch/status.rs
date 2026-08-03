@@ -546,10 +546,13 @@ pub(super) fn handle_context_info_complete(
         // copy", which matches the lifetime story.
         let snapshot = info.data.context;
         agent.apply_full_context_info(snapshot.clone());
+        // Resolved here, off the render path: the block keeps the facts and
+        // only restyles on redraw.
+        let history = agent.session.compaction_history().to_vec();
         agent
             .scrollback
             .push_block(crate::scrollback::block::RenderBlock::context_info(
-                snapshot, model,
+                snapshot, &history, model,
             ));
     }
     vec![]

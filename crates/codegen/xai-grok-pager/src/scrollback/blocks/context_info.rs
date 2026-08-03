@@ -1,20 +1,28 @@
 //! ContextInfoBlock — typed `/context` display rendered in scrollback.
 //!
-//! Holds the raw [`ContextInfo`] snapshot + active model name and rebuilds
-//! the styled output on every `output()` call. This is the same pattern as
-//! [`super::SessionEventBlock`]: keep typed data, format at render time. The
-//! payoff is theme-reactivity — `Theme::current()` is re-resolved on every
-//! redraw, so switching themes after running `/context` updates the colors
-//! immediately instead of leaving stale baked-in values.
+//! Holds the [`ContextFacts`] resolved when the block was created, plus the
+//! active model name, and rebuilds the styled output on every `output()` call.
+//! This is the same pattern as [`super::SessionEventBlock`]: keep typed data,
+//! format at render time. The payoff is theme-reactivity — `Theme::current()`
+//! is re-resolved on every redraw, so switching themes after running
+//! `/context` updates the colors immediately instead of leaving stale
+//! baked-in values.
+//!
+//! The split is deliberate: every number is decided once, in
+//! [`crate::acp::context_facts`], and this module only chooses glyphs, colors
+//! and column widths for them. Arithmetic added back into `build_lines` would
+//! be recomputed on each redraw and unreachable from a test.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::acp::context_facts::{BarPartition, ContextFacts, ContributorKind};
+use crate::acp::tracker::CompactionRecord;
 use crate::render::wrapping::word_wrap_lines;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockLine, BlockOutput};
 use crate::theme::{Theme, quantize};
-use xai_grok_shell::session::{ContextInfo, count_detail};
+use xai_grok_shell::session::ContextInfo;
 
 /// Block that renders a `/context` snapshot in scrollback.
 ///
@@ -42,6 +50,11 @@ use xai_grok_shell::session::{ContextInfo, count_detail};
 ///
 /// Auto-compact at 85% · ~812k tokens remaining
 ///
+/// Compaction
+/// 2 compactions · 1.6m tokens recovered · 1.2s spent
+///  1  858k → 43.0k tokens  ·  815k recovered  (0.5s)
+///  2  900k → 60.0k tokens  ·  840k recovered  (0.7s)
+///
 /// Turns: 5 · Tool calls: 12 · Compactions: 0
 /// ```
 ///
@@ -52,8 +65,9 @@ use xai_grok_shell::session::{ContextInfo, count_detail};
 /// enter the bar.
 #[derive(Debug, Clone)]
 pub struct ContextInfoBlock {
-    /// The captured context-window snapshot.
-    pub snapshot: ContextInfo,
+    /// Facts resolved when the block was created. Held rather than the raw
+    /// snapshot so redraws only restyle — every number is already decided.
+    pub facts: ContextFacts,
     /// Active model name at the time of capture (display-only).
     pub model: String,
 }
@@ -254,10 +268,14 @@ impl RowLayout {
 }
 
 impl ContextInfoBlock {
-    /// Create a new context-info block.
-    pub fn new(snapshot: ContextInfo, model: impl Into<String>) -> Self {
+    /// Create a new context-info block, resolving the facts up front.
+    pub fn new(
+        snapshot: ContextInfo,
+        history: &[CompactionRecord],
+        model: impl Into<String>,
+    ) -> Self {
         Self {
-            snapshot,
+            facts: ContextFacts::resolve(&snapshot, history),
             model: model.into(),
         }
     }
@@ -274,21 +292,11 @@ impl ContextInfoBlock {
     /// (10×10) when terminal width drops below `BarLayout::NARROW_BREAKPOINT`
     /// so the bar still fits on column-constrained terminals.
     fn build_lines(&self, theme: &Theme, bar: BarLayout) -> Vec<Line<'static>> {
-        let snapshot = &self.snapshot;
+        let facts = &self.facts;
         let model = &self.model;
 
-        let used = snapshot.used;
-        let total = snapshot.total;
-        let usage_pct = snapshot.usage_pct;
-        let system_tokens = snapshot.system_prompt_tokens;
-        let tool_tokens = snapshot.tool_definitions_tokens;
-        let tool_count = snapshot.tool_definitions_count;
-        let message_tokens = snapshot.message_tokens;
-        let free_tokens = snapshot.free_tokens;
-        let turn_count = snapshot.turn_count;
-        let tool_call_count = snapshot.tool_call_count;
-        let compaction_count = snapshot.compaction_count;
-        let overhead_tokens = used.saturating_sub(system_tokens + message_tokens);
+        let used = facts.used;
+        let total = facts.total;
 
         let muted = theme.muted();
         let primary = Style::default()
@@ -320,31 +328,22 @@ impl ContextInfoBlock {
         let free_glyph = crate::glyphs::diamond_hollow(); // ◇
         let overhead_glyph = crate::glyphs::diamond_filled(); // ◆ (violet)
 
+        // The partition is resolved against `BarPartition::CELLS`; the layout
+        // only chooses how those cells are wrapped into rows. `LAYOUTS_HOLD_A
+        // _FULL_PARTITION` fails the build if a future shape stops agreeing.
         let total_cells = bar.total();
-        let cells_for = |tokens: u64| -> usize {
-            if total == 0 {
-                0
-            } else {
-                ((tokens as f64 / total as f64) * total_cells as f64).round() as usize
-            }
-        };
-        let used_cells = cells_for(used).min(total_cells);
-        let system_cells = cells_for(system_tokens).min(used_cells);
-        let messages_cells = cells_for(message_tokens).min(used_cells - system_cells);
-        let overhead_cells = used_cells - system_cells - messages_cells;
-        let free_cells = total_cells - used_cells;
-
+        let partition = facts.bar;
         let mut cells: Vec<(&'static str, Color)> = Vec::with_capacity(total_cells);
-        for _ in 0..system_cells {
+        for _ in 0..partition.system {
             cells.push((system_glyph, system_color));
         }
-        for _ in 0..messages_cells {
+        for _ in 0..partition.messages {
             cells.push((messages_glyph, messages_color));
         }
-        for _ in 0..overhead_cells {
+        for _ in 0..partition.overhead {
             cells.push((overhead_glyph, overhead_color));
         }
-        for _ in 0..free_cells {
+        for _ in 0..partition.free {
             cells.push((free_glyph, empty_color));
         }
         debug_assert_eq!(cells.len(), total_cells);
@@ -370,53 +369,29 @@ impl ContextInfoBlock {
         // because their tokens are already counted in its categories:
         // tool definitions surface in Reasoning/overhead, and the usage
         // categories overlap Messages.
-        let mut legend_rows = vec![
+        // Kinds carry no styling of their own — the resolver never names a
+        // glyph or a color — so the mapping to chrome lives here.
+        let chrome = |kind: ContributorKind| -> (&'static str, Color) {
+            match kind {
+                ContributorKind::SystemPrompt => (system_glyph, system_color),
+                ContributorKind::Messages => (messages_glyph, messages_color),
+                ContributorKind::Overhead => (overhead_glyph, overhead_color),
+                ContributorKind::Free => (free_glyph, empty_color),
+                ContributorKind::Itemized => (tools_glyph, tools_color),
+            }
+        };
+        let to_row = |c: &crate::acp::context_facts::Contributor| {
+            let (glyph, color) = chrome(c.kind);
             LegendRow {
-                glyph: system_glyph,
-                color: system_color,
-                label: "System prompt".to_string(),
-                tokens: system_tokens,
-                detail: None,
-            },
-            LegendRow {
-                glyph: messages_glyph,
-                color: messages_color,
-                label: "Messages".to_string(),
-                tokens: message_tokens,
-                detail: None,
-            },
-        ];
-        if overhead_tokens > 0 {
-            legend_rows.push(LegendRow {
-                glyph: overhead_glyph,
-                color: overhead_color,
-                label: "Reasoning/overhead".to_string(),
-                tokens: overhead_tokens,
-                detail: None,
-            });
-        }
-        legend_rows.push(LegendRow {
-            glyph: free_glyph,
-            color: empty_color,
-            label: "Free".to_string(),
-            tokens: free_tokens,
-            detail: None,
-        });
-        let info_rows: Vec<LegendRow> = std::iter::once(LegendRow {
-            glyph: tools_glyph,
-            color: tools_color,
-            label: "Tool definitions".to_string(),
-            tokens: tool_tokens,
-            detail: Some(count_detail(tool_count, "tool")),
-        })
-        .chain(snapshot.usage_categories.iter().map(|c| LegendRow {
-            glyph: tools_glyph,
-            color: tools_color,
-            label: c.label.clone(),
-            tokens: c.tokens,
-            detail: c.detail.clone(),
-        }))
-        .collect();
+                glyph,
+                color,
+                label: c.label.clone(),
+                tokens: c.tokens,
+                detail: c.detail.clone(),
+            }
+        };
+        let legend_rows: Vec<LegendRow> = facts.contributors.iter().map(to_row).collect();
+        let info_rows: Vec<LegendRow> = facts.itemized.iter().map(to_row).collect();
         let layout = RowLayout::measure(legend_rows.iter().chain(info_rows.iter()), total);
         let label_style = Style::default().fg(theme.text_secondary);
 
@@ -438,7 +413,7 @@ impl ContextInfoBlock {
                     "{} / {} tokens ({:.2}%)",
                     fmt_tok_big(used),
                     fmt_tok_big(total),
-                    precise_usage_percent(used, total),
+                    facts.usage_pct,
                 ),
                 Style::default().fg(theme.text_secondary),
             )),
@@ -462,24 +437,14 @@ impl ContextInfoBlock {
         }
         lines.push(Line::from(""));
 
-        // Auto-compact estimate: tokens until we hit the auto-compact
-        // threshold. Uses the *live* value from the session snapshot
-        // (routed from xai-grok-shell's model config resolution). This makes
-        // the “Auto-compact at X%” line and the tip band match exactly what
-        // remote settings / user TOML / env have configured for the
-        // current model (e.g. 65 for grok-build).
-        //
-        // `threshold_tokens` uses `div_ceil` rather than truncating integer
-        // division so it matches the rounded `usage_pct` from `ContextInfo`
-        // (which uses `round()`). Without `div_ceil`, tiny totals could
-        // produce `remaining == 0` while `usage_pct < threshold_percent`,
-        // showing `~0 tokens remaining` for a context window that isn't
-        // actually at the threshold.
+        // Auto-compact estimate: where the trigger sits and how far off it is.
+        // Both figures come from the resolved facts, which carry the threshold
+        // the shell resolved for this model (remote settings / user TOML / env)
+        // rather than a default assumed here.
         if total > 0 {
-            let threshold_percent = snapshot.auto_compact_threshold_percent;
-            let threshold_tokens = total.saturating_mul(threshold_percent as u64).div_ceil(100);
-            let remaining = threshold_tokens.saturating_sub(used);
-            let (text, style) = if usage_pct >= threshold_percent {
+            let auto = facts.auto_compact;
+            let threshold_percent = auto.threshold_percent;
+            let (text, style) = if auto.imminent {
                 (
                     format!("Auto-compact triggers next turn (at {threshold_percent}%)"),
                     Style::default().fg(quantize(theme.warning)),
@@ -492,7 +457,7 @@ impl ContextInfoBlock {
                 (
                     format!(
                         "Auto-compact at {threshold_percent}% \u{00b7} ~{} tokens remaining",
-                        fmt_tok_big(remaining)
+                        fmt_tok_big(auto.remaining_tokens)
                     ),
                     muted,
                 )
@@ -501,21 +466,22 @@ impl ContextInfoBlock {
             lines.push(Line::from(""));
         }
 
+        lines.extend(self.compaction_lines(theme, muted, label_style));
+
         // Footer stats
         lines.push(Line::from(Span::styled(
             format!(
-                "Turns: {turn_count} \u{00b7} Tool calls: {tool_call_count} \u{00b7} Compactions: {compaction_count}"
+                "Turns: {} \u{00b7} Tool calls: {} \u{00b7} Compactions: {}",
+                facts.turn_count, facts.tool_call_count, facts.compaction.reported_count
             ),
             muted,
         )));
 
-        // Approaching-auto-compact tip: only show in the gap between the
-        // "getting close" mark (80%) and the actual auto-compact threshold.
-        // Above the threshold the "Auto-compact triggers next turn" line
-        // already surfaces in warning style, so a second warning-styled tip
-        // suggesting a manual `/compact` would just stack visually and
-        // contradict itself (auto-compact is about to fire on its own).
-        if (80..snapshot.auto_compact_threshold_percent).contains(&usage_pct) {
+        // Approaching-auto-compact tip: only in the gap below the trigger.
+        // Past it the "Auto-compact triggers next turn" line already says so
+        // in warning style, and a second warning-styled tip advising a manual
+        // `/compact` would contradict it.
+        if facts.auto_compact.approaching {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Tip: run /compact to free up context space.".to_string(),
@@ -524,6 +490,106 @@ impl ContextInfoBlock {
         }
 
         lines
+    }
+
+    /// The compaction section: a totals line, then one row per recorded
+    /// compaction. Absent entirely for a session that has never compacted.
+    ///
+    /// The section reports the shell's count and this client's recorded events
+    /// as two separate things. They diverge on a session resumed without a
+    /// full replay, and letting the row count stand in for the total would
+    /// under-report what compaction has actually done to the conversation.
+    fn compaction_lines(
+        &self,
+        theme: &Theme,
+        muted: Style,
+        label_style: Style,
+    ) -> Vec<Line<'static>> {
+        let c = &self.facts.compaction;
+        if c.is_empty() {
+            return Vec::new();
+        }
+
+        let mut lines = vec![Line::from(Span::styled(
+            "Compaction",
+            Style::default()
+                .fg(theme.text_primary)
+                .add_modifier(Modifier::BOLD),
+        ))];
+
+        let mut summary = vec![count_noun(c.reported_count, "compaction")];
+        if c.recovered_tokens > 0 {
+            let mut recovered = format!("{} tokens recovered", fmt_tok_big(c.recovered_tokens));
+            if c.records_without_recovery > 0 {
+                // The total omits these, so say so rather than letting it read
+                // as the whole story.
+                recovered.push_str(&format!(
+                    " (excludes {})",
+                    count_noun(c.records_without_recovery as u64, "event")
+                ));
+            }
+            summary.push(recovered);
+        }
+        if c.elapsed_ms > 0 {
+            summary.push(format!("{:.1}s spent", c.elapsed_ms as f64 / 1000.0));
+        }
+        lines.push(Line::from(Span::styled(summary.join(" \u{00b7} "), muted)));
+
+        let ordinal_width = c
+            .records
+            .iter()
+            .map(|r| r.ordinal.to_string().chars().count())
+            .max()
+            .unwrap_or(1);
+        for record in &c.records {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {:>ordinal_width$} ", record.ordinal), label_style),
+                Span::styled(compaction_row(record), muted),
+            ]));
+        }
+
+        if c.undetailed() > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{} ran before this session was opened",
+                    count_noun(c.undetailed(), "compaction")
+                ),
+                muted,
+            )));
+        }
+
+        lines.push(Line::from(""));
+        lines
+    }
+}
+
+/// One compaction's numbers: what it collapsed, what it gave back, how long
+/// it took. Fields the shell did not report are omitted, never guessed.
+fn compaction_row(record: &CompactionRecord) -> String {
+    let mut row = match record.tokens_before {
+        Some(before) => format!(
+            "{} \u{2192} {} tokens",
+            fmt_tok_big(before),
+            fmt_tok_big(record.tokens_after)
+        ),
+        None => format!("\u{2192} {} tokens", fmt_tok_big(record.tokens_after)),
+    };
+    if let Some(recovered) = record.recovered() {
+        row.push_str(&format!("  \u{00b7}  {} recovered", fmt_tok_big(recovered)));
+    }
+    if let Some(ms) = record.elapsed_ms {
+        row.push_str(&format!("  ({:.1}s)", ms as f64 / 1000.0));
+    }
+    row
+}
+
+/// `"1 compaction"` / `"2 compactions"` — the plural rule the summary and the
+/// undetailed note share.
+fn count_noun(n: u64, noun: &str) -> String {
+    if n == 1 {
+        format!("{n} {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
@@ -548,14 +614,13 @@ fn fmt_tok(n: u64) -> String {
     }
 }
 
-/// Compute `used / total * 100` as f64 with safe handling of `total == 0`.
-fn precise_usage_percent(used: u64, total: u64) -> f64 {
-    if total == 0 {
-        0.0
-    } else {
-        (used as f64 / total as f64) * 100.0
-    }
-}
+// Every shipped bar shape must hold exactly the partition the resolver
+// produces, or the legend percentages would describe a different bar than the
+// one drawn. A new shape with a different cell count fails the build here.
+const _: () = {
+    assert!(BarLayout::WIDE.total() == BarPartition::CELLS);
+    assert!(BarLayout::NARROW.total() == BarPartition::CELLS);
+};
 
 /// Like [`fmt_tok`] but rolls over to `1.0m` at one million.
 ///
@@ -703,9 +768,117 @@ mod tests {
             .collect()
     }
 
+    fn record(ordinal: usize, before: Option<u64>, after: u64) -> CompactionRecord {
+        CompactionRecord {
+            ordinal,
+            tokens_before: before,
+            tokens_after: after,
+            elapsed_ms: Some(500),
+            summary_preview: None,
+        }
+    }
+
+    // ── compaction section ─────────────────────────────────────────────
+
+    #[test]
+    fn compaction_section_is_absent_until_something_compacts() {
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
+        let lines = block.build_lines(&test_theme(), BarLayout::WIDE);
+        assert!(
+            !all_text(&lines).contains("Compaction\n"),
+            "a session that never compacted gets no section"
+        );
+    }
+
+    #[test]
+    fn compaction_section_lists_each_recorded_event() {
+        let mut snap = snapshot();
+        snap.compaction_count = 2;
+        let history = [
+            record(1, Some(858_000), 43_000),
+            record(2, Some(900_000), 60_000),
+        ];
+        let block = ContextInfoBlock::new(snap, &history, "grok-4");
+        let all = all_text(&block.build_lines(&test_theme(), BarLayout::WIDE));
+
+        assert!(all.contains("2 compactions"), "{all}");
+        assert!(all.contains("1.7m tokens recovered"), "{all}");
+        assert!(all.contains("1.0s spent"), "{all}");
+        // Per-event rows carry before → after, what came back, and how long.
+        assert!(all.contains("858k \u{2192} 43.0k tokens"), "{all}");
+        assert!(all.contains("815k recovered"), "{all}");
+        assert!(all.contains("900k \u{2192} 60.0k tokens"), "{all}");
+        assert!(all.contains("(0.5s)"), "{all}");
+    }
+
+    #[test]
+    fn compaction_row_omits_what_the_shell_did_not_report() {
+        let mut snap = snapshot();
+        snap.compaction_count = 1;
+        let history = [CompactionRecord {
+            ordinal: 1,
+            tokens_before: None,
+            tokens_after: 20_000,
+            elapsed_ms: None,
+            summary_preview: None,
+        }];
+        let block = ContextInfoBlock::new(snap, &history, "grok-4");
+        let all = all_text(&block.build_lines(&test_theme(), BarLayout::WIDE));
+        assert!(all.contains("\u{2192} 20.0k tokens"), "{all}");
+        assert!(
+            !all.contains("recovered"),
+            "no before count means no recovery figure to show: {all}"
+        );
+        assert!(!all.contains("0.0s)"), "no timing means no timing: {all}");
+    }
+
+    #[test]
+    fn compaction_section_says_when_the_client_missed_events() {
+        // A resumed session: the shell counted five, this client saw two.
+        let mut snap = snapshot();
+        snap.compaction_count = 5;
+        let history = [
+            record(1, Some(858_000), 43_000),
+            record(2, Some(900_000), 60_000),
+        ];
+        let block = ContextInfoBlock::new(snap, &history, "grok-4");
+        let all = all_text(&block.build_lines(&test_theme(), BarLayout::WIDE));
+        assert!(
+            all.contains("5 compactions"),
+            "the summary reports the shell's count, not the row count: {all}"
+        );
+        assert!(
+            all.contains("3 compactions ran before this session was opened"),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn compaction_summary_flags_a_recovery_total_that_is_short() {
+        let mut snap = snapshot();
+        snap.compaction_count = 2;
+        let history = [record(1, Some(858_000), 43_000), record(2, None, 60_000)];
+        let block = ContextInfoBlock::new(snap, &history, "grok-4");
+        let all = all_text(&block.build_lines(&test_theme(), BarLayout::WIDE));
+        assert!(all.contains("815k tokens recovered"), "{all}");
+        assert!(
+            all.contains("(excludes 1 event)"),
+            "the total must not read as covering both events: {all}"
+        );
+    }
+
+    #[test]
+    fn footer_compaction_count_is_the_shell_figure() {
+        let mut snap = snapshot();
+        snap.compaction_count = 5;
+        let block = ContextInfoBlock::new(snap, &[record(1, Some(90_000), 20_000)], "grok-4");
+        let all = all_text(&block.build_lines(&test_theme(), BarLayout::WIDE));
+        assert!(all.contains("Compactions: 5"), "{all}");
+    }
+
     #[test]
     fn build_lines_contains_header_tokens_and_model() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         // Layout: Context / <blank> / tokens / model.
@@ -720,24 +893,12 @@ mod tests {
 
     #[test]
     fn build_lines_contains_tokens_summary() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let l2 = line_text(&lines, 2);
         assert!(l2.contains("tokens"));
         assert!(l2.contains("(3.67%)"));
-    }
-
-    #[test]
-    fn precise_usage_percent_handles_zero_total() {
-        assert_eq!(precise_usage_percent(100, 0), 0.0);
-    }
-
-    #[test]
-    fn precise_usage_percent_two_decimal_formatting() {
-        // 36_700 / 1_000_000 = 3.67 (exact to 2 decimals)
-        let s = format!("{:.2}", precise_usage_percent(36_700, 1_000_000));
-        assert_eq!(s, "3.67");
     }
 
     #[test]
@@ -747,7 +908,7 @@ mod tests {
         // line is also showing.
         let mut snap = snapshot();
         snap.usage_pct = 80;
-        let block = ContextInfoBlock::new(snap, "grok-4");
+        let block = ContextInfoBlock::new(snap, &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let last = line_text(&lines, lines.len() - 1);
@@ -756,7 +917,7 @@ mod tests {
 
     #[test]
     fn build_lines_omits_tip_below_threshold() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         assert!(!all_text(&lines).contains("/compact"));
@@ -770,7 +931,7 @@ mod tests {
         // other (manual /compact vs. auto-compact about to fire).
         let mut snap = snapshot();
         snap.usage_pct = 85; // the historical default (and value in snapshot() helper)
-        let block = ContextInfoBlock::new(snap, "grok-4");
+        let block = ContextInfoBlock::new(snap, &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         assert!(!all_text(&lines).contains("/compact"));
@@ -778,7 +939,7 @@ mod tests {
 
     #[test]
     fn build_lines_shows_auto_compact_estimate_below_threshold() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let all = all_text(&lines);
@@ -796,7 +957,7 @@ mod tests {
         snap.total = 4_000_000;
         snap.used = 0;
         snap.usage_pct = 0;
-        let block = ContextInfoBlock::new(snap, "grok-4");
+        let block = ContextInfoBlock::new(snap, &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let all = all_text(&lines);
@@ -809,7 +970,7 @@ mod tests {
     #[test]
     fn build_lines_auto_compact_eta_arithmetic_at_known_snapshot() {
         // 1M window, 36_700 used: ceil(850_000) - 36_700 = 813_300 → "813k".
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let all = all_text(&lines);
@@ -849,7 +1010,7 @@ mod tests {
         let mut snap = snapshot();
         snap.total = 2_000_000;
         snap.used = 36_700;
-        let block = ContextInfoBlock::new(snap, "grok-4");
+        let block = ContextInfoBlock::new(snap, &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let l2 = line_text(&lines, 2);
@@ -863,7 +1024,7 @@ mod tests {
     fn build_lines_shows_imminent_auto_compact_at_threshold() {
         let mut snap = snapshot();
         snap.usage_pct = 85;
-        let block = ContextInfoBlock::new(snap, "grok-4");
+        let block = ContextInfoBlock::new(snap, &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let all = all_text(&lines);
@@ -926,7 +1087,7 @@ mod tests {
         snap.tool_definitions_tokens = 0;
         snap.free_tokens = 90_000;
         snap.usage_pct = 10;
-        let block = ContextInfoBlock::new(snap, "grok-4");
+        let block = ContextInfoBlock::new(snap, &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let (diamonds, tools, free, total) = count_bar_glyphs(&lines, BarLayout::WIDE);
@@ -941,7 +1102,7 @@ mod tests {
 
     #[test]
     fn bar_total_cells_always_sum_to_one_hundred() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let (_, _, _, total) = count_bar_glyphs(&lines, BarLayout::WIDE);
@@ -957,7 +1118,7 @@ mod tests {
         snap.tool_definitions_tokens = 0;
         snap.message_tokens = 0;
         snap.free_tokens = 0;
-        let block = ContextInfoBlock::new(snap, "grok-4");
+        let block = ContextInfoBlock::new(snap, &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let (diamonds, tools, free, total) = count_bar_glyphs(&lines, BarLayout::WIDE);
@@ -979,7 +1140,7 @@ mod tests {
         snap.message_tokens = 1_000;
         snap.free_tokens = 0;
         snap.usage_pct = 100;
-        let block = ContextInfoBlock::new(snap, "grok-4");
+        let block = ContextInfoBlock::new(snap, &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let (diamonds, tools, free, total) = count_bar_glyphs(&lines, BarLayout::WIDE);
@@ -999,7 +1160,7 @@ mod tests {
         snap.tool_definitions_tokens = 800;
         snap.free_tokens = 0;
         snap.usage_pct = 100;
-        let block = ContextInfoBlock::new(snap, "grok-4");
+        let block = ContextInfoBlock::new(snap, &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let (diamonds, tools, free, total) = count_bar_glyphs(&lines, BarLayout::WIDE);
@@ -1027,7 +1188,7 @@ mod tests {
             auto_compact_threshold_percent: 65,
             usage_categories: vec![],
         };
-        let block = ContextInfoBlock::new(snap, "grok-build");
+        let block = ContextInfoBlock::new(snap, &[], "grok-build");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
 
@@ -1055,7 +1216,7 @@ mod tests {
             TokenUsageCategory::skills_listing(&"x".repeat(9_600), 21),
             TokenUsageCategory::mcp_servers(&"y".repeat(1_200), 4),
         ];
-        let block = ContextInfoBlock::new(snap, "grok-4");
+        let block = ContextInfoBlock::new(snap, &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let all = all_text(&lines);
@@ -1161,7 +1322,7 @@ mod tests {
 
     #[test]
     fn narrow_bar_renders_10_rows() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::NARROW);
         // The bar starts at index 5 (header / blank / tokens / model /
@@ -1179,7 +1340,7 @@ mod tests {
 
     #[test]
     fn narrow_bar_total_cells_still_100() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::NARROW);
         let (_, _, _, total) = count_bar_glyphs(&lines, BarLayout::NARROW);
@@ -1190,7 +1351,7 @@ mod tests {
     fn narrow_bar_each_row_has_at_most_10_cells() {
         // Sanity: no single bar row should exceed the narrow row_len.
         // We count cell glyphs (not separator spaces) per row.
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::NARROW);
         for (offset, line) in lines[5..15].iter().enumerate() {
@@ -1215,7 +1376,7 @@ mod tests {
 
     #[test]
     fn wide_bar_each_row_has_at_most_20_cells() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         for (offset, line) in lines[5..10].iter().enumerate() {
@@ -1258,7 +1419,7 @@ mod tests {
 
     #[test]
     fn legend_label_uses_secondary_color_wide() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let row = find_legend_line(&lines, "System prompt").expect("legend row");
@@ -1279,7 +1440,7 @@ mod tests {
 
     #[test]
     fn legend_label_uses_secondary_color_narrow() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::NARROW);
         let row = find_legend_line(&lines, "System prompt").expect("legend row 1");
@@ -1299,7 +1460,7 @@ mod tests {
 
     #[test]
     fn narrow_legend_wraps_to_two_lines_per_category() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::NARROW);
         let categories = [
@@ -1335,7 +1496,7 @@ mod tests {
 
     #[test]
     fn narrow_legend_data_row_starts_with_one_space_indent() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::NARROW);
         // The data row for the first legend entry sits at index 17
@@ -1355,7 +1516,7 @@ mod tests {
 
     #[test]
     fn wide_legend_remains_single_line_per_category() {
-        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let row_text =
