@@ -646,6 +646,13 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             prompt_id: batch_prompt_id,
             runs,
         } => {
+            // `disable_plugins` is documented as the switch that hides the
+            // plugin/hook UI, and the sibling `HookAnnotation` arm above honours
+            // it — this one never did, so setting it still left the `[hooks: N]`
+            // badges and the lifecycle rows on screen.
+            if app.appearance.disable_plugins {
+                return false;
+            }
             use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
             let hook_entries: Vec<HookRunEntry> = runs
                 .into_iter()
