@@ -2126,6 +2126,37 @@ mod permission_classifier_request_tests {
         );
     }
 
+    /// Gemini enforces `generationConfig.responseJsonSchema` natively, so the
+    /// classifier stays on the native path there and sends no tool. The schema
+    /// must land verbatim — `additionalProperties` included, which is why
+    /// `responseJsonSchema` and not the OpenAPI-3.0-subset `responseSchema` is
+    /// the field it maps onto.
+    #[test]
+    fn gemini_classifier_request_carries_the_schema_natively() {
+        let req = request(&ApiBackend::Gemini);
+        assert!(req.tools.is_empty(), "gemini needs no synthetic tool");
+        let wire =
+            serde_json::to_value(xai_grok_sampling_types::build_gemini_request(&req)).unwrap();
+
+        assert_eq!(
+            wire.pointer("/generationConfig/responseJsonSchema"),
+            Some(&classifier_output_json_schema()),
+            "the classifier schema must reach the wire verbatim: {wire:#}",
+        );
+        assert_eq!(
+            wire.pointer("/generationConfig/responseMimeType")
+                .and_then(serde_json::Value::as_str),
+            Some("application/json"),
+            "a schema without the json mime type is rejected: {wire:#}",
+        );
+        assert_eq!(
+            wire.pointer("/generationConfig/responseJsonSchema/additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "the strict shape must survive; `responseSchema` could not hold it: {wire:#}",
+        );
+        assert!(wire.get("tools").is_none(), "{wire:#}");
+    }
+
     /// The two natively-constrained OpenAI-shaped formats keep the schema on
     /// `json_schema` and gain no synthetic tool.
     #[test]
