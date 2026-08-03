@@ -2443,6 +2443,42 @@ fn drop_dangling_reasoning(items: &mut Vec<rs::InputItem>) {
     items.retain(|_| keep.next().unwrap_or(true));
 }
 
+/// Whether a reasoning item can legally appear in a Responses API `input[]`.
+///
+/// [`rs::ReasoningItem::id`] is a bare `String` with no `skip_serializing_if`
+/// — unlike `content`, `encrypted_content` and `status`, which are all
+/// omitted when absent. An item with an empty id therefore goes on the wire
+/// as `"id": ""`, and OpenAI-shaped endpoints reject the whole request with
+/// a 400. There is nothing to repair: the id names server-side state, so no
+/// value the client could invent would resolve.
+///
+/// An empty id marks exactly the items synthesized off a stream that is not
+/// the Responses API — chat completions `reasoning_content` (via
+/// [`synthesized_reasoning_item`]) and Anthropic Messages `thinking` blocks,
+/// neither protocol carrying a stable upstream item id — plus the streaming
+/// fallback in [`inject_streaming_reasoning_fallback`] for a Responses turn
+/// that emitted no reasoning item of its own. Those items remain legal on
+/// their own backends' wires; [`conversation_to_chat_messages`] still folds
+/// them into text and the Messages conversion still emits them as `thinking`
+/// blocks. Only this conversion has to refuse them.
+///
+/// Dropping them is what lets a session survive a mid-conversation switch to
+/// a model on a different `api_backend`: the replayed history would otherwise
+/// carry a reasoning item that the new endpoint rejects, failing the first
+/// turn after the switch.
+///
+/// Note this is a validity check, not a provenance check. A well-formed item
+/// whose `encrypted_content` was produced by a different backend (an
+/// Anthropic thinking signature, say) is indistinguishable here from a native
+/// one — [`ConversationItem::Reasoning`] wraps [`rs::ReasoningItem`] bare, and
+/// neither type records which backend wrote it. In practice both non-Responses
+/// synthesizers leave the id empty, so such items are caught anyway; a
+/// principled fix for the general case needs a provenance field this data
+/// model does not have.
+fn reasoning_item_is_wire_legal(item: &rs::ReasoningItem) -> bool {
+    !item.id.is_empty()
+}
+
 /// Walk a serialized Responses API request body and inject the
 /// `type: "reasoning_text"` discriminator that the API requires on
 /// `reasoning.content[*]` items.
@@ -2498,9 +2534,14 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
         }
         ConversationItem::Reasoning(r) => {
             // Reasoning items round-trip back to the Responses API in their
-            // native typed form. `status` is output-only (the API rejects it
-            // on input), so strip it before emission; everything else
-            // (summary, content, encrypted_content, id) passes through.
+            // native typed form — but only the ones that can be legal there.
+            // See [`reasoning_item_is_wire_legal`].
+            if !reasoning_item_is_wire_legal(r) {
+                return Vec::new();
+            }
+            // `status` is output-only (the API rejects it on input), so strip
+            // it before emission; everything else (summary, content,
+            // encrypted_content, id) passes through.
             let mut r = r.clone();
             r.status = None;
             vec![rs::InputItem::Item(rs::Item::Reasoning(r))]
@@ -5259,14 +5300,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_only_encrypted_reasoning_included_in_request() {
-        // Test that when there's only encrypted content (no visible summary),
-        // it's still included in the request
+    /// Build a one-turn conversation whose assistant is preceded by a single
+    /// encrypted-only reasoning sibling carrying `id`, and return the
+    /// `reasoning` entries of the resulting Responses `input[]`.
+    fn encrypted_only_reasoning_on_wire(id: &str) -> Vec<rs::ReasoningItem> {
         let req = ConversationRequest::from_items(vec![
             ConversationItem::user("Hello"),
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: String::new(),
+                id: id.to_string(),
                 summary: vec![],
                 content: None,
                 encrypted_content: Some("enc_hidden_thoughts".to_string()),
@@ -5286,20 +5327,26 @@ mod tests {
         let rs::InputParam::Items(items) = responses_req.input else {
             panic!("Expected Items input");
         };
-        let reasoning_items: Vec<_> = items
-            .iter()
-            .filter_map(|item| {
-                if let rs::InputItem::Item(rs::Item::Reasoning(r)) = item {
-                    Some(r)
-                } else {
-                    None
-                }
+        items
+            .into_iter()
+            .filter_map(|item| match item {
+                rs::InputItem::Item(rs::Item::Reasoning(r)) => Some(r),
+                _ => None,
             })
-            .collect();
+            .collect()
+    }
+
+    /// A reasoning item with no visible summary is still worth replaying —
+    /// its `encrypted_content` is the whole payload — so an item that carries
+    /// a real id must survive with that content intact.
+    #[test]
+    fn test_only_encrypted_reasoning_included_in_request() {
+        let reasoning_items = encrypted_only_reasoning_on_wire("rs_hidden");
 
         assert_eq!(reasoning_items.len(), 1);
-        let reasoning = reasoning_items[0];
+        let reasoning = &reasoning_items[0];
 
+        assert_eq!(reasoning.id, "rs_hidden");
         // Encrypted content should be present
         assert_eq!(
             reasoning.encrypted_content,
@@ -5308,6 +5355,100 @@ mod tests {
 
         // Summary should be empty
         assert!(reasoning.summary.is_empty());
+    }
+
+    /// The same item with an empty id must NOT be included.
+    ///
+    /// This assertion used to read the other way: the fixture carried
+    /// `id: String::new()` and the test asserted the item reached the wire.
+    /// That encoded the bug — `rs::ReasoningItem::id` has no
+    /// `skip_serializing_if`, so an empty id serializes as `"id": ""` and the
+    /// endpoint rejects the request. Carrying the encrypted blob is not worth
+    /// anything if the turn 400s.
+    #[test]
+    fn test_encrypted_reasoning_without_id_excluded_from_request() {
+        let reasoning_items = encrypted_only_reasoning_on_wire("");
+
+        assert!(
+            reasoning_items.is_empty(),
+            "a reasoning item with an empty id cannot be legal on the \
+             Responses wire and must be dropped, got: {reasoning_items:?}"
+        );
+    }
+
+    /// The regression this filter exists for: a history recorded against a
+    /// chat-completions model, replayed after the session is switched to a
+    /// model on the Responses backend (same provider, same credential — only
+    /// `api_backend` differs).
+    ///
+    /// `stream/chat_completions` synthesizes its reasoning sibling through
+    /// [`synthesized_reasoning_item`] and places it immediately before the
+    /// assistant it belongs to, so `drop_dangling_reasoning` sees it as
+    /// attached and keeps it. Nothing else inspected the id, so the item went
+    /// out as `"id": ""` and the first turn after the switch failed.
+    #[test]
+    fn test_chat_completions_synthesized_reasoning_dropped_from_responses_input() {
+        let req = ConversationRequest::from_items(vec![
+            ConversationItem::user("What is 2+2?"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("let me add them")),
+            ConversationItem::assistant("4"),
+        ]);
+
+        let types = wire_input_types(&req);
+        assert!(
+            !types.iter().any(|t| t == "reasoning"),
+            "a synthesized reasoning item must not reach input[]: {types:?}"
+        );
+
+        let body = serde_json::to_value(rs::CreateResponse::from(&req)).expect("serializes");
+        assert!(
+            !body.to_string().contains(r#""id":"""#),
+            "no input item may serialize an empty id: {body}"
+        );
+    }
+
+    /// The load-bearing counterpart: a Responses-native reasoning item keeps
+    /// its id and `encrypted_content` across turns even when an unusable
+    /// sibling from an earlier turn is dropped. The filter must discriminate
+    /// on the invalid shape, not on "is a reasoning item".
+    #[test]
+    fn test_native_reasoning_survives_alongside_dropped_synthesized_item() {
+        let req = ConversationRequest::from_items(vec![
+            ConversationItem::user("turn one"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("synthesized thought")),
+            ConversationItem::assistant("answer one"),
+            ConversationItem::user("turn two"),
+            ConversationItem::Reasoning(rs::ReasoningItem {
+                id: "rs_2".to_string(),
+                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
+                    text: "native thought".to_string(),
+                })],
+                content: None,
+                encrypted_content: Some("enc_rs_2".to_string()),
+                status: Some(rs::OutputStatus::Completed),
+            }),
+            ConversationItem::assistant("answer two"),
+        ]);
+
+        let rs::InputParam::Items(items) = rs::CreateResponse::from(&req).input else {
+            panic!("Expected Items input");
+        };
+        let reasoning: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                rs::InputItem::Item(rs::Item::Reasoning(r)) => Some(r),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            reasoning.len(),
+            1,
+            "only the native item is replayable: {reasoning:?}"
+        );
+        assert_eq!(reasoning[0].id, "rs_2");
+        assert_eq!(reasoning[0].encrypted_content, Some("enc_rs_2".to_string()));
+        assert_eq!(reasoning[0].status, None, "status is output-only");
     }
 
     #[test]
