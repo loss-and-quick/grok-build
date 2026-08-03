@@ -9,6 +9,8 @@ use url::Url;
 
 use super::cache::FetchCache;
 use super::config::{MAX_REDIRECTS, MAX_URL_LENGTH, USER_AGENT_STRING, WebFetchParams};
+use super::distill::{self, WebContentDistiller};
+use super::domain::is_preapproved_url;
 use super::error::WebFetchError;
 use super::http::HttpClient;
 use super::overflow::{OverflowHandler, RecoveryTools, inline_budget};
@@ -233,6 +235,47 @@ impl WebFetchClient {
         }
 
         Ok(output)
+    }
+
+    /// Fetch a URL, then answer `prompt` about it with an auxiliary model.
+    ///
+    /// Distillation is a strictly additive post-step over [`Self::fetch`]: it can
+    /// replace the body, never withhold one. Anything that stops it — no prompt,
+    /// no distiller, an unresolvable model pin, a timeout, an upstream error —
+    /// yields the same output [`Self::fetch`] alone would have produced.
+    ///
+    /// It runs *after* the cache, not before it, so the cache keeps storing raw
+    /// pages keyed by URL alone. Caching a body distilled for one question and
+    /// serving it for the next would answer the wrong question from a hit.
+    pub async fn fetch_distilled(
+        &self,
+        raw_url: &str,
+        prompt: Option<&str>,
+        distiller: Option<&dyn WebContentDistiller>,
+        session_folder: Option<&Path>,
+        read_tool_name: Option<&str>,
+        execute_tool_name: Option<&str>,
+    ) -> Result<WebFetchOutput, WebFetchError> {
+        let output = self
+            .fetch(raw_url, session_folder, read_tool_name, execute_tool_name)
+            .await?;
+        // Judge the URL that actually served the bytes, not the one asked for:
+        // a same-host redirect can move the path off a path-scoped entry.
+        let preapproved_source = match &output {
+            WebFetchOutput::Content(content) => is_preapproved_url(&content.url),
+            _ => false,
+        };
+        Ok(distill::apply(
+            output,
+            distill::DistillContext {
+                params: &self.params,
+                distiller,
+                prompt,
+                preapproved_source,
+                read_tool_name,
+            },
+        )
+        .await)
     }
 
     async fn process_text_content(

@@ -10,6 +10,7 @@ mod artifact;
 mod cache;
 pub mod client;
 pub mod config;
+pub mod distill;
 pub mod domain;
 pub mod error;
 mod http;
@@ -18,7 +19,8 @@ mod ssrf;
 
 pub use client::WebFetchClient;
 pub use config::WebFetchParams;
-pub use domain::{DomainMatcher, domain_from_url};
+pub use distill::{WebContentDistiller, WebContentDistillerResource};
+pub use domain::{DomainMatcher, domain_from_url, is_preapproved_url};
 pub use error::WebFetchError;
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -60,6 +62,19 @@ pub struct WebFetchInput {
     /// The URL to fetch content from.
     #[schemars(description = "The URL to fetch content from.")]
     pub url: String,
+    /// What to extract from the page.
+    ///
+    /// Optional, and the switch that turns distillation on for a call: with a
+    /// prompt the page is read by a helper model and the answer comes back, so a
+    /// long document is condensed rather than cut off at the context budget.
+    /// Without one the raw markdown is returned exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "What you want to know from the page. When set, the page is \
+                       read and answered against this instead of being truncated. \
+                       Omit to get the raw page markdown."
+    )]
+    pub prompt: Option<String>,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -85,7 +100,8 @@ IMPORTANT: ${{ tools.by_kind.web_fetch }} WILL FAIL for authenticated or private
 
 Usage notes:
   - HTTP URLs will be automatically upgraded to HTTPS
-  - Long pages will be truncated to fit your context window"#
+  - Pass `prompt` describing what you need from the page and it will be read and answered for you, so a long document comes back condensed instead of cut off
+  - Without `prompt`, long pages will be truncated to fit your context window"#
     }
 
     fn versioned_definition(
@@ -167,9 +183,12 @@ impl xai_tool_runtime::Tool for WebFetchTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let (client, session_folder, read_tool_name, execute_tool_name) = {
+        let (client, distiller, session_folder, read_tool_name, execute_tool_name) = {
             let res = resources.lock().await;
             let client = res.require::<WebFetchClient>()?.clone();
+            // Optional by design: a host that registers no distiller still gets
+            // the raw page, so distillation can never be the reason a fetch fails.
+            let distiller = res.get::<WebContentDistillerResource>().cloned();
             let session_folder = res.get::<SessionFolder>().map(|folder| folder.0.clone());
             let renderer = res.get::<crate::types::template_renderer::TemplateRenderer>();
             let read_tool_name = renderer
@@ -178,12 +197,22 @@ impl xai_tool_runtime::Tool for WebFetchTool {
             let execute_tool_name = renderer
                 .and_then(|renderer| renderer.tool_for_kind(ToolKind::Execute))
                 .map(str::to_owned);
-            (client, session_folder, read_tool_name, execute_tool_name)
+            (
+                client,
+                distiller,
+                session_folder,
+                read_tool_name,
+                execute_tool_name,
+            )
         };
 
         let output = client
-            .fetch(
+            .fetch_distilled(
                 &input.url,
+                input.prompt.as_deref(),
+                distiller
+                    .as_ref()
+                    .map(WebContentDistillerResource::distiller),
                 session_folder.as_deref(),
                 read_tool_name.as_deref(),
                 execute_tool_name.as_deref(),
@@ -221,6 +250,7 @@ mod tests {
             test_ctx_with_call_id(resources.into_shared(), "test-call"),
             WebFetchInput {
                 url: "https://example.com".into(),
+                prompt: None,
             },
         )
         .await;
