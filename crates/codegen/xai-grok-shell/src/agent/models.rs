@@ -588,23 +588,6 @@ impl ModelsManager {
             .map(|key| key.0.as_ref().to_owned())
     }
 
-    /// The routing slug `model_id` resolves to in the current catalog — the
-    /// value that may appear as a request's wire `model`. `None` when the
-    /// catalog does not list the id.
-    ///
-    /// This is not [`Self::model_in_catalog`] plus the caller's own string: the
-    /// catalog *key* and the routing slug differ whenever the key is not the
-    /// vendor's own name for the model. A `[[provider]]` entry is keyed
-    /// `<provider>/<model>` and serves the bare `<model>`, so an operator id
-    /// written in the qualified form is present in the catalog **and** wrong on
-    /// the wire — a presence check passes while the vendor still rejects the
-    /// request by name. Anything that forwards an operator-supplied id as a
-    /// request's `model` must translate it here first.
-    pub fn model_routing_slug(&self, model_id: &str) -> Option<String> {
-        let cat = self.inner.catalog.read();
-        catalog_entry(&cat.models, model_id).map(|entry| entry.info().model.clone())
-    }
-
     /// The routing slug `requested` may be named on a sampling client that was
     /// built for `session_model`, or `None` when it may not be named there at
     /// all. For [`crate::agent::config::aux_slug_on_session_client`].

@@ -607,11 +607,11 @@ impl SessionActor {
     /// tier except env is catalog-guarded against this shell's own model
     /// catalog — when the effective model is not sampleable here (e.g.
     /// `grok-build-0.1` for OAuth users) the request is **skipped
-    /// entirely** instead of fired doomed. The same lookup also translates the
-    /// id to the catalog entry's routing slug, so a pin spelled in the
-    /// `<provider>/<model>` form reaches the vendor as the bare `<model>` rather
-    /// than as the catalog key. The session model is never used:
-    /// a per-turn background call must stay on the small model.
+    /// entirely** instead of fired doomed. The same lookup normalises the id to
+    /// the catalog *key* that names its entry, which is what the aux resolver
+    /// below then turns into an endpoint, a credential and the wire `model`.
+    /// The session model is never used: a per-turn background call must stay on
+    /// the small model.
     ///
     /// The call then goes out on a **dedicated** sampler resolved for that model
     /// ([`Self::resolve_aux_sampler_client`]), not on the session's client: the
@@ -634,8 +634,8 @@ impl SessionActor {
         use crate::session::helpers::prompt_suggest;
 
         let pin = self.models_manager.prompt_suggest_model_pin();
-        let Some(model) = prompt_suggest::effective_suggest_model(&pin, model_override, |m| {
-            self.models_manager.model_routing_slug(m)
+        let Some(model_key) = prompt_suggest::effective_suggest_model(&pin, model_override, |m| {
+            self.models_manager.catalog_key(m)
         }) else {
             tracing::debug!(
                 pin = ?pin,
@@ -666,12 +666,18 @@ impl SessionActor {
         // what admitted the pin in the first place. Only resolving the entry, and
         // sending to the endpoint it names, keeps model and endpoint in agreement.
         //
+        // The key is what gets resolved, never a slug derived from it first: a
+        // slug names the last-declared entry that serves it, so a pin qualified
+        // to one of two same-slug providers would land on the other one's
+        // endpoint under the other one's credential.
+        //
         // `None` ⇒ the pin has no route of its own: skip, as this feature does
         // everywhere else, rather than degrade to the session model — a per-turn
         // background call must stay on a small cheap model.
-        let Some((sampling_client, model)) = self.resolve_aux_sampler_client(&model).await else {
+        let Some((sampling_client, model)) = self.resolve_aux_sampler_client(&model_key).await
+        else {
             tracing::debug!(
-                model = %model,
+                model = %model_key,
                 "prompt suggest: suggestion model has no sampler route; skipping request"
             );
             return None;

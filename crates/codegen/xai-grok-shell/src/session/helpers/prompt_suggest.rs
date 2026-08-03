@@ -31,7 +31,7 @@ pub(crate) const DEFAULT_SUGGEST_MODEL: &str = "grok-build-0.1";
 ///
 /// Precedence: env pin > config.toml/remote pin > client hint (the request's
 /// `model` param) > [`DEFAULT_SUGGEST_MODEL`]. Every tier except the env pin
-/// is catalog-guarded via `routing_slug`: [`DEFAULT_SUGGEST_MODEL`]
+/// is catalog-guarded via `catalog_key`: [`DEFAULT_SUGGEST_MODEL`]
 /// (`grok-build-0.1`) is API-key-only and excluded from OAuth catalogs, so
 /// firing it (or any unavailable pin) would send a doomed per-turn request
 /// that can never render ghost text. Skipping keeps the per-turn cost at
@@ -40,22 +40,25 @@ pub(crate) const DEFAULT_SUGGEST_MODEL: &str = "grok-build-0.1";
 /// `GROK_PROMPT_SUGGESTIONS_MODEL` keeps working for models the catalog does
 /// not list (mirrors the pager, which forwards the env value unchecked).
 ///
-/// `routing_slug` guards *and translates*: it returns the catalog entry's own
-/// routing slug, which is the only form of the id that may go on the wire as a
-/// request's `model`. The two differ whenever the catalog key is not the
-/// vendor's name for the model — a `[[provider]]` entry is keyed
-/// `<provider>/<model>` and serves the bare `<model>` — so a pin spelled in the
-/// qualified form must not be forwarded as typed.
+/// The value returned is a catalog **key**, not a routing slug, and the caller
+/// hands it to the aux sampler resolver, which turns it into an endpoint, a
+/// credential and the wire `model` in one step. Returning a slug would be
+/// lossy: a `[[provider]]` entry is keyed `<provider>/<model>` and serves the
+/// bare `<model>`, so two providers serving one slug produce two entries that
+/// only the key tells apart. A pin narrowed to its slug re-resolves to whichever
+/// of them was declared last, which sends the request to a provider the operator
+/// did not name, on that provider's credential.
 ///
 /// This deliberately replaced a presence predicate (`model_in_catalog`). A
 /// presence check cannot catch that class of bug: a provider-qualified pin IS
-/// in the catalog, which is precisely why the request gets made at all, and it
-/// is still wrong as a `model` value — the vendor rejects it by name with a 404.
-/// A guard on presence is not a guard on correctness.
+/// in the catalog, which is precisely why the request gets made at all, and
+/// forwarding it as a `model` value is still a 404 by name. A guard on presence
+/// is not a guard on correctness — but the answer is to keep the key and resolve
+/// it once, not to trade it for a slug.
 pub(crate) fn effective_suggest_model(
     pin: &PromptSuggestModelPin,
     client_hint: Option<&str>,
-    routing_slug: impl Fn(&str) -> Option<String>,
+    catalog_key: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
     let client_hint = client_hint.map(str::trim).filter(|s| !s.is_empty());
     let (model, catalog_guarded) = match pin {
@@ -63,12 +66,13 @@ pub(crate) fn effective_suggest_model(
         PromptSuggestModelPin::Pinned(m) => (m.as_str(), true),
         PromptSuggestModelPin::Unpinned => (client_hint.unwrap_or(DEFAULT_SUGGEST_MODEL), true),
     };
-    match routing_slug(model) {
-        Some(slug) => Some(slug),
+    match catalog_key(model) {
+        Some(key) => Some(key),
         // Guarded tiers skip rather than fire a request the catalog cannot back.
         None if catalog_guarded => None,
-        // Env pin: the explicit escape hatch for a slug the catalog does not
-        // list, so there is nothing to translate it to — forward it verbatim.
+        // Env pin: the explicit escape hatch for an id the catalog does not
+        // list, so there is no entry to name — forward it verbatim and let the
+        // resolver's first-party fallback tier deal with it.
         None => Some(model.to_owned()),
     }
 }
@@ -427,38 +431,34 @@ mod tests {
         );
     }
 
-    /// A pin spelled in the provider-qualified form — the catalog key that
-    /// `[[provider]]` expansion mints, `<provider>/<model>` — must go on the
-    /// wire as the bare `<model>` the provider actually serves. The qualified
-    /// key is *in* the catalog, so the old presence guard let it through
-    /// unchanged and the vendor answered 404 on the name it was sent.
+    /// Every spelling of a pin comes out as the one catalog key that names its
+    /// entry — including the provider-qualified form `[[provider]]` expansion
+    /// mints. Narrowing that to the bare slug would throw away the only thing
+    /// distinguishing two providers that serve it.
     #[test]
-    fn effective_model_translates_a_provider_qualified_pin_to_its_routing_slug() {
-        // Both spellings of the same catalog entry resolve to its routing slug.
-        let routing_slug = |m: &str| match m {
-            "acme/some-model" | "some-model" => Some("some-model".to_owned()),
+    fn effective_model_resolves_every_spelling_of_a_pin_to_its_catalog_key() {
+        let catalog_key = |m: &str| match m {
+            "acme/some-model" | "some-model" => Some("acme/some-model".to_owned()),
             _ => None,
         };
         for spelling in ["acme/some-model", "some-model"] {
             assert_eq!(
-                effective_suggest_model(&Pin::Pinned(spelling.into()), None, routing_slug)
+                effective_suggest_model(&Pin::Pinned(spelling.into()), None, catalog_key)
                     .as_deref(),
-                Some("some-model"),
-                "pin {spelling:?} must reach the wire as the bare routing slug"
+                Some("acme/some-model"),
+                "pin {spelling:?} must resolve to the catalog key, not to a slug"
             );
         }
-        // A client hint is translated the same way...
+        // A client hint is resolved the same way...
         assert_eq!(
-            effective_suggest_model(&Pin::Unpinned, Some("acme/some-model"), routing_slug)
-                .as_deref(),
-            Some("some-model")
+            effective_suggest_model(&Pin::Unpinned, Some("some-model"), catalog_key).as_deref(),
+            Some("acme/some-model")
         );
         // ...and so is an env pin the catalog happens to know: bypassing the
-        // guard is not licence to put a catalog key on the wire.
+        // guard is not licence to route by an ambiguous name.
         assert_eq!(
-            effective_suggest_model(&Pin::Env("acme/some-model".into()), None, routing_slug)
-                .as_deref(),
-            Some("some-model")
+            effective_suggest_model(&Pin::Env("some-model".into()), None, catalog_key).as_deref(),
+            Some("acme/some-model")
         );
     }
 
