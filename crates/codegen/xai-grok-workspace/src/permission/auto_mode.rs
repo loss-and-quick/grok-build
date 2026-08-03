@@ -32,6 +32,16 @@ pub enum ClassifierVerdict {
 pub enum ClassifierSource {
     Llm,
     Heuristic,
+    /// The model answered, but the answer carried no verdict this crate could
+    /// read, so the deterministic fallback decided instead.
+    ///
+    /// Distinct from [`Self::Heuristic`], which means the fallback decided *by
+    /// design* — the pre-pass that provably clears a routine action without a
+    /// model round-trip. Collapsing the two is what let a whole wire format
+    /// stop using the model without anyone noticing: an unenforceable schema
+    /// produces prose, prose fails to parse, and the resulting decision looked
+    /// exactly like the intended fast path.
+    HeuristicFallback,
     Timeout,
     TransportError,
 }
@@ -41,6 +51,7 @@ impl ClassifierSource {
         match self {
             Self::Llm => "llm",
             Self::Heuristic => "heuristic",
+            Self::HeuristicFallback => "heuristic_fallback",
             Self::Timeout => "timeout",
             Self::TransportError => "transport_error",
         }
@@ -76,6 +87,7 @@ impl std::fmt::Display for ClassifierFailure {
 enum ClassifierProvenance {
     Llm,
     Heuristic,
+    HeuristicFallback,
     Failure(ClassifierFailure),
 }
 
@@ -84,6 +96,7 @@ impl ClassifierProvenance {
         match self {
             Self::Llm => ClassifierSource::Llm,
             Self::Heuristic => ClassifierSource::Heuristic,
+            Self::HeuristicFallback => ClassifierSource::HeuristicFallback,
             Self::Failure(failure) => failure.source(),
         }
     }
@@ -117,6 +130,18 @@ impl ClassifierOutcome {
             verdict,
             reason,
             provenance: ClassifierProvenance::Llm,
+        }
+    }
+
+    /// The deterministic fallback decided because the model's answer could not
+    /// be read — a degraded decision, not the intended fast path. Same verdict
+    /// handling as [`Self::heuristic`]; only the provenance differs, so the
+    /// fail-open behaviour is untouched and the degradation is legible.
+    pub fn heuristic_fallback(verdict: ClassifierVerdict) -> Self {
+        Self {
+            verdict,
+            reason: None,
+            provenance: ClassifierProvenance::HeuristicFallback,
         }
     }
 
@@ -1373,6 +1398,12 @@ pub fn parse_classifier_model_text(text: &str) -> ClassifierVerdict {
 
 pub const CLASSIFIER_REASON_MAX_LEN: usize = 400;
 
+/// Chars of an unparseable classifier response kept in the warning that reports
+/// the degraded verdict. Enough to tell "the model wrote prose because nothing
+/// constrained it" from "the verdict JSON is malformed", without dumping a full
+/// response into the log.
+const CLASSIFIER_UNPARSED_PREVIEW_MAX_LEN: usize = 200;
+
 fn classifier_reason(v: &serde_json::Value) -> Option<String> {
     v.get("reason")
         .and_then(|r| r.as_str())
@@ -1591,7 +1622,22 @@ impl PermissionClassifier for LlmPermissionClassifier {
             if outcome.verdict() != ClassifierVerdict::Unavailable {
                 return outcome;
             }
-            heuristic.into()
+            // The side-query answered and the answer carried no verdict. The
+            // decision below is the deterministic fallback's, not the model's,
+            // and the two are indistinguishable downstream unless said so here.
+            // The usual cause is a schema the backend never enforced, so log
+            // enough of the answer to tell prose from a malformed verdict.
+            tracing::warn!(
+                tool = %tool_name,
+                response_chars = model_text.chars().count(),
+                response_preview = %xai_grok_tools::util::truncate_line(
+                    model_text.trim(),
+                    CLASSIFIER_UNPARSED_PREVIEW_MAX_LEN,
+                ),
+                fallback_verdict = ?heuristic,
+                "auto mode: classifier response carried no verdict; falling back to the heuristic"
+            );
+            ClassifierOutcome::heuristic_fallback(heuristic)
         })
     }
 }
@@ -2856,9 +2902,56 @@ mod tests {
             (
                 ClassifierOutcome::failure(ClassifierFailure::TransportError("timeout".into())),
                 ClassifierOutcome::failure(ClassifierFailure::Timeout),
-                ClassifierVerdict::Block.into(),
+                // Same verdict as before — fail-open behaviour is unchanged —
+                // but no longer reported as if the fallback were the plan.
+                ClassifierOutcome::heuristic_fallback(ClassifierVerdict::Block),
             )
         );
+    }
+
+    /// A verdict the model never supplied must not read like one it did.
+    ///
+    /// Every wire format that cannot enforce the response schema ends here:
+    /// the model returns prose, the parse finds no `shouldBlock`, and the
+    /// deterministic fallback decides. That decision used to carry the same
+    /// `heuristic` source as the pre-pass that skips the model on purpose, so
+    /// an entire backend could stop consulting the model with nothing in the
+    /// logs to show for it.
+    #[tokio::test]
+    async fn degraded_and_intended_heuristic_verdicts_report_different_sources() {
+        let unreadable = LlmPermissionClassifier::with_fixed_model_text(
+            "I think this command looks risky, but I can't be sure.",
+        );
+        let degraded = unreadable
+            .classify(
+                "run_terminal_command",
+                &AccessKind::Bash("rm -rf /".into()),
+                Some("rm -rf /"),
+                ClassifierContext::default(),
+            )
+            .await;
+        // The pre-pass clears a provably routine action without ever calling
+        // the model — a heuristic verdict by design, from the same classifier.
+        let by_design = unreadable
+            .classify(
+                "run_terminal_command",
+                &AccessKind::Bash("cargo test".into()),
+                Some("cargo test"),
+                ClassifierContext::default(),
+            )
+            .await;
+
+        assert_eq!(degraded.source(), ClassifierSource::HeuristicFallback);
+        assert_eq!(degraded.source().as_str(), "heuristic_fallback");
+        assert_eq!(by_design.source(), ClassifierSource::Heuristic);
+        assert_ne!(
+            degraded.source(),
+            by_design.source(),
+            "a degraded verdict must not be reported as the intended fast path",
+        );
+        // Only the provenance moved; the safety behaviour did not.
+        assert_eq!(degraded.verdict(), ClassifierVerdict::Block);
+        assert_eq!(by_design.verdict(), ClassifierVerdict::Allow);
     }
 
     /// Channel send failure is unavailable when the session worker dies.

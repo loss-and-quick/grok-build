@@ -1007,9 +1007,11 @@ mod tests {
         let groups = build_groups(&models, &resolved);
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
-        let mut state = ProvidersViewState::default();
         // Select the overridden model (entry 0 is the provider header).
-        state.selected = 1;
+        let mut state = ProvidersViewState {
+            selected: 1,
+            ..Default::default()
+        };
         render_providers(&mut buf, area, &groups, &mut state);
         buffer_text(&buf)
     }
