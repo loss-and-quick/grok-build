@@ -1,6 +1,9 @@
 use super::*;
 
 /// Map a model id (catalog key or routing slug) to its catalog key.
+///
+/// The slug arm goes through [`config::find_by_slug`], the one bare-slug rule
+/// every catalog resolver shares.
 pub(crate) fn resolve_catalog_key(
     models: &IndexMap<String, ModelEntry>,
     id: &acp::ModelId,
@@ -9,11 +12,7 @@ pub(crate) fn resolve_catalog_key(
     if models.contains_key(id_str) {
         return Some(id.clone());
     }
-    models
-        .iter()
-        .rev()
-        .find(|(_, entry)| entry.info.model == id_str)
-        .map(|(key, _)| acp::ModelId::new(key.clone()))
+    config::find_by_slug(models, id_str).map(|(key, _)| acp::ModelId::new(key.clone()))
 }
 
 /// Catalog key for a persisted session model id, restricted to **selectable**
@@ -26,6 +25,7 @@ pub(crate) fn selectable_catalog_key_for_persisted(
         return Some(id.clone());
     }
     let id_str = id.0.as_ref();
+    // Same direction as `config::find_by_slug`, narrowed to selectable entries.
     if let Some((key, _)) = models.iter().rev().find(|(key, entry)| {
         available.contains_key(&acp::ModelId::new((*key).clone())) && entry.info.model == id_str
     }) {
@@ -98,9 +98,11 @@ pub(crate) fn resolve_default_model(
             (key, first, config::ConfigSource::Default)
         }
         Some(pref) => {
+            // Bare slugs go through the shared scan so `[models] default` and a
+            // persisted session id name the same entry (`resolve_catalog_key`).
             let found = visible
                 .get_key_value(&pref.value)
-                .or_else(|| visible.iter().find(|(_, m)| m.model == pref.value));
+                .or_else(|| config::find_by_slug(&visible, &pref.value));
 
             if let Some((key, entry)) = found {
                 (key.clone(), entry.clone(), pref.source)
@@ -132,7 +134,7 @@ pub(crate) fn resolve_default_model(
                         .filter(|s| !s.is_empty())
                     && let Some((key, entry)) = visible
                         .get_key_value(prev)
-                        .or_else(|| visible.iter().find(|(_, m)| m.model == prev))
+                        .or_else(|| config::find_by_slug(&visible, prev))
                 {
                     tracing::info!(
                         unavailable = %pref.value, fallback = %prev,
@@ -308,7 +310,7 @@ pub(crate) fn validate_selectable(
         if let Some(id) = id
             && let Some(entry) = catalog
                 .get(id)
-                .or_else(|| catalog.values().find(|e| e.model == id))
+                .or_else(|| config::find_by_slug(catalog, id).map(|(_, e)| e))
             && !entry.info.user_selectable
         {
             return Err(format!(

@@ -3986,15 +3986,35 @@ pub fn default_model_entries(endpoints: &EndpointsConfig) -> IndexMap<String, Mo
         .map(|(key, entry)| (key, ModelEntry::from_config_entry(&entry)))
         .collect()
 }
+/// The bare-slug scan every catalog resolver shares, so a slug cannot mean one
+/// entry in `[models] default` and a different one when the same session is
+/// restored from disk.
+///
+/// **The LAST match wins.** [`resolve_model_list`] assembles the catalog
+/// first-party-first — prefetched entries replace the map wholesale, then
+/// `[model.*]` tables are re-inserted at the end, then `[[provider]]`
+/// expansions — so scanning backwards is what makes a locally declared entry
+/// beat a same-slug first-party one. A user who declared a model in their own
+/// config meant that one.
+///
+/// Callers try the exact catalog-key lookup first, so a fully qualified
+/// `<provider>/<model>` key never reaches this scan; it stays the disambiguator
+/// between two of the user's own providers that serve the same slug.
+pub fn find_by_slug<'a>(
+    models: &'a IndexMap<String, ModelEntry>,
+    slug: &str,
+) -> Option<(&'a String, &'a ModelEntry)> {
+    models.iter().rev().find(|(_, entry)| entry.model == slug)
+}
 /// Resolve a model against the available model map.
-/// Checks the map key (id) first, then falls back to a slug scan.
+/// Checks the map key (id) first, then falls back to [`find_by_slug`].
 pub fn find_model_by_id<'a>(
     models: &'a IndexMap<String, ModelEntry>,
     model_id: &str,
 ) -> Option<&'a ModelEntry> {
     models
         .get(model_id)
-        .or_else(|| models.values().find(|m| m.model == model_id))
+        .or_else(|| find_by_slug(models, model_id).map(|(_, entry)| entry))
 }
 /// Whether the EFFECTIVE Auto-mode classifier model supports reasoning effort:
 /// the model actually routed to (`aux_model` when the aux sampler resolved) else
@@ -5665,9 +5685,10 @@ fn provider_auth_scheme(declared: xai_grok_config_types::ProviderAuthScheme) -> 
 /// Each `<model>` a provider serves is inserted under the key
 /// `<provider_id>/<model>` with the wire slug set to the bare `<model>`.
 /// Selecting `<provider_id>/<model>` forces this provider; selecting the bare
-/// `<model>` resolves via [`find_model_by_id`]'s slug fallback (first catalog
-/// match wins, so a built-in x.ai model of the same name keeps precedence and
-/// the default path is never shadowed).
+/// `<model>` resolves via [`find_by_slug`] (last catalog match wins, and
+/// expansion runs last, so a provider the user declared beats a same-slug
+/// prefetched or built-in entry). A model no provider serves is untouched, so
+/// the default path is never shadowed.
 ///
 /// Returns the keys it synthesized, in insertion order, so the caller can
 /// re-apply any `[model.<key>]` table that expansion just overwrote.
@@ -13866,8 +13887,8 @@ default = "grok-4.5"
     }
 
     /// When two providers serve the same bare slug, both keep distinct
-    /// `<id>/<slug>` keys and the bare slug resolves to the first (registration
-    /// order), so `<id>/<slug>` is the disambiguator.
+    /// `<id>/<slug>` keys and the bare slug resolves to the last declared one
+    /// (the shared last-match rule), so `<id>/<slug>` is the disambiguator.
     #[test]
     fn provider_prefix_disambiguates_shared_slug() {
         let raw: toml::Value = toml::from_str(
@@ -13894,10 +13915,91 @@ default = "grok-4.5"
             find_model_by_id(&resolved, "b/shared").map(|e| e.info.base_url.as_str()),
             Some("https://b.test/v1")
         );
-        // Bare slug resolves to the first-registered provider.
+        // Bare slug resolves to the last-declared provider.
         assert_eq!(
             find_model_by_id(&resolved, "shared").map(|e| e.info.base_url.as_str()),
-            Some("https://a.test/v1")
+            Some("https://b.test/v1")
+        );
+    }
+
+    /// Two resolvers used to disagree about a bare slug: `resolve_default_model`
+    /// and `find_model_by_id` took the FIRST catalog match, while
+    /// `resolve_catalog_key` / `selectable_catalog_key_for_persisted` took the
+    /// LAST. The catalog is assembled prefetched-first and config-declared-last,
+    /// so after a catalog merge `[models] default = "<slug>"` picked the
+    /// prefetched entry while a persisted session id for the same slug picked
+    /// the user's own — the same input naming two different endpoints.
+    #[test]
+    fn bare_slug_resolves_to_the_locally_declared_entry_through_every_resolver() {
+        use crate::agent::models::{
+            available_models, resolve_catalog_key, selectable_catalog_key_for_persisted,
+        };
+
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [models]
+            default = "shared"
+
+            [[provider]]
+            id = "local"
+            base_url = "https://local.test/v1"
+            api_key = "sk-local"
+            models = ["shared"]
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+
+        // A prefetched first-party entry carrying the same routing slug, under a
+        // different catalog key, so only the slug scan can tell them apart.
+        let mut prefetched: IndexMap<String, ModelEntry> = IndexMap::new();
+        prefetched.insert(
+            "remote-key".to_string(),
+            test_model_entry(
+                "shared",
+                &cfg.endpoints.resolve_inference_base_url(),
+                None,
+                None,
+                None,
+            ),
+        );
+        let catalog = resolve_model_list(&cfg, Some(prefetched));
+        assert!(
+            catalog.get_index_of("remote-key") < catalog.get_index_of("local/shared"),
+            "the prefetched entry must sit ahead of the locally declared one"
+        );
+
+        let expected = "local/shared";
+        // `[models] default` — first-match resolver.
+        let (default_key, default_entry, _) =
+            crate::agent::models::resolve_default_model(&cfg, &catalog, true);
+        assert_eq!(default_key, expected);
+        assert_eq!(default_entry.info.base_url, "https://local.test/v1");
+        // A persisted session id — last-match resolver.
+        assert_eq!(
+            resolve_catalog_key(&catalog, &acp::ModelId::new("shared".to_string()))
+                .map(|k| k.0.to_string()),
+            Some(expected.to_string())
+        );
+        assert_eq!(
+            selectable_catalog_key_for_persisted(
+                &catalog,
+                &available_models(&catalog, true),
+                &acp::ModelId::new("shared".to_string()),
+            )
+            .map(|k| k.0.to_string()),
+            Some(expected.to_string())
+        );
+        // Credential/auth lookups agree too.
+        assert_eq!(
+            find_model_by_id(&catalog, "shared").map(|e| e.info.base_url.as_str()),
+            Some("https://local.test/v1")
+        );
+        // A fully qualified key still hits the exact-key fast path untouched.
+        assert_eq!(
+            resolve_catalog_key(&catalog, &acp::ModelId::new("remote-key".to_string()))
+                .map(|k| k.0.to_string()),
+            Some("remote-key".to_string())
         );
     }
 
