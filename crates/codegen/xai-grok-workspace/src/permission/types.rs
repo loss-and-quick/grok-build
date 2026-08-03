@@ -643,6 +643,7 @@ mod tests {
         use xai_grok_tools::types::ToolInput;
         let input = ToolInput::WebFetch(WebFetchInput {
             url: "https://custom.example.com/api".into(),
+            prompt: None,
         });
         let access = AccessKind::from(&input);
         assert!(
