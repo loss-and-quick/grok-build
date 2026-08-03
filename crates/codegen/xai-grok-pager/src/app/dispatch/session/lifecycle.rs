@@ -806,6 +806,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
     let agent_count = app.agents.len();
     let switch_hint =
         crate::views::dashboard::session_switch_hint_command(app.screen_mode.is_minimal());
+    let billing_refresh = crate::app::dispatch::billing::silent_billing_refresh(app, agent_id);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         let session_id_clone = session_id.clone();
         if agent.session.created_via_new
@@ -867,10 +868,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 session_id: session_id_clone.clone(),
             });
         }
-        effects.push(Effect::FetchBilling {
-            agent_id,
-            silent: true,
-        });
+        effects.extend(billing_refresh);
         if let Some((model_id, effort)) = deferred {
             effects.push(Effect::SwitchModel {
                 agent_id,
@@ -914,6 +912,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
     new_models: Option<acp::SessionModelState>,
     scheduler_background_loops: Option<bool>,
 ) -> Vec<Effect> {
+    let billing_refresh = crate::app::dispatch::billing::silent_billing_refresh(app, agent_id);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.finish_command();
         agent.mark_turn_finished();
@@ -970,10 +969,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 session_id: session_id_clone.clone(),
             });
         }
-        effects.push(Effect::FetchBilling {
-            agent_id,
-            silent: true,
-        });
+        effects.extend(billing_refresh);
         if let Some((model_id, effort)) = deferred {
             effects.push(Effect::SwitchModel {
                 agent_id,

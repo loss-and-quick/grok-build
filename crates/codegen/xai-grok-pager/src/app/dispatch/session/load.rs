@@ -886,6 +886,9 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         agent_id,
         session_id,
     );
+    // Bound before the `agents` borrow below (field-precise borrows keep the
+    // rest of `app` readable, but this needs `&AppView` as a whole).
+    let billing_refresh = crate::app::dispatch::billing::silent_billing_refresh(app, agent_id);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if defer_to_open_reload_window(agent, agent_id, "SessionLoaded") {
             return vec![];
@@ -979,10 +982,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
                 session_id: hydrate_sid.clone(),
             });
         }
-        effects.push(Effect::FetchBilling {
-            agent_id,
-            silent: true,
-        });
+        effects.extend(billing_refresh);
         if let Some((model_id, effort)) = deferred {
             agent.session.model_switch_pending = true;
             effects.push(Effect::SwitchModel {

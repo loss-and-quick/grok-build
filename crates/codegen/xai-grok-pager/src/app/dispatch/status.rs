@@ -295,7 +295,17 @@ pub(super) fn commit_session_usage_block(
 
 /// Consumer credit follow-up for `/usage` (redirect or non-silent billing fetch).
 pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
+    // `/usage` is explicit user intent, so say why the credits section is
+    // missing instead of silently omitting it. The automatic refreshes skip
+    // the fetch entirely (`billing::silent_billing_refresh`); here the user
+    // asked, and "nothing happened" is indistinguishable from a bug.
     if !app.usage_visible {
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            agent.scrollback.push_block(RenderBlock::system(
+                "No grok.com billing data for this account \u{2014} usage above covers this session only."
+                    .to_string(),
+            ));
+        }
         return vec![];
     }
     // Remote-settings kill switch (`grok_build_usage_redirect_url`): link out

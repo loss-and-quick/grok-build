@@ -14,6 +14,33 @@ use xai_grok_telemetry::session_ctx::log_event;
 /// After this, the user can still manually check via the [Refresh] button.
 pub(super) const PAYWALL_AUTO_CHECK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// A background billing refresh for `agent_id`, or `None` when this account
+/// has no consumer billing surface to refresh.
+///
+/// Automatic fetches (session load, session resume, turn end, the near-limit
+/// poll) exist only to keep the credit bar and its usage warning current, and
+/// both render behind `AgentView::billing_surface_visible` — the per-agent
+/// mirror of [`AppView::usage_visible`]. A team plan bills centrally, an API
+/// key has no consumer billing surface, and a non-first-party credential has
+/// no grok.com billing relationship at all, so on those accounts the request
+/// can only come back rejected and nothing could display the result anyway.
+///
+/// Gating here means the request is never issued rather than issued and
+/// refused once per turn. `usage_visible` converges on the account state every
+/// frame via `AppView::resync_account_feature_gates_on_divergence`, so this
+/// settles without waiting for the next auth-meta push. The startup
+/// `FetchAppBilling` in `event_loop` is gated on the same flag.
+///
+/// `/usage` is deliberately *not* routed through here: it is explicit user
+/// intent and reports its own "no billing data" message instead of going
+/// quiet — see `status::append_consumer_billing_surface`.
+pub(crate) fn silent_billing_refresh(app: &AppView, agent_id: AgentId) -> Option<Effect> {
+    app.usage_visible.then_some(Effect::FetchBilling {
+        agent_id,
+        silent: true,
+    })
+}
+
 /// Whether the user is at the highest subscription tier (SuperGrok Heavy).
 ///
 /// Returns `true` only when `subscription_tier` **positively matches** a
@@ -490,6 +517,7 @@ pub(super) fn handle_credit_limit_recheck_complete(
         app.apply_auth_meta(&auth_meta);
     }
     let tier_changed = app.subscription_tier != old_tier && app.subscription_tier.is_some();
+    let billing_refresh = silent_billing_refresh(app, agent_id);
 
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
@@ -521,10 +549,7 @@ pub(super) fn handle_credit_limit_recheck_complete(
     agent.credit_limit_stashed_prompt = None;
 
     let mut drain = maybe_drain_queue(agent);
-    drain.effects.push(Effect::FetchBilling {
-        agent_id,
-        silent: true,
-    });
+    drain.effects.extend(billing_refresh);
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     drain.effects
 }

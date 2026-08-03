@@ -1112,6 +1112,9 @@ pub(super) fn handle_prompt_response(
     // `PromptResponse`). Take any stashed adoption now; it is applied
     // after `finish_turn` clears `current_prompt_id` below.
     let pending_adoption = app.pending_running_adoptions.remove(&agent_id);
+    // Both need `&AppView` as a whole, so they are bound before the
+    // field-precise `agents` borrow below.
+    let billing_refresh = super::billing::silent_billing_refresh(app, agent_id);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         // Discard PromptResponses that don't belong to the currently
         // active prompt -- they belong to a turn the user rewound, or to
@@ -1597,10 +1600,7 @@ pub(super) fn handle_prompt_response(
             });
         }
 
-        effects.push(Effect::FetchBilling {
-            agent_id,
-            silent: true,
-        });
+        effects.extend(billing_refresh);
         note_peek_page_flip(app, agent_id, page_flip_entry);
         return effects;
     }

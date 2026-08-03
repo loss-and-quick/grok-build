@@ -619,9 +619,16 @@ fn session_usage_complete_no_billing_when_surface_hidden() {
     app.usage_visible = false;
     let before = agent_scrollback_len(&app);
     let effects = complete_session_usage(&mut app, "test-session", Default::default());
-    assert!(effects.is_empty());
-    // Only the credit follow-up is gated; the session block itself must land.
-    assert_eq!(agent_scrollback_len(&app), before + 1);
+    assert!(effects.is_empty(), "no billing fetch when the surface is hidden");
+    // The session block lands, plus an explicit "no billing data" line: the
+    // user asked for `/usage`, so the missing credits section is explained
+    // rather than silently dropped.
+    assert_eq!(agent_scrollback_len(&app), before + 2);
+    let text = last_system_text(&app, AgentId(0));
+    assert!(
+        text.contains("No grok.com billing data for this account"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -1373,4 +1380,96 @@ fn credit_limit_upsell_submit_shows_url_when_browser_unavailable() {
 
     // SAFETY: serialized via `serial_test`.
     unsafe { std::env::remove_var("GROK_TEST_OPEN_URL_FILE") };
+}
+
+// ── Automatic billing fetches are gated on the billing surface ──────
+//
+// This fork is routinely run against custom `[[provider]]` endpoints with no
+// grok.com account at all. The automatic (silent) refreshes used to fire on
+// every session load and after every prompt turn regardless, so the shell
+// rejected each one with "Authentication required to fetch billing data" —
+// one wasted round trip per turn. Nothing could have rendered the result
+// either: the credit bar and its usage warning both sit behind
+// `billing_surface_visible`, the per-agent mirror of `usage_visible`.
+
+/// Drive a session load to completion and return the emitted effects.
+fn load_session(app: &mut AppView, session_id: &str) -> Vec<Effect> {
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: AgentId(0),
+            session_id: session_id.to_string().into(),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+            scheduler_background_loops: None,
+        }),
+        app,
+    )
+}
+
+/// Run a turn to completion and return the emitted effects.
+fn end_turn(app: &mut AppView) -> Vec<Effect> {
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.session.state = AgentState::TurnRunning;
+    agent.turn_started_at = Some(std::time::Instant::now());
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: AgentId(0),
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id: None,
+        }),
+        app,
+    )
+}
+
+fn has_billing_fetch(effects: &[Effect]) -> bool {
+    effects
+        .iter()
+        .any(|e| matches!(e, Effect::FetchBilling { .. }))
+}
+
+/// Baseline: a first-party account still refreshes billing on session load.
+#[test]
+fn session_load_fetches_billing_for_first_party_account() {
+    let mut app = test_app_with_agent();
+    assert!(app.usage_visible, "test app is a first-party account");
+    assert!(has_billing_fetch(&load_session(&mut app, "s-1")));
+}
+
+#[test]
+fn session_load_issues_no_billing_fetch_without_first_party_account() {
+    let mut app = test_app_with_agent();
+    // No grok.com account — the state a custom-provider-only session settles
+    // into once `resync_account_feature_gates_on_divergence` runs.
+    app.is_first_party_account = false;
+    app.refresh_account_feature_gates();
+    assert!(!app.usage_visible);
+
+    assert!(
+        !has_billing_fetch(&load_session(&mut app, "s-1")),
+        "session load must not fetch billing without a first-party account"
+    );
+}
+
+/// Baseline: a first-party account still refreshes billing after a turn.
+#[test]
+fn turn_end_fetches_billing_for_first_party_account() {
+    let mut app = test_app_with_agent();
+    assert!(has_billing_fetch(&end_turn(&mut app)));
+}
+
+#[test]
+fn turn_end_issues_no_billing_fetch_without_first_party_account() {
+    let mut app = test_app_with_agent();
+    app.is_first_party_account = false;
+    app.refresh_account_feature_gates();
+    assert!(!app.usage_visible);
+
+    assert!(
+        !has_billing_fetch(&end_turn(&mut app)),
+        "a turn must not fetch billing without a first-party account"
+    );
 }

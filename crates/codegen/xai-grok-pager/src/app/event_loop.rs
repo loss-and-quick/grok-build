@@ -2303,10 +2303,9 @@ pub(crate) async fn run(
             _ = billing_poll => {
                 billing_poll_at = None;
                 if let ActiveView::Agent(id) = app.active_view {
-                    let effs = vec![Effect::FetchBilling {
-                        agent_id: id,
-                        silent: true,
-                    }];
+                    let effs = Vec::from_iter(
+                        crate::app::dispatch::silent_billing_refresh(&app, id),
+                    );
                     if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                         break;
                     }
