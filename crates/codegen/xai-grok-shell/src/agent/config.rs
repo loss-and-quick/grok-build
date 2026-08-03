@@ -5308,10 +5308,44 @@ fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T
     let models = resolve_model_list(&cfg, None);
     f(ModelLookup::Loaded(find_model_by_id(&models, model_id)))
 }
+/// Whether an aux catalog entry may be handed a credential by
+/// [`resolve_credentials`], which falls through to the session token and then
+/// `XAI_API_KEY` for any entry that carries neither its own `api_key`/`env_key`
+/// nor an auth provider. A `[[provider]]` that expects a plugin-minted bearer
+/// (it declares only an `auth_account`) is exactly such an entry, so without
+/// this check an aux call routed to it would carry a first-party credential to
+/// a third-party host.
+///
+/// The main turn path guards the same fall-through with
+/// [`crate::agent::auth_method::session_token_auth_gate`]; this is the aux
+/// path's equivalent, keyed on the ENTRY's own endpoint rather than the
+/// session's.
+///
+/// [`crate::util::is_xai_api_bearer_url`], not `is_xai_api_url`: this decides
+/// where a *credential* is attached, so cleartext and loopback are refused too
+/// — the same choice Tier 2 below and the `model_provider` fail-closed guard in
+/// [`apply_config_model_override`] make.
+fn aux_entry_may_take_first_party_credential(entry: &ModelEntry) -> bool {
+    entry.own_credential().is_some()
+        || entry.effective_auth_provider().is_some()
+        || crate::util::is_xai_api_bearer_url(&entry.info.base_url)
+}
 /// Resolve a standalone `SamplerConfig` for an auxiliary model slug (image
 /// description, session summary, ...), resolved through the catalog so a
 /// `[model.*]` override redirects it to its own endpoint, credentials, and
 /// routing `model`. `None` → caller falls back to the active session's model.
+///
+/// Tier 1 (a catalog hit) follows the PIN, not the session: an aux slug that
+/// names a first-party model keeps routing first-party even while the session
+/// runs on a custom `[[provider]]`, because that is the endpoint the pinned
+/// slug is served from and the account is the user's own. Forcing the aux call
+/// onto the session endpoint instead would 404 — see
+/// [`finalize_aux_sampler_config`] — so "follow the session" can only mean
+/// degrading to the session model, which the `None` path already does. Users
+/// who want aux traffic on their own endpoint point `[models] session_summary`
+/// / `image_description` at a model their provider serves. What must never
+/// follow the pin is the credential; see
+/// [`aux_entry_may_take_first_party_credential`].
 ///
 /// On a catalog miss there is a second, first-party-only tier: mint a synthetic
 /// entry against `endpoints.resolve_inference_base_url()` carrying the session
@@ -5333,6 +5367,16 @@ pub fn resolve_aux_model_sampling_config(
 ) -> Option<SamplerConfig> {
     let catalog_entry = find_model_by_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {
+        if !aux_entry_may_take_first_party_credential(entry) {
+            tracing::warn!(
+                model = %model_id,
+                base_url = %entry.info.base_url,
+                "aux model resolves to a non-first-party endpoint that carries no credential of \
+                 its own; refusing to attach a first-party credential — the caller falls back to \
+                 its session default"
+            );
+            return None;
+        }
         let credentials = resolve_credentials_enforced(entry, session_key, disable_api_key_auth);
         let sampler = sampling_config_for_model(
             entry,
@@ -6750,6 +6794,73 @@ reasoning_effort = "low"
         assert_eq!(first_party.model, aux_slug);
         assert_eq!(first_party.base_url, endpoints.resolve_inference_base_url());
         assert_eq!(first_party.api_key.as_deref(), Some("session-jwt"));
+    }
+    /// A catalog HIT used to resolve credentials with no endpoint check, so an
+    /// entry that carries no credential of its own — a `[[provider]]` whose
+    /// bearer is minted by a credential plugin declares only an `auth_account`
+    /// — fell through `resolve_credentials` to the session token and would have
+    /// carried it to that third-party host. Unreachable while signed out
+    /// (`session_key` is `None`); signing in armed it.
+    #[test]
+    fn aux_model_on_a_third_party_entry_never_receives_the_session_bearer() {
+        let endpoints = EndpointsConfig::default();
+        let mut catalog = IndexMap::new();
+        // No api_key / env_key / auth_provider: the plugin-minted-bearer shape.
+        catalog.insert(
+            "acme/aux-model".to_string(),
+            test_model_entry("aux-model", "https://acme.example/v1", None, None, None),
+        );
+        let entry = &catalog["acme/aux-model"];
+        assert!(
+            entry.own_credential().is_none() && entry.effective_auth_provider().is_none(),
+            "the entry must have no credential of its own for this test to mean anything"
+        );
+        assert_eq!(
+            resolve_credentials(entry, Some("session-jwt"))
+                .api_key
+                .as_deref(),
+            Some("session-jwt"),
+            "resolve_credentials itself still falls through — the aux path is what must guard it"
+        );
+        assert!(
+            resolve_aux_model_sampling_config(
+                "aux-model",
+                &catalog,
+                &endpoints,
+                // Even a first-party session, which is what mints the bearer.
+                &endpoints.resolve_inference_base_url(),
+                Some("session-jwt"),
+                false,
+                None,
+                None,
+            )
+            .is_none(),
+            "a third-party aux entry must not be handed the session bearer"
+        );
+        // A genuine first-party entry still resolves with the session bearer.
+        let first_party_url = endpoints.resolve_inference_base_url();
+        assert!(
+            crate::util::is_xai_api_bearer_url(&first_party_url),
+            "the inference base URL must be a first-party bearer URL"
+        );
+        let mut first_party_catalog = IndexMap::new();
+        first_party_catalog.insert(
+            "aux-model".to_string(),
+            test_model_entry("aux-model", &first_party_url, None, None, None),
+        );
+        let resolved = resolve_aux_model_sampling_config(
+            "aux-model",
+            &first_party_catalog,
+            &endpoints,
+            &first_party_url,
+            Some("session-jwt"),
+            false,
+            None,
+            None,
+        )
+        .expect("a first-party aux entry still resolves");
+        assert_eq!(resolved.base_url, first_party_url);
+        assert_eq!(resolved.api_key.as_deref(), Some("session-jwt"));
     }
     /// Cold cache falls back to the session model, never the xAI proxy;
     /// warm cache serves the provider token at the provider endpoint.
