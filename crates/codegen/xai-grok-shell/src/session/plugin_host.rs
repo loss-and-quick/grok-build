@@ -359,6 +359,12 @@ pub(crate) fn plugin_hook_specs(registry: &PluginRegistry) -> (Vec<HookSpec>, Ve
 ///
 /// Returns the input unchanged when no active plugin contributes a spec, so a
 /// plugin-less session keeps a `None` registry and skips the machinery.
+///
+/// The append is idempotent: any `plugin/…` specs already on the input registry
+/// are dropped first. A subagent session spawns with its parent's registry as
+/// the override, and that registry has been through here already — without the
+/// re-clean it ended up holding two specs per event per plugin, so every plugin
+/// hook ran twice for the whole life of the child.
 pub(crate) fn registry_with_plugin_specs(
     registry: Option<Arc<xai_grok_hooks::discovery::HookRegistry>>,
     plugin_registry: Option<&PluginRegistry>,
@@ -373,6 +379,11 @@ pub(crate) fn registry_with_plugin_specs(
         return registry;
     }
     let mut merged = registry.map(|arc| (*arc).clone()).unwrap_or_default();
+    // Same re-clean `apply_plugin_registry_snapshot` performs before its own
+    // append: every spec this function contributes is named `plugin/…`, so the
+    // prefix removal takes back exactly the previous contribution and nothing
+    // else (config-layer and `agent:` specs keep their own names).
+    merged.remove_by_prefix("plugin/");
     merged.append_specs(specs);
     Some(Arc::new(merged))
 }
@@ -1146,6 +1157,72 @@ mod tests {
             |s| s.plugin.as_deref() == Some("council") && s.handler_type == HandlerType::Plugin
         ));
         assert!(merged.has_enabled_hooks_for_canonical(HookEventName::StartOauthFlow));
+    }
+
+    /// A subagent session spawns with its parent's registry as the hook
+    /// override, and that registry already went through this append. Appending
+    /// again on top of it must not stack a second copy of every spec: the
+    /// dispatcher runs one spec per registered hook, so a duplicated set means
+    /// every plugin hook fires twice for the whole life of the child — twice the
+    /// sidecar round-trips, and two runs to render where the plugin acted once.
+    #[test]
+    fn inheriting_a_parents_registry_does_not_stack_a_second_plugin_spec_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = plugin_registry(
+            vec![with_hooks_file(
+                discovered_plugin(tmp.path(), "council", true, true),
+                hooks_json("./audit.sh"),
+            )],
+            &["council"],
+        );
+
+        // The parent session's registry: a config-layer hook plus the plugin
+        // contribution.
+        let parent = registry_with_plugin_specs(
+            Some(Arc::new(registry_with_config_layer_hook())),
+            Some(&plugins),
+        )
+        .expect("parent registry built");
+        // The subagent spawn: the parent's registry handed straight back in.
+        let child = registry_with_plugin_specs(Some(parent.clone()), Some(&plugins))
+            .expect("child registry built");
+
+        assert_eq!(
+            child.len(),
+            parent.len(),
+            "the child stacked a second copy of the plugin specs"
+        );
+        for &event in SIDECAR_HOOK_EVENTS {
+            let sidecar: Vec<&str> = child
+                .hooks_for_canonical(event)
+                .iter()
+                .filter(|s| s.handler_type == HandlerType::Plugin)
+                .map(|s| s.name.as_str())
+                .collect();
+            assert_eq!(
+                sidecar.len(),
+                1,
+                "{event} would fire {} times in a subagent",
+                sidecar.len()
+            );
+        }
+        // The plugin's file hooks are re-cleaned by the same prefix, so they too
+        // survive exactly once.
+        let post: Vec<&str> = child
+            .hooks_for_canonical(HookEventName::PostToolUse)
+            .iter()
+            .filter(|s| s.handler_type == HandlerType::Command)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(post.len(), 1, "plugin file hook duplicated: {post:?}");
+        // Nothing outside the `plugin/` namespace was taken by the re-clean.
+        assert!(
+            child
+                .hooks_for_canonical(HookEventName::PreToolUse)
+                .iter()
+                .any(|s| s.name == "global/audit"),
+            "the re-clean removed a config-layer hook"
+        );
     }
 
     /// A session with no plugins keeps its registry byte-for-byte — including
