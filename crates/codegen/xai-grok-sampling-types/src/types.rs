@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 
 // ============================================================================
 // TraceContext — cloneable, type-erased context for request tracing
@@ -961,6 +961,87 @@ impl<'de> serde::Deserialize<'de> for ReasoningEffortOption {
                     description,
                     default,
                 }
+            }
+        })
+    }
+}
+
+/// Smallest `budget_tokens` the Messages API accepts.
+pub const MIN_THINKING_BUDGET_TOKENS: u32 = 1024;
+
+/// Which `thinking` dialect an Anthropic Messages endpoint accepts.
+///
+/// The three modes are not interchangeable and the endpoint rejects the wrong
+/// one outright — adaptive on a model that predates it, `budget_tokens` on a
+/// model that has dropped it — so which one applies is a property of the
+/// endpoint and has to be declared, not guessed. This crate cannot classify the
+/// model itself: it sees a configured slug with no provider identity attached,
+/// and a gateway may serve anything under any name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingDialect {
+    /// `{"type": "adaptive"}` — the endpoint picks the budget itself.
+    Adaptive,
+    /// `{"type": "enabled", "budget_tokens": N}` — an explicit budget. The API
+    /// also requires `budget_tokens` to be strictly below the request's
+    /// `max_tokens`; that pairing is a per-request relation this value cannot
+    /// see, and violating it returns a 400 that names the two fields, so it is
+    /// left to surface as the legible error it already is.
+    Budget { budget_tokens: NonZeroU32 },
+    /// Send no `thinking` field at all. Not `{"type": "disabled"}`, which some
+    /// endpoints reject outright while every one of them accepts the field
+    /// simply being absent.
+    Off,
+}
+
+impl Serialize for ThinkingDialect {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Adaptive => serializer.serialize_str("adaptive"),
+            Self::Off => serializer.serialize_str("off"),
+            Self::Budget { budget_tokens } => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("budget_tokens", &budget_tokens.get())?;
+                map.end()
+            }
+        }
+    }
+}
+
+/// Deserialization shape accepting either a bare mode name (`"adaptive"`,
+/// `"off"`) or the budget table (`{ budget_tokens = 8000 }`). Folding the
+/// number into the variant rather than pairing a `"budget"` name with a
+/// separate field means "budget dialect with no budget" is unspellable.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawThinkingDialect {
+    Named(String),
+    Budget { budget_tokens: u32 },
+}
+
+impl<'de> Deserialize<'de> for ThinkingDialect {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match RawThinkingDialect::deserialize(deserializer)? {
+            RawThinkingDialect::Named(name) => match name.to_ascii_lowercase().as_str() {
+                "adaptive" => Self::Adaptive,
+                "off" => Self::Off,
+                other => {
+                    return Err(serde::de::Error::custom(format!(
+                        "invalid thinking dialect: {other:?} (expected \"adaptive\", \"off\", \
+                         or a table such as {{ budget_tokens = 8000 }})"
+                    )));
+                }
+            },
+            RawThinkingDialect::Budget { budget_tokens } => {
+                let budget_tokens = NonZeroU32::new(budget_tokens)
+                    .filter(|n| n.get() >= MIN_THINKING_BUDGET_TOKENS)
+                    .ok_or_else(|| {
+                        serde::de::Error::custom(format!(
+                            "thinking budget_tokens must be at least \
+                             {MIN_THINKING_BUDGET_TOKENS}; got {budget_tokens}"
+                        ))
+                    })?;
+                Self::Budget { budget_tokens }
             }
         })
     }

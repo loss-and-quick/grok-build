@@ -56,6 +56,24 @@
     "google_api_key"
   ];
 
+  # The `thinking` dialects `ThinkingDialect` deserializes
+  # (crates/codegen/xai-grok-sampling-types/src/types.rs): the two mode names, or
+  # a `{ budget_tokens = N; }` attrset for the explicit-budget dialect. Folding
+  # the number into the value rather than pairing a `"budget"` name with a
+  # separate option means a budget dialect with no budget is unspellable.
+  thinkingDialectType = types.either
+    (types.enum ["adaptive" "off"])
+    (types.submodule {
+      options.budget_tokens = mkOption {
+        type = types.ints.positive;
+        example = 8000;
+        description = ''
+          Thinking budget in tokens. The Messages API requires at least 1024,
+          and strictly less than the request's `max_tokens`.
+        '';
+      };
+    });
+
   # One `[[provider]]` registry entry. Fields mirror
   # `xai_grok_config_types::provider::ProviderConfig`
   # (crates/codegen/xai-grok-config-types/src/provider.rs) 1:1, including its
@@ -209,12 +227,37 @@
           `false` (the default) whenever you set that.
         '';
       };
+      thinking = mkOption {
+        type = types.nullOr thinkingDialectType;
+        default = null;
+        example = "adaptive";
+        description = ''
+          Which `thinking` dialect this provider's models accept. Only the
+          `messages` format has such a field; the other three ignore it.
+
+          The accepted dialect follows from the model generation the endpoint
+          serves and the wrong one is a hard rejection, so it has to be declared
+          — nothing downstream can classify an arbitrary slug, since a gateway
+          may serve any model under any name. `"adaptive"` for models that let
+          the endpoint pick the budget, `{ budget_tokens = 8000; }` for older
+          ones that require an explicit budget, `"off"` to send no `thinking`
+          field at all.
+
+          Like the effort menu, it describes the *endpoint*, so every model the
+          provider serves inherits it; override a single model with a
+          `[model."<id>/<model>"]` table in `settings` when its generation
+          differs from its siblings'.
+
+          `null` (the default) declares nothing and keeps grok's previous
+          behaviour, so an existing provider entry is unaffected.
+        '';
+      };
     };
   };
 
   # ProviderConfig applies `skip_serializing_if` to `api_key`, `auth_scheme`,
   # `proxy`, `context_window`, `max_completion_tokens`, `auth_account`,
-  # `reasoning_effort` (Option::is_none), to
+  # `reasoning_effort`, `thinking` (Option::is_none), to
   # empty `headers`/`models`/`reasoning_efforts`, and to a false
   # `supports_reasoning_effort`. Nix's TOML writer cannot emit `null`, so drop
   # those keys here before generating: an omitted key is exactly what the

@@ -736,6 +736,7 @@ impl SessionActor {
             proxy: model_facts.proxy.clone(),
             client_version: creds.client_version,
             reasoning_effort: cfg.reasoning_effort,
+            thinking: model_facts.thinking,
             force_http1: false,
             max_retries: Some(self.max_retries),
             stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
@@ -2108,7 +2109,8 @@ mod permission_classifier_request_tests {
     fn messages_classifier_request_carries_the_schema_as_a_tool() {
         let req = request(&ApiBackend::Messages);
         let wire =
-            serde_json::to_value(xai_grok_sampling_types::build_messages_request(&req)).unwrap();
+            serde_json::to_value(xai_grok_sampling_types::build_messages_request(&req, None))
+                .unwrap();
 
         let tools = wire["tools"].as_array().expect("tools must be emitted");
         assert_eq!(tools.len(), 1, "{wire:#}");

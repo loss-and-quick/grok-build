@@ -10,7 +10,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
-use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
+use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption, ThinkingDialect};
 
 /// Wire format a custom provider speaks. Maps 1:1 onto the sampler's
 /// `ApiBackend`, but lives here so config parsing does not depend on the
@@ -148,6 +148,26 @@ pub struct ProviderConfig {
     /// list. Implied by a non-empty `reasoning_efforts`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_reasoning_effort: bool,
+    /// Which `thinking` dialect this provider's models accept. Only the
+    /// `messages` format has such a field; the other three ignore it.
+    ///
+    /// Spelled `thinking = "adaptive"`, `thinking = "off"`, or
+    /// `thinking = { budget_tokens = 8000 }`. Like the context window, the
+    /// output ceiling and the effort menu, the dialect describes the
+    /// *endpoint*, so every model this provider serves inherits it; a
+    /// `[model."<id>/<model>"]` table refines it for the one model that differs
+    /// from its siblings.
+    ///
+    /// It has to be declared rather than derived because the accepted dialect
+    /// varies by model generation and the wrong one is a hard rejection, and
+    /// nothing downstream can classify an arbitrary slug: a gateway may serve
+    /// any model under any name.
+    ///
+    /// `None` (the default) leaves the previous inference in place — adaptive,
+    /// and only when an effort is requested — so a provider that does not
+    /// declare one behaves exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingDialect>,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -219,6 +239,9 @@ mod tests {
         assert!(p.reasoning_efforts.is_empty());
         assert!(p.reasoning_effort.is_none());
         assert!(!p.supports_reasoning_effort);
+        // No declared dialect = the previous inference, so nothing changes for a
+        // provider that does not declare one.
+        assert!(p.thinking.is_none());
     }
 
     /// The common declaration: a bare array of canonical values. Each entry
@@ -271,6 +294,74 @@ mod tests {
         assert_eq!(deep.label, "Deep think");
         assert_eq!(deep.description.as_deref(), Some("slow"));
         assert!(deep.default);
+    }
+
+    /// Each spelling of the thinking dialect round-trips back to the same
+    /// value, so a config the HM module generates re-parses unchanged.
+    #[test]
+    fn each_thinking_dialect_round_trips() {
+        for (toml_value, expected) in [
+            ("\"adaptive\"", ThinkingDialect::Adaptive),
+            ("\"off\"", ThinkingDialect::Off),
+            (
+                "{ budget_tokens = 8000 }",
+                ThinkingDialect::Budget {
+                    budget_tokens: std::num::NonZeroU32::new(8000).unwrap(),
+                },
+            ),
+        ] {
+            let toml = format!(
+                r#"
+                id = "acme"
+                format = "messages"
+                base_url = "https://example.test/v1"
+                models = ["m-large"]
+                thinking = {toml_value}
+            "#
+            );
+            let p: ProviderConfig = toml::from_str(&toml).unwrap();
+            assert_eq!(p.thinking, Some(expected), "parsing {toml_value}");
+            let round_tripped: ProviderConfig =
+                toml::from_str(&toml::to_string(&p).unwrap()).unwrap();
+            assert_eq!(
+                round_tripped.thinking,
+                Some(expected),
+                "re-parsing {toml_value}"
+            );
+        }
+    }
+
+    /// A misspelled dialect fails at config parse, where the message can name
+    /// the accepted spellings, rather than as an opaque 400 mid-session.
+    #[test]
+    fn rejects_unknown_thinking_dialect() {
+        let toml = r#"
+            id = "acme"
+            base_url = "https://example.test/v1"
+            thinking = "enabled"
+        "#;
+        let err = toml::from_str::<ProviderConfig>(toml)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("adaptive"),
+            "message should list the spellings: {err}"
+        );
+    }
+
+    /// The Messages API rejects a budget below 1024, so the floor is enforced
+    /// where the number is written instead of surfacing as a request failure.
+    #[test]
+    fn rejects_thinking_budget_below_the_api_floor() {
+        let toml = r#"
+            id = "acme"
+            base_url = "https://example.test/v1"
+            thinking = { budget_tokens = 512 }
+        "#;
+        let err = toml::from_str::<ProviderConfig>(toml)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("1024"), "message should name the floor: {err}");
     }
 
     /// A provider that accepts an effort but publishes no menu declares the

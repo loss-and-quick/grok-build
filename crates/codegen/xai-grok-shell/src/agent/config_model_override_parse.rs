@@ -458,6 +458,7 @@ mod tests {
     use crate::sampling::ApiBackend;
     use xai_grok_sampling_types::{
         CompactionAtTokens, CompactionsRemaining, ReasoningEffort, ReasoningEffortOption,
+        ThinkingDialect,
     };
 
     fn parse_cfg(toml_str: &str) -> crate::agent::config::Config {
@@ -726,6 +727,9 @@ mod tests {
             compaction_at_tokens: Some(CompactionAtTokens::Fixed(100_000)),
             show_model_fingerprint: Some(true),
             stream_tool_calls: Some(false),
+            thinking: Some(ThinkingDialect::Budget {
+                budget_tokens: std::num::NonZeroU32::new(8_000).unwrap(),
+            }),
         }
     }
 

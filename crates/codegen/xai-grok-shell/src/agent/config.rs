@@ -15,7 +15,7 @@ use xai_grok_agent::prompt::skills::SkillsConfig;
 use xai_grok_sampler::{AuthScheme, SamplerConfig};
 use xai_grok_sampling_types::{
     CompactionAtTokens, CompactionsRemaining, REASONING_EFFORT_META_KEY,
-    REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption,
+    REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption, ThinkingDialect,
     reasoning_effort_meta_value, reasoning_efforts_meta_value,
 };
 use xai_grok_tools::types::compat::{
@@ -4126,6 +4126,9 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 reasoning_effort: m.reasoning_effort,
                 supports_reasoning_effort: m.supports_reasoning_effort,
                 reasoning_efforts: m.reasoning_efforts,
+                // No built-in model speaks the messages backend, so none of
+                // them declares a thinking dialect.
+                thinking: None,
                 supports_backend_search: m.supports_backend_search,
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
@@ -4182,6 +4185,11 @@ pub struct ModelEntryConfig {
     /// above are derived from this list when it is non-empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
+    /// Which `thinking` dialect this model accepts on the messages backend.
+    /// Inherited from the owning `[[provider]]` for synthesized entries; unset
+    /// keeps the sampler's previous inference. Ignored by the other backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingDialect>,
     /// Extra headers to send with requests to this model's endpoint.
     /// Useful for BYOK (Bring Your Own Key) scenarios.
     /// Example: { "x-anthropic-api-key" = "sk-ant-..." }
@@ -4286,6 +4294,7 @@ impl ModelEntryConfig {
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
+            thinking: None,
             extra_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
@@ -4365,6 +4374,9 @@ pub struct ConfigModelOverride {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub supports_reasoning_effort: Option<bool>,
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
+    /// Refines the owning `[[provider]]`'s dialect for the one model whose
+    /// generation differs from its siblings'.
+    pub thinking: Option<ThinkingDialect>,
     pub supports_backend_search: Option<bool>,
     /// Aliases must be registered in `config_model_override_parse::ALIASES`;
     /// serde rejects a table that contains both spellings otherwise.
@@ -4451,6 +4463,9 @@ impl ConfigModelOverride {
         }
         if !self.reasoning_efforts.is_empty() {
             entry.info.reasoning_efforts = self.reasoning_efforts.clone();
+        }
+        if self.thinking.is_some() {
+            entry.info.thinking = self.thinking;
         }
         if let Some(v) = self.supports_backend_search {
             entry.info.supports_backend_search = v;
@@ -4546,6 +4561,10 @@ pub struct ModelInfo {
     /// Per-model reasoning-effort menu (source of truth); legacy fields derived from it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
+    /// Declared `thinking` dialect for the messages backend; see
+    /// [`ModelEntryConfig::thinking`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingDialect>,
     pub supports_backend_search: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -4597,6 +4616,7 @@ impl ModelInfo {
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
+            thinking: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -4635,6 +4655,7 @@ impl ModelInfo {
             reasoning_effort: entry.reasoning_effort,
             supports_reasoning_effort: entry.supports_reasoning_effort,
             reasoning_efforts: entry.reasoning_efforts.clone(),
+            thinking: entry.thinking,
             supports_backend_search: entry.supports_backend_search,
             compactions_remaining: entry.compactions_remaining,
             compaction_at_tokens: entry.compaction_at_tokens,
@@ -5259,6 +5280,10 @@ pub struct ModelAuthFacts {
     /// does: the turn path needs it from the catalog entry without widening
     /// `SamplingConfig`. `None` = the plugin's default account.
     pub auth_account: Option<String>,
+    /// Declared `thinking` dialect for this model ([`ModelInfo::thinking`]).
+    /// Rides here for the same reason the two fields above do. `None` = the
+    /// endpoint declared none, which keeps the sampler's previous inference.
+    pub thinking: Option<ThinkingDialect>,
 }
 /// Resolve `model_id` to its auth facts and auth-provider reference from one
 /// effective-config load; both ride the same memo (see
@@ -5276,6 +5301,7 @@ pub fn resolve_model_auth_facts_and_provider(
                 auth_scheme: AuthScheme::default(),
                 proxy: None,
                 auth_account: None,
+                thinking: None,
             },
             None,
         );
@@ -5293,6 +5319,10 @@ pub fn resolve_model_auth_facts_and_provider(
             },
             auth_account: match &lookup {
                 ModelLookup::Loaded(Some(e)) => e.info().auth_account.clone(),
+                _ => None,
+            },
+            thinking: match &lookup {
+                ModelLookup::Loaded(Some(e)) => e.info().thinking,
                 _ => None,
             },
         };
@@ -5470,6 +5500,7 @@ pub fn resolve_aux_model_sampling_config(
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
+                thinking: None,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -5752,6 +5783,10 @@ fn expand_providers_into_catalog(
                 reasoning_effort: provider.reasoning_effort,
                 supports_reasoning_effort: provider.supports_reasoning_effort,
                 reasoning_efforts: provider.reasoning_efforts.clone(),
+                // So is the `thinking` dialect: which of the three modes the
+                // endpoint accepts follows from the model generation it serves,
+                // and the wrong one is a hard rejection.
+                thinking: provider.thinking,
                 ..ModelEntryConfig::minimal_for_provider(model)
             };
             let mut model_entry = ModelEntry::from_config_entry(&entry_config);
@@ -5805,6 +5840,7 @@ pub fn sampling_config_for_model(
         proxy: model.proxy.clone(),
         client_version,
         reasoning_effort: info.reasoning_effort,
+        thinking: info.thinking,
         force_http1: false,
         max_retries: info.max_retries,
         stream_tool_calls: info.stream_tool_calls.unwrap_or(false),
@@ -5915,6 +5951,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
+            thinking: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -7519,6 +7556,7 @@ reasoning_effort = "low"
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
+                thinking: None,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -8584,6 +8622,7 @@ reasoning_effort = "low"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
+            thinking: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -8744,6 +8783,7 @@ reasoning_effort = "low"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
+            thinking: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -9301,6 +9341,7 @@ reasoning_effort = "low"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
+            thinking: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -13091,6 +13132,7 @@ default = "grok-4.5"
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
+                thinking: None,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -14072,6 +14114,7 @@ default = "grok-4.5"
             reasoning_efforts: Vec::new(),
             reasoning_effort: None,
             supports_reasoning_effort: false,
+            thinking: None,
         };
         let providers = vec![
             entry("acme-work", Some("work")),
@@ -14121,6 +14164,7 @@ default = "grok-4.5"
                 reasoning_efforts: Vec::new(),
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
+                thinking: None,
             },
             ProviderConfig {
                 id: "direct".to_owned(),
@@ -14137,6 +14181,7 @@ default = "grok-4.5"
                 reasoning_efforts: Vec::new(),
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
+                thinking: None,
             },
         ];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
@@ -14194,6 +14239,7 @@ default = "grok-4.5"
                 reasoning_efforts: Vec::new(),
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
+                thinking: None,
             }];
             let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
             expand_providers_into_catalog(&mut catalog, &providers);
@@ -14235,6 +14281,7 @@ default = "grok-4.5"
             reasoning_efforts: Vec::new(),
             reasoning_effort: None,
             supports_reasoning_effort: false,
+            thinking: None,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -14292,6 +14339,7 @@ default = "grok-4.5"
             reasoning_efforts: Vec::new(),
             reasoning_effort: None,
             supports_reasoning_effort: false,
+            thinking: None,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -14357,6 +14405,7 @@ default = "grok-4.5"
             reasoning_efforts: Vec::new(),
             reasoning_effort: None,
             supports_reasoning_effort: false,
+            thinking: None,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -14433,6 +14482,7 @@ default = "grok-4.5"
             reasoning_efforts: Vec::new(),
             reasoning_effort: None,
             supports_reasoning_effort: false,
+            thinking: None,
         }
     }
 
@@ -14671,6 +14721,7 @@ default = "grok-4.5"
                     reasoning_efforts: Vec::new(),
                     reasoning_effort: None,
                     supports_reasoning_effort: false,
+                    thinking: None,
                 }];
                 let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
                 expand_providers_into_catalog(&mut catalog, &providers);
@@ -14714,6 +14765,7 @@ default = "grok-4.5"
             reasoning_efforts: Vec::new(),
             reasoning_effort: None,
             supports_reasoning_effort: false,
+            thinking: None,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -15126,6 +15178,97 @@ default = "grok-4.5"
                 body.pointer(pointer),
                 Some(&want),
                 "{format:?}: expected {pointer} = {want}; got {body:#}",
+            );
+        }
+    }
+    /// A `[[provider]]` declares the `thinking` dialect its endpoint accepts,
+    /// and that declaration decides the wire shape. Before it existed every
+    /// messages request said `adaptive`, which endpoints serving pre-4.6 models
+    /// reject with `adaptive thinking is not supported on this model`.
+    #[tokio::test]
+    async fn provider_thinking_dialect_reaches_the_messages_wire() {
+        use xai_grok_sampling_types::conversation::{ConversationItem, ConversationRequest};
+
+        // (declaration, expected `thinking` object on the wire)
+        let cases = [
+            ("\"adaptive\"", Some(serde_json::json!("adaptive")), None),
+            (
+                "{ budget_tokens = 8000 }",
+                Some(serde_json::json!("enabled")),
+                Some(serde_json::json!(8000)),
+            ),
+            ("\"off\"", None, None),
+        ];
+
+        for (declared, want_type, want_budget) in cases {
+            let server = xai_grok_test_support::MockInferenceServer::start()
+                .await
+                .unwrap();
+            let raw = format!(
+                r#"
+                [[provider]]
+                id = "acme"
+                format = "messages"
+                base_url = "{}"
+                api_key = "sk-test"
+                models = ["m1"]
+                max_completion_tokens = 64000
+                reasoning_efforts = [{{ value = "high", default = true }}]
+                thinking = {declared}
+                "#,
+                server.url(),
+            );
+            let raw: toml::Value = toml::from_str(&raw).unwrap();
+            let cfg = Config::new_from_toml_cfg(&raw).expect("config parses");
+            let catalog = resolve_model_list(&cfg, Some(IndexMap::new()));
+            let entry = catalog.get("acme/m1").expect("synthesized");
+            assert!(
+                entry.info().thinking.is_some(),
+                "{declared}: the declaration must reach the synthesized entry",
+            );
+
+            let sampler_config = sampling_config_for_model(
+                entry,
+                resolve_credentials(entry, None),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(
+                sampler_config.thinking,
+                entry.info().thinking,
+                "{declared}: the declaration must reach SamplerConfig",
+            );
+            let effort = sampler_config.reasoning_effort;
+            let client =
+                xai_grok_sampler::SamplingClient::new(sampler_config).expect("client should build");
+            let request = ConversationRequest {
+                items: vec![ConversationItem::user("hi".to_owned())],
+                model: Some("m1".to_owned()),
+                reasoning_effort: effort,
+                ..Default::default()
+            };
+            let _ = client.conversation_collect(request).await;
+
+            let requests = server.requests();
+            let logged = requests
+                .iter()
+                .find(|e| e.path.contains("/messages"))
+                .unwrap_or_else(|| panic!("{declared}: no request to /messages logged"));
+            let body = logged
+                .body
+                .as_ref()
+                .unwrap_or_else(|| panic!("{declared}: request body captured"));
+            assert_eq!(
+                body.pointer("/thinking/type"),
+                want_type.as_ref(),
+                "{declared}: expected thinking.type = {want_type:?}; got {body:#}",
+            );
+            assert_eq!(
+                body.pointer("/thinking/budget_tokens"),
+                want_budget.as_ref(),
+                "{declared}: expected budget_tokens = {want_budget:?}; got {body:#}",
             );
         }
     }

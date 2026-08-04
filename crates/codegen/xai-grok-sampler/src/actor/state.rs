@@ -99,6 +99,7 @@ mod tests {
             idle_timeout_secs: None,
             proxy: None,
             reasoning_effort: None,
+            thinking: None,
             origin_client: None,
             client_identifier: None,
             deployment_id: None,

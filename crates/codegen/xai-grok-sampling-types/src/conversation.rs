@@ -3276,7 +3276,14 @@ pub fn dedup_duplicate_tool_results(conversation: &mut Vec<ConversationItem>) ->
 // ============================================================================
 
 /// Convert a ConversationRequest to Anthropic MessagesRequest.
-pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::MessagesRequest {
+///
+/// `thinking_dialect` is the endpoint's declared `thinking` mode (see
+/// [`crate::ThinkingDialect`]); `None` means nothing declared one, which keeps
+/// the pre-declaration behaviour.
+pub fn build_messages_request(
+    req: &ConversationRequest,
+    thinking_dialect: Option<crate::ThinkingDialect>,
+) -> crate::messages::MessagesRequest {
     use crate::messages::{
         CacheControl, ContentBlock, ImageSource, Message, MessageContent, MessageRole,
         MessagesRequest, OutputConfig, SystemParam, TextBlock, ToolChoiceParam, ToolParam,
@@ -3570,12 +3577,37 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
             schema: schema.clone(),
         });
 
-    // thinking is driven by reasoning_effort only, not by json_schema.
-    let thinking = effort
-        .as_ref()
-        .map(|_| crate::messages::ThinkingConfig::Adaptive {
+    // Which `thinking` dialect the endpoint accepts is a property of the
+    // endpoint, so it is declared per provider and handed in here. Adaptive is
+    // not universal: a model that predates it rejects the whole request with
+    // `adaptive thinking is not supported on this model`, and a model that has
+    // dropped `budget_tokens` rejects that one just as hard.
+    //
+    // An undeclared endpoint keeps the previous inference — adaptive, and only
+    // when an effort was requested, which is the caller's own signal that
+    // reasoning config applies at all. A declared dialect is authoritative and
+    // deliberately does NOT depend on the effort: the models that still require
+    // `budget_tokens` are largely the ones that reject the effort parameter
+    // outright, so coupling the two would make that dialect unreachable on
+    // exactly the endpoints that need it.
+    //
+    // `json_schema` never drives this either way.
+    let thinking = match thinking_dialect {
+        None => effort
+            .as_ref()
+            .map(|_| crate::messages::ThinkingConfig::Adaptive {
+                display: Some(crate::messages::ThinkingDisplay::Summarized),
+            }),
+        Some(crate::ThinkingDialect::Adaptive) => Some(crate::messages::ThinkingConfig::Adaptive {
             display: Some(crate::messages::ThinkingDisplay::Summarized),
-        });
+        }),
+        Some(crate::ThinkingDialect::Budget { budget_tokens }) => {
+            Some(crate::messages::ThinkingConfig::Enabled {
+                budget_tokens: budget_tokens.get(),
+            })
+        }
+        Some(crate::ThinkingDialect::Off) => None,
+    };
 
     let output_config = if effort.is_some() || format.is_some() {
         Some(OutputConfig { effort, format })
@@ -4162,7 +4194,7 @@ mod tests {
         assert_eq!(f.schema, Some(schema.clone()));
 
         // Messages API: json_schema → output_config.format
-        let msgs_req = build_messages_request(&req);
+        let msgs_req = build_messages_request(&req, None);
         let output_config = msgs_req.output_config.expect("output_config should be set");
         let fmt = output_config.format.expect("format should be set");
         let crate::messages::OutputFormat::JsonSchema { schema: s } = fmt;
@@ -4182,7 +4214,7 @@ mod tests {
             .with_json_schema(schema);
         req.reasoning_effort = Some(crate::ReasoningEffort::High);
 
-        let msgs = build_messages_request(&req);
+        let msgs = build_messages_request(&req, None);
         let oc = msgs.output_config.expect("output_config present");
         assert_eq!(oc.effort.as_deref(), Some("high"));
         assert!(oc.format.is_some());
@@ -5930,7 +5962,7 @@ mod tests {
             (crate::ReasoningEffort::Max, "max"),
         ] {
             let req = messages_test_request(Some(variant));
-            let msgs = build_messages_request(&req);
+            let msgs = build_messages_request(&req, None);
             let json = serde_json::to_value(&msgs).unwrap();
             assert_eq!(
                 json.pointer("/output_config/effort")
@@ -5955,7 +5987,7 @@ mod tests {
         ];
         for input in none_or_unsupported {
             let req = messages_test_request(input);
-            let msgs = build_messages_request(&req);
+            let msgs = build_messages_request(&req, None);
             assert!(
                 msgs.output_config.is_none(),
                 "input {input:?} must not produce output_config",
@@ -6086,7 +6118,7 @@ mod tests {
             ..ConversationRequest::from_items(vec![ConversationItem::user("hi")])
                 .with_model("messages-compatible-model")
         };
-        let msg = build_messages_request(&req);
+        let msg = build_messages_request(&req, None);
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(
             json.pointer("/thinking/type").and_then(|v| v.as_str()),
@@ -6106,7 +6138,7 @@ mod tests {
     fn test_messages_request_omits_thinking_when_effort_unset() {
         let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
             .with_model("messages-compatible-model");
-        let msg = build_messages_request(&req);
+        let msg = build_messages_request(&req, None);
         let json = serde_json::to_value(&msg).unwrap();
         assert!(
             json.get("thinking").is_none()
@@ -6123,6 +6155,68 @@ mod tests {
                     .map(|v| v.is_null())
                     .unwrap_or(false),
             "output_config must be absent when reasoning_effort is unset; got: {json:#}",
+        );
+    }
+
+    /// A declared dialect decides the wire shape of `thinking`, and adaptive is
+    /// only one of three. Sending it to a model that predates it returns
+    /// `adaptive thinking is not supported on this model`, which is what the
+    /// unconditional mapping produced for every endpoint.
+    #[test]
+    fn test_messages_request_thinking_follows_the_declared_dialect() {
+        let budget = crate::ThinkingDialect::Budget {
+            budget_tokens: std::num::NonZeroU32::new(8_000).unwrap(),
+        };
+        for (dialect, want_type, want_budget) in [
+            (crate::ThinkingDialect::Adaptive, Some("adaptive"), None),
+            (budget, Some("enabled"), Some(8_000)),
+            (crate::ThinkingDialect::Off, None, None),
+        ] {
+            let req = messages_test_request(Some(crate::ReasoningEffort::High));
+            let json = serde_json::to_value(build_messages_request(&req, Some(dialect))).unwrap();
+            assert_eq!(
+                json.pointer("/thinking/type").and_then(|v| v.as_str()),
+                want_type,
+                "{dialect:?} should produce thinking.type={want_type:?}; got: {json:#}",
+            );
+            assert_eq!(
+                json.pointer("/thinking/budget_tokens")
+                    .and_then(|v| v.as_u64()),
+                want_budget,
+                "{dialect:?} should produce budget_tokens={want_budget:?}; got: {json:#}",
+            );
+            // The effort is an independent knob and is unaffected either way.
+            assert_eq!(
+                json.pointer("/output_config/effort")
+                    .and_then(|v| v.as_str()),
+                Some("high"),
+                "{dialect:?} must not disturb the effort; got: {json:#}",
+            );
+        }
+    }
+
+    /// A declared dialect does not depend on an effort being requested: the
+    /// endpoints that still require `budget_tokens` are largely the ones that
+    /// reject the effort parameter outright, so coupling the two would make
+    /// that dialect unreachable exactly where it is needed.
+    #[test]
+    fn test_messages_request_declared_dialect_applies_without_an_effort() {
+        let req = messages_test_request(None);
+        let json = serde_json::to_value(build_messages_request(
+            &req,
+            Some(crate::ThinkingDialect::Budget {
+                budget_tokens: std::num::NonZeroU32::new(4_096).unwrap(),
+            }),
+        ))
+        .unwrap();
+        assert_eq!(
+            json.pointer("/thinking/type").and_then(|v| v.as_str()),
+            Some("enabled"),
+            "got: {json:#}",
+        );
+        assert!(
+            json.get("output_config").is_none_or(|v| v.is_null()),
+            "no effort was requested, so none may be sent; got: {json:#}",
         );
     }
 
@@ -6155,7 +6249,7 @@ mod tests {
                 ConversationItem::assistant("done"),
             ])
             .with_model("messages-compatible-model");
-            let json = serde_json::to_value(build_messages_request(&req)).unwrap();
+            let json = serde_json::to_value(build_messages_request(&req, None)).unwrap();
             let types = messages_block_types(&json);
             assert!(
                 !types.contains(&"thinking"),
@@ -6187,7 +6281,7 @@ mod tests {
             ConversationItem::assistant("done"),
         ])
         .with_model("messages-compatible-model");
-        let json = serde_json::to_value(build_messages_request(&req)).unwrap();
+        let json = serde_json::to_value(build_messages_request(&req, None)).unwrap();
         assert!(
             !messages_block_types(&json).contains(&"thinking"),
             "an unsigned reasoning item must not produce a thinking block; got: {json:#}",
@@ -6211,7 +6305,7 @@ mod tests {
             ConversationItem::assistant("done"),
         ])
         .with_model("messages-compatible-model");
-        let json = serde_json::to_value(build_messages_request(&req)).unwrap();
+        let json = serde_json::to_value(build_messages_request(&req, None)).unwrap();
         let block = json
             .pointer("/messages/1/content/0")
             .unwrap_or_else(|| panic!("expected an assistant block; got: {json:#}"));
@@ -6262,7 +6356,7 @@ mod tests {
             ConversationItem::user("btw what is X?"),
         ]);
 
-        let msg = build_messages_request(&req);
+        let msg = build_messages_request(&req, None);
         let json = serde_json::to_value(&msg).unwrap();
 
         // No thinking blocks should appear in any message.
@@ -6336,7 +6430,7 @@ mod tests {
         // Add the btw user question.
         items.push(ConversationItem::user("btw what is X?"));
 
-        let msg = build_messages_request(&ConversationRequest::from_items(items.clone()));
+        let msg = build_messages_request(&ConversationRequest::from_items(items.clone()), None);
         let json = serde_json::to_value(&msg).unwrap();
         let messages = json.get("messages").unwrap().as_array().unwrap();
 
@@ -6487,7 +6581,7 @@ mod tests {
     fn test_btw_cross_api_messages_no_regressions() {
         let items = btw_prepare_items(btw_mid_turn_conversation());
         let req = ConversationRequest::from_items(items);
-        let msg = build_messages_request(&req);
+        let msg = build_messages_request(&req, None);
         let json = serde_json::to_value(&msg).unwrap();
 
         let messages = json.get("messages").unwrap().as_array().unwrap();
@@ -8652,7 +8746,7 @@ mod tests {
             ),
         ]);
 
-        let messages_req = build_messages_request(&req);
+        let messages_req = build_messages_request(&req, None);
 
         // Find the user message that contains the tool result
         // (Anthropic wraps tool results in user messages)

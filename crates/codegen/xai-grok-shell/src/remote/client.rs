@@ -939,6 +939,9 @@ pub fn parse_remote_model_value(
             .and_then(|v| v.as_array())
             .map(|arr| xai_grok_sampling_types::parse_reasoning_effort_options(arr))
             .unwrap_or_default(),
+        // The remote /models feed does not publish a thinking dialect; it is a
+        // `[[provider]]` / `[model."…"]` declaration only.
+        thinking: None,
         supports_backend_search: obj
             .get("supportsBackendSearch")
             .or_else(|| obj.get("supports_backend_search"))

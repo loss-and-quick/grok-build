@@ -377,6 +377,9 @@ struct ClientDefaults {
     auth_scheme: AuthScheme,
     stream_tool_calls: bool,
     doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
+    /// Declared `thinking` dialect for the messages backend; see
+    /// [`crate::SamplerConfig::thinking`].
+    thinking: Option<xai_grok_sampling_types::ThinkingDialect>,
 }
 
 /// Endpoint URL builder, resolved once at client construction so each request
@@ -687,6 +690,7 @@ impl SamplingClient {
             auth_scheme: config.auth_scheme,
             stream_tool_calls: config.stream_tool_calls,
             doom_loop_recovery: config.doom_loop_recovery,
+            thinking: config.thinking,
         };
 
         let endpoint = EndpointTemplate::new(&config.base_url, &config.query_params);
@@ -2191,7 +2195,7 @@ impl SamplingClient {
         let x_grok_turn_idx = request.x_grok_turn_idx.clone();
         let x_grok_agent_id = request.x_grok_agent_id.clone();
 
-        let messages_request = build_messages_request(&request);
+        let messages_request = build_messages_request(&request, self.defaults.thinking);
 
         let mut wrapper = MessagesRequestWrapper::new(messages_request);
         wrapper.x_grok_conv_id = x_grok_conv_id;
@@ -2389,7 +2393,7 @@ impl SamplingClient {
         let x_grok_turn_idx = request.x_grok_turn_idx.clone();
         let x_grok_agent_id = request.x_grok_agent_id.clone();
 
-        let messages_request = build_messages_request(&request);
+        let messages_request = build_messages_request(&request, self.defaults.thinking);
 
         let mut wrapper = MessagesRequestWrapper::new(messages_request);
         wrapper.x_grok_conv_id = x_grok_conv_id;
@@ -2477,6 +2481,7 @@ mod tests {
             idle_timeout_secs: None,
             proxy: None,
             reasoning_effort: None,
+            thinking: None,
             origin_client: None,
             client_identifier: None,
             deployment_id: None,

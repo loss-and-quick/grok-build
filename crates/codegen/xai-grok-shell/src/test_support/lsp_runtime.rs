@@ -42,6 +42,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             proxy: None,
             client_identifier: None,
             reasoning_effort: None,
+            thinking: None,
             deployment_id: None,
             user_id: None,
             origin_client: None,

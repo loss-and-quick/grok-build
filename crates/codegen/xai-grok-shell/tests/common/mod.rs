@@ -346,6 +346,7 @@ pub fn test_sampler_config(
         proxy: None,
         client_identifier: None,
         reasoning_effort: None,
+        thinking: None,
         deployment_id: None,
         user_id: None,
         origin_client: None,

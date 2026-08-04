@@ -725,11 +725,12 @@ async fn read_parent_sampling_config(
             let auth_scheme = crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
                 .map(|r| r.auth_scheme)
                 .unwrap_or_default();
-            // A parent routed through a [[provider]] proxy hands it down so the
-            // subagent reaches the same endpoint.
-            let proxy = crate::agent::config::resolve_model_auth_facts_and_provider(&cfg.model)
-                .0
-                .proxy;
+            // A parent routed through a [[provider]] hands its transport and
+            // wire-shape facts down, so the subagent reaches the same endpoint
+            // and speaks the dialect that endpoint accepts.
+            let parent_facts =
+                crate::agent::config::resolve_model_auth_facts_and_provider(&cfg.model).0;
+            let proxy = parent_facts.proxy;
             let inherited = xai_grok_sampler::SamplerConfig {
                 api_key: creds.api_key,
                 base_url: cfg.base_url,
@@ -746,6 +747,7 @@ async fn read_parent_sampling_config(
                 proxy,
                 client_version: creds.client_version,
                 reasoning_effort: cfg.reasoning_effort,
+                thinking: parent_facts.thinking,
                 force_http1: false,
                 max_retries: None,
                 stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),

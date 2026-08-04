@@ -155,12 +155,6 @@ pub enum ToolChoiceParam {
     Tool { name: String },
 }
 
-/// Extended thinking configuration
-///
-/// Three modes per the Anthropic Messages API:
-/// - Adaptive: 4.6+ models, API decides budget
-/// - Enabled: 4.0-4.5 models, explicit budget_tokens
-/// - Disabled: pre-thinking models or thinking_budget=0
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingDisplay {
@@ -168,6 +162,15 @@ pub enum ThinkingDisplay {
     Summarized,
 }
 
+/// Extended thinking configuration.
+///
+/// The wire modes the Anthropic Messages API defines. Which one a given
+/// endpoint accepts is not derivable here — see [`crate::ThinkingDialect`],
+/// which is declared per provider and selects among these at request build.
+///
+/// [`Self::Disabled`] is deliberately never constructed: it is accepted only on
+/// some model generations and rejected outright on others, whereas omitting the
+/// field entirely means the same thing and is accepted everywhere.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {

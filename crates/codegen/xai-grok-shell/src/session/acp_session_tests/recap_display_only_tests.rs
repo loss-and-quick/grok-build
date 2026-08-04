@@ -581,7 +581,7 @@ fn over_budget_recap_serializes_to_well_formed_messages_request() {
     // grok backend => strip_reasoning=false; the over-budget branch strips anyway.
     let items = session_recap::budget_recap_items(conv, "system-reminder", false, 8_000);
     let req = ConversationRequest::from_items(items);
-    let msg = xai_grok_sampling_types::build_messages_request(&req);
+    let msg = xai_grok_sampling_types::build_messages_request(&req, None);
 
     assert!(msg.system.is_some(), "system prompt must be preserved");
 

@@ -90,6 +90,7 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         idle_timeout_secs: Some(30),
         proxy: None,
         reasoning_effort: None,
+        thinking: None,
         origin_client: None,
         client_identifier: None,
         deployment_id: None,

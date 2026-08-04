@@ -10,6 +10,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use xai_grok_sampling_types::{
     ApiBackend, CompactionAtTokens, CompactionsRemaining, DoomLoopRecoveryPolicy, ReasoningEffort,
+    ThinkingDialect,
 };
 
 use crate::attribution::SharedAttributionCallback;
@@ -89,6 +90,13 @@ pub struct SamplerConfig {
 
     // Reasoning effort
     pub reasoning_effort: Option<ReasoningEffort>,
+
+    /// Which `thinking` dialect this endpoint's models accept on the messages
+    /// backend. `None` means undeclared, which keeps the sampler's previous
+    /// inference (adaptive, and only alongside a requested effort). Ignored by
+    /// the other three wire formats, which have no such field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingDialect>,
 
     // Client identity
     pub origin_client: Option<OriginClientInfo>,
@@ -186,6 +194,7 @@ impl Default for SamplerConfig {
             idle_timeout_secs: None,
             proxy: None,
             reasoning_effort: None,
+            thinking: None,
             origin_client: None,
             client_identifier: None,
             deployment_id: None,

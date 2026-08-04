@@ -291,6 +291,7 @@ mod tests {
             reasoning_efforts: Vec::new(),
             reasoning_effort: None,
             supports_reasoning_effort: false,
+            thinking: None,
         }
     }
 
