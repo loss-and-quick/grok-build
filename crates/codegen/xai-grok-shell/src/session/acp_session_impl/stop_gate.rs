@@ -106,6 +106,44 @@ pub(super) fn demote_ignored_blocks(
 }
 
 impl SessionActor {
+    /// Dispatch the observe-only `session_end`, on both the shutdown and the
+    /// channel-closed path.
+    ///
+    /// Suppressed for a subagent, like the session-end `Stop` below. Nothing
+    /// fires `session_start` for a child — only the agent's own session
+    /// registration sends that command, and a subagent session is never
+    /// registered — so a child that reported its end announced the close of a
+    /// lifecycle no subscriber was ever told had opened, once per child in a
+    /// fan-out. A child's lifecycle is reported by `subagent_start` /
+    /// `subagent_stop`, which are paired.
+    pub(crate) async fn dispatch_session_end_hook(&self, reason: &str) {
+        if self.startup_hints.is_subagent {
+            return;
+        }
+        let envelope = self.fire_hook(
+            event::HookEventName::SessionEnd,
+            None,
+            event::HookPayload::SessionEnd {
+                reason: reason.to_string(),
+                turn_count: None,
+                tool_call_count: None,
+            },
+        );
+        let Some(registry) = self.hook_registry.borrow().clone() else {
+            return;
+        };
+        let ctx = self.hook_run_ctx();
+        let results = dispatcher::dispatch_non_blocking(
+            &registry,
+            event::HookEventName::SessionEnd,
+            &envelope,
+            &ctx,
+        )
+        .await;
+        self.send_hook_execution("session_end", None, None, &results)
+            .await;
+    }
+
     /// Dispatch the observe-only session-end `Stop`: runs in stop-gate mode so
     /// exit code 2 parses as a block, but the decision is discarded (no turn
     /// left to continue).

@@ -463,26 +463,7 @@ pub(super) async fn run_session(
                     let Some(cmd) = maybe_cmd else {
                         // ── session_end hook (channel-closed path) ────
                         // Fires BEFORE memory auto-save per plan contract.
-                        let envelope = session.fire_hook(
-                            xai_grok_hooks::event::HookEventName::SessionEnd,
-                            None,
-                            xai_grok_hooks::event::HookPayload::SessionEnd {
-                                reason: "channel_closed".to_string(),
-                                turn_count: None,
-                                tool_call_count: None,
-                            },
-                        );
-                        if let Some(registry) = session.hook_registry.borrow().clone() {
-                            let ctx = session.hook_run_ctx();
-                            let results = xai_grok_hooks::dispatcher::dispatch_non_blocking(
-                                &registry,
-                                xai_grok_hooks::event::HookEventName::SessionEnd,
-                                &envelope,
-                                &ctx,
-                            )
-                            .await;
-                            session.send_hook_execution("session_end", None, None, &results).await;
-                        }
+                        session.dispatch_session_end_hook("channel_closed").await;
                         session.dispatch_session_end_stop("channel_closed").await;
                         // Channel closed -- run memory session-end hook.
                         let mut session_end_result = "disabled";
@@ -2179,26 +2160,7 @@ pub(super) async fn run_session(
 
                             // ── session_end hook (shutdown path) ────────
                             // Fires BEFORE memory auto-save per plan contract.
-                            let envelope = session.fire_hook(
-                                xai_grok_hooks::event::HookEventName::SessionEnd,
-                                None,
-                                xai_grok_hooks::event::HookPayload::SessionEnd {
-                                    reason: "shutdown".to_string(),
-                                    turn_count: None,
-                                    tool_call_count: None,
-                                },
-                            );
-                            if let Some(registry) = session.hook_registry.borrow().clone() {
-                                let ctx = session.hook_run_ctx();
-                                let results = xai_grok_hooks::dispatcher::dispatch_non_blocking(
-                                    &registry,
-                                    xai_grok_hooks::event::HookEventName::SessionEnd,
-                                    &envelope,
-                                    &ctx,
-                                )
-                                .await;
-                                session.send_hook_execution("session_end", None, None, &results).await;
-                            }
+                            session.dispatch_session_end_hook("shutdown").await;
                             session.dispatch_session_end_stop("shutdown").await;
                             // Memory: save session summary before shutdown
                             let mut session_end_result = "disabled";
