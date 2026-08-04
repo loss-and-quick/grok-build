@@ -1654,6 +1654,8 @@ mod reasoning_compaction_regression_tests {
             client_identifier: None,
             reasoning_effort: None,
             thinking: None,
+            max_concurrent: None,
+            concurrency_class: Default::default(),
             deployment_id: None,
             user_id: None,
             origin_client: None,

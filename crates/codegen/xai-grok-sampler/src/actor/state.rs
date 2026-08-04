@@ -100,6 +100,8 @@ mod tests {
             proxy: None,
             reasoning_effort: None,
             thinking: None,
+            max_concurrent: None,
+            concurrency_class: crate::concurrency::ConcurrencyClass::Interactive,
             origin_client: None,
             client_identifier: None,
             deployment_id: None,

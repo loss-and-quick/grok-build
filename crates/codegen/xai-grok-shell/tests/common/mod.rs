@@ -347,6 +347,8 @@ pub fn test_sampler_config(
         client_identifier: None,
         reasoning_effort: None,
         thinking: None,
+        max_concurrent: None,
+        concurrency_class: Default::default(),
         deployment_id: None,
         user_id: None,
         origin_client: None,

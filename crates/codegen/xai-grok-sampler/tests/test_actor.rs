@@ -91,6 +91,8 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         proxy: None,
         reasoning_effort: None,
         thinking: None,
+        max_concurrent: None,
+        concurrency_class: xai_grok_sampler::ConcurrencyClass::Interactive,
         origin_client: None,
         client_identifier: None,
         deployment_id: None,

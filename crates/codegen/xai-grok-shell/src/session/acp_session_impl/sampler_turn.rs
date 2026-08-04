@@ -737,6 +737,10 @@ impl SessionActor {
             client_version: creds.client_version,
             reasoning_effort: cfg.reasoning_effort,
             thinking: model_facts.thinking,
+            max_concurrent: model_facts.max_concurrent,
+            // The turn the user is watching; aux one-shots resolved elsewhere
+            // declare themselves background.
+            concurrency_class: xai_grok_sampler::ConcurrencyClass::Interactive,
             force_http1: false,
             max_retries: Some(self.max_retries),
             stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),

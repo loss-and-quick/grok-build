@@ -43,6 +43,8 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             client_identifier: None,
             reasoning_effort: None,
             thinking: None,
+            max_concurrent: None,
+            concurrency_class: Default::default(),
             deployment_id: None,
             user_id: None,
             origin_client: None,

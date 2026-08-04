@@ -750,6 +750,12 @@ async fn read_parent_sampling_config(
                 client_version: creds.client_version,
                 reasoning_effort: cfg.reasoning_effort,
                 thinking: parent_facts.thinking,
+                // The child talks to the same endpoint under the same cap, so
+                // it queues in the same gate rather than doubling the parent's
+                // allowance. It stays interactive: a Task tool call is a turn
+                // the user is waiting on.
+                max_concurrent: parent_facts.max_concurrent,
+                concurrency_class: xai_grok_sampler::ConcurrencyClass::Interactive,
                 force_http1: false,
                 max_retries: None,
                 stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),

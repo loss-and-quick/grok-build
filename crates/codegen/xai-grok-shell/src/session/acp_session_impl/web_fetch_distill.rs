@@ -292,6 +292,7 @@ mod tests {
             reasoning_effort: None,
             supports_reasoning_effort: false,
             thinking: None,
+            max_concurrent: None,
         }
     }
 

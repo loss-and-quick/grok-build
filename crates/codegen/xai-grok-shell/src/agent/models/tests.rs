@@ -1711,6 +1711,7 @@ fn make_entry_config_with_id(
         supports_reasoning_effort: false,
         reasoning_efforts: Vec::new(),
         thinking: None,
+        max_concurrent: None,
         supports_backend_search: false,
         compactions_remaining: None,
         compaction_at_tokens: None,

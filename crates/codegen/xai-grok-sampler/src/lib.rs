@@ -20,6 +20,7 @@ pub mod actor;
 pub mod attribution;
 pub mod client;
 pub mod commands;
+pub mod concurrency;
 pub mod config;
 pub mod doom_loop;
 pub mod events;
@@ -38,6 +39,7 @@ pub use attribution::{
     Auth401AttributionCallback, SENT_BEARER_PREFIX_LEN, SamplingConsumer, SharedAttributionCallback,
 };
 pub use client::{ApiBackend, SamplingClient, user_agent_string_for};
+pub use concurrency::ConcurrencyClass;
 pub use config::{
     AuthScheme, BearerResolver, HeaderInjector, OriginClientInfo, RetryPolicy, SamplerConfig,
     SharedBearerResolver, SharedHeaderInjector,

@@ -674,7 +674,13 @@ impl SessionActor {
         // `None` ⇒ the pin has no route of its own: skip, as this feature does
         // everywhere else, rather than degrade to the session model — a per-turn
         // background call must stay on a small cheap model.
-        let Some((sampling_client, model)) = self.resolve_aux_sampler_client(&model_key).await
+        // Nothing waits on a suggestion — it appears next to an idle prompt or
+        // it does not — so it takes the background lane and cannot hold a slot
+        // the next turn needs.
+        let Some((sampling_client, model)) = self
+            .resolve_aux_sampler_client(&model_key)
+            .await
+            .map(|(client, model)| (client.as_background(), model))
         else {
             tracing::debug!(
                 model = %model_key,

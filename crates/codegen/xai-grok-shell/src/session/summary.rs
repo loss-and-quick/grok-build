@@ -42,7 +42,13 @@ pub(crate) struct SummaryGenerator {
 }
 
 impl SummaryGenerator {
-    pub(crate) fn new(config: SummaryConfig) -> Self {
+    pub(crate) fn new(mut config: SummaryConfig) -> Self {
+        // Titling is the one aux call that rides the *session's* client rather
+        // than a routed aux config, so it is the one place the background class
+        // has to be declared here instead of at resolution. Without this a
+        // title would queue as user-visible work against a provider that
+        // declares `max_concurrent` and could delay the turn that triggered it.
+        config.sampling_client = config.sampling_client.as_background();
         Self {
             state: State::Idle,
             config,

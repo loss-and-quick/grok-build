@@ -730,6 +730,7 @@ mod tests {
             thinking: Some(ThinkingDialect::Budget {
                 budget_tokens: std::num::NonZeroU32::new(8_000).unwrap(),
             }),
+            max_concurrent: std::num::NonZeroUsize::new(4),
         }
     }
 

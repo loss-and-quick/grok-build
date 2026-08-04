@@ -9,7 +9,7 @@
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption, ThinkingDialect};
 
 /// Wire format a custom provider speaks. Maps 1:1 onto the sampler's
@@ -168,6 +168,24 @@ pub struct ProviderConfig {
     /// declare one behaves exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingDialect>,
+    /// How many requests this provider will serve at once, *per model*.
+    ///
+    /// For an endpoint that enforces a hard parallelism limit: over the limit
+    /// it rejects the surplus rather than queueing it, so the client has to do
+    /// the queueing. Declared here because the limit is a static fact of the
+    /// endpoint — like the context window and the output ceiling above, it
+    /// describes the endpoint, so every model this provider serves inherits it,
+    /// and a `[model."<id>/<model>"]` table refines it for the one model whose
+    /// limit differs from its siblings'.
+    ///
+    /// It counts per model, not per provider, because that is how such
+    /// endpoints meter: two models on one endpoint each get the declared number
+    /// of slots.
+    ///
+    /// `None` (the default) declares no limit and runs no admission control at
+    /// all, so a provider that does not declare one is unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<NonZeroUsize>,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -242,6 +260,37 @@ mod tests {
         // No declared dialect = the previous inference, so nothing changes for a
         // provider that does not declare one.
         assert!(p.thinking.is_none());
+        // No declared parallelism limit = no admission control at all.
+        assert!(p.max_concurrent.is_none());
+    }
+
+    /// The limit round-trips, so a config the HM module generates re-parses to
+    /// the same `ProviderConfig`.
+    #[test]
+    fn max_concurrent_round_trips() {
+        let toml = r#"
+            id = "acme"
+            base_url = "https://example.test/v1"
+            models = ["m-large"]
+            max_concurrent = 3
+        "#;
+        let p: ProviderConfig = toml::from_str(toml).unwrap();
+        assert_eq!(p.max_concurrent, NonZeroUsize::new(3));
+        let round_tripped: ProviderConfig = toml::from_str(&toml::to_string(&p).unwrap()).unwrap();
+        assert_eq!(round_tripped.max_concurrent, NonZeroUsize::new(3));
+    }
+
+    /// Zero is refused where the number is written. A cap of zero admits
+    /// nothing, so a typo would wedge the provider forever with no request ever
+    /// reaching the wire to explain why.
+    #[test]
+    fn rejects_a_max_concurrent_of_zero() {
+        let toml = r#"
+            id = "acme"
+            base_url = "https://example.test/v1"
+            max_concurrent = 0
+        "#;
+        assert!(toml::from_str::<ProviderConfig>(toml).is_err());
     }
 
     /// The common declaration: a bare array of canonical values. Each entry

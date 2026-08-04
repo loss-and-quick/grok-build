@@ -226,6 +226,8 @@ impl ShellToolsetConfig {
             client_version: None,
             reasoning_effort: None,
             thinking: None,
+            max_concurrent: None,
+            concurrency_class: Default::default(),
             force_http1: false,
             max_retries: None,
             stream_tool_calls: false,

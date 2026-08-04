@@ -98,6 +98,23 @@ pub struct SamplerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingDialect>,
 
+    /// Hard limit on how many requests this endpoint will serve at once for
+    /// [`Self::model`]. `None` (the default) means no limit is declared and no
+    /// admission control runs at all.
+    ///
+    /// Enforced by [`crate::concurrency`], not by this struct: the gate is
+    /// process-wide and keyed by `(base_url, model)`, so every client built for
+    /// the same endpoint — the session's, a subagent's, each aux one-shot's —
+    /// shares one cap rather than getting one each.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<std::num::NonZeroUsize>,
+
+    /// Whether requests from this client compete as user-visible or background
+    /// work when [`Self::max_concurrent`] is saturated. Ignored when no cap is
+    /// declared.
+    #[serde(default)]
+    pub concurrency_class: crate::concurrency::ConcurrencyClass,
+
     // Client identity
     pub origin_client: Option<OriginClientInfo>,
     pub client_identifier: Option<String>,
@@ -195,6 +212,8 @@ impl Default for SamplerConfig {
             proxy: None,
             reasoning_effort: None,
             thinking: None,
+            max_concurrent: None,
+            concurrency_class: crate::concurrency::ConcurrencyClass::Interactive,
             origin_client: None,
             client_identifier: None,
             deployment_id: None,

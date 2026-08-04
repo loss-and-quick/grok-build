@@ -8,7 +8,7 @@ use crate::{config::StorageMode, sampling::ApiBackend, tools::config::ShellTools
 use agent_client_protocol as acp;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use xai_grok_agent::prompt::skills::SkillsConfig;
@@ -4129,6 +4129,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 // No built-in model speaks the messages backend, so none of
                 // them declares a thinking dialect.
                 thinking: None,
+                max_concurrent: None,
                 supports_backend_search: m.supports_backend_search,
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
@@ -4190,6 +4191,11 @@ pub struct ModelEntryConfig {
     /// keeps the sampler's previous inference. Ignored by the other backends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingDialect>,
+    /// How many requests this model's endpoint will serve at once, above which
+    /// it rejects rather than queues. Inherited from the owning `[[provider]]`
+    /// for synthesized entries; unset means no admission control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<NonZeroUsize>,
     /// Extra headers to send with requests to this model's endpoint.
     /// Useful for BYOK (Bring Your Own Key) scenarios.
     /// Example: { "x-anthropic-api-key" = "sk-ant-..." }
@@ -4295,6 +4301,7 @@ impl ModelEntryConfig {
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             thinking: None,
+            max_concurrent: None,
             extra_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
@@ -4377,6 +4384,9 @@ pub struct ConfigModelOverride {
     /// Refines the owning `[[provider]]`'s dialect for the one model whose
     /// generation differs from its siblings'.
     pub thinking: Option<ThinkingDialect>,
+    /// Refines the owning `[[provider]]`'s parallelism limit for the one model
+    /// whose limit differs from its siblings'.
+    pub max_concurrent: Option<NonZeroUsize>,
     pub supports_backend_search: Option<bool>,
     /// Aliases must be registered in `config_model_override_parse::ALIASES`;
     /// serde rejects a table that contains both spellings otherwise.
@@ -4466,6 +4476,9 @@ impl ConfigModelOverride {
         }
         if self.thinking.is_some() {
             entry.info.thinking = self.thinking;
+        }
+        if self.max_concurrent.is_some() {
+            entry.info.max_concurrent = self.max_concurrent;
         }
         if let Some(v) = self.supports_backend_search {
             entry.info.supports_backend_search = v;
@@ -4565,6 +4578,10 @@ pub struct ModelInfo {
     /// [`ModelEntryConfig::thinking`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingDialect>,
+    /// Declared parallelism limit for this model's endpoint; see
+    /// [`ModelEntryConfig::max_concurrent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<NonZeroUsize>,
     pub supports_backend_search: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -4617,6 +4634,7 @@ impl ModelInfo {
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             thinking: None,
+            max_concurrent: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -4656,6 +4674,7 @@ impl ModelInfo {
             supports_reasoning_effort: entry.supports_reasoning_effort,
             reasoning_efforts: entry.reasoning_efforts.clone(),
             thinking: entry.thinking,
+            max_concurrent: entry.max_concurrent,
             supports_backend_search: entry.supports_backend_search,
             compactions_remaining: entry.compactions_remaining,
             compaction_at_tokens: entry.compaction_at_tokens,
@@ -5284,6 +5303,13 @@ pub struct ModelAuthFacts {
     /// Rides here for the same reason the two fields above do. `None` = the
     /// endpoint declared none, which keeps the sampler's previous inference.
     pub thinking: Option<ThinkingDialect>,
+    /// Declared parallelism limit for this model
+    /// ([`ModelInfo::max_concurrent`]). Rides here for the same reason: the
+    /// turn path rebuilds its `SamplerConfig` from chat-state's
+    /// `SamplingConfig`, which carries no such field, so without this the cap
+    /// would reach every auxiliary call and miss the main turn — the one that
+    /// matters most.
+    pub max_concurrent: Option<NonZeroUsize>,
 }
 /// Resolve `model_id` to its auth facts and auth-provider reference from one
 /// effective-config load; both ride the same memo (see
@@ -5302,6 +5328,7 @@ pub fn resolve_model_auth_facts_and_provider(
                 proxy: None,
                 auth_account: None,
                 thinking: None,
+                max_concurrent: None,
             },
             None,
         );
@@ -5323,6 +5350,10 @@ pub fn resolve_model_auth_facts_and_provider(
             },
             thinking: match &lookup {
                 ModelLookup::Loaded(Some(e)) => e.info().thinking,
+                _ => None,
+            },
+            max_concurrent: match &lookup {
+                ModelLookup::Loaded(Some(e)) => e.info().max_concurrent,
                 _ => None,
             },
         };
@@ -5501,6 +5532,7 @@ pub fn resolve_aux_model_sampling_config(
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 thinking: None,
+                max_concurrent: None,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -5787,6 +5819,10 @@ fn expand_providers_into_catalog(
                 // endpoint accepts follows from the model generation it serves,
                 // and the wrong one is a hard rejection.
                 thinking: provider.thinking,
+                // And so is the parallelism limit: the endpoint meters it and
+                // rejects the surplus, so every model it serves inherits the
+                // declaration until a per-model table refines it below.
+                max_concurrent: provider.max_concurrent,
                 ..ModelEntryConfig::minimal_for_provider(model)
             };
             let mut model_entry = ModelEntry::from_config_entry(&entry_config);
@@ -5841,6 +5877,16 @@ pub fn sampling_config_for_model(
         client_version,
         reasoning_effort: info.reasoning_effort,
         thinking: info.thinking,
+        max_concurrent: info.max_concurrent,
+        // Interactive by default, and deliberately not keyed on "is this an
+        // auxiliary model": most auxiliary one-shots run *inside* a turn and
+        // block it — an image description gates prompt build, the Auto-mode
+        // classifier gates a tool call, `web_fetch` distillation gates a tool
+        // result — so deprioritizing them would slow the very turn the lane
+        // exists to protect. What deserves the background lane is work nothing
+        // waits on, which only the call site knows; those sites say so with
+        // [`xai_grok_sampler::SamplingClient::as_background`].
+        concurrency_class: xai_grok_sampler::ConcurrencyClass::Interactive,
         force_http1: false,
         max_retries: info.max_retries,
         stream_tool_calls: info.stream_tool_calls.unwrap_or(false),
@@ -5952,6 +5998,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             thinking: None,
+            max_concurrent: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -7557,6 +7604,7 @@ reasoning_effort = "low"
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 thinking: None,
+                max_concurrent: None,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -8623,6 +8671,7 @@ reasoning_effort = "low"
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             thinking: None,
+            max_concurrent: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -8784,6 +8833,7 @@ reasoning_effort = "low"
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             thinking: None,
+            max_concurrent: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -9342,6 +9392,7 @@ reasoning_effort = "low"
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             thinking: None,
+            max_concurrent: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -13133,6 +13184,7 @@ default = "grok-4.5"
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 thinking: None,
+                max_concurrent: None,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -14115,6 +14167,7 @@ default = "grok-4.5"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             thinking: None,
+            max_concurrent: None,
         };
         let providers = vec![
             entry("acme-work", Some("work")),
@@ -14165,6 +14218,7 @@ default = "grok-4.5"
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 thinking: None,
+                max_concurrent: None,
             },
             ProviderConfig {
                 id: "direct".to_owned(),
@@ -14182,6 +14236,7 @@ default = "grok-4.5"
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 thinking: None,
+                max_concurrent: None,
             },
         ];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
@@ -14240,6 +14295,7 @@ default = "grok-4.5"
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 thinking: None,
+                max_concurrent: None,
             }];
             let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
             expand_providers_into_catalog(&mut catalog, &providers);
@@ -14282,6 +14338,7 @@ default = "grok-4.5"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             thinking: None,
+            max_concurrent: None,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -14340,6 +14397,7 @@ default = "grok-4.5"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             thinking: None,
+            max_concurrent: None,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -14406,6 +14464,7 @@ default = "grok-4.5"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             thinking: None,
+            max_concurrent: None,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -14483,6 +14542,7 @@ default = "grok-4.5"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             thinking: None,
+            max_concurrent: None,
         }
     }
 
@@ -14722,6 +14782,7 @@ default = "grok-4.5"
                     reasoning_effort: None,
                     supports_reasoning_effort: false,
                     thinking: None,
+                    max_concurrent: None,
                 }];
                 let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
                 expand_providers_into_catalog(&mut catalog, &providers);
@@ -14766,6 +14827,7 @@ default = "grok-4.5"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             thinking: None,
+            max_concurrent: None,
         }];
         let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
         expand_providers_into_catalog(&mut catalog, &providers);
@@ -14861,6 +14923,123 @@ default = "grok-4.5"
         // entry (wire format, credential, base URL) still comes from the provider.
         assert_eq!(small.info.api_backend, ApiBackend::Messages);
         assert_eq!(small.info.base_url, "https://example.test/v1");
+    }
+
+    /// A `[[provider]]` declares how many requests its endpoint serves at once,
+    /// every model it serves inherits the number, and a `[model."<id>/<model>"]`
+    /// table refines it for the one whose limit differs. The declaration has to
+    /// survive onto the `SamplerConfig` — that is where admission reads it, and
+    /// a value that stops at the catalog caps nothing.
+    #[test]
+    fn provider_max_concurrent_declares_and_per_model_table_overrides() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "acme"
+            base_url = "https://example.test/v1"
+            api_key = "sk-test"
+            models = ["m-large", "m-small"]
+            max_concurrent = 4
+
+            [model."acme/m-small"]
+            max_concurrent = 1
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config parses");
+        let catalog = resolve_model_list(&cfg, Some(IndexMap::new()));
+
+        let large = catalog.get("acme/m-large").expect("synthesized");
+        assert_eq!(
+            large.info.max_concurrent,
+            NonZeroUsize::new(4),
+            "the provider declaration is the default for every model it serves",
+        );
+        let sampling = sampling_config_for_model(
+            large,
+            resolve_credentials(large, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(sampling.max_concurrent, NonZeroUsize::new(4));
+        assert_eq!(
+            sampling.concurrency_class,
+            xai_grok_sampler::ConcurrencyClass::Interactive,
+            "a bare per-model config is for work a turn is blocked on",
+        );
+
+        let small = catalog.get("acme/m-small").expect("synthesized");
+        assert_eq!(
+            small.info.max_concurrent,
+            NonZeroUsize::new(1),
+            "a per-model table must still override the provider default",
+        );
+        // The override refines only the limit: the rest of the synthesized
+        // entry still comes from the provider.
+        assert_eq!(small.info.base_url, "https://example.test/v1");
+
+        // A provider that declares nothing runs no admission control.
+        let bare: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "bare"
+            base_url = "https://example.test/v1"
+            models = ["m"]
+            "#,
+        )
+        .unwrap();
+        let bare = Config::new_from_toml_cfg(&bare).expect("config parses");
+        let bare = resolve_model_list(&bare, Some(IndexMap::new()));
+        assert!(
+            bare.get("bare/m")
+                .expect("synthesized")
+                .info
+                .max_concurrent
+                .is_none()
+        );
+    }
+
+    /// An auxiliary model routed to its own endpoint is still admitted against
+    /// that endpoint's cap — the coverage that matters, since aux calls build
+    /// their own clients and would otherwise be the traffic the cap misses.
+    ///
+    /// It stays in the interactive lane: most aux one-shots run inside a turn
+    /// and block it, so the lane is chosen per call site (see
+    /// `SamplingClient::as_background`) rather than by whether the model is
+    /// auxiliary.
+    #[test]
+    fn aux_model_route_is_admitted_against_the_declared_cap() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "acme"
+            base_url = "https://example.test/v1"
+            api_key = "sk-test"
+            models = ["m-aux"]
+            max_concurrent = 2
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config parses");
+        let catalog = resolve_model_list(&cfg, Some(IndexMap::new()));
+        let resolved = resolve_aux_model_sampling_config(
+            "acme/m-aux",
+            &catalog,
+            &EndpointsConfig::default(),
+            "https://example.test/v1",
+            None,
+            false,
+            None,
+            None,
+        )
+        .expect("the aux slug has a route of its own");
+        assert_eq!(resolved.max_concurrent, NonZeroUsize::new(2));
+        assert_eq!(
+            resolved.concurrency_class,
+            xai_grok_sampler::ConcurrencyClass::Interactive,
+        );
     }
 
     /// A `[[provider]]` that lists nothing about reasoning keeps the effort

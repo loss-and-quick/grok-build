@@ -1904,6 +1904,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             thinking: None,
+            max_concurrent: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,

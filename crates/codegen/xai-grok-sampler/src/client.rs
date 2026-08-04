@@ -30,6 +30,7 @@ use xai_grok_sampling_types::{
     is_check_event, messages, rs,
 };
 
+use crate::concurrency::{AdmissionPermit, ConcurrencyClass, admit, hold_permit_for_stream};
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
 
 // Re-export ApiBackend from the shared types crate for downstream callers.
@@ -380,6 +381,12 @@ struct ClientDefaults {
     /// Declared `thinking` dialect for the messages backend; see
     /// [`crate::SamplerConfig::thinking`].
     thinking: Option<xai_grok_sampling_types::ThinkingDialect>,
+    /// Declared parallelism cap for this endpoint; see
+    /// [`crate::SamplerConfig::max_concurrent`].
+    max_concurrent: Option<std::num::NonZeroUsize>,
+    /// Which admission lane this client's requests take; see
+    /// [`crate::SamplerConfig::concurrency_class`].
+    concurrency_class: ConcurrencyClass,
 }
 
 /// Endpoint URL builder, resolved once at client construction so each request
@@ -691,6 +698,8 @@ impl SamplingClient {
             stream_tool_calls: config.stream_tool_calls,
             doom_loop_recovery: config.doom_loop_recovery,
             thinking: config.thinking,
+            max_concurrent: config.max_concurrent,
+            concurrency_class: config.concurrency_class,
         };
 
         let endpoint = EndpointTemplate::new(&config.base_url, &config.query_params);
@@ -712,6 +721,40 @@ impl SamplingClient {
     /// The configured API backend for this client.
     pub fn api_backend(&self) -> ApiBackend {
         self.defaults.api_backend.clone()
+    }
+
+    /// A copy of this client whose requests queue as background work.
+    ///
+    /// Only the call site knows whether a turn is waiting on its request, so
+    /// the lane is chosen here rather than inferred from the model: a session
+    /// title, a prompt suggestion and memory consolidation are fire-and-forget,
+    /// while an image description or a permission classification on the very
+    /// same models is holding a turn open.
+    pub fn as_background(&self) -> Self {
+        let mut clone = self.clone();
+        clone.defaults.concurrency_class = ConcurrencyClass::Background;
+        clone
+    }
+
+    /// Wait for a slot on this endpoint's declared `max_concurrent` before a
+    /// request goes on the wire.
+    ///
+    /// `model` is the *wire* model of the request being sent, not the client
+    /// default, because a per-request override targets a different slug on the
+    /// same endpoint and the provider meters the two separately.
+    ///
+    /// The permit must be bound to a local (or moved into the returned stream)
+    /// and never leaked: dropping it is the only release path, and that is what
+    /// makes cancellation and every error arm below correct without any of them
+    /// mentioning it.
+    async fn admit(&self, model: &str) -> Result<Option<AdmissionPermit>> {
+        admit(
+            &self.base_url,
+            model,
+            self.defaults.max_concurrent,
+            self.defaults.concurrency_class,
+        )
+        .await
     }
 
     /// POST with default headers. When a bearer_resolver is wired it is the
@@ -1100,6 +1143,10 @@ impl SamplingClient {
             "Sending chat completion request"
         );
 
+        // Held to the end of the function, so every `?` below and any drop of
+        // this future returns the slot.
+        let _permit = self.admit(&model_id).await?;
+
         let grok_headers = GrokRequestHeaders {
             conv_id: x_grok_conv_id,
             req_id: x_grok_req_id,
@@ -1153,6 +1200,11 @@ impl SamplingClient {
         let x_grok_conv_id = &payload.x_grok_conv_id.clone().unwrap_or_default();
         let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
         let model_id = payload.model.clone().unwrap_or_default();
+
+        // Acquired before the body goes out and moved into the returned stream
+        // below: the provider counts this request as in flight until the body
+        // ends, not until its headers arrive.
+        let permit = self.admit(&model_id).await?;
 
         // Wrap the request with streaming fields and serialize once.
         // Previously this path serialized twice: first to serde_json::Value
@@ -1315,7 +1367,7 @@ impl SamplingClient {
             })
             .boxed();
 
-        Ok((chunks, model_metadata))
+        Ok((hold_permit_for_stream(chunks, permit), model_metadata))
     }
 
     // =========================================================================
@@ -1379,6 +1431,10 @@ impl SamplingClient {
 
         tracing::debug!("create_response: {:?}", &request);
         tracing::debug!("endpoint: {:?}", self.endpoint("responses"));
+
+        // Held to the end of the function, so every `?` below and any drop of
+        // this future returns the slot.
+        let _permit = self.admit(&model_id).await?;
 
         let grok_headers = GrokRequestHeaders {
             conv_id: x_grok_conv_id,
@@ -1511,6 +1567,11 @@ impl SamplingClient {
             model_id = model_id.as_str(),
             "Sending responses API stream request"
         );
+
+        // Acquired before the body goes out and moved into the returned stream
+        // below: the provider counts this request as in flight until the body
+        // ends, not until its headers arrive.
+        let permit = self.admit(&model_id).await?;
 
         let grok_headers = GrokRequestHeaders {
             conv_id: x_grok_conv_id,
@@ -1686,7 +1747,11 @@ impl SamplingClient {
             .filter_map(std::future::ready)
             .boxed();
 
-        Ok((events, model_metadata, doom_loop))
+        Ok((
+            hold_permit_for_stream(events, permit),
+            model_metadata,
+            doom_loop,
+        ))
     }
 
     // =========================================================================
@@ -1766,6 +1831,10 @@ impl SamplingClient {
 
         tracing::debug!("create_message: {:?}", &request.inner);
         tracing::debug!("endpoint: {:?}", self.endpoint("messages"));
+
+        // Held to the end of the function, so every `?` below and any drop of
+        // this future returns the slot.
+        let _permit = self.admit(&model_id).await?;
 
         let grok_headers = GrokRequestHeaders {
             conv_id: x_grok_conv_id,
@@ -1881,6 +1950,11 @@ impl SamplingClient {
             model_id = model_id.as_str(),
             "Sending Messages API stream request"
         );
+
+        // Acquired before the body goes out and moved into the returned stream
+        // below: the provider counts this request as in flight until the body
+        // ends, not until its headers arrive.
+        let permit = self.admit(&model_id).await?;
 
         let grok_headers = GrokRequestHeaders {
             conv_id: x_grok_conv_id,
@@ -2031,7 +2105,7 @@ impl SamplingClient {
             })
             .boxed();
 
-        Ok((events, model_metadata))
+        Ok((hold_permit_for_stream(events, permit), model_metadata))
     }
 
     // =========================================================================
@@ -2254,6 +2328,11 @@ impl SamplingClient {
             "Sending Gemini API stream request"
         );
 
+        // Acquired before the body goes out and moved into the returned stream
+        // below: the provider counts this request as in flight until the body
+        // ends, not until its headers arrive.
+        let permit = self.admit(&model).await?;
+
         let http_request = if self.has_request_interceptor() {
             let body =
                 serde_json::to_value(&gemini_request).map_err(SamplingError::Serialization)?;
@@ -2374,7 +2453,7 @@ impl SamplingClient {
             })
             .boxed();
 
-        Ok((events, model_metadata))
+        Ok((hold_permit_for_stream(events, permit), model_metadata))
     }
 
     /// Send a conversation request using the Anthropic Messages API (non-streaming).
@@ -2482,6 +2561,8 @@ mod tests {
             proxy: None,
             reasoning_effort: None,
             thinking: None,
+            max_concurrent: None,
+            concurrency_class: crate::concurrency::ConcurrencyClass::Interactive,
             origin_client: None,
             client_identifier: None,
             deployment_id: None,
@@ -2497,6 +2578,91 @@ mod tests {
             request_interceptor: None,
             error_hook: None,
         }
+    }
+
+    /// The failure mode that would kill admission control in production: a
+    /// request that has taken a slot and is then *cancelled* — its future
+    /// dropped mid-flight, which is what an interrupted turn or a torn-down
+    /// session does — must hand the slot back. A leak here is silent and
+    /// cumulative: the endpoint simply stops being reachable after
+    /// `max_concurrent` interruptions.
+    #[tokio::test]
+    async fn cancelling_an_in_flight_request_returns_its_slot() {
+        use std::num::NonZeroUsize;
+        use std::time::Duration;
+
+        // Accepts the connection and never answers, so the request parks on the
+        // wire with the slot held instead of running to completion.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _silent_server = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                open.push(socket);
+            }
+        });
+
+        let base_url = format!("http://{addr}");
+        let max = NonZeroUsize::new(1);
+        let client = SamplingClient::new(SamplerConfig {
+            base_url: base_url.clone(),
+            model: "m".to_string(),
+            max_concurrent: max,
+            ..minimal_config()
+        })
+        .expect("client should build");
+
+        let probe =
+            || crate::concurrency::admit(&base_url, "m", max, ConcurrencyClass::Interactive);
+
+        let mut in_flight = Box::pin(client.conversation_collect(
+            xai_grok_sampling_types::ConversationRequest {
+                items: vec![
+                    xai_grok_sampling_types::conversation::ConversationItem::user("hi".to_owned()),
+                ],
+                model: Some("m".to_owned()),
+                ..Default::default()
+            },
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut in_flight)
+                .await
+                .is_err(),
+            "the request must still be parked on the wire"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), probe())
+                .await
+                .is_err(),
+            "an in-flight request holds the only slot"
+        );
+
+        drop(in_flight);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), probe())
+                .await
+                .is_ok(),
+            "cancelling the request future must return its slot"
+        );
+    }
+
+    /// `as_background` really moves a client into the background lane, and
+    /// leaves the original alone. The session's own client is cloned for
+    /// fire-and-forget work such as title generation, so a version that mutated
+    /// in place would demote the turn along with it.
+    #[test]
+    fn as_background_moves_only_the_clone_into_the_background_lane() {
+        let client = SamplingClient::new(minimal_config()).expect("client should build");
+        let background = client.as_background();
+        assert_eq!(
+            background.defaults.concurrency_class,
+            ConcurrencyClass::Background
+        );
+        assert_eq!(
+            client.defaults.concurrency_class,
+            ConcurrencyClass::Interactive,
+        );
     }
 
     /// Verify the serialized shape of StreamingChatRequest matches the

@@ -1016,6 +1016,7 @@ async fn model_auth_memo_serves_cached_status_and_keys_on_model() {
                         proxy: None,
                         auth_account: None,
                         thinking: None,
+                        max_concurrent: None,
                     },
                     provider: None,
                 }));
@@ -1063,6 +1064,7 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
                         proxy: None,
                         auth_account: None,
                         thinking: None,
+                        max_concurrent: None,
                     },
                     provider: None,
                 }));
@@ -1114,6 +1116,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                         proxy: None,
                         auth_account: None,
                         thinking: None,
+                        max_concurrent: None,
                     },
                     provider: None,
                 }));
@@ -1142,6 +1145,8 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 client_identifier: None,
                 reasoning_effort: None,
                 thinking: None,
+                max_concurrent: None,
+                concurrency_class: Default::default(),
                 deployment_id: None,
                 user_id: None,
                 origin_client: None,
@@ -1189,6 +1194,7 @@ async fn seed_provider_memo(actor: &Arc<SessionActor>, provider: crate::auth::Au
                 proxy: None,
                 auth_account: None,
                 thinking: None,
+                max_concurrent: None,
             },
             provider: Some(provider),
         }));
@@ -1242,6 +1248,8 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 client_identifier: None,
                 reasoning_effort: None,
                 thinking: None,
+                max_concurrent: None,
+                concurrency_class: Default::default(),
                 deployment_id: None,
                 user_id: None,
                 origin_client: None,

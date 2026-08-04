@@ -320,7 +320,9 @@ impl SessionActor {
 
     /// Make the dream model call using the session's sampling client.
     async fn run_dream_model_call(&self, user_message: &str) -> Result<String, acp::Error> {
-        let sampling_client = self.prepare_chat_completion(false).await?;
+        // Memory consolidation runs on its own schedule with no turn waiting on
+        // it, so it queues in the background lane against a capped provider.
+        let sampling_client = self.prepare_chat_completion(false).await?.as_background();
         let model = self
             .chat_state_handle
             .get_sampling_config()
@@ -380,7 +382,9 @@ impl SessionActor {
             .await;
 
         let result = async {
-            let sampling_client = self.prepare_chat_completion(false).await?;
+            // Same as the dream call: maintenance, not a turn, so it takes the
+            // background lane.
+            let sampling_client = self.prepare_chat_completion(false).await?.as_background();
             let MemoryFlushSnapshot {
                 counts,
                 chat_history,
