@@ -1059,6 +1059,72 @@
         assert!(!changed);
     }
 
+    /// A subagent runs the parent's hooks against its own tool calls, and its
+    /// `HookExecution` updates ride the same rail stamped with the child's
+    /// session id. None of that belongs in the parent's scrollback: the user is
+    /// watching one turn, and a fan-out of ten children would bury it under
+    /// chrome for hooks nobody asked to see run. Driven through the real
+    /// dispatch entry point rather than the child handler alone, so a future
+    /// change that starts forwarding child updates has to answer this first.
+    #[test]
+    fn subagent_hook_chrome_stays_out_of_the_parent_ui() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-sess-hooks";
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.start_turn(&mut agent.scrollback);
+            agent.session.current_prompt_id = Some("pid-1".into());
+            agent
+                .subagent_sessions
+                .insert(child_sid.into(), make_subagent_info(child_sid));
+            agent
+                .subagent_views
+                .insert(child_sid.into(), Box::new(make_agent(Some(child_sid))));
+        }
+        let parent_before = app.agents[&AgentId(0)].scrollback.len();
+        let child_before = app.agents[&AgentId(0)]
+            .subagent_views
+            .get(child_sid)
+            .unwrap()
+            .scrollback
+            .len();
+
+        for event in ["pre_tool_use", "post_tool_use", "session_end", "stop"] {
+            let _ = handle_ext_notification(
+                &xai_hook_execution_notif(child_sid, event, false),
+                &mut app,
+            );
+        }
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.scrollback.len(),
+            parent_before,
+            "a child's hook runs pushed blocks into the parent's scrollback"
+        );
+        assert!(
+            agent.pending_stop_hooks.is_none(),
+            "a child's stop hooks were stashed against the parent's turn marker"
+        );
+        assert_eq!(
+            agent.subagent_views.get(child_sid).unwrap().scrollback.len(),
+            child_before,
+            "a child's hook runs pushed blocks into the subagent view"
+        );
+
+        // Control: the identical update stamped with the parent's own session
+        // id does land, so the assertions above are reading a live path rather
+        // than a notification the dispatcher rejected for some other reason.
+        let _ = handle_ext_notification(
+            &xai_hook_execution_notif("sess-parent", "stop", false),
+            &mut app,
+        );
+        assert!(
+            app.agents[&AgentId(0)].pending_stop_hooks.is_some(),
+            "the parent's own stop hooks did not reach the UI either"
+        );
+    }
+
     // ── apply_retry_state ─────────────────────────────────────────────
 
     #[test]
