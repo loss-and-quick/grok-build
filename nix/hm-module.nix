@@ -252,12 +252,37 @@
           behaviour, so an existing provider entry is unaffected.
         '';
       };
+      max_concurrent = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 4;
+        description = ''
+          How many requests this provider will serve at once, per model.
+
+          For an endpoint that enforces a hard parallelism limit: over the limit
+          it rejects the surplus rather than queueing it, so grok queues locally
+          instead and admits at most this many requests per model at a time —
+          counting the main turn, subagent turns, and every auxiliary one-shot
+          (session title, image description, the Auto-mode classifier,
+          `web_fetch` distillation, prompt suggestion). Auxiliary work is held to
+          one slot fewer than the limit so a burst of it cannot displace the turn
+          you are waiting on.
+
+          Like `context_window` and `max_completion_tokens`, it describes the
+          *endpoint*, so every model the provider serves inherits it; override a
+          single model with a `[model."<id>/<model>"]` table in `settings` when
+          its limit differs from its siblings'.
+
+          `null` (the default) declares no limit and runs no admission control
+          at all. Changing the value takes effect on restart.
+        '';
+      };
     };
   };
 
   # ProviderConfig applies `skip_serializing_if` to `api_key`, `auth_scheme`,
   # `proxy`, `context_window`, `max_completion_tokens`, `auth_account`,
-  # `reasoning_effort`, `thinking` (Option::is_none), to
+  # `reasoning_effort`, `thinking`, `max_concurrent` (Option::is_none), to
   # empty `headers`/`models`/`reasoning_efforts`, and to a false
   # `supports_reasoning_effort`. Nix's TOML writer cannot emit `null`, so drop
   # those keys here before generating: an omitted key is exactly what the
