@@ -217,6 +217,34 @@ pub(crate) fn build_session_plugin_host(
     Some(Arc::new(host))
 }
 
+/// The sidecar host a spawning session runs with.
+///
+/// A subagent borrows its parent's host (`inherited`) instead of standing up its
+/// own. A sidecar is a process: building one per child turns a fan-out of ten
+/// into ten more processes, ten handshakes, and — because each host loads a
+/// plugin's storage file into memory once and then writes the whole map back —
+/// ten copies of that map racing to overwrite each other. The host's per-plugin
+/// lock only orders writers inside one process, so the "core guarantees
+/// atomicity + locking" promise the storage contract makes holds exactly as far
+/// as one host does.
+///
+/// Nothing is lost by sharing: which agent a hook came from rides on each
+/// invocation (`subagentType` on the tool payloads, the child's own session id
+/// on the envelope, `agent` in the tool-call context), not on the host. The
+/// sinks the parent installed stay pointed at the parent, which is where a
+/// panel or a plugin-spawned agent belongs — the child's channels are not on
+/// screen and die with the child.
+///
+/// `build` is called only for a top-level session; a child never evaluates it,
+/// so the config read behind it stays off the spawn path of every subagent.
+pub(crate) fn session_plugin_host(
+    is_subagent: bool,
+    inherited: Option<Arc<PluginHost>>,
+    build: impl FnOnce() -> Option<Arc<PluginHost>>,
+) -> Option<Arc<PluginHost>> {
+    if is_subagent { inherited } else { build() }
+}
+
 /// Build the [`RegisteredPlugin`] list for a registry's active sidecar plugins,
 /// stamping each with its merged per-plugin config
 /// (`merge_plugin_config(manifest_defaults, user[name])`). Pure (no host side
@@ -1621,5 +1649,36 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// A subagent must run on the host its parent already owns. Building one
+    /// per child multiplies sidecar processes by the fan-out, and each child's
+    /// host loads its own copy of a plugin's storage map and then writes the
+    /// whole map back — so two children that both touch storage overwrite each
+    /// other's keys and the parent's.
+    #[test]
+    fn a_subagent_borrows_its_parents_host_instead_of_building_one() {
+        let parent = test_host();
+        let other = test_host();
+
+        let mut built = false;
+        let child = session_plugin_host(true, Some(parent.clone()), || {
+            built = true;
+            Some(other.clone())
+        });
+        assert!(!built, "a subagent built a second host");
+        assert!(
+            Arc::ptr_eq(&child.expect("child runs on a host"), &parent),
+            "the child is not on its parent's host"
+        );
+
+        // A top-level session builds and owns its own, ignoring any inherited
+        // value: only a subagent spawn ever supplies one.
+        let top = session_plugin_host(false, Some(parent.clone()), || Some(other.clone()));
+        assert!(Arc::ptr_eq(&top.expect("top-level host"), &other));
+
+        // A parent with no sidecar plugins gives the child none — the child
+        // must not start a host the parent itself decided not to have.
+        assert!(session_plugin_host(true, None, || Some(other.clone())).is_none());
     }
 }

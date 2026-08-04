@@ -95,7 +95,10 @@ async fn apply_subagent_resolve_hook(
     let run_ctx = xai_grok_hooks::runner::RunContext {
         session_id: &ctx.parent_session_id,
         workspace_root: &cwd,
-        plugin_invoker: ctx.plugin_invoker.clone(),
+        plugin_invoker: ctx
+            .parent_plugin_host
+            .clone()
+            .map(|h| h as std::sync::Arc<dyn xai_grok_hooks::invoker::PluginHookInvoker>),
     };
     let replaced = xai_grok_hooks::dispatcher::dispatch_replace(
         &registry,
@@ -1212,6 +1215,10 @@ pub(crate) async fn run_shell_child(
         ctx.api_key_provider.clone(),
         ctx.image_description_model.clone(),
         ctx.hook_registry.clone(),
+        // The parent's sidecar host, so the child serves the plugin specs it
+        // just inherited from the parent's sidecars instead of starting a
+        // second set of processes for the length of one subagent run.
+        ctx.parent_plugin_host.clone(),
         ctx.workspace_ops.clone(),
         vec![],
         ctx.todo_gate,

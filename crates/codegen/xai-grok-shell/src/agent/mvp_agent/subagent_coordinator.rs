@@ -499,11 +499,14 @@ impl MvpAgent {
             agent_config: Some(self.cfg.borrow().clone()),
             gcs_upload_method,
             hook_registry: parent_hook_registry,
-            plugin_invoker: {
+            // Taken from the same handle as `parent_hook_registry` above: the
+            // child's plugin hook specs and the sidecars that serve them then
+            // always come from one parent, or neither does.
+            parent_plugin_host: {
                 let sessions = self.sessions.borrow();
                 sessions
                     .get(&parent_sid)
-                    .and_then(|h| h.plugin_invoker.clone())
+                    .and_then(|h| h.plugin_host.clone())
             },
             permission_handle: {
                 let sessions = self.sessions.borrow();

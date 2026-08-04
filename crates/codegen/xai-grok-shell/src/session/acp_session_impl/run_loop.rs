@@ -2217,8 +2217,13 @@ pub(super) async fn run_session(
                             if !session.startup_hints.is_subagent {
                                 session.persist_background_task_manifest().await;
                             }
-                            // Tear down the plugin sidecars this session owns.
-                            if let Some(plugin_host) = &session.plugin_host {
+                            // Tear down the plugin sidecars this session owns. A
+                            // subagent owns none: it runs on the host its parent
+                            // built, so disposing here would kill the parent's
+                            // sidecars mid-turn every time a child finished.
+                            if let Some(plugin_host) = &session.plugin_host
+                                && !session.startup_hints.is_subagent
+                            {
                                 plugin_host.dispose().await;
                             }
                             // Clean up scratch directory (pre-edit file copies).

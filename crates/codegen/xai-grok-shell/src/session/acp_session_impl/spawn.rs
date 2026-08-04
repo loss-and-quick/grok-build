@@ -294,6 +294,11 @@ pub(crate) async fn spawn_session_actor(
     api_key_provider: Option<xai_grok_tools::types::SharedApiKeyProvider>,
     image_description_model: String,
     hook_registry_override: Option<std::sync::Arc<xai_grok_hooks::discovery::HookRegistry>>,
+    // The parent's sidecar host on a subagent spawn; `None` for a top-level
+    // session, which builds its own. Travels beside `hook_registry_override`
+    // because the two belong together: that override carries the parent's
+    // `plugin/…` specs, and this is what serves them.
+    inherited_plugin_host: Option<Arc<xai_grok_plugin_host::PluginHost>>,
     workspace_ops: xai_grok_workspace::WorkspaceOps,
     cli_permission_rules: Vec<xai_grok_workspace::permission::types::PermissionRule>,
     todo_gate: bool,
@@ -1322,33 +1327,44 @@ pub(crate) async fn spawn_session_actor(
         );
     }
     let hook_registry_for_handle = built_hook_registry.clone();
-    // TS plugin sidecar host: built once from the initial registry snapshot when
-    // any loaded plugin declares a sidecar. `None` (no sidecar plugins) keeps
-    // startup free of any plugin-host machinery. Sidecars spawn lazily on the
-    // first matching hook; the synthetic `Plugin` hook specs that route events
-    // here were appended just above (see
+    // TS plugin sidecar host: a top-level session builds one from the initial
+    // registry snapshot when any loaded plugin declares a sidecar, and a
+    // subagent borrows the one its parent already owns rather than starting a
+    // second set of sidecars (see `session_plugin_host`). `None` (no sidecar
+    // plugins anywhere) keeps startup free of any plugin-host machinery.
+    // Sidecars spawn lazily on the first matching hook; the synthetic `Plugin`
+    // hook specs that route events here were appended just above (see
     // `session::plugin_host::sidecar_plugin_hook_specs`).
-    // Per-plugin config source: `[plugins.<name>]` tables from the effective
-    // config.toml. Merged over each plugin's manifest `config` defaults inside
-    // `build_session_plugin_host`. Only the user/global tiers contribute here
-    // (project configs extend disabled only), so an untrusted repo can't inject
-    // a plugin's config; and only active (enabled + trusted) sidecar plugins
-    // ever read it.
-    let session_plugin_config =
-        crate::config::resolve_effective_plugins_config(std::path::Path::new(&session_info.cwd))
+    let built_plugin_host = crate::session::plugin_host::session_plugin_host(
+        startup_hints.is_subagent,
+        inherited_plugin_host,
+        || {
+            // Per-plugin config source: `[plugins.<name>]` tables from the
+            // effective config.toml. Merged over each plugin's manifest `config`
+            // defaults inside `build_session_plugin_host`. Only the user/global
+            // tiers contribute here (project configs extend disabled only), so
+            // an untrusted repo can't inject a plugin's config; and only active
+            // (enabled + trusted) sidecar plugins ever read it.
+            let session_plugin_config = crate::config::resolve_effective_plugins_config(
+                std::path::Path::new(&session_info.cwd),
+            )
             .config;
-    let built_plugin_host = crate::session::plugin_host::build_session_plugin_host(
-        plugin_registry.as_deref(),
-        &session_info.id.0,
-        &resolved_workspace_root,
-        &session_plugin_config,
-        // Arms the plugin `agent_*` orchestration RPCs: plugin spawns route
-        // through this session's subagent coordinator like any Task spawn.
-        tool_context.subagent_event_tx.clone(),
-        // Arms the `ui_publish_panel` / `ui_close_panel` / `panel_action` seam:
-        // panels emit `plugin_panel` / `panel_closed` notifications and button
-        // presses route back to the plugin, all through this command channel.
-        Some(cmd_tx.clone()),
+            crate::session::plugin_host::build_session_plugin_host(
+                plugin_registry.as_deref(),
+                &session_info.id.0,
+                &resolved_workspace_root,
+                &session_plugin_config,
+                // Arms the plugin `agent_*` orchestration RPCs: plugin spawns
+                // route through this session's subagent coordinator like any
+                // Task spawn.
+                tool_context.subagent_event_tx.clone(),
+                // Arms the `ui_publish_panel` / `ui_close_panel` /
+                // `panel_action` seam: panels emit `plugin_panel` /
+                // `panel_closed` notifications and button presses route back to
+                // the plugin, all through this command channel.
+                Some(cmd_tx.clone()),
+            )
+        },
     );
     // Now that the plugin host exists, fill the deferred `permission_ask` seam so
     // the permission manager can dispatch to sidecar plugins. Only sidecar plugins
@@ -1403,10 +1419,9 @@ pub(crate) async fn spawn_session_actor(
     }
     let workspace_ops_for_handle = workspace_ops.clone();
     // Snapshot for `SessionHandle`: the coordinator-side `subagent_resolve`
-    // seam dispatches through this invoker (the actor keeps the owning Arc).
-    let plugin_invoker_for_handle = built_plugin_host
-        .clone()
-        .map(|h| h as Arc<dyn xai_grok_hooks::invoker::PluginHookInvoker>);
+    // seam dispatches through this host, and a subagent spawn hands it to the
+    // child (the actor keeps an owning Arc either way).
+    let plugin_host_for_handle = built_plugin_host.clone();
     #[allow(clippy::arc_with_non_send_sync)]
     let mut _hook_load_errors: Vec<String> = hook_discovery_errors
         .iter()
@@ -2248,7 +2263,7 @@ pub(crate) async fn spawn_session_actor(
             session_default_agent_profile,
             allowed_subagent_types: allowed_subagent_types_for_handle,
             hook_registry: hook_registry_for_handle,
-            plugin_invoker: plugin_invoker_for_handle,
+            plugin_host: plugin_host_for_handle,
             workspace_ops: workspace_ops_for_handle,
             terminal_backend: Some(terminal_backend.clone()),
             tools_notification_handle: Some(tools_notification_handle.clone()),
@@ -2387,6 +2402,11 @@ pub(crate) async fn spawn_session_on_thread(
     api_key_provider: Option<xai_grok_tools::types::SharedApiKeyProvider>,
     image_description_model: String,
     hook_registry_override: Option<std::sync::Arc<xai_grok_hooks::discovery::HookRegistry>>,
+    // The parent's sidecar host on a subagent spawn; `None` for a top-level
+    // session, which builds its own. Travels beside `hook_registry_override`
+    // because the two belong together: that override carries the parent's
+    // `plugin/…` specs, and this is what serves them.
+    inherited_plugin_host: Option<Arc<xai_grok_plugin_host::PluginHost>>,
     workspace_ops: xai_grok_workspace::WorkspaceOps,
     cli_permission_rules: Vec<xai_grok_workspace::permission::types::PermissionRule>,
     todo_gate: bool,
@@ -2559,6 +2579,7 @@ pub(crate) async fn spawn_session_on_thread(
                         api_key_provider,
                         image_description_model,
                         hook_registry_override,
+                        inherited_plugin_host,
                         workspace_ops,
                         cli_permission_rules,
                         todo_gate,

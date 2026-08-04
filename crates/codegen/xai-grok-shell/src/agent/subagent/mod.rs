@@ -250,11 +250,13 @@ pub(crate) struct SubagentSpawnContext {
     /// GCS upload method (direct or proxy).
     pub gcs_upload_method: Option<crate::session::repo_changes::UploadMethod>,
     pub hook_registry: Option<std::sync::Arc<xai_grok_hooks::discovery::HookRegistry>>,
-    /// The parent session's plugin sidecar invoker (see
-    /// `SessionHandle::plugin_invoker`). Drives the pre-spawn
-    /// `subagent_resolve` Replace dispatch; `None` fails open (plugin hook
-    /// specs then pass through, exactly as with no host wired).
-    pub plugin_invoker: Option<std::sync::Arc<dyn xai_grok_hooks::invoker::PluginHookInvoker>>,
+    /// The parent session's plugin sidecar host (see
+    /// `SessionHandle::plugin_host`). Drives the pre-spawn `subagent_resolve`
+    /// Replace dispatch, and is handed to the child session so it serves its
+    /// plugin hooks from the parent's sidecars instead of starting a second set.
+    /// `None` fails open (plugin hook specs then pass through, exactly as with
+    /// no host wired).
+    pub parent_plugin_host: Option<std::sync::Arc<xai_grok_plugin_host::PluginHost>>,
     pub permission_handle: Option<xai_grok_workspace::permission::PermissionHandle>,
     pub worktree_type: crate::util::config::WorktreeType,
     pub api_key_provider: Option<xai_grok_tools::types::SharedApiKeyProvider>,

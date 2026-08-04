@@ -1187,7 +1187,7 @@ fn make_test_handle(
         session_default_agent_profile: None,
         allowed_subagent_types: None,
         hook_registry: None,
-        plugin_invoker: None,
+        plugin_host: None,
         workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
         terminal_backend: None,
         tools_notification_handle: None,

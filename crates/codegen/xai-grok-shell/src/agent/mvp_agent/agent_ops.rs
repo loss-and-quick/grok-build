@@ -4222,6 +4222,8 @@ impl MvpAgent {
                     ),
                     self.resolve_image_description_model(),
                     agent_hook_registry_override,
+                    // Top-level session: it builds and owns its own sidecar host.
+                    None,
                     workspace_ops.clone(),
                     {
                         let cfg = self.cfg.borrow();
