@@ -3469,21 +3469,39 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                     cache_control: None,
                 });
             }
-            // Reasoning sibling — emit as Anthropic `thinking` block on the
-            // pending assistant turn. `tco_*` encrypted blobs only set
-            // `signature`; real model reasoning sets `thinking`.
+            // Reasoning sibling — emit as an Anthropic `thinking` block on the
+            // pending assistant turn, but only when the item carries a
+            // signature this backend actually minted.
+            //
+            // `signature` names server-side state: the endpoint verifies it and
+            // rejects a block it did not sign, and nothing here can repair one,
+            // so a block that cannot be signed correctly must not be sent. That
+            // is the mirror of the rule ff6e5cb applied to
+            // `rs::ReasoningItem::id` on the Responses path. Two shapes fail it:
+            //
+            // * A foreign blob. `encrypted_content` on an item with a non-empty
+            //   `id` is a Responses-API payload — a real `rs_*` item or one of
+            //   the parallel `tco_*` backend-tool blobs — which this endpoint
+            //   reads as a tampered signature. Only the Messages stream
+            //   consumer mints a signature into this field, and it leaves `id`
+            //   empty because the protocol carries no item id.
+            // * No blob at all. Reasoning text synthesized off a
+            //   chat-completions or fallback stream has `encrypted_content:
+            //   None`, and an empty `signature` is rejected just the same.
+            //
+            // Dropping costs only the replayed display text: thinking blocks
+            // are echoed back to the model that produced them, and every other
+            // model ignores them.
             ConversationItem::Reasoning(r) => {
                 flush_tool_results(&mut pending_tool_results, &mut messages);
-                let thinking = reasoning_item_text(r);
-                let signature = r
-                    .encrypted_content
-                    .as_deref()
-                    .map(str::to_owned)
-                    .unwrap_or_default();
-                if !thinking.is_empty() || !signature.is_empty() {
+                let signature = match (r.id.as_str(), r.encrypted_content.as_deref()) {
+                    ("", Some(sig)) if !sig.is_empty() => Some(sig),
+                    _ => None,
+                };
+                if let Some(signature) = signature {
                     pending_assistant.push(ContentBlock::Thinking {
-                        thinking,
-                        signature,
+                        thinking: reasoning_item_text(r),
+                        signature: signature.to_owned(),
                     });
                 }
             }
@@ -6105,6 +6123,112 @@ mod tests {
                     .map(|v| v.is_null())
                     .unwrap_or(false),
             "output_config must be absent when reasoning_effort is unset; got: {json:#}",
+        );
+    }
+
+    /// Collect the `type` of every content block across every message.
+    fn messages_block_types(json: &serde_json::Value) -> Vec<&str> {
+        json.get("messages")
+            .and_then(|m| m.as_array())
+            .map(|msgs| {
+                msgs.iter()
+                    .filter_map(|m| m.get("content").and_then(|c| c.as_array()))
+                    .flatten()
+                    .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A reasoning item whose `encrypted_content` came from another backend is
+    /// not a signature this endpoint minted — a non-empty `id` marks a
+    /// Responses-API payload (`rs_*`, or one of the parallel `tco_*`
+    /// backend-tool blobs). Replaying it produces
+    /// `Invalid \`signature\` in \`thinking\` block`, so no block may be
+    /// emitted at all.
+    #[test]
+    fn test_messages_request_drops_thinking_with_foreign_encrypted_content() {
+        for id in ["rs_abc123", "tco_resp123_call-1"] {
+            let req = ConversationRequest::from_items(vec![
+                ConversationItem::user("hi"),
+                reasoning_sibling(id, "considering the options", Some("foreign-blob")),
+                ConversationItem::assistant("done"),
+            ])
+            .with_model("messages-compatible-model");
+            let json = serde_json::to_value(build_messages_request(&req)).unwrap();
+            let types = messages_block_types(&json);
+            assert!(
+                !types.contains(&"thinking"),
+                "id {id:?} carries a foreign blob and must not produce a thinking block; \
+                 got: {json:#}",
+            );
+            assert!(
+                !serde_json::to_string(&json)
+                    .unwrap()
+                    .contains("foreign-blob"),
+                "the foreign blob must not reach the wire at all; got: {json:#}",
+            );
+            assert!(
+                types.contains(&"text"),
+                "the surrounding turn must still be sent; got: {json:#}",
+            );
+        }
+    }
+
+    /// Reasoning text synthesized off a chat-completions or fallback stream has
+    /// no `encrypted_content`, so there is no signature to send. The old guard
+    /// emitted the block anyway with `signature: ""`, which the Messages API
+    /// rejects the same way.
+    #[test]
+    fn test_messages_request_drops_thinking_without_encrypted_content() {
+        let req = ConversationRequest::from_items(vec![
+            ConversationItem::user("hi"),
+            reasoning_sibling("", "thinking out loud", None),
+            ConversationItem::assistant("done"),
+        ])
+        .with_model("messages-compatible-model");
+        let json = serde_json::to_value(build_messages_request(&req)).unwrap();
+        assert!(
+            !messages_block_types(&json).contains(&"thinking"),
+            "an unsigned reasoning item must not produce a thinking block; got: {json:#}",
+        );
+        assert!(
+            !serde_json::to_string(&json)
+                .unwrap()
+                .contains("thinking out loud"),
+            "the unsigned reasoning text must not reach the wire; got: {json:#}",
+        );
+    }
+
+    /// The half this must keep: a signature minted by the Messages stream
+    /// consumer (empty `id`, because the protocol carries no item id) still
+    /// rides back out unchanged, so a same-model turn replays as before.
+    #[test]
+    fn test_messages_request_keeps_thinking_signed_by_this_backend() {
+        let req = ConversationRequest::from_items(vec![
+            ConversationItem::user("hi"),
+            reasoning_sibling("", "weighing it up", Some("EqoBCkYIBRgCKkA")),
+            ConversationItem::assistant("done"),
+        ])
+        .with_model("messages-compatible-model");
+        let json = serde_json::to_value(build_messages_request(&req)).unwrap();
+        let block = json
+            .pointer("/messages/1/content/0")
+            .unwrap_or_else(|| panic!("expected an assistant block; got: {json:#}"));
+        assert_eq!(
+            block.get("type").and_then(|t| t.as_str()),
+            Some("thinking"),
+            "got: {json:#}",
+        );
+        assert_eq!(
+            block.get("signature").and_then(|s| s.as_str()),
+            Some("EqoBCkYIBRgCKkA"),
+            "the signature must ride back out byte-for-byte; got: {json:#}",
+        );
+        assert_eq!(
+            block.get("thinking").and_then(|t| t.as_str()),
+            Some("weighing it up"),
+            "got: {json:#}",
         );
     }
 
