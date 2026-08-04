@@ -377,6 +377,20 @@ pub enum PersistenceMsg {
     UpgradeToWriteback {
         auth_manager: Arc<crate::auth::AuthManager>,
     },
+    /// Report whether this session's transcript is actually being pushed to
+    /// the user's grok.com account, i.e. whether [`init_remote_sync`] built a
+    /// [`RemoteSync`] for it.
+    ///
+    /// Deliberately not the same question as the agent's [`StorageMode`]:
+    /// `Writeback` is necessary but not sufficient, because `init_remote_sync`
+    /// leaves a ZDR team local-only. Reading the mode instead tells a ZDR user
+    /// their transcript is being uploaded when nothing is — and this answer is
+    /// what `/status` prints and what the pager's once-per-session notice is
+    /// driven off, so a wrong answer is a wrong statement about where someone's
+    /// data goes in both places.
+    SyncsToBackend {
+        respond_to: tokio::sync::oneshot::Sender<bool>,
+    },
     Flush,
     /// Flush all pending writes, then signal the caller once the flush is complete.
     /// Unlike `Flush` (fire-and-forget), this is a **sync barrier**: the caller's
@@ -1871,6 +1885,9 @@ impl SessionPersistence {
                     self.flush_pending().await;
                     let _ = respond_to.send(());
                 }
+                PersistenceMsg::SyncsToBackend { respond_to } => {
+                    let _ = respond_to.send(self.remote_sync.is_some());
+                }
                 PersistenceMsg::Update(update) => {
                     match update {
                         SessionUpdate::Acp(notification) => {
@@ -2339,11 +2356,19 @@ fn backfill_updates_to_sync(
 /// - switching it off would break cross-device resume for exactly the sessions
 ///   the user asked to keep, and would do it just as silently.
 ///
-/// The repair is that the mode is reportable instead of invisible:
-/// `SessionInfoResponse::syncs_to_backend` carries it and `/status` prints it.
-/// Keep that wired — `Local` is the default and the override is usually a
-/// server-side remote setting (`writeback_enabled`), so nothing else on any
-/// surface tells a user their transcripts are leaving the machine.
+/// The repair is that the destination is reportable instead of invisible:
+/// `SessionInfoResponse::syncs_to_backend` carries it, `/status` prints it, and
+/// the pager states it unprompted once per session. Keep that wired — `Local`
+/// is the default and the override is usually a server-side remote setting
+/// (`writeback_enabled`), so nothing else on any surface tells a user their
+/// transcripts are leaving the machine.
+///
+/// Those surfaces read the *outcome* of this function via
+/// [`PersistenceMsg::SyncsToBackend`], not the `StorageMode` that was passed
+/// in. The ZDR skip below is why: under `Writeback` a ZDR team is told nothing
+/// is uploaded because nothing is. Anything new that answers "where does my
+/// transcript go" must ask the same way rather than re-deriving it from the
+/// mode.
 fn init_remote_sync(
     summary: &Summary,
     storage_mode: StorageMode,

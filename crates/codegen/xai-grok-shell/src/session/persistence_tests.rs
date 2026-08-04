@@ -346,3 +346,95 @@ async fn durable_append_drains_pending_update_in_fifo_order() {
     assert_eq!(texts, ["before", "durable"]);
     actor.stop().await;
 }
+
+/// A ZDR team is left local-only by `init_remote_sync` even when the agent's
+/// mode is `Writeback`, so the mode alone is not the answer to "is my
+/// transcript being uploaded". Reading it would tell a ZDR user their
+/// conversation is going to grok.com when nothing is sent at all — and that
+/// answer is what `/status` prints and what the pager's once-per-session
+/// notice is driven off.
+#[tokio::test]
+async fn zdr_team_is_not_synced_despite_writeback_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth_manager = Arc::new(crate::auth::AuthManager::new(
+        dir.path(),
+        Default::default(),
+    ));
+    auth_manager.hot_swap(crate::auth::GrokAuth {
+        team_id: Some("team-1".into()),
+        team_blocked_reasons: vec!["BLOCKED_REASON_NO_LOGS".into()],
+        ..crate::auth::GrokAuth::test_default()
+    });
+    assert!(
+        auth_manager
+            .current_or_expired()
+            .is_some_and(|a| a.is_zdr_team()),
+        "fixture must actually be a ZDR team"
+    );
+
+    let info = Info {
+        id: acp::SessionId::new("zdr-session"),
+        cwd: dir.path().to_string_lossy().into_owned(),
+    };
+    let summary = Summary::new(&info, acp::ModelId::new("test-model")).unwrap();
+
+    let synced = init_remote_sync(
+        &summary,
+        StorageMode::Writeback,
+        Some(Arc::clone(&auth_manager)),
+    )
+    .expect("ZDR is a quiet skip, not an error");
+    assert!(
+        synced.is_none(),
+        "a ZDR team must not get a RemoteSync, so nothing is uploaded"
+    );
+
+    // Same inputs without the ZDR flag do sync — otherwise the assertion above
+    // would pass for the wrong reason (e.g. a broken auth fixture).
+    auth_manager.hot_swap(crate::auth::GrokAuth {
+        team_id: Some("team-1".into()),
+        ..crate::auth::GrokAuth::test_default()
+    });
+    assert!(
+        init_remote_sync(&summary, StorageMode::Writeback, Some(auth_manager))
+            .expect("non-ZDR writeback init")
+            .is_some(),
+        "a non-ZDR writeback session must sync"
+    );
+}
+
+/// `/status` and the session notice ask the persistence actor rather than the
+/// agent's `StorageMode`, so the ZDR skip above actually reaches them: the
+/// answer tracks whether a `RemoteSync` exists, in both directions.
+#[tokio::test]
+async fn syncs_to_backend_reports_the_actual_remote_sync() {
+    async fn ask(handle: &PersistenceHandle) -> bool {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(PersistenceMsg::SyncsToBackend { respond_to: tx })
+            .expect("actor alive");
+        rx.await.expect("actor answers")
+    }
+
+    let info = Info {
+        id: acp::SessionId::new("syncs-report"),
+        cwd: "/test".into(),
+    };
+    let storage: Arc<dyn StorageAdapter> = Arc::new(JsonlStorageAdapter::default());
+
+    let local = test_actor_with_remote_sync(info.clone(), Arc::clone(&storage), None);
+    assert!(
+        !ask(&local.handle).await,
+        "no RemoteSync means the transcript stays on this machine"
+    );
+    local.stop().await;
+
+    let (sync, _observed) = RemoteSync::test_observer();
+    let synced = test_actor_with_remote_sync(info, storage, Some(sync));
+    assert!(
+        ask(&synced.handle).await,
+        "a session with a RemoteSync is being uploaded and must say so"
+    );
+    synced.stop().await;
+}

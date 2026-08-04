@@ -70,6 +70,38 @@ struct RecentSessionsRequest {
     limit: usize,
 }
 
+/// Whether this session's transcript is actually being uploaded to the user's
+/// grok.com account.
+///
+/// Asks the session's persistence actor rather than reading the agent's
+/// [`crate::config::StorageMode`]. `Writeback` is necessary but not
+/// sufficient: `init_remote_sync` leaves a ZDR team local-only, so the mode
+/// alone claims an upload that never happens. This field is what `/status`
+/// prints and what drives the pager's once-per-session notice, so the two
+/// surfaces state whatever this returns — a notice people learn is sometimes
+/// wrong is worse than no notice.
+///
+/// `mode_says_writeback` is the fallback for when the actor cannot answer (a
+/// no-op persistence handle, or a session being shut down). On uncertainty
+/// this over-reports rather than promising a session is local: a false alarm
+/// is recoverable, a silent upload is the failure this field exists to prevent.
+async fn session_syncs_to_backend(
+    session: &crate::session::SessionHandle,
+    mode_says_writeback: bool,
+) -> bool {
+    use crate::session::persistence::PersistenceMsg;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if session
+        .persistence_tx
+        .send(PersistenceMsg::SyncsToBackend { respond_to: tx })
+        .is_err()
+    {
+        return mode_says_writeback;
+    }
+    rx.await.unwrap_or(mode_says_writeback)
+}
+
 async fn handle_session_info(
     agent: &MvpAgent,
     args: &acp::ExtRequest,
@@ -135,7 +167,7 @@ async fn handle_session_info(
     let response = SessionInfoResponse {
         session_id,
         cwd: session.info.cwd.clone(),
-        syncs_to_backend: agent.is_writeback_storage(),
+        syncs_to_backend: session_syncs_to_backend(&session, agent.is_writeback_storage()).await,
         data,
     };
 
