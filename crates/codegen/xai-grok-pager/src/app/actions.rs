@@ -1736,8 +1736,10 @@ pub enum Effect {
         cwd: std::path::PathBuf,
         session_id: String,
     },
-    /// Resolve the running agent name for a session (`x.ai/session/info`).
-    FetchSessionAgentName {
+    /// Fetch the per-session facts the pane caches out of band
+    /// (`x.ai/session/info`): the running agent name and where the
+    /// transcript is stored.
+    FetchSessionSnapshot {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
@@ -2447,10 +2449,15 @@ pub enum TaskResult {
         agent_id: AgentId,
         prompts: Vec<String>,
     },
-    /// Running agent name cached from `session/info` (for agents modal, etc.).
-    SessionAgentNameResolved {
+    /// Per-session facts cached from `session/info`: the running agent name
+    /// (for the agents modal, etc.) and whether the transcript is uploaded to
+    /// the user's grok.com account.
+    SessionSnapshotResolved {
         agent_id: AgentId,
         agent_name: Option<String>,
+        /// `false` both when the session is local and when the fetch failed —
+        /// the notice must never be shown on a guess.
+        syncs_to_backend: bool,
     },
     /// Authentication completed successfully.
     AuthComplete {

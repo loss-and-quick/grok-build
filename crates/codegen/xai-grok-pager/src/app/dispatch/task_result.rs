@@ -237,6 +237,40 @@ pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, mess
         action: None,
     });
 }
+/// Text of the writeback notice. Deliberately not `/status`'s wording: that
+/// line answers "where is this stored?", this one has to tell someone who did
+/// not ask that a transfer is happening at all, so it names what goes.
+pub(crate) const TRANSCRIPT_SYNC_NOTICE: &str = concat!(
+    "This session syncs to your grok.com account \u{2014} prompts, replies ",
+    "and tool output are uploaded as the conversation goes.",
+);
+
+/// Push the writeback notice into `agent`'s scrollback, at most once per session.
+///
+/// `Local` is the default and the thing that flips writeback on is usually a
+/// server-side setting rather than anything the user typed, so a session can
+/// upload a whole conversation with nothing on screen saying so. `/status`
+/// reports it, but only to someone who thought to ask — and `Local` is exactly
+/// the expectation that stops people asking. Same field, same request as
+/// `/status` (`x.ai/session/info` `syncsToBackend`), so the two cannot disagree.
+fn push_transcript_sync_notice(agent: &mut crate::app::agent_view::AgentView, syncs: bool) {
+    if !syncs {
+        return;
+    }
+    let Some(session_id) = agent.session.session_id.clone() else {
+        // No session id yet: leave the notice un-armed rather than burning it
+        // on a pane that cannot key it — the next snapshot fetch re-tries.
+        return;
+    };
+    if agent.transcript_sync_notified_for.as_ref() == Some(&session_id) {
+        return;
+    }
+    agent.transcript_sync_notified_for = Some(session_id);
+    agent
+        .scrollback
+        .push_block(RenderBlock::system(TRANSCRIPT_SYNC_NOTICE.to_string()));
+}
+
 /// Handle a completed async task result.
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
     match result {
@@ -830,15 +864,17 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::SessionAgentNameResolved {
+        TaskResult::SessionSnapshotResolved {
             agent_id,
             agent_name,
+            syncs_to_backend,
         } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent.session_agent_name = agent_name.clone();
                 if let Some(modal) = agent.agents_modal.as_mut() {
                     modal.active_agent = agent_name;
                 }
+                push_transcript_sync_notice(agent, syncs_to_backend);
             }
             vec![]
         }

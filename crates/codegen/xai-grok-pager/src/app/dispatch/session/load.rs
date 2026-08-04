@@ -972,7 +972,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             cwd,
             session_id: hydrate_sid.to_string(),
         });
-        effects.push(Effect::FetchSessionAgentName {
+        effects.push(Effect::FetchSessionSnapshot {
             agent_id,
             session_id: hydrate_sid.clone(),
         });

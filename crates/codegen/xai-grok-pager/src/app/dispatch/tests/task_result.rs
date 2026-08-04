@@ -1,8 +1,8 @@
 //! Tests for async task-result application arms.
 
 use super::super::task_result::{
-    X11_PRIMARY_PASTE_HINT, maybe_show_x11_primary_paste_hint, show_clipboard_failure,
-    wrap_host_image_request_eligible,
+    TRANSCRIPT_SYNC_NOTICE, X11_PRIMARY_PASTE_HINT, maybe_show_x11_primary_paste_hint,
+    show_clipboard_failure, wrap_host_image_request_eligible,
 };
 use super::*;
 use xai_grok_shell::session::unified_list::ListScope;
@@ -2818,5 +2818,119 @@ fn session_list_nonempty_partial_modal_toasts_in_chat_mode_only() {
     assert!(
         app.agents[&AgentId(0)].toast.is_none(),
         "Build-mode modal non-empty degraded list stays silent"
+    );
+}
+
+// ── Writeback notice ────────────────────────────────────────────
+
+/// Count the writeback notices sitting in an agent's scrollback.
+fn transcript_sync_notices(app: &AppView, id: AgentId) -> usize {
+    let scrollback = &app.agents[&id].scrollback;
+    (0..scrollback.len())
+        .filter_map(|i| scrollback.entry(i))
+        .filter(|entry| {
+            matches!(
+                &entry.block,
+                crate::scrollback::block::RenderBlock::System(b)
+                    if b.text == TRANSCRIPT_SYNC_NOTICE
+            )
+        })
+        .count()
+}
+
+fn resolve_snapshot(app: &mut AppView, id: AgentId, syncs_to_backend: bool) {
+    dispatch_task_result(
+        TaskResult::SessionSnapshotResolved {
+            agent_id: id,
+            agent_name: None,
+            syncs_to_backend,
+        },
+        app,
+    );
+}
+
+/// `Local` is the default and it promises nothing leaves the machine, so a
+/// local session must stay completely silent — an unnecessary notice here
+/// would teach people to skip the one that matters.
+#[test]
+fn local_session_says_nothing_about_syncing() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    resolve_snapshot(&mut app, id, false);
+
+    assert_eq!(transcript_sync_notices(&app, id), 0);
+    assert!(
+        app.agents[&id].transcript_sync_notified_for.is_none(),
+        "a local session must not arm the latch — writeback can still be \
+         switched on later in this same session"
+    );
+}
+
+/// A failed `session/info` fetch reports `syncs_to_backend: false`. That must
+/// read as "don't know yet", not as "local": the latch has to stay open so the
+/// next fetch can still announce.
+#[test]
+fn failed_snapshot_fetch_leaves_the_notice_armed() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    resolve_snapshot(&mut app, id, false);
+    resolve_snapshot(&mut app, id, true);
+
+    assert_eq!(transcript_sync_notices(&app, id), 1);
+}
+
+/// Several things re-fetch the snapshot for one session (the agents modal, a
+/// settings refresh). The notice is pushed for the first of them and never
+/// again — a notice that repeats becomes noise and stops being read.
+#[test]
+fn writeback_notice_is_pushed_once_per_session() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    resolve_snapshot(&mut app, id, true);
+    resolve_snapshot(&mut app, id, true);
+    resolve_snapshot(&mut app, id, true);
+
+    assert_eq!(transcript_sync_notices(&app, id), 1);
+    assert_eq!(
+        app.agents[&id]
+            .transcript_sync_notified_for
+            .as_ref()
+            .map(|s| s.0.as_ref()),
+        Some("test-session")
+    );
+}
+
+/// `/new` and resume reuse the pane. A different session is a different
+/// upload, so it gets its own notice.
+#[test]
+fn a_new_session_in_the_same_pane_is_announced_again() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    resolve_snapshot(&mut app, id, true);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.unbind_session_id();
+    agent.bind_session_id("second-session".into());
+    resolve_snapshot(&mut app, id, true);
+
+    assert_eq!(transcript_sync_notices(&app, id), 2);
+}
+
+/// The notice fires off the same request and the same field `/status` reads
+/// (`x.ai/session/info` `syncsToBackend`), so the two can never disagree — but
+/// it must not simply restate `/status`'s line, which answers a question the
+/// reader here has not asked.
+#[test]
+fn writeback_notice_does_not_restate_the_status_line() {
+    assert!(
+        !TRANSCRIPT_SYNC_NOTICE.contains("Transcript: synced to your grok.com account"),
+        "{TRANSCRIPT_SYNC_NOTICE}"
+    );
+    assert!(
+        TRANSCRIPT_SYNC_NOTICE.contains("grok.com account"),
+        "the notice must name the destination: {TRANSCRIPT_SYNC_NOTICE}"
     );
 }

@@ -1393,6 +1393,18 @@ pub struct AgentView {
     pub(crate) timeline_hover_preview: Option<(usize, String)>,
     /// Running agent definition for this session (`x.ai/session/info` `agentName`).
     pub session_agent_name: Option<String>,
+    /// Session the writeback notice has already been pushed for
+    /// (`x.ai/session/info` `syncsToBackend`).
+    ///
+    /// Keyed by session id rather than a plain `bool` because the same pane is
+    /// reused across `/new` and resume: a new session is a new upload and gets
+    /// its own notice, while the several things that re-fetch the snapshot for
+    /// one session (the agents modal, a settings refresh) must not restate it.
+    /// `/model` deliberately does not re-arm it — the transcript goes to the
+    /// user's own account whichever model serves the turn, so re-announcing on
+    /// every switch would repeat the notice at exactly the people who switch
+    /// providers most and teach them to skip it.
+    pub(crate) transcript_sync_notified_for: Option<agent_client_protocol::SessionId>,
     /// Map of child session IDs to subagent metadata. Populated on
     /// `SubagentSpawned` notifications, used for permission routing
     /// (which agent owns a session) and provenance display.

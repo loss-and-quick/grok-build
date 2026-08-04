@@ -762,3 +762,44 @@
             "gated-off Auto must display as Ask"
         );
     }
+
+    /// Remote settings arriving mid-session is the one moment a live session
+    /// is moved from `Local` to writeback, and the upgrade backfills the
+    /// conversation so far. The snapshot fetched at session creation predates
+    /// that, so the pane must re-ask rather than stay silent about an upload
+    /// that has already started.
+    #[test]
+    fn settings_arrival_re_asks_where_the_transcript_goes() {
+        let mut app = make_app_with_agent("sess-upgrade");
+
+        assert!(handle_ext_notification(&voice_settings_update(true), &mut app));
+
+        assert!(
+            app.pending_effects.iter().any(|effect| matches!(
+                effect,
+                crate::app::actions::Effect::FetchSessionSnapshot { .. }
+            )),
+            "an un-notified pane must re-fetch the session snapshot"
+        );
+    }
+
+    /// ...but a pane that already carries the notice must not re-fetch and
+    /// must never restate it. Every settings refresh would otherwise re-run
+    /// the check for the whole lifetime of the session.
+    #[test]
+    fn settings_arrival_leaves_an_already_notified_pane_alone() {
+        let mut app = make_app_with_agent("sess-known");
+        let id = crate::app::agent::AgentId(0);
+        app.agents.get_mut(&id).unwrap().transcript_sync_notified_for =
+            Some(agent_client_protocol::SessionId::new("sess-known"));
+
+        assert!(handle_ext_notification(&voice_settings_update(true), &mut app));
+
+        assert!(
+            !app.pending_effects.iter().any(|effect| matches!(
+                effect,
+                crate::app::actions::Effect::FetchSessionSnapshot { .. }
+            )),
+            "the notice is shown once per session, so there is nothing to re-ask"
+        );
+    }

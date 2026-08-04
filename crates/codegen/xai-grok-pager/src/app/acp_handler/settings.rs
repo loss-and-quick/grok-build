@@ -51,6 +51,43 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
     }
 }
 
+/// Re-ask `x.ai/session/info` for panes that have not yet shown the writeback
+/// notice.
+///
+/// Settings arrival is the one moment a *live* session can be moved from
+/// `Local` to writeback: the shell runs `reapply_storage_mode` immediately
+/// before pushing this notification, and the upgrade backfills the
+/// conversation so far to the backend. The snapshot each pane fetched when its
+/// session was created predates that, so without a re-ask the session that is
+/// upgraded mid-flight — the very case a user is least likely to expect — is
+/// the one that never says anything.
+///
+/// Bounded by the per-session latch (a pane that already carries the notice is
+/// skipped) and by the pending-effect check, so the `/new` path that refreshes
+/// settings and creates a session does not fetch the snapshot twice.
+fn resync_transcript_notices(app: &AppView) -> Vec<crate::app::actions::Effect> {
+    use crate::app::actions::Effect;
+    app.agents
+        .iter()
+        .filter_map(|(agent_id, agent)| {
+            if agent.transcript_sync_notified_for.is_some() {
+                return None;
+            }
+            let session_id = agent.session.session_id.clone()?;
+            let already_queued = app.pending_effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    Effect::FetchSessionSnapshot { agent_id: queued, .. } if queued == agent_id
+                )
+            });
+            (!already_queued).then_some(Effect::FetchSessionSnapshot {
+                agent_id: *agent_id,
+                session_id,
+            })
+        })
+        .collect()
+}
+
 /// Handle `x.ai/settings/update` — remote settings refreshed on `/new`.
 pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(update) = serde_json::from_str::<PagerSettingsUpdate>(notif.params.get()) else {
@@ -339,6 +376,9 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         *app.command_tags.borrow_mut() =
             resolve_slash_command_tags(tags_config, remote_tags.as_ref());
     }
+
+    let resync = resync_transcript_notices(app);
+    app.pending_effects.extend(resync);
 
     tracing::info!("settings updated via x.ai/settings/update");
     true

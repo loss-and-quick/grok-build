@@ -850,7 +850,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
             cwd: cwd.clone(),
             session_id: session_id_clone.to_string(),
         });
-        effects.push(Effect::FetchSessionAgentName {
+        effects.push(Effect::FetchSessionSnapshot {
             agent_id,
             session_id: session_id_clone.clone(),
         });
@@ -951,7 +951,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
             cwd: cwd.clone(),
             session_id: session_id_clone.to_string(),
         });
-        effects.push(Effect::FetchSessionAgentName {
+        effects.push(Effect::FetchSessionSnapshot {
             agent_id,
             session_id: session_id_clone.clone(),
         });

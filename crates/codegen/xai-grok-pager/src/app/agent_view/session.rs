@@ -301,6 +301,7 @@ impl AgentView {
             timeline_hover: None,
             timeline_hover_preview: None,
             session_agent_name: None,
+            transcript_sync_notified_for: None,
             subagent_sessions: HashMap::new(),
             subagent_views: HashMap::new(),
             active_subagent: None,

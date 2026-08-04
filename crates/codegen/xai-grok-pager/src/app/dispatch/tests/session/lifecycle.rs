@@ -141,7 +141,7 @@ fn session_created_sets_session_id() {
         &effects[0],
         Effect::FetchPromptHistory { session_id, .. } if session_id == "new-session-123"
     ));
-    assert!(matches!(&effects[1], Effect::FetchSessionAgentName { .. }));
+    assert!(matches!(&effects[1], Effect::FetchSessionSnapshot { .. }));
     assert!(matches!(
         &effects[2],
         Effect::RefreshAvailableCommands { .. }
@@ -315,7 +315,7 @@ fn worktree_session_created_sets_session_and_cwd() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::FetchSessionAgentName { .. }))
+            .any(|e| matches!(e, Effect::FetchSessionSnapshot { .. }))
     );
     assert!(
         effects

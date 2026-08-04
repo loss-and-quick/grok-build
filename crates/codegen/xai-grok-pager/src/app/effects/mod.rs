@@ -3189,22 +3189,24 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchSessionAgentName { agent_id, session_id } => {
+        Effect::FetchSessionSnapshot { agent_id, session_id } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     match fetch_session_info(&session_id, &tx).await {
                         Ok(info) => {
-                            TaskResult::SessionAgentNameResolved {
+                            TaskResult::SessionSnapshotResolved {
                                 agent_id,
                                 agent_name: info.data.agent_name,
+                                syncs_to_backend: info.syncs_to_backend,
                             }
                         }
                         Err(e) => {
-                            tracing::debug!("session agent name fetch failed: {e}");
-                            TaskResult::SessionAgentNameResolved {
+                            tracing::debug!("session snapshot fetch failed: {e}");
+                            TaskResult::SessionSnapshotResolved {
                                 agent_id,
                                 agent_name: None,
+                                syncs_to_backend: false,
                             }
                         }
                     }

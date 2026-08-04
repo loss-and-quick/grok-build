@@ -525,7 +525,7 @@ pub(super) fn dispatch_open_config_agents_modal(
     }
     agent.agents_modal = Some(modal);
     if let Some(session_id) = session_id {
-        return vec![Effect::FetchSessionAgentName {
+        return vec![Effect::FetchSessionSnapshot {
             agent_id: id,
             session_id,
         }];
