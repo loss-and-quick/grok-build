@@ -2060,28 +2060,54 @@ fn fresh_tool_model_rejects_unavailable_exact_key_over_visible_slug_collision() 
             "validation must inspect the unavailable exact-key entry selected by execution"
         );
 }
+/// A bare slug names the **last** matching entry (`config::find_by_slug`), the
+/// same door the spawn path goes through, so validation has to judge that entry
+/// and not an earlier namesake the child will never be routed to.
 #[test]
-fn fresh_tool_model_rejects_unavailable_first_slug_collision() {
-    let mut models = indexmap::IndexMap::new();
+fn fresh_tool_model_judges_the_last_slug_collision_entry() {
+    let mut earlier_blocked = indexmap::IndexMap::new();
     let mut unavailable_first = test_model_entry("shared-routing-slug");
     unavailable_first.info.user_selectable = false;
-    models.insert("blocked-first".to_string(), unavailable_first);
-    models.insert("visible-second".to_string(), test_model_entry("shared-routing-slug"));
+    earlier_blocked.insert("blocked-first".to_string(), unavailable_first);
+    earlier_blocked.insert(
+        "visible-second".to_string(),
+        test_model_entry("shared-routing-slug"),
+    );
+    assert!(
+        super::handle_request::task_model_override_error(
+            Some("shared-routing-slug"),
+            ModelOverrideProvenance::Tool,
+            false,
+            &earlier_blocked,
+            false,
+        )
+        .is_none(),
+        "an unavailable earlier namesake must not block the entry execution picks"
+    );
+
+    let mut last_blocked = indexmap::IndexMap::new();
+    last_blocked.insert(
+        "visible-first".to_string(),
+        test_model_entry("shared-routing-slug"),
+    );
+    let mut unavailable_last = test_model_entry("shared-routing-slug");
+    unavailable_last.info.user_selectable = false;
+    last_blocked.insert("blocked-last".to_string(), unavailable_last);
     assert_eq!(
-            super::handle_request::task_model_override_error(
-                Some("shared-routing-slug"),
-                ModelOverrideProvenance::Tool,
-                false,
-                &models,
-                false,
-            )
-            .as_deref(),
-            Some(
-                "Unknown Task.model slug 'shared-routing-slug'. Valid model slugs: \
-                 visible-second. Omit `model` to inherit the parent model."
-            ),
-            "validation must inspect the first routing-slug entry selected by execution"
-        );
+        super::handle_request::task_model_override_error(
+            Some("shared-routing-slug"),
+            ModelOverrideProvenance::Tool,
+            false,
+            &last_blocked,
+            false,
+        )
+        .as_deref(),
+        Some(
+            "Unknown Task.model slug 'shared-routing-slug'. Valid model slugs: \
+             visible-first. Omit `model` to inherit the parent model."
+        ),
+        "validation must reject when the entry execution picks is unavailable"
+    );
 }
 #[test]
 fn fresh_tool_model_rejects_unknown_and_nonavailable_entries() {
