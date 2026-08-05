@@ -1504,3 +1504,66 @@ async fn sampler_401_on_fresh_provider_token_surfaces_error() {
         })
         .await;
 }
+
+/// Two providers can serve the same routing slug, so the "Available:" list
+/// in a 404/401 sampler error must print catalog keys (`<provider>/<slug>`),
+/// not the bare slug repeated once per provider — the slug alone doesn't
+/// distinguish the entries, and it isn't what the user would type into
+/// `/model` to pick one.
+#[tokio::test(flavor = "current_thread")]
+async fn sampler_error_lists_catalog_keys_for_a_shared_slug() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gw_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persist_rx) = mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(50_000, 100_000, 85, gateway_tx, persistence_tx).await;
+
+            let endpoints = crate::agent::config::EndpointsConfig::default();
+            let mut models = indexmap::IndexMap::new();
+            models.insert(
+                "acme/shared".to_string(),
+                crate::agent::config::ModelEntry::fallback("shared", &endpoints),
+            );
+            models.insert(
+                "beta/shared".to_string(),
+                crate::agent::config::ModelEntry::fallback("shared", &endpoints),
+            );
+            let dir = tempfile::tempdir().expect("tempdir");
+            let auth_manager = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+            actor.models_manager = crate::agent::models::ModelsManager::new(
+                None,
+                models,
+                acp::ModelId::new("acme/shared"),
+                auth_manager,
+                crate::agent::config::Config::default(),
+            );
+
+            let mut cfg = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("test actor seeds a default sampling config");
+            cfg.model = "acme/shared".to_string();
+            actor.chat_state_handle.update_sampling_config(cfg);
+
+            let actor = Arc::new(actor);
+            let result = actor.handle_sampling_failure(model_not_found_error()).await;
+            let err = match result {
+                Err(e) => e,
+                Ok(_) => panic!("expected Err from handle_sampling_failure"),
+            };
+            let data = err.data.unwrap();
+            let msg = data
+                .get("message")
+                .and_then(|v| v.as_str())
+                .or_else(|| data.as_str())
+                .unwrap();
+            assert!(
+                msg.contains("Available: acme/shared, beta/shared"),
+                "must list the qualified catalog keys, got: {msg}"
+            );
+        })
+        .await;
+}

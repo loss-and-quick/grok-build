@@ -1339,12 +1339,12 @@ impl SessionActor {
                 .await
                 .map(|c| c.model)
                 .unwrap_or_else(|| "unknown".to_string());
-            let available: Vec<String> = self
-                .models_manager
-                .models()
-                .values()
-                .map(|m| m.model.clone())
-                .collect();
+            // Catalog key, not the routing slug (`m.model`): several providers
+            // can serve the same slug, and the key is what the user actually
+            // types into `/model` to pick one of them. `current_model` above
+            // is already a catalog key (see `wire_permission_auto_llm_classifier`),
+            // so this keeps the two comparable.
+            let available: Vec<String> = self.models_manager.models().keys().cloned().collect();
             let mut msg = format!("{detailed_message}\n");
             msg.push_str(&format!("\n  Model:     {current_model}"));
             msg.push_str(&format!("\n  Auth:      {auth_mode_str}"));
