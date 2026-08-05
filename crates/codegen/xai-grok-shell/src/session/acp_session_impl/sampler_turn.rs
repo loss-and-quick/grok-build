@@ -796,8 +796,10 @@ impl SessionActor {
         // a pin qualified to one of two providers serving the same slug keeps
         // naming that provider's entry, endpoint and credential.
         let classifier_pin = auto_cfg.classifier_model.as_deref();
+        // The classifier gates a tool call, so it competes for slots as
+        // interactive work rather than taking the background lane.
         let aux_classifier_sampler = match classifier_pin {
-            Some(key) => self.resolve_aux_sampler_client(key).await,
+            Some(key) => self.resolve_aux_route(key, false).await,
             None => None,
         };
         let models = self.models_manager.models();
@@ -823,29 +825,24 @@ impl SessionActor {
         tokio::task::spawn_local(async move {
             while let Some((messages, respond_to)) = rx.recv().await {
                 let result = async {
-                    let (sampling_client, model) = match &aux_classifier_sampler {
-                        Some((client, model)) => (client.clone(), model.clone()),
-                        None => {
-                            let client = session
-                                .prepare_chat_completion(false)
-                                .await
-                                .map_err(|e| xai_grok_workspace::permission::ClassifierFailure::TransportError(
-                                    e.to_string(),
-                                ))?;
-                            let model = session
-                                .chat_state_handle
-                                .get_sampling_config()
-                                .await
-                                .map(|c| c.model)
-                                .unwrap_or_default();
-                            (client, model)
-                        }
+                    let route = match &aux_classifier_sampler {
+                        Some(route) => route.clone(),
+                        // No pin, or a pin with no route of its own: the
+                        // side-query rides the session's own client and model. A
+                        // chain written against the session model still applies,
+                        // so the route is described the same way rather than
+                        // opting out of failover.
+                        None => session.session_client_aux_route(false).await.map_err(|e| {
+                            xai_grok_workspace::permission::ClassifierFailure::TransportError(
+                                e.to_string(),
+                            )
+                        })?,
                     };
                     let session_id = session.session_info.id.to_string();
-                    let backend = sampling_client.api_backend();
+                    let backend = route.client.api_backend();
                     let request = build_permission_classifier_request(
                         &backend,
-                        model,
+                        route.wire_model.clone(),
                         messages,
                         classifier_reasoning_effort,
                         session_id,
@@ -862,18 +859,28 @@ impl SessionActor {
                         },
                         "permission auto classifier request built"
                     );
-                    let fut = sampling_client.conversation_collect(request);
+                    // One alternative on a runtime failure, no more. This query
+                    // is issued before every tool call the session makes, so its
+                    // budget is paid on the critical path of the whole session;
+                    // `classify_timeout` still bounds the hop and the original
+                    // attempt together, and the heuristic remains the floor.
+                    let fut = session.aux_collect_with_fallback(
+                        "permission_classifier",
+                        route,
+                        request,
+                        AUX_HOPS_PERMISSION_CLASSIFIER,
+                    );
                     let response = tokio::time::timeout(classify_timeout, fut)
                         .await
-                        .map_err(|_| {
-                            xai_grok_workspace::permission::ClassifierFailure::Timeout
-                        })?
-                        .map_err(|e| xai_grok_workspace::permission::ClassifierFailure::TransportError(
-                            e.to_string(),
-                        ))?;
+                        .map_err(|_| xai_grok_workspace::permission::ClassifierFailure::Timeout)?
+                        .map_err(|e| {
+                            xai_grok_workspace::permission::ClassifierFailure::TransportError(
+                                e.to_string(),
+                            )
+                        })?;
                     Ok(classifier_verdict_text(&response))
                 }
-                    .await;
+                .await;
                 if let Err(error) = &result {
                     tracing::warn!(%error, "permission auto classifier side-query failed");
                 }

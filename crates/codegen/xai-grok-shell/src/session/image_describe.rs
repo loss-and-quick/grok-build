@@ -290,9 +290,9 @@ impl ImageDescribeCache {
     /// Returns a cached description when `(source, path_key, bytes, prompt)`
     /// matches a prior successful describe; otherwise calls the vision
     /// model, stores the result, and returns it.
-    pub async fn get_or_describe(
+    pub async fn get_or_describe<C, F>(
         &self,
-        client: xai_grok_sampler::SamplingClient,
+        collect: C,
         model: &str,
         raw_bytes: &[u8],
         mime_type: &str,
@@ -300,7 +300,16 @@ impl ImageDescribeCache {
         current_query: &str,
         source: ImageDescribeSource,
         path_key: &str,
-    ) -> Result<String, DescribeError> {
+    ) -> Result<String, DescribeError>
+    where
+        C: FnOnce(ConversationRequest) -> F,
+        F: std::future::Future<
+                Output = Result<
+                    xai_grok_sampling_types::ConversationResponse,
+                    xai_grok_sampling_types::SamplingError,
+                >,
+            >,
+    {
         let content_fp = content_fingerprint(raw_bytes);
         let prompt_fp = describe_prompt_fingerprint(outline, current_query);
         let cache_key = (source, path_key.to_owned(), content_fp, prompt_fp);
@@ -314,7 +323,7 @@ impl ImageDescribeCache {
         );
         let prompt_text = build_describe_prompt(outline, current_query);
         let description =
-            describe_user_images(client, model, prompt_text, std::slice::from_ref(&url)).await?;
+            describe_user_images(collect, model, prompt_text, std::slice::from_ref(&url)).await?;
         self.inner.lock().insert(cache_key, description.clone());
         Ok(description)
     }
@@ -437,12 +446,27 @@ pub enum DescribeError {
 /// [`ImageContent`], otherwise the `data:<mime>;base64,...` URI). The
 /// caller is responsible for outline + prompt assembly so this stays a
 /// pure transport helper.
-pub async fn describe_user_images(
-    client: OaiCompatClient,
+///
+/// `collect` issues the assembled request. It is a seam rather than a client
+/// because the host wraps it in the bounded auxiliary failover loop: this is the
+/// one auxiliary call whose failure changes what the model can *see*, and the
+/// turn that follows has no way to know it is reasoning about an image nobody
+/// described.
+pub async fn describe_user_images<C, F>(
+    collect: C,
     model: &str,
     prompt_text: String,
     image_urls: &[String],
-) -> Result<String, DescribeError> {
+) -> Result<String, DescribeError>
+where
+    C: FnOnce(ConversationRequest) -> F,
+    F: std::future::Future<
+            Output = Result<
+                xai_grok_sampling_types::ConversationResponse,
+                xai_grok_sampling_types::SamplingError,
+            >,
+        >,
+{
     let mut user_item = ConversationItem::User(UserItem {
         content: vec![ContentPart::Text {
             text: std::sync::Arc::<str>::from(prompt_text),
@@ -462,7 +486,9 @@ pub async fn describe_user_images(
         .with_temperature(0.2)
         .with_max_output_tokens(4_096);
     const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
-    let response = tokio::time::timeout(DESCRIBE_TIMEOUT, client.conversation_collect(request))
+    // The budget covers the whole round trip including any fallback hops
+    // `collect` makes, so a chain cannot extend the wait the caller agreed to.
+    let response = tokio::time::timeout(DESCRIBE_TIMEOUT, collect(request))
         .await
         .map_err(|_| {
             DescribeError::Sampling(format!(

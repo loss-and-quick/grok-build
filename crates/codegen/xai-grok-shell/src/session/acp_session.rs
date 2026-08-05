@@ -166,6 +166,9 @@ use hook_dispatch::*;
 #[path = "acp_session_impl/provider_control.rs"]
 mod provider_control;
 use provider_control::*;
+#[path = "acp_session_impl/aux_fallback.rs"]
+mod aux_fallback;
+use aux_fallback::*;
 #[path = "acp_session_impl/stop_gate.rs"]
 mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;

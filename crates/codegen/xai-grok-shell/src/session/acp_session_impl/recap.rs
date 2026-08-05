@@ -677,17 +677,14 @@ impl SessionActor {
         // Nothing waits on a suggestion — it appears next to an idle prompt or
         // it does not — so it takes the background lane and cannot hold a slot
         // the next turn needs.
-        let Some((sampling_client, model)) = self
-            .resolve_aux_sampler_client(&model_key)
-            .await
-            .map(|(client, model)| (client.as_background(), model))
-        else {
+        let Some(route) = self.resolve_aux_route(&model_key, true).await else {
             tracing::debug!(
                 model = %model_key,
                 "prompt suggest: suggestion model has no sampler route; skipping request"
             );
             return None;
         };
+        let model = route.wire_model.clone();
 
         tracing::debug!(
             model = %model,
@@ -721,7 +718,14 @@ impl SessionActor {
             ..Default::default()
         };
 
-        let response = match sampling_client.conversation_collect(request).await {
+        // One alternative on a runtime failure, no more: the suggestion is worth
+        // rescuing when a whole provider is down (otherwise the feature vanishes
+        // for the rest of the session with nothing to point at), but it renders
+        // next to an idle prompt the user is already typing into.
+        let response = match self
+            .aux_collect_with_fallback("prompt_suggest", route, request, AUX_HOPS_PROMPT_SUGGEST)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(error = %e, "prompt suggest inference failed");

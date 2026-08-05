@@ -52,7 +52,7 @@ use xai_grok_tools::implementations::grok_build::web_fetch::{
     WebContentDistiller, WebContentDistillerResource,
 };
 
-use super::SessionActor;
+use super::{AUX_HOPS_WEB_FETCH_DISTILL, AuxRoute, SessionActor};
 use crate::agent::models::ModelsManager;
 
 /// One distillation request, handed from a `web_fetch` call to the session's
@@ -147,18 +147,34 @@ impl WebContentDistiller for ChannelWebContentDistiller {
 /// slug the session endpoint is known to serve, whereas here the model was
 /// chosen from a different entry, and a client carries one endpoint and one
 /// credential.
-pub(crate) async fn serve_distill_jobs<R, F>(
+///
+/// `collect` issues the built request on that route. It is a second seam rather
+/// than a plain `conversation_collect` because in production it is the bounded
+/// aux failover loop ([`SessionActor::aux_collect_with_fallback`]): a
+/// distillation that dies on a 429 or a dropped connection silently returns the
+/// raw page, and the operator's `[[model_fallbacks]]` chain already says which
+/// model should have taken over.
+pub(crate) async fn serve_distill_jobs<R, F, C, G>(
     mut jobs: mpsc::UnboundedReceiver<DistillJob>,
     session_id: String,
     resolve: R,
+    collect: C,
 ) where
     R: Fn(String) -> F,
-    F: std::future::Future<Output = Option<(xai_grok_sampler::SamplingClient, String)>>,
+    F: std::future::Future<Output = Option<AuxRoute>>,
+    C: Fn(AuxRoute, ConversationRequest) -> G,
+    G: std::future::Future<
+            Output = Result<
+                xai_grok_sampling_types::ConversationResponse,
+                xai_grok_sampling_types::SamplingError,
+            >,
+        >,
 {
     while let Some(job) = jobs.recv().await {
         let route = resolve(job.model_key.clone()).await;
         let result = run_distill_job(
             route,
+            &collect,
             &job.model_key,
             &job.system_prompt,
             &job.user_prompt,
@@ -183,14 +199,24 @@ pub(crate) async fn serve_distill_jobs<R, F>(
 /// key, so there is nothing left here to cross-check: the key was carried whole
 /// from the pin, and the slug was derived from it rather than the other way
 /// round.
-async fn run_distill_job(
-    route: Option<(xai_grok_sampler::SamplingClient, String)>,
+async fn run_distill_job<C, G>(
+    route: Option<AuxRoute>,
+    collect: &C,
     model_key: &str,
     system_prompt: &str,
     user_prompt: &str,
     session_id: &str,
-) -> Result<String, String> {
-    let Some((client, model)) = route else {
+) -> Result<String, String>
+where
+    C: Fn(AuxRoute, ConversationRequest) -> G,
+    G: std::future::Future<
+            Output = Result<
+                xai_grok_sampling_types::ConversationResponse,
+                xai_grok_sampling_types::SamplingError,
+            >,
+        >,
+{
+    let Some(route) = route else {
         return Err(format!(
             "aux model {model_key:?} has no route of its own; it must not ride the session client"
         ));
@@ -201,17 +227,14 @@ async fn run_distill_job(
             ConversationItem::user(user_prompt.to_owned()),
         ],
         tools: vec![],
-        model: Some(model),
+        model: Some(route.wire_model.clone()),
         x_grok_conv_id: Some(format!("webfetchdistill-{}", uuid::Uuid::new_v4())),
         x_grok_req_id: Some(format!("xai-webfetchdistill-{}", uuid::Uuid::new_v4())),
         x_grok_session_id: Some(session_id.to_owned()),
         x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
         ..Default::default()
     };
-    let response = client
-        .conversation_collect(request)
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = collect(route, request).await.map_err(|e| e.to_string())?;
     Ok(response.assistant_text())
 }
 
@@ -230,11 +253,39 @@ impl SessionActor {
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
         let weak = Arc::downgrade(self);
         let session_id = self.session_info.id.to_string();
+        let collect_weak = Arc::downgrade(self);
         tokio::task::spawn_local(async move {
-            serve_distill_jobs(jobs_rx, session_id, move |key| {
-                let weak = weak.clone();
-                async move { weak.upgrade()?.resolve_aux_sampler_client(&key).await }
-            })
+            serve_distill_jobs(
+                jobs_rx,
+                session_id,
+                move |key| {
+                    let weak = weak.clone();
+                    // A distillation is a tool call's own inference and the tool
+                    // is blocked on it, so it competes as interactive work.
+                    async move { weak.upgrade()?.resolve_aux_route(&key, false).await }
+                },
+                move |route, request| {
+                    let weak = collect_weak.clone();
+                    // One alternative: the tool wraps this in its own
+                    // `distill_timeout`, and failing outright only returns the
+                    // raw page, so more hops mostly buy expiry.
+                    async move {
+                        match weak.upgrade() {
+                            Some(session) => {
+                                session
+                                    .aux_collect_with_fallback(
+                                        "web_fetch_distill",
+                                        route,
+                                        request,
+                                        AUX_HOPS_WEB_FETCH_DISTILL,
+                                    )
+                                    .await
+                            }
+                            None => route.client.conversation_collect(request).await,
+                        }
+                    }
+                },
+            )
             .await;
             tracing::debug!("web_fetch distiller task exiting (channel closed)");
         });
@@ -344,7 +395,7 @@ mod tests {
         catalog: &IndexMap<String, ModelEntry>,
         session: &SamplerConfig,
         session_key: Option<&str>,
-    ) -> Option<(xai_grok_sampler::SamplingClient, String)> {
+    ) -> Option<AuxRoute> {
         let mut cfg = resolve_aux_model_sampling_config(
             model_key,
             catalog,
@@ -356,8 +407,13 @@ mod tests {
             None,
         )?;
         stamp_session_local_sampler_fields(&mut cfg, session, None, Some(1));
-        let model = cfg.model.clone();
-        Some((xai_grok_sampler::SamplingClient::new(cfg).ok()?, model))
+        let wire_model = cfg.model.clone();
+        Some(AuxRoute {
+            client: xai_grok_sampler::SamplingClient::new(cfg).ok()?,
+            catalog_key: model_key.to_owned(),
+            wire_model,
+            background: false,
+        })
     }
 
     /// Drive one `infer` through the real channel, service loop and resolver.
@@ -368,14 +424,21 @@ mod tests {
         model_key: &str,
     ) -> Result<String, String> {
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
-        let served = serve_distill_jobs(jobs_rx, "test-session".to_owned(), move |model_key| {
-            let catalog = catalog.clone();
-            let session = session.clone();
-            async move {
-                // A signed-in session: the bearer that must not travel.
-                resolve_route(&model_key, &catalog, &session, Some("session-jwt"))
-            }
-        });
+        let served = serve_distill_jobs(
+            jobs_rx,
+            "test-session".to_owned(),
+            move |model_key| {
+                let catalog = catalog.clone();
+                let session = session.clone();
+                async move {
+                    // A signed-in session: the bearer that must not travel.
+                    resolve_route(&model_key, &catalog, &session, Some("session-jwt"))
+                }
+            },
+            // These cases are about routing, so they issue directly; the bounded
+            // failover loop is exercised against a live actor in `aux_fallback`.
+            |route: AuxRoute, request| async move { route.client.conversation_collect(request).await },
+        );
         let distiller = ChannelWebContentDistiller::new(models, jobs_tx);
         let call = async move {
             let result = distiller.infer(model_key, "system", "user").await;

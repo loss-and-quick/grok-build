@@ -857,6 +857,20 @@ impl SessionActor {
             ))
         })?;
         let model = &describe_model;
+        // The route the describe call travels, described so a runtime failure can
+        // be re-issued on a `[[model_fallbacks]]` target. `describe_model` is the
+        // wire slug either way: the routed aux entry's own, or the session
+        // model's when the helper slug had no route and the call degraded onto
+        // the session config. Prompt build waits on this, so it is interactive.
+        let describe_route = super::AuxRoute {
+            client,
+            catalog_key: self
+                .models_manager
+                .catalog_key(model)
+                .unwrap_or_else(|| model.clone()),
+            wire_model: model.clone(),
+            background: false,
+        };
         let limit = crate::session::image_describe::IMAGE_DESCRIPTION_PROCESSING_LIMIT;
         let skip_count = persisted.len().saturating_sub(limit);
         if skip_count > 0 {
@@ -875,7 +889,14 @@ impl SessionActor {
             } else {
                 self.image_describe_cache
                     .get_or_describe(
-                        client.clone(),
+                        |request| {
+                            self.aux_collect_with_fallback(
+                                "image_describe",
+                                describe_route.clone(),
+                                request,
+                                super::AUX_HOPS_IMAGE_DESCRIBE,
+                            )
+                        },
                         model,
                         &p.raw_bytes,
                         &p.mime_type,
