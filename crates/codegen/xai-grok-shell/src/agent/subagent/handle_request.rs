@@ -53,6 +53,49 @@ pub(super) fn task_model_override_error(
     let requested = requested?;
     crate::agent::models::task_model_error_for_catalog(requested, available, is_session_auth)
 }
+/// What a requested reasoning effort does against the resolved child model.
+pub(super) enum ReasoningEffortGate {
+    /// Stamp it onto the child's sampling config.
+    Apply(xai_grok_sampling_types::ReasoningEffort),
+    /// The model has no effort dial; run it at its own default.
+    Ignore,
+    /// The model has a dial but does not offer this level; fail the spawn.
+    Reject(String),
+}
+
+/// Gate a requested reasoning effort against the levels `offered` by the model
+/// the child resolved to (see `ModelsManager::model_offered_reasoning_efforts`).
+///
+/// An off-menu level is rejected rather than dropped or clamped: it would
+/// otherwise reach the wire and 400 once the child session and any worktree
+/// already exist, and the child's `meta.json` records the *requested* effort, so
+/// quietly running at another one would leave a record of work that never
+/// happened. A model with no dial at all keeps the older lenient behaviour —
+/// the effort can come from a role or persona definition rather than this
+/// spawn's arguments, and there the model's own default is the right answer.
+pub(super) fn gate_reasoning_effort(
+    requested: xai_grok_sampling_types::ReasoningEffort,
+    offered: &[xai_grok_sampling_types::ReasoningEffort],
+    model_id: &str,
+) -> ReasoningEffortGate {
+    if offered.is_empty() {
+        return ReasoningEffortGate::Ignore;
+    }
+    if offered.contains(&requested) {
+        return ReasoningEffortGate::Apply(requested);
+    }
+    let levels = offered
+        .iter()
+        .map(|e| e.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    ReasoningEffortGate::Reject(format!(
+        "Model '{model_id}' does not offer reasoning effort '{}'. \
+         Available levels: {levels}. Omit `reasoning_effort` to use the model's default.",
+        requested.as_str(),
+    ))
+}
+
 /// Max chars of the spawn prompt forwarded in the `subagent_resolve` payload.
 const SUBAGENT_RESOLVE_PROMPT_PREVIEW_CHARS: usize = 4000;
 /// Fire the `subagent_resolve` Replace hook and apply any directive to
@@ -567,12 +610,19 @@ pub(crate) async fn run_shell_child(
             return child_run_output(failure_result(&request, &msg), completion_data, None);
         }
     }
-    if let Some(eff) = effective_runtime.reasoning_effort
-        && ctx
+    if let Some(eff) = effective_runtime.reasoning_effort {
+        let offered = ctx
             .models_manager
-            .model_supports_reasoning_effort(effective_model_id.0.as_ref())
-    {
-        effective_sampling_config.reasoning_effort = Some(eff);
+            .model_offered_reasoning_efforts(effective_model_id.0.as_ref());
+        match gate_reasoning_effort(eff, &offered, effective_model_id.0.as_ref()) {
+            ReasoningEffortGate::Apply(eff) => {
+                effective_sampling_config.reasoning_effort = Some(eff);
+            }
+            ReasoningEffortGate::Ignore => {}
+            ReasoningEffortGate::Reject(msg) => {
+                return child_run_output(failure_result(&request, &msg), completion_data, None);
+            }
+        }
     }
     let subagent_id = request.id.clone();
     let child_session_id = acp::SessionId::new(subagent_id.clone());

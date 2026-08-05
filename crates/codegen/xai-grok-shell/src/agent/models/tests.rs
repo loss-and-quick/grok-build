@@ -784,6 +784,81 @@ fn config_menu_only_model_derives_support_and_default() {
     assert_eq!(mgr.model_default_reasoning_effort("plain"), None);
 }
 
+/// The declared `reasoning_efforts` menu, not the support flag alone, decides
+/// which levels a model takes: a three-level menu reports support and still
+/// refuses `xhigh`.
+#[test]
+fn model_offered_reasoning_efforts_follows_the_declared_menu() {
+    fn option(value: ReasoningEffort) -> ReasoningEffortOption {
+        ReasoningEffortOption {
+            id: value.as_str().to_string(),
+            value,
+            label: value.as_str().to_string(),
+            description: None,
+            default: false,
+        }
+    }
+
+    let mut models = IndexMap::new();
+    let mut menu = make_model_entry("menu-slug");
+    menu.info.supports_reasoning_effort = true;
+    menu.info.reasoning_efforts = vec![
+        option(ReasoningEffort::Low),
+        option(ReasoningEffort::Medium),
+        option(ReasoningEffort::High),
+    ];
+    models.insert("menu-model".to_string(), menu);
+    let mut no_menu = make_model_entry("no-menu-slug");
+    no_menu.info.supports_reasoning_effort = true;
+    models.insert("no-menu-model".to_string(), no_menu);
+    models.insert("plain-model".to_string(), make_model_entry("plain-slug"));
+    let mgr = manager_with_catalog(models);
+
+    assert!(
+        mgr.model_supports_reasoning_effort("menu-model"),
+        "a model with a menu still reports that it has an effort dial"
+    );
+    assert_eq!(
+        mgr.model_offered_reasoning_efforts("menu-model"),
+        vec![
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High
+        ],
+        "the declared menu is the whole vocabulary, in declaration order"
+    );
+    assert!(
+        !mgr.model_offered_reasoning_efforts("menu-model")
+            .contains(&ReasoningEffort::Xhigh),
+        "a level outside the menu would be refused on the wire"
+    );
+    assert_eq!(
+        mgr.model_offered_reasoning_efforts("menu-slug"),
+        mgr.model_offered_reasoning_efforts("menu-model"),
+        "a routing slug lands on the same entry as its catalog key"
+    );
+    assert_eq!(
+        mgr.model_offered_reasoning_efforts("no-menu-model"),
+        vec![
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::Xhigh
+        ],
+        "support declared without a menu keeps the built-in levels"
+    );
+    assert!(
+        mgr.model_offered_reasoning_efforts("plain-model")
+            .is_empty(),
+        "a model with no effort dial offers nothing"
+    );
+    assert!(
+        mgr.model_offered_reasoning_efforts("absent-model")
+            .is_empty(),
+        "an unknown model offers nothing"
+    );
+}
+
 #[test]
 fn cli_reasoning_effort_override_only_stamps_supporting_models() {
     use indexmap::IndexMap;

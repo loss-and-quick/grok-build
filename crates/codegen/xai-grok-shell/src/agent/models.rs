@@ -508,6 +508,24 @@ impl ModelsManager {
             .unwrap_or_default()
     }
 
+    /// Every reasoning-effort level `model_id` accepts on the wire: its declared
+    /// `reasoning_efforts` menu, or the built-in levels when it declares support
+    /// without a menu. Empty when the model has no effort dial.
+    ///
+    /// [`Self::model_supports_reasoning_effort`] only answers whether the dial
+    /// exists, so a caller stamping one specific level has to ask this instead —
+    /// a model that declares a menu 400s on any level outside it. Resolved
+    /// through [`resolve_catalog_key`] so a routing slug lands on the same entry
+    /// the request will.
+    pub fn model_offered_reasoning_efforts(&self, model_id: &str) -> Vec<ReasoningEffort> {
+        let cat = self.inner.catalog.read();
+        let models = &cat.models;
+        resolve_catalog_key(models, &acp::ModelId::new(model_id))
+            .and_then(|key| models.get(key.0.as_ref()))
+            .map(|e| offered_reasoning_efforts(e.info()))
+            .unwrap_or_default()
+    }
+
     pub fn model_supports_backend_search(&self, model_id: &str) -> bool {
         self.inner
             .catalog

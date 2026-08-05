@@ -1957,6 +1957,60 @@ fn subagent_auth_type_rule() {
     assert_eq!(super::subagent_auth_type(None, &api_key), AuthType::ApiKey);
 }
 #[test]
+fn subagent_effort_off_the_declared_menu_is_rejected_at_spawn() {
+    use xai_grok_sampling_types::ReasoningEffort;
+    let offered = [
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+    ];
+    let msg = match super::handle_request::gate_reasoning_effort(
+        ReasoningEffort::Xhigh,
+        &offered,
+        "menu-model",
+    ) {
+        super::handle_request::ReasoningEffortGate::Reject(msg) => msg,
+        _ => panic!("a level outside the declared menu must not reach the wire"),
+    };
+    assert_eq!(
+        msg,
+        "Model 'menu-model' does not offer reasoning effort 'xhigh'. \
+         Available levels: low, medium, high. \
+         Omit `reasoning_effort` to use the model's default."
+    );
+}
+#[test]
+fn subagent_effort_on_the_declared_menu_is_applied() {
+    use xai_grok_sampling_types::ReasoningEffort;
+    let offered = [ReasoningEffort::Low, ReasoningEffort::High];
+    assert!(
+        matches!(
+            super::handle_request::gate_reasoning_effort(
+                ReasoningEffort::High,
+                &offered,
+                "menu-model"
+            ),
+            super::handle_request::ReasoningEffortGate::Apply(ReasoningEffort::High)
+        ),
+        "a level the model declares must be stamped onto the child"
+    );
+}
+#[test]
+fn subagent_effort_is_ignored_when_the_model_has_no_effort_dial() {
+    use xai_grok_sampling_types::ReasoningEffort;
+    assert!(
+        matches!(
+            super::handle_request::gate_reasoning_effort(
+                ReasoningEffort::High,
+                &[],
+                "plain-model"
+            ),
+            super::handle_request::ReasoningEffortGate::Ignore
+        ),
+        "a model with no dial runs at its own default rather than failing the spawn"
+    );
+}
+#[test]
 fn fresh_tool_model_accepts_visible_key_and_internal_id() {
     let mut models = indexmap::IndexMap::new();
     models.insert("grok-3".to_string(), test_model_entry("grok-3-2025-02-15"));

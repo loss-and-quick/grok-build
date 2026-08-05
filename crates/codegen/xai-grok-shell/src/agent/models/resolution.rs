@@ -258,22 +258,47 @@ pub fn resolve_model_catalog(
     catalog
 }
 
+/// Levels a model accepts when it declares reasoning-effort support without a
+/// `reasoning_efforts` menu — the vocabulary that predates the declared menu.
+const BUILTIN_REASONING_EFFORTS: [ReasoningEffort; 4] = [
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::Xhigh,
+];
+
 /// Whether `effort` is a value this model will accept on the wire.
 fn model_offers_reasoning_effort(info: &config::ModelInfo, effort: ReasoningEffort) -> bool {
     if !info.supports_reasoning_effort {
         return false;
     }
     if info.reasoning_efforts.is_empty() {
-        matches!(
-            effort,
-            ReasoningEffort::Low
-                | ReasoningEffort::Medium
-                | ReasoningEffort::High
-                | ReasoningEffort::Xhigh
-        )
+        BUILTIN_REASONING_EFFORTS.contains(&effort)
     } else {
         info.reasoning_efforts.iter().any(|opt| opt.value == effort)
     }
+}
+
+/// Every level this model accepts on the wire, in the order the catalog
+/// declares them; empty when the model has no reasoning-effort dial at all.
+///
+/// The same rule as [`model_offers_reasoning_effort`], as a list, so a caller
+/// rejecting an off-menu level can name what the model does take. Duplicate
+/// values (two menu ids mapping to one level) collapse to the first.
+pub(crate) fn offered_reasoning_efforts(info: &config::ModelInfo) -> Vec<ReasoningEffort> {
+    if !info.supports_reasoning_effort {
+        return Vec::new();
+    }
+    if info.reasoning_efforts.is_empty() {
+        return BUILTIN_REASONING_EFFORTS.to_vec();
+    }
+    let mut levels: Vec<ReasoningEffort> = Vec::with_capacity(info.reasoning_efforts.len());
+    for opt in &info.reasoning_efforts {
+        if !levels.contains(&opt.value) {
+            levels.push(opt.value);
+        }
+    }
+    levels
 }
 
 /// True when an active `allowed_models` allowlist leaves no selectable model.
