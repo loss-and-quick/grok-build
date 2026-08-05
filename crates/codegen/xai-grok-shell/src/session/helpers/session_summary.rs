@@ -1,8 +1,7 @@
 //! Session title generation via LLM tool call.
 
 use crate::sampling::{
-    Client as OaiCompatClient, ConversationItem, ConversationRequest, ConversationToolChoice,
-    ToolSpec,
+    ConversationItem, ConversationRequest, ConversationResponse, ConversationToolChoice, ToolSpec,
 };
 use crate::session::helpers::chat::floor_char_boundary;
 
@@ -71,11 +70,23 @@ pub(crate) fn title_fallback_from_user_text(user_message: &str) -> String {
 /// We do not generate more of it on next user message unless its very important
 ///
 /// Ideally we should be updating it as the session continues, but ... skipping that for now
-pub async fn generate_session_summary(
+///
+/// `collect` issues the built request and is a seam rather than a client because
+/// the title runs on the persistence actor's task, which cannot hold one: in
+/// production it is the session's bounded aux failover loop, reached over
+/// [`AuxInferenceBridge`], and it is what re-derives the wire `model` from
+/// whichever catalog entry the pin actually routes to.
+///
+/// [`AuxInferenceBridge`]: crate::session::acp_session::AuxInferenceBridge
+pub async fn generate_session_summary<F, Fut>(
     user_message: String,
-    client: OaiCompatClient,
     model: &str,
-) -> String {
+    collect: F,
+) -> String
+where
+    F: FnOnce(ConversationRequest) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<ConversationResponse, String>>,
+{
     let clean_message = title_source_text(&user_message);
     let request = ConversationRequest::from_items(vec![
         ConversationItem::system(
@@ -115,7 +126,7 @@ Just generate the session_title and nothing else"#,
     .with_temperature(1.0)
     .with_tool_choice(ConversationToolChoice::Function("session_title".to_owned()));
 
-    match client.conversation_collect(request).await {
+    match collect(request).await {
         Ok(response) => {
             if let Some(a) = response.assistant()
                 && let Some(tool_call) = a.tool_calls.first()

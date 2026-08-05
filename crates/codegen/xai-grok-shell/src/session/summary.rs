@@ -6,7 +6,7 @@
 //! calls [`SummaryGenerator::update`] — all state transitions are internal.
 
 use crate::extensions::notification::{SessionNotification, SessionUpdate as XaiSessionUpdate};
-use crate::sampling::Client as OaiCompatClient;
+use crate::session::acp_session::{AUX_HOPS_SESSION_TITLE, AuxCall, AuxInferenceBridge};
 use crate::session::helpers::session_summary::generate_session_summary;
 use crate::session::info::Info;
 use crate::session::persistence::PersistenceMsg;
@@ -24,10 +24,35 @@ enum State {
 
 /// Dependencies for session title generation and fan-out.
 pub(crate) struct SummaryConfig {
-    pub(crate) sampling_client: OaiCompatClient,
+    /// The configured title model, spelled the way the operator wrote it. A
+    /// pin, not a resolved route: this actor never holds a client, an endpoint
+    /// or a credential, so there is nothing here to go stale against a `/model`
+    /// switch or a token refresh.
     pub(crate) model: String,
     /// Channel back to the persistence actor for sequential storage writes.
     pub(crate) persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
+    /// Seam onto the session's routing and its `[[model_fallbacks]]` chains.
+    ///
+    /// `None` until the session actor exists and installs one
+    /// ([`PersistenceMsg::TitleInference`]), which it does at spawn — before any
+    /// turn can produce the `ContentChunk` that triggers titling. A generator
+    /// that never receives one titles off the user's own text.
+    pub(crate) aux: Option<AuxInferenceBridge>,
+}
+
+/// How a title request asks to be routed and how far it may hop.
+///
+/// The background lane is declared here rather than at resolution because a
+/// title is work nobody asked for: queued as user-visible work against a
+/// provider that declares `max_concurrent`, it could delay the very turn that
+/// triggered it.
+fn title_aux_call(model_pin: String) -> AuxCall {
+    AuxCall {
+        caller: "session_title",
+        model_pin,
+        background: true,
+        max_hops: AUX_HOPS_SESSION_TITLE,
+    }
 }
 
 /// Manages session title generation with explicit lifecycle state.
@@ -42,17 +67,21 @@ pub(crate) struct SummaryGenerator {
 }
 
 impl SummaryGenerator {
-    pub(crate) fn new(mut config: SummaryConfig) -> Self {
-        // Titling is the one aux call that rides the *session's* client rather
-        // than a routed aux config, so it is the one place the background class
-        // has to be declared here instead of at resolution. Without this a
-        // title would queue as user-visible work against a provider that
-        // declares `max_concurrent` and could delay the turn that triggered it.
-        config.sampling_client = config.sampling_client.as_background();
+    pub(crate) fn new(config: SummaryConfig) -> Self {
         Self {
             state: State::Idle,
             config,
         }
+    }
+
+    /// Install the seam onto the session's auxiliary routing.
+    ///
+    /// Separate from construction because the persistence actor is started
+    /// *before* the session actor it belongs to — the handle it returns is one
+    /// of that actor's constructor arguments — so the bridge cannot exist yet
+    /// when this generator does.
+    pub(crate) fn set_aux(&mut self, aux: AuxInferenceBridge) {
+        self.config.aux = Some(aux);
     }
 
     /// Generate a session summary from the first content chunk.
@@ -75,7 +104,7 @@ impl SummaryGenerator {
                 // don't spawn duplicate title generation tasks.
                 self.state = State::Done;
 
-                let sampling_client = self.config.sampling_client.clone();
+                let aux = self.config.aux.clone();
                 let model = self.config.model.clone();
                 let persistence_tx = self.config.persistence_tx.clone();
 
@@ -83,8 +112,23 @@ impl SummaryGenerator {
                 // persistence actor can continue processing messages
                 // (updates, flushes) without waiting for the LLM call.
                 tokio::spawn(async move {
-                    let mut title =
-                        generate_session_summary(content.clone(), sampling_client, &model).await;
+                    let mut title = match aux {
+                        Some(aux) => {
+                            generate_session_summary(content.clone(), &model, |request| {
+                                aux.collect(title_aux_call(model.clone()), request)
+                            })
+                            .await
+                        }
+                        None => {
+                            tracing::debug!(
+                                model = %model,
+                                "session title: no session to route through; titling off user text"
+                            );
+                            crate::session::helpers::session_summary::title_fallback_from_user_text(
+                                &content,
+                            )
+                        }
+                    };
                     if title.trim().is_empty() {
                         title =
                             crate::session::helpers::session_summary::title_fallback_from_user_text(

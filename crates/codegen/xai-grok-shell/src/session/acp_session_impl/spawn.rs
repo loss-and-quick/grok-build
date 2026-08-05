@@ -1987,6 +1987,16 @@ pub(crate) async fn spawn_session_actor(
         session.wire_permission_auto_llm_classifier().await;
     }
     session.wire_web_fetch_distiller().await;
+    // Session titling runs on the persistence actor's own task, which has no
+    // reach into this actor and so could never consult `[[model_fallbacks]]`.
+    // Hand it a bridge now, before any turn can emit the content chunk that
+    // starts a title.
+    let _ = session
+        .notifications
+        .persistence_tx
+        .send(PersistenceMsg::TitleInference(
+            session.spawn_aux_inference_bridge(),
+        ));
     session
         .agent
         .borrow()

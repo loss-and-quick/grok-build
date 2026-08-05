@@ -7,7 +7,6 @@ use crate::config::StorageMode;
 
 use crate::remote::RemoteSync;
 
-use crate::sampling::Client as OaiCompatClient;
 use crate::sampling::ConversationItem;
 use crate::session::export::ExportedMetadata;
 use xai_grok_workspace::session::file_state::RewindPoint;
@@ -372,6 +371,15 @@ pub enum PersistenceMsg {
     /// Routed back through the persistence channel so the storage write
     /// stays sequential with other summary.json mutations.
     GeneratedTitle(String),
+    /// Hand the title generator its seam onto the session's model routing and
+    /// `[[model_fallbacks]]` chains.
+    ///
+    /// Sent by the session actor at spawn, because that actor does not exist
+    /// yet when this one is created — it takes the handle returned here as a
+    /// constructor argument. Ordering is what makes the late install safe: the
+    /// only message that starts a title is `ContentChunk`, which a turn emits,
+    /// and no turn can run before spawn has finished.
+    TitleInference(crate::session::acp_session::AuxInferenceBridge),
     /// Enable remote writeback for a session created `Local` before remote
     /// settings resolved (non-blocking startup); backfills its local history.
     UpgradeToWriteback {
@@ -2052,6 +2060,9 @@ impl SessionPersistence {
                         &self.info.cwd,
                     );
                 }
+                PersistenceMsg::TitleInference(aux) => {
+                    self.summary.set_aux(aux);
+                }
                 PersistenceMsg::GeneratedTitle(title) => {
                     // Auto-generated titles must never overwrite a title the
                     // user set via `/rename`. `set_generated_title_if_absent`
@@ -2524,7 +2535,6 @@ const WORKTREE_TOUCH_INTERVAL: std::time::Duration = std::time::Duration::from_s
 pub(crate) async fn new(
     info: &Info,
     model_id: acp::ModelId,
-    sampling_client: OaiCompatClient,
     storage_mode: StorageMode,
     auth_manager: Option<Arc<crate::auth::AuthManager>>,
     relay_sync: Option<crate::relay::RelaySync>,
@@ -2566,9 +2576,9 @@ pub(crate) async fn new(
             relay_sync,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
-                    sampling_client,
                     model: session_summary_model,
                     persistence_tx: tx,
+                    aux: None,
                 },
             ),
             registry_title_sync,
@@ -2595,7 +2605,6 @@ pub async fn new_with_explicit_dir(
     info: &Info,
     target_dir: PathBuf,
     model_id: acp::ModelId,
-    sampling_client: OaiCompatClient,
     session_summary_model: String,
 ) -> io::Result<PersistenceHandle> {
     let summary_path = target_dir.join("summary.json");
@@ -2637,9 +2646,9 @@ pub async fn new_with_explicit_dir(
             relay_sync: None,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
-                    sampling_client,
                     model: session_summary_model,
                     persistence_tx: tx,
+                    aux: None,
                 },
             ),
             registry_title_sync: None,
@@ -2699,7 +2708,6 @@ async fn pull_on_miss(
 #[expect(dead_code, reason = "wired when session restore flow calls load")]
 pub(crate) async fn load(
     info: &Info,
-    sampling_client: OaiCompatClient,
     storage_mode: StorageMode,
     auth_manager: Option<Arc<crate::auth::AuthManager>>,
     backend: Option<&crate::remote::BackendClient>,
@@ -2748,9 +2756,9 @@ pub(crate) async fn load(
     tokio::task::spawn(async move {
         let mut summary_gen = crate::session::summary::SummaryGenerator::new(
             crate::session::summary::SummaryConfig {
-                sampling_client,
                 model: session_summary_model,
                 persistence_tx: tx,
+                aux: None,
             },
         );
         if has_title {
@@ -2779,7 +2787,6 @@ pub(crate) async fn load(
 /// Use this for memory-efficient session loading when replaying updates.
 pub(crate) async fn load_light(
     info: &Info,
-    sampling_client: OaiCompatClient,
     storage_mode: StorageMode,
     auth_manager: Option<Arc<crate::auth::AuthManager>>,
     backend: Option<&crate::remote::BackendClient>,
@@ -2835,9 +2842,9 @@ pub(crate) async fn load_light(
     tokio::task::spawn(async move {
         let mut summary_gen = crate::session::summary::SummaryGenerator::new(
             crate::session::summary::SummaryConfig {
-                sampling_client,
                 model: session_summary_model,
                 persistence_tx: tx,
+                aux: None,
             },
         );
         if has_title {

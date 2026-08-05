@@ -85,52 +85,20 @@ impl MvpAgent {
             .unwrap_or(crate::models::default_image_description_model())
             .to_owned()
     }
-    fn resolve_session_summary_model(&self) -> String {
+    /// The configured session-title model, as the operator spelled it.
+    ///
+    /// Handed to the persistence actor unresolved. It used to arrive there as a
+    /// built client and a resolved wire model, which froze the title's endpoint
+    /// and credential at session open and left it the one auxiliary caller with
+    /// no way to consult `[[model_fallbacks]]`. The session actor resolves it
+    /// per call instead, over the bridge it installs at spawn.
+    pub(super) fn resolve_session_summary_model(&self) -> String {
         self.cfg
             .borrow()
             .session_summary_model
             .as_deref()
             .unwrap_or(crate::models::default_session_summary_model())
             .to_owned()
-    }
-    pub(super) fn build_summary_client(
-        &self,
-        primary: &SamplingConfig,
-    ) -> Result<(OaiCompatClient, String), acp::Error> {
-        let slug = self.resolve_session_summary_model();
-        let session_key = self.auth_manager.current_or_expired().map(|a| a.key.clone());
-        let models = self.models_manager.models();
-        let endpoints = self.models_manager.endpoints();
-        let (disable_api_key_auth, alpha_test_key, client_version) = {
-            let cfg = self.cfg.borrow();
-            (
-                cfg.grok_com_config.api_key_auth_disabled(),
-                cfg.endpoints.alpha_test_key.clone(),
-                cfg.client_version.clone(),
-            )
-        };
-        let resolved = crate::agent::config::resolve_aux_model_sampling_config(
-            &slug,
-            &models,
-            &endpoints,
-            &primary.base_url,
-            session_key.as_deref(),
-            disable_api_key_auth,
-            alpha_test_key,
-            client_version,
-        );
-        // On a catalog miss the summary slug must NOT be forced onto the
-        // session's endpoint: a custom `[[provider]]` does not serve it and
-        // every title request 404s. Degrade to the session model + config,
-        // exactly like image-describe.
-        let (model, config) = crate::agent::config::finalize_aux_sampler_config(
-            resolved,
-            primary,
-            primary.client_identifier.clone(),
-            primary.max_retries,
-        );
-        let client = OaiCompatClient::new(config).map_err(map_sampling_err_to_acp)?;
-        Ok((client, model))
     }
     fn has_proxy_credentials(&self) -> bool {
         self.cfg.borrow().endpoints.deployment_key.is_some()

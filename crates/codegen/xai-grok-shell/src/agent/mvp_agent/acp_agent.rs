@@ -1238,8 +1238,7 @@ impl acp::Agent for MvpAgent {
         {
             session_sampling.reasoning_effort = Some(effort);
         }
-        let (summary_client, summary_model) = self
-            .build_summary_client(&session_sampling)?;
+        let summary_model = self.resolve_session_summary_model();
         let relay_sync = if let Some(sync) = self
             .create_relay_sync(&session_id.0, &session_info)
         {
@@ -1277,7 +1276,6 @@ impl acp::Agent for MvpAgent {
             crate::session::persistence::new(
                     &session_info,
                     model_id,
-                    summary_client,
                     self.storage_mode.get(),
                     Some(self.auth_manager.clone()),
                     relay_sync,
@@ -1584,8 +1582,7 @@ impl acp::Agent for MvpAgent {
                 &self.models_manager.current_model_id(),
                 origin_client.clone(),
             );
-        let (summary_client, summary_model) = self
-            .build_summary_client(&load_session_sampling)?;
+        let summary_model = self.resolve_session_summary_model();
         let relay_sync = if let Some(sync) = self
             .create_relay_sync(&session_id.0, &session_info)
         {
@@ -1619,7 +1616,6 @@ impl acp::Agent for MvpAgent {
             });
         let (persistence_info, persistence) = crate::session::persistence::load_light(
                 &session_info,
-                summary_client,
                 self.storage_mode.get(),
                 Some(self.auth_manager.clone()),
                 backend.as_ref(),

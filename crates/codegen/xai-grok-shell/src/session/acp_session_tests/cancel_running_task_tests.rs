@@ -38,44 +38,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 id: acp::SessionId::new("test-persist-ack"),
                 cwd: cwd.as_str().to_string(),
             };
-            let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
-                api_key: Some("test-key".to_string()),
-                base_url: "http://localhost".to_string(),
-                model: "test".to_string(),
-                max_completion_tokens: None,
-                temperature: None,
-                top_p: None,
-                api_backend: Default::default(),
-                auth_scheme: Default::default(),
-                extra_headers: Default::default(),
-                query_params: Default::default(),
-                env_http_headers: Default::default(),
-                context_window: 100_000,
-                client_version: None,
-                force_http1: false,
-                max_retries: None,
-                stream_tool_calls: false,
-                idle_timeout_secs: None,
-                proxy: None,
-                client_identifier: None,
-                reasoning_effort: None,
-                thinking: None,
-                max_concurrent: None,
-                concurrency_class: Default::default(),
-                deployment_id: None,
-                user_id: None,
-                origin_client: None,
-                attribution_callback: None,
-                bearer_resolver: None,
-                supports_backend_search: false,
-                compactions_remaining: None,
-                compaction_at_tokens: None,
-                doom_loop_recovery: None,
-                header_injector: None,
-                request_interceptor: None,
-                error_hook: None,
-            })
-            .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
                 &crate::session::info::Info {
                     id: session_info.id.clone(),
@@ -83,7 +45,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 },
                 session_dir.clone(),
                 acp::ModelId::new("test-model"),
-                sampling_client,
                 crate::test_support::TEST_MODEL.to_owned(),
             )
             .await
@@ -359,44 +320,6 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 id: acp::SessionId::new("persist-memory"),
                 cwd: session_dir.path().to_string_lossy().to_string(),
             };
-            let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
-                api_key: Some("test-key".to_string()),
-                base_url: "http://localhost".to_string(),
-                model: "test-model".to_string(),
-                max_completion_tokens: None,
-                extra_headers: Default::default(),
-                query_params: Default::default(),
-                env_http_headers: Default::default(),
-                temperature: None,
-                top_p: None,
-                api_backend: Default::default(),
-                auth_scheme: Default::default(),
-                context_window: 100_000,
-                client_version: None,
-                force_http1: false,
-                max_retries: None,
-                stream_tool_calls: false,
-                idle_timeout_secs: None,
-                proxy: None,
-                client_identifier: None,
-                reasoning_effort: None,
-                thinking: None,
-                max_concurrent: None,
-                concurrency_class: Default::default(),
-                deployment_id: None,
-                user_id: None,
-                origin_client: None,
-                attribution_callback: None,
-                bearer_resolver: None,
-                supports_backend_search: false,
-                compactions_remaining: None,
-                compaction_at_tokens: None,
-                doom_loop_recovery: None,
-                header_injector: None,
-                request_interceptor: None,
-                error_hook: None,
-            })
-            .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
                     &crate::session::info::Info {
                         id: session_info.id.clone(),
@@ -404,7 +327,6 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     },
                     session_dir.path().to_path_buf(),
                     acp::ModelId::new("test-model"),
-                    sampling_client,
                     crate::test_support::TEST_MODEL.to_owned(),
                 )
                 .await
@@ -499,44 +421,6 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
             );
             let tool_context =
                 ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
-            let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
-                api_key: Some("test-key".to_string()),
-                base_url: "http://localhost".to_string(),
-                model: "test-model".to_string(),
-                max_completion_tokens: None,
-                extra_headers: Default::default(),
-                query_params: Default::default(),
-                env_http_headers: Default::default(),
-                temperature: None,
-                top_p: None,
-                api_backend: Default::default(),
-                auth_scheme: Default::default(),
-                context_window: 100_000,
-                client_version: None,
-                force_http1: false,
-                max_retries: None,
-                stream_tool_calls: false,
-                idle_timeout_secs: None,
-                proxy: None,
-                client_identifier: None,
-                reasoning_effort: None,
-                thinking: None,
-                max_concurrent: None,
-                concurrency_class: Default::default(),
-                deployment_id: None,
-                user_id: None,
-                origin_client: None,
-                attribution_callback: None,
-                bearer_resolver: None,
-                supports_backend_search: false,
-                compactions_remaining: None,
-                compaction_at_tokens: None,
-                doom_loop_recovery: None,
-                header_injector: None,
-                request_interceptor: None,
-                error_hook: None,
-            })
-            .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
                 &crate::session::info::Info {
                     id: session_info.id.clone(),
@@ -544,7 +428,6 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 },
                 session_dir.path().to_path_buf(),
                 acp::ModelId::new("test-model"),
-                sampling_client,
                 crate::test_support::TEST_MODEL.to_owned(),
             )
             .await

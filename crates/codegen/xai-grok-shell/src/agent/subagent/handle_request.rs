@@ -793,26 +793,10 @@ pub(crate) async fn run_shell_child(
         depth: 0,
         auth_manager: ctx.auth_manager.clone(),
     };
-    let sampling_client = match crate::sampling::Client::new(effective_sampling_config.clone()) {
-        Ok(c) => c,
-        Err(e) => {
-            let msg = format!("Sampling client error: {e}");
-            let result = fail_subagent(
-                &msg,
-                &subagent_id,
-                &child_session_id,
-                &subagent_meta_dir,
-                0,
-                &early_gcs_ctx,
-            );
-            return child_run_output(result, completion_data, None);
-        }
-    };
     let persistence = match session::persistence::new_with_explicit_dir(
         &child_session_info,
         child_session_dir.clone(),
         effective_model_id.clone(),
-        sampling_client,
         effective_sampling_config.model.clone(),
     )
     .await

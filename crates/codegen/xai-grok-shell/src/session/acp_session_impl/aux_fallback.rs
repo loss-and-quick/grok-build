@@ -8,6 +8,13 @@
 //! feature out with nothing to point at. This module gives those callers the
 //! same chains under a much smaller budget.
 //!
+//! Session titling was worse off still: it runs on the persistence actor's own
+//! task, which cannot reach a `SessionActor` at all, so it held a client built
+//! at session open and had nothing to ask for a second one. It arrives here
+//! over [`AuxInferenceBridge`], which is the `Send + Sync` seam onto this loop.
+//!
+//! [`AuxInferenceBridge`]: super::AuxInferenceBridge
+//!
 //! # Why not just call the turn's failover
 //!
 //! [`SessionActor::try_provider_failover`] is deliberately not reused:
@@ -31,7 +38,9 @@
 //! `effective_suggest_model`). Nothing in this module can turn that into a hop:
 //! it is only ever entered with a client that already resolved, and a chain
 //! target that does not resolve stops the hop rather than degrading to some
-//! other model.
+//! other model. What a miss costs differs by caller — distillation skips, a
+//! session title falls to the session's own route — but in neither case does it
+//! reach the missing model's chain.
 //!
 //! # Budgets
 //!
@@ -67,6 +76,23 @@ pub(super) const AUX_HOPS_PROMPT_SUGGEST: u32 = 1;
 /// `distill_timeout` around the whole thing, so extra hops mostly buy expiry.
 /// Failing distillation returns the raw page, which is degraded but correct.
 pub(super) const AUX_HOPS_WEB_FETCH_DISTILL: u32 = 1;
+
+/// Session title: two alternatives.
+///
+/// The only aux call with exactly one chance ever. It fires once, from the
+/// persistence actor's own task, and the generator marks itself done before the
+/// request goes out — a session that titles off truncated user text keeps that
+/// title for the rest of its life, and a resumed session that already has one
+/// never asks again. Nothing is waiting on it either: no tool call is blocked,
+/// no ghost-text window is closing, no permission verdict is pending, and it
+/// rides the background admission lane. So the bound worth respecting is total
+/// work rather than latency, and that bound is small — three requests of at most
+/// a hundred output tokens, once per session.
+///
+/// `pub(crate)`, unlike its neighbours, because the caller that spends it lives
+/// outside this actor: the persistence actor's title task holds the budget and
+/// hands it back over the bridge.
+pub(crate) const AUX_HOPS_SESSION_TITLE: u32 = 2;
 
 /// Image description: two alternatives.
 ///
@@ -732,12 +758,7 @@ mod tests {
                     actor_with(
                         vec![
                             provider("origin", "origin-model", &dead_url(), Some("origin-key")),
-                            provider(
-                                "backup",
-                                "backup-model",
-                                &backup.url(),
-                                Some("backup-key"),
-                            ),
+                            provider("backup", "backup-model", &backup.url(), Some("backup-key")),
                         ],
                         vec![chain("origin/origin-model", &["backup/backup-model"])],
                     )
@@ -759,6 +780,171 @@ mod tests {
 
                 assert!(answer.contains("60 rpm"), "got: {answer}");
                 assert_eq!(backup.request_bodies().len(), 1);
+            })
+            .await;
+    }
+
+    /// A chat-completions stream carrying one `session_title` tool call, which
+    /// is the only shape title generation accepts as a model-written title —
+    /// anything else falls through to truncated user text and would make these
+    /// two tests unable to tell a hop from a degrade.
+    fn title_tool_call_sse(title: &str) -> xai_grok_test_support::ScriptedResponse {
+        use serde_json::{Value, json};
+        use xai_grok_test_support::{ScriptedResponse, SseEvent};
+        let chunk = |delta: Value, finish_reason: Value| {
+            SseEvent::data(
+                json!({
+                    "id": "chatcmpl-title",
+                    "object": "chat.completion.chunk",
+                    "created": 1_234_567_890,
+                    "model": "test-model",
+                    "choices": [{ "index": 0, "delta": delta, "finish_reason": finish_reason }]
+                })
+                .to_string(),
+            )
+        };
+        ScriptedResponse::sse(vec![
+            chunk(
+                json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_session_title",
+                        "type": "function",
+                        "function": {
+                            "name": "session_title",
+                            "arguments": json!({ "session_title": title }).to_string()
+                        }
+                    }]
+                }),
+                Value::Null,
+            ),
+            chunk(json!({}), json!("tool_calls")),
+            SseEvent::data("[DONE]"),
+        ])
+    }
+
+    /// Drive the shipped title generator to the title it routes back through
+    /// the persistence channel.
+    async fn title_from(
+        actor: &std::sync::Arc<crate::session::acp_session::SessionActor>,
+        pin: &str,
+        user_text: &str,
+    ) -> String {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut generator = crate::session::summary::SummaryGenerator::new(
+            crate::session::summary::SummaryConfig {
+                model: pin.to_owned(),
+                persistence_tx: tx,
+                aux: Some(actor.spawn_aux_inference_bridge()),
+            },
+        );
+        generator.update(user_text.to_owned());
+        match rx.recv().await {
+            Some(PersistenceMsg::GeneratedTitle(title)) => title,
+            other => panic!("expected a generated title, got {:?}", other.is_some()),
+        }
+    }
+
+    /// The gap this wiring closes. A session title used to be issued on a
+    /// client built at session open, which could only ever reach the one
+    /// endpoint it was built for — so a title model that was throttled or down
+    /// silently produced a title cut from the user's own first ten words, and
+    /// that title is permanent. It now hops onto the operator's chain.
+    #[tokio::test]
+    async fn session_title_hops_to_the_chain_target() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let backup = MockInferenceServer::start().await.unwrap();
+                backup.enqueue_response(
+                    "/v1/chat/completions",
+                    title_tool_call_sse("Fix flaky auth test in login"),
+                );
+                let actor = std::sync::Arc::new(
+                    actor_with(
+                        vec![
+                            provider("origin", "origin-model", &dead_url(), Some("origin-key")),
+                            provider("backup", "backup-model", &backup.url(), Some("backup-key")),
+                        ],
+                        vec![chain("origin/origin-model", &["backup/backup-model"])],
+                    )
+                    .await,
+                );
+
+                let title = title_from(
+                    &actor,
+                    "origin/origin-model",
+                    "fix the flaky auth test in login.rs please",
+                )
+                .await;
+
+                assert_eq!(
+                    title, "Fix flaky auth test in login",
+                    "the chain target's title, not the truncated-user-text degrade"
+                );
+                let bodies = backup.request_bodies();
+                assert_eq!(bodies.len(), 1, "exactly one re-issue");
+                assert_eq!(
+                    bodies[0].get("model").and_then(|m| m.as_str()),
+                    Some("backup-model"),
+                    "the hop names the target entry's own slug, not the pin"
+                );
+            })
+            .await;
+    }
+
+    /// ...and the guard that must survive it. A title pin this catalog cannot
+    /// place is an availability answer, so it never enters that pin's chain: it
+    /// degrades to the session's own route, which is the one slug the session's
+    /// endpoint is known to serve. Forcing the pin's slug onto that endpoint
+    /// would only 404, and entering its chain would send the title to a
+    /// provider the operator never pointed titling at.
+    #[tokio::test]
+    async fn session_title_catalog_miss_degrades_without_entering_the_pins_chain() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let session_server = MockInferenceServer::start().await.unwrap();
+                session_server.enqueue_response(
+                    "/v1/chat/completions",
+                    title_tool_call_sse("Titled by the session model"),
+                );
+                let backup = MockInferenceServer::start().await.unwrap();
+                backup.set_response("should never be asked");
+                let actor = std::sync::Arc::new(
+                    actor_with(
+                        vec![
+                            provider(
+                                "session-provider",
+                                "session-model",
+                                &session_server.url(),
+                                Some("session-key"),
+                            ),
+                            provider("backup", "backup-model", &backup.url(), Some("backup-key")),
+                        ],
+                        // A chain that would fire for the absent pin if a miss
+                        // could ever reach one.
+                        vec![chain("absent/absent-model", &["backup/backup-model"])],
+                    )
+                    .await,
+                );
+                point_session_at(&actor, "session-model", &session_server.url());
+
+                let title = title_from(&actor, "absent/absent-model", "fix the auth bug").await;
+
+                assert_eq!(title, "Titled by the session model");
+                let bodies = session_server.request_bodies();
+                assert_eq!(bodies.len(), 1);
+                assert_eq!(
+                    bodies[0].get("model").and_then(|m| m.as_str()),
+                    Some("session-model"),
+                    "the absent pin must never go on the wire"
+                );
+                assert!(
+                    backup.requests().is_empty(),
+                    "a catalog miss must not enter the pin's chain"
+                );
             })
             .await;
     }

@@ -24,7 +24,6 @@ fn test_actor_with_remote_sync(
 ) -> ActorGuard {
     let (tx, rx) = mpsc::unbounded_channel();
     let summary_tx = tx.clone();
-    let sampling_client = OaiCompatClient::new(xai_grok_sampler::SamplerConfig::default()).unwrap();
     let task = tokio::spawn(
         SessionPersistence {
             info,
@@ -37,9 +36,9 @@ fn test_actor_with_remote_sync(
             relay_sync: None,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
-                    sampling_client,
                     model: String::new(),
                     persistence_tx: summary_tx,
+                    aux: None,
                 },
             ),
             registry_title_sync: None,

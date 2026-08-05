@@ -168,7 +168,12 @@ mod provider_control;
 use provider_control::*;
 #[path = "acp_session_impl/aux_fallback.rs"]
 mod aux_fallback;
+pub(crate) use aux_fallback::AUX_HOPS_SESSION_TITLE;
 use aux_fallback::*;
+#[path = "acp_session_impl/aux_bridge.rs"]
+mod aux_bridge;
+pub(crate) use aux_bridge::AuxCall;
+pub use aux_bridge::AuxInferenceBridge;
 #[path = "acp_session_impl/stop_gate.rs"]
 mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
