@@ -2043,6 +2043,7 @@ impl SessionActor {
                 });
             }
             self.drain_pending_interjections().await;
+            self.drain_pending_steering();
             self.flush_pending_skill_reminders().await;
             self.inject_pending_monitor_events().await;
             let memory_reminder = self.first_turn_memory_reminder().await;
@@ -2446,7 +2447,7 @@ impl SessionActor {
                         ));
                     }
                 }
-                if self.drain_pending_interjections().await {
+                if self.drain_pending_interjections().await | self.drain_pending_steering() {
                     tracing::info!("Drained interjection(s) before turn completion — continuing");
                     continue;
                 }
@@ -2458,7 +2459,7 @@ impl SessionActor {
                         model_fingerprint.clone(),
                     )
                     .await;
-                if self.drain_pending_interjections().await {
+                if self.drain_pending_interjections().await | self.drain_pending_steering() {
                     tracing::info!(
                         "Drained late interjection(s) during turn-end bookkeeping — continuing"
                     );

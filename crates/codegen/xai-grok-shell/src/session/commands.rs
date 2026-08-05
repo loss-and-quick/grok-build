@@ -765,6 +765,23 @@ pub enum SessionCommand {
         /// text-only / older clients.
         images: Vec<acp::ImageContent>,
     },
+    /// Steer this session's running turn from outside it: the text is queued
+    /// in `pending_steering` and injected as a `<system-reminder>` at the same
+    /// safe points [`Self::Interject`] uses.
+    ///
+    /// Two things separate it from `Interject`. The framing carries operator
+    /// authority rather than reading as the task's requester changing their
+    /// mind — the sender is whoever owns this session, not whoever asked for
+    /// the work. And `ack` reports whether the text actually reached the
+    /// conversation: a steering message that finds no turn left is answered
+    /// `false` and dropped, never converted into a turn of its own, because
+    /// the only sender today is a subagent's parent and a subagent runs
+    /// exactly one prompt — a resurrected turn would race the child's own
+    /// teardown.
+    Steer {
+        text: String,
+        ack: oneshot::Sender<bool>,
+    },
     /// Trigger a model turn so the model can print a visible goal progress
     /// summary.  The goal orchestrator injects a system reminder into context
     /// (via `push_parent_reminder`) *before* sending this command.  The session

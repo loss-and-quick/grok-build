@@ -148,6 +148,7 @@ async fn create_test_actor(
         max_retries: 3,
         max_turns: None,
         pending_interjections: InterjectionBuffer::new(),
+        pending_steering: Default::default(),
         pending_skill_reminders: Mutex::new(Vec::new()),
         idle_flush_timeout: None,
         dream_check_timeout: None,
@@ -592,6 +593,7 @@ async fn create_test_actor_with_memory(
         max_retries: 3,
         max_turns: None,
         pending_interjections: InterjectionBuffer::new(),
+        pending_steering: Default::default(),
         pending_skill_reminders: Mutex::new(Vec::new()),
         idle_flush_timeout: memory_config
             .as_ref()
@@ -1374,6 +1376,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 max_retries: 3,
                 max_turns: None,
                 pending_interjections: InterjectionBuffer::new(),
+                pending_steering: Default::default(),
                 pending_skill_reminders: Mutex::new(Vec::new()),
                 idle_flush_timeout: None,
                 dream_check_timeout: None,

@@ -214,6 +214,7 @@ impl SessionActor {
             self.emit_buffered(notification).await;
         }
         self.pending_interjections.clear();
+        self.discard_pending_steering();
         self.cancel_running_task(false, false, false, Some("send_now".to_string()))
             .await;
         // Re-enable notification drains: unlike Ctrl+C, a send-now means the user is re-engaged.

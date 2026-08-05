@@ -35,6 +35,20 @@ async fn wait_for_pending_interjection(buf: &InterjectionBuffer<acp::ImageConten
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
+
+/// Steering counterpart of [`wait_for_pending_interjection`]. A child parked in
+/// a wait tool is the case a correction most needs to reach: without this the
+/// message would sit buffered until whatever it was told to stop doing finished.
+async fn wait_for_pending_steering(
+    buf: &std::sync::Arc<parking_lot::Mutex<Vec<super::PendingSteeringMessage>>>,
+) {
+    loop {
+        if !buf.lock().is_empty() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
 use crate::tools::tool_context::BlockingWaitGuard;
 /// Model-facing result when a wait is aborted for a pending interjection.
 fn interrupted_wait_tool_result(args: &serde_json::Value) -> ToolRunResult {
@@ -346,6 +360,7 @@ impl SessionActor {
             }
         }
         self.drain_pending_interjections().await;
+        self.drain_pending_steering();
         self.flush_pending_skill_reminders().await;
         if let Some(final_result) = final_result {
             return Ok(final_result);
@@ -471,6 +486,7 @@ impl SessionActor {
         let shared_recovery = Arc::new(tokio::sync::OnceCell::<bool>::const_new());
         let workspace_ops = self.workspace_ops.clone();
         let pending_interjections = self.pending_interjections.clone();
+        let pending_steering = self.pending_steering.clone();
         let session_id: Arc<str> = Arc::from(&*self.session_info.id.0);
         let dispatch_futures: Vec<_> = approved
             .iter()
@@ -482,6 +498,7 @@ impl SessionActor {
                 let workspace_ops = workspace_ops.clone();
                 let session_id = session_id.clone();
                 let pending_interjections = pending_interjections.clone();
+                let pending_steering = pending_steering.clone();
                 let blocking_wait_depth = self.tool_context.blocking_wait_depth.clone();
                 let interruptible =
                     is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args);
@@ -519,6 +536,16 @@ impl SessionActor {
                                     "abort wait tool: interjection pending"
                                 );
                                 Ok(interrupted_wait_tool_result(&prepared.parsed_args))
+                            }
+                            _ = wait_for_pending_steering(&pending_steering) => {
+                                tracing::info!(
+                                    tool = %prepared.tool_name,
+                                    "abort wait tool: steering message pending"
+                                );
+                                Ok(interrupted_wait_tool_result_with_msg(
+                                    &prepared.parsed_args,
+                                    "Wait interrupted: the agent that started this task sent a correction.",
+                                ))
                             }
                         }
                     } else {

@@ -440,6 +440,11 @@ pub(super) async fn run_session(
                     if session.flush_stranded_interjections().await {
                         tracing::info!("Flushed stranded interjection(s) into prompt turns");
                     }
+                    // The steering counterpart of that flush, and deliberately
+                    // not the same move: a message that raced past the turn's
+                    // final drain has no later turn it could honestly run in,
+                    // so it is answered "not delivered" instead of queued.
+                    session.discard_pending_steering();
                     SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                     // If no user prompt started, check for pending notifications
                     SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
@@ -997,6 +1002,10 @@ pub(super) async fn run_session(
                             // Clear pending interjections — the turn is being
                             // cancelled, so they have no active turn to inject into.
                             session.pending_interjections.clear();
+                            // Same reasoning for steering messages, except the
+                            // sender is waiting on an answer: tell it the turn
+                            // it aimed at is gone.
+                            session.discard_pending_steering();
                             let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
                             session
                                 .cancel_running_task(
@@ -1997,6 +2006,9 @@ pub(super) async fn run_session(
                                 )
                                 .await;
                             }
+                        }
+                        SessionCommand::Steer { text, ack } => {
+                            session.accept_steering_message(text, ack);
                         }
                         SessionCommand::GoalSummaryTurn { prompt_text } => {
                             // Queue a synthetic prompt so the model gets a turn

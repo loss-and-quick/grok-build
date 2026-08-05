@@ -17,6 +17,35 @@ pub(crate) use xai_interjection_core::{InterjectionBuffer, drain_formatted, form
 /// Shell instantiation of the shared entry type: images are ACP content.
 pub(crate) type PendingInterjection = xai_interjection_core::PendingInterjection<acp::ImageContent>;
 
+/// A buffered steering message plus the channel that reports its fate.
+///
+/// Deliberately not a [`PendingInterjection`]: an interjection is the user's
+/// own text and is framed as a `<user_query>` the model may weigh against its
+/// in-flight work, while this is the session owner speaking and is framed as a
+/// `<system-reminder>`. Keeping them in separate buffers also keeps the
+/// interjection path — which converts strays into prompt turns — from ever
+/// resurrecting a steering message as a turn of its own.
+pub(crate) struct PendingSteeringMessage {
+    pub(crate) text: String,
+    /// `true` once the text is in the conversation; `false` if the turn ended
+    /// or was cancelled first. Dropped without a send only when the session
+    /// actor itself goes away, which the sender reads as unreachable.
+    pub(crate) ack: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// Wrap steering text for the model. The framing names the sender's standing —
+/// the agent that owns this session, not the requester of its task — so the
+/// model treats it as a correction to follow rather than a change of mind to
+/// weigh. Truncated on the same threshold as an interjection so one oversized
+/// message cannot displace the turn's own context.
+pub(crate) fn format_steering_message(text: String) -> String {
+    let truncated = xai_interjection_core::truncate_large_prompt(text);
+    format!(
+        "The agent that started this task sent a correction while you were \
+         working. Treat it as an instruction, not as new information:\n{truncated}"
+    )
+}
+
 /// Prompt-id prefix for interjections that missed their turn and were
 /// converted into standalone prompt turns (arrived while idle, or after the
 /// running turn's final drain). The prefix keeps the turn's user echo
@@ -96,6 +125,74 @@ impl SessionActor {
             state.pending_inputs.push_back(item);
         }
         tracing::info!("Converted stranded interjection into a queued prompt turn");
+    }
+
+    /// Take an out-of-band steering message aimed at the running turn.
+    ///
+    /// The same running-turn test [`SessionCommand::Interject`] makes, with the
+    /// opposite fallback: an interjection that finds no turn becomes a prompt
+    /// turn of its own, while a steering message is answered `false` and
+    /// dropped. Nothing is acknowledged here on the accepting path — the drain
+    /// does that once the text is actually in the conversation.
+    pub(crate) fn accept_steering_message(
+        &self,
+        text: String,
+        ack: tokio::sync::oneshot::Sender<bool>,
+    ) {
+        let turn_running = self
+            .current_prompt_id
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .is_some();
+        if !turn_running {
+            let _ = ack.send(false);
+            tracing::info!("Dropped steering message: no turn running in this session");
+            return;
+        }
+        self.pending_steering
+            .lock()
+            .push(PendingSteeringMessage { text, ack });
+        tracing::info!("Queued out-of-band steering message");
+    }
+
+    /// Drain buffered steering messages into the conversation as
+    /// `<system-reminder>` items and acknowledge each one. Returns `true` if
+    /// anything was drained, so the caller can `continue` the turn loop and let
+    /// the model act on the correction.
+    ///
+    /// Called at exactly the drain points [`Self::drain_pending_interjections`]
+    /// uses; the ack fires here rather than at enqueue so "delivered" means the
+    /// model will see it, not that a channel accepted it.
+    pub(super) fn drain_pending_steering(&self) -> bool {
+        let entries = std::mem::take(&mut *self.pending_steering.lock());
+        if entries.is_empty() {
+            return false;
+        }
+        for PendingSteeringMessage { text, ack } in entries {
+            self.push_system_reminder(&format_steering_message(text));
+            let _ = ack.send(true);
+        }
+        tracing::info!("Injected out-of-band steering message(s) into the running turn");
+        true
+    }
+
+    /// Answer every buffered steering message with "not delivered" and drop it.
+    ///
+    /// Used where the turn the messages were aimed at is gone — cancelled, or
+    /// already past its final drain. Dropping is the point: a subagent runs one
+    /// prompt, so there is no later turn these could honestly be held for, and
+    /// the sender is told so rather than left believing it steered.
+    pub(super) fn discard_pending_steering(&self) {
+        let entries = std::mem::take(&mut *self.pending_steering.lock());
+        if entries.is_empty() {
+            return;
+        }
+        let count = entries.len();
+        for entry in entries {
+            let _ = entry.ack.send(false);
+        }
+        tracing::info!(count, "Discarded steering message(s) with no turn to steer");
     }
 
     /// Flush interjections that missed the completed turn's final drain into
