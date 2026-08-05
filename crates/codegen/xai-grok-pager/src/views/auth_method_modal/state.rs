@@ -40,10 +40,10 @@ pub struct AuthMethodEntry {
     /// Classification of the method id. Informational only — the picker does
     /// not prefer any particular kind.
     pub kind: AuthMethodKind,
-    /// True only when this entry reflects the credential *actually in use*.
-    /// The pager is not told which credential the agent authenticated with
-    /// (`AuthMeta` carries no method id), so callers pass `None` for
-    /// `current_method_id` today and no row claims to be current.
+    /// True only when this entry reflects the credential *actually in use*,
+    /// from `AuthMeta::auth_method_id`. `None` for `current_method_id` (the
+    /// agent could not name an owning method, e.g. a plain API key) leaves
+    /// every row unbadged rather than badging the default.
     pub is_current: bool,
     pub details: Vec<AuthMethodDetail>,
 }

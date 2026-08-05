@@ -103,11 +103,10 @@ fn open_auth_method_picker(app: &mut AppView, switch_account: bool) -> bool {
     }
     app.auth_method_picker = Some(crate::views::auth_method_modal::AuthMethodPickerState::new(
         &app.auth_methods,
-        // The agent does not tell the pager which credential it actually
-        // authenticated with, so no row is badged "current".
-        // `login_method_id` is only a default and would mis-badge a
-        // machine that has never logged in.
-        None,
+        // The credential in use, reported by the agent. Distinct from
+        // `login_method_id`, which is only the default a login would start and
+        // would mis-badge a machine that has never logged in.
+        app.current_auth_method_id.as_ref(),
         app.login_method_id.as_ref(),
         switch_account,
     ));

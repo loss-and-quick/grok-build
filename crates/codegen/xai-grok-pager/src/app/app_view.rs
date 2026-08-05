@@ -1031,6 +1031,12 @@ pub struct AppView {
     pub login_label: Option<String>,
     /// The auth method ID to use for login.
     pub login_method_id: Option<acp::AuthMethodId>,
+    /// The method the agent is *actually* authenticated with, from
+    /// [`xai_grok_shell::auth::AuthMeta::auth_method_id`] — as opposed to
+    /// [`Self::login_method_id`], which is only the method a login would start.
+    /// `None` when the agent reports no owning method (a plain API key, or no
+    /// credential yet); the picker then badges nothing rather than the default.
+    pub current_auth_method_id: Option<acp::AuthMethodId>,
     /// Initial auth mode hint from method metadata.
     pub auth_start_mode: AuthMode,
     /// Text buffer for manual auth token paste (loopback mode).
@@ -1372,6 +1378,11 @@ impl AppView {
             );
         }
         self.subscription_tier = meta.subscription_tier.clone();
+        // Adopted verbatim, `None` included: an absent id means the agent could
+        // not name an owning login method, which is not the same as "the one we
+        // would log in with". Carrying the previous value forward would keep
+        // badging a row after a logout.
+        self.current_auth_method_id = meta.auth_method_id.as_deref().map(acp::AuthMethodId::new);
         self.is_first_party_account = meta.is_first_party_account;
         let was_api_key = self.is_api_key_auth;
         self.is_api_key_auth = meta.auth_mode.as_deref().is_some_and(is_api_key_label)
@@ -1558,6 +1569,7 @@ impl AppView {
             trust_state: TrustState::Done,
             login_label: None,
             login_method_id: None,
+            current_auth_method_id: None,
             auth_start_mode: AuthMode::Pending,
             auth_code_input: LineEditor::default(),
             next_auth_request_seq: 1,
@@ -5857,6 +5869,7 @@ pub(crate) mod tests {
             trust_state: TrustState::Done,
             login_label: None,
             login_method_id: None,
+            current_auth_method_id: None,
             auth_start_mode: AuthMode::Pending,
             auth_code_input: LineEditor::default(),
             next_auth_request_seq: 1,

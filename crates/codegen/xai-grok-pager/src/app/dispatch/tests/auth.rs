@@ -908,8 +908,8 @@ fn login_with_two_interactive_methods_opens_the_picker() {
 }
 
 /// The picker defaults to the configured method rather than to any particular
-/// kind, and badges nothing as current (the pager is not told which credential
-/// is in use).
+/// kind, and badges nothing as current while the agent has not reported a
+/// credential.
 #[test]
 fn picker_defaults_to_the_configured_method_and_badges_nothing() {
     let mut app = test_app_with_agent();
@@ -926,6 +926,59 @@ fn picker_defaults_to_the_configured_method_and_badges_nothing() {
     assert!(
         picker.entries.iter().all(|e| !e.is_current),
         "a merely-defaulted method must not be badged as the current credential"
+    );
+}
+
+/// The credential the agent reports is the one badged — not the default the
+/// picker starts on. Both are set here, and they disagree, so a call site that
+/// passed `login_method_id` for both would badge the wrong row.
+#[test]
+fn picker_badges_the_credential_the_agent_reports() {
+    let mut app = test_app_with_agent();
+    advertise_two_interactive_methods(&mut app);
+    app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
+        auth_method_id: Some("plugin-oauth:example-auth".to_string()),
+        ..Default::default()
+    });
+    app.login_method_id = Some(acp::AuthMethodId::new("grok.com"));
+
+    dispatch(Action::Login, &mut app);
+
+    let picker = open_picker(&app);
+    let badged: Vec<String> = picker
+        .entries
+        .iter()
+        .filter(|e| e.is_current)
+        .map(|e| e.method_id.0.to_string())
+        .collect();
+    assert_eq!(badged, vec!["plugin-oauth:example-auth".to_string()]);
+    assert_eq!(
+        picker.selected_method_id().map(|id| id.0.to_string()),
+        Some("grok.com".to_string()),
+        "the configured default still drives the initial selection"
+    );
+}
+
+/// A session with no first-party credential and no owning method reports it:
+/// `apply_auth_meta` adopts the absence rather than leaving the previous badge
+/// standing (which is what a logout looks like from here).
+#[test]
+fn an_absent_identity_clears_the_badge_rather_than_persisting_it() {
+    let mut app = test_app_with_agent();
+    advertise_two_interactive_methods(&mut app);
+    app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
+        auth_method_id: Some("grok.com".to_string()),
+        ..Default::default()
+    });
+    assert!(app.current_auth_method_id.is_some());
+
+    app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+
+    assert_eq!(app.current_auth_method_id, None);
+    dispatch(Action::Login, &mut app);
+    assert!(
+        open_picker(&app).entries.iter().all(|e| !e.is_current),
+        "no credential reported means no row is badged"
     );
 }
 

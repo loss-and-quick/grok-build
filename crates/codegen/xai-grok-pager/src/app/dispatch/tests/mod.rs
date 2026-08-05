@@ -143,6 +143,7 @@ fn test_app() -> AppView {
         trust_state: TrustState::Done,
         login_label: None,
         login_method_id: None,
+        current_auth_method_id: None,
         auth_start_mode: AuthMode::Pending,
         auth_code_input: Default::default(),
         next_auth_request_seq: 1,
