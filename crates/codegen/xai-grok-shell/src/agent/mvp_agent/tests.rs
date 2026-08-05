@@ -2632,6 +2632,111 @@ async fn auth_type_no_method_id_with_current_returns_session_token() {
     assert!(agent.auth_manager.current().is_some());
     assert_eq!(agent.auth_type(), xai_chat_state::AuthType::SessionToken,);
 }
+// ── AuthMeta credential identity ────────────────────────────────────────
+//
+// `AuthMeta::auth_method_id` is what lets the login picker badge the row the
+// session is actually on. It has to name the same row after a re-auth of the
+// same account, and it has to stay absent when nothing owns the credential.
+
+/// Decode the `AuthMeta` from an `authenticate` reply, or `None` when the
+/// agent reported no authenticated session.
+fn auth_meta_of(agent: &MvpAgent) -> Option<crate::auth::AuthMeta> {
+    let meta = agent.auth_response_with_meta().meta?;
+    serde_json::from_value(serde_json::Value::Object(meta.into_iter().collect()))
+        .expect("AuthMeta round-trips through its own wire form")
+}
+
+/// A session token minted by `grok.com` and a session restored from
+/// `auth.json` on the next launch are the same account, so both must report
+/// the same row. The raw method id does not: it reads `grok.com` then
+/// `cached_token`.
+#[tokio::test(flavor = "current_thread")]
+async fn auth_meta_identity_survives_a_reauth_of_the_same_account() {
+    use crate::auth::GrokAuth;
+    let agent = build_minimal_agent_for_tests();
+    agent.auth_manager.hot_swap(GrokAuth::test_default());
+
+    agent.set_auth_method(acp::AuthMethodId::new(
+        crate::agent::auth_method::GROK_COM_METHOD_ID,
+    ));
+    let after_login = auth_meta_of(&agent).expect("authenticated");
+    assert_eq!(after_login.auth_method_id.as_deref(), Some("grok.com"));
+    assert!(after_login.is_first_party_account);
+
+    // Next launch: same credential, served from the cache.
+    agent.set_auth_method(acp::AuthMethodId::new(
+        crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
+    ));
+    let after_relaunch = auth_meta_of(&agent).expect("authenticated");
+    assert_eq!(
+        after_relaunch.auth_method_id, after_login.auth_method_id,
+        "a restored session must not look like a different credential"
+    );
+}
+
+/// A plugin sign-in mints nothing into the `AuthManager`, so the session has
+/// no first-party credential at all. It must still report which plugin account
+/// it is on, and must not claim a first-party account, email, or tier.
+#[tokio::test(flavor = "current_thread")]
+async fn auth_meta_reports_a_plugin_account_without_inventing_a_first_party_one() {
+    let agent = build_minimal_agent_for_tests();
+    assert!(agent.auth_manager.current().is_none());
+    agent.set_auth_method(acp::AuthMethodId::new(
+        crate::agent::auth_method::plugin_oauth_method_id("example-auth", Some("work")),
+    ));
+
+    let meta = auth_meta_of(&agent).expect("a plugin sign-in is an authenticated session");
+    assert_eq!(
+        meta.auth_method_id.as_deref(),
+        Some("plugin-oauth:example-auth#work"),
+        "the account selector is part of the identity: one plugin can hold several"
+    );
+    assert!(!meta.is_first_party_account);
+    assert_eq!(meta.email, None);
+    assert_eq!(meta.auth_mode, None);
+    assert_eq!(meta.subscription_tier, None);
+    assert_eq!(meta.team_id, None);
+    assert!(
+        meta.coding_data_retention_opt_out,
+        "absent retention preference must stay opted out"
+    );
+}
+
+/// No first-party credential and nothing else owning one: report nothing at
+/// all rather than a default that reads like an account.
+#[tokio::test(flavor = "current_thread")]
+async fn auth_meta_absent_when_no_credential_is_in_use() {
+    let agent = build_minimal_agent_for_tests();
+    assert!(auth_meta_of(&agent).is_none(), "pre-authenticate");
+
+    agent.set_auth_method(acp::AuthMethodId::new(
+        crate::agent::auth_method::XAI_API_KEY_METHOD_ID,
+    ));
+    assert!(
+        auth_meta_of(&agent).is_none(),
+        "a bare API key is not an account"
+    );
+}
+
+/// An API key parked in `auth.json` is a credential, but no login row owns it,
+/// so the identity is absent while the rest of the meta is still reported.
+#[tokio::test(flavor = "current_thread")]
+async fn auth_meta_omits_the_identity_for_a_stored_api_key() {
+    use crate::auth::{AuthMode, GrokAuth};
+    let agent = build_minimal_agent_for_tests();
+    agent.auth_manager.hot_swap(GrokAuth {
+        auth_mode: AuthMode::ApiKey,
+        ..GrokAuth::test_default()
+    });
+    agent.set_auth_method(acp::AuthMethodId::new(
+        crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
+    ));
+
+    let meta = auth_meta_of(&agent).expect("a credential is present");
+    assert_eq!(meta.auth_method_id, None);
+    assert!(!meta.is_first_party_account);
+}
+
 /// Minimal agent whose `grok_com_config` engages the api-key kill switch
 /// (`disable_api_key_auth = true`), mirroring a forced-IdP deployment.
 fn build_agent_with_api_key_auth_disabled() -> MvpAgent {

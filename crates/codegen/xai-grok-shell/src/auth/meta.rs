@@ -17,6 +17,25 @@ pub struct AuthMeta {
     pub email: Option<String>,
     #[serde(default)]
     pub auth_mode: Option<String>,
+    /// ACP method id identifying the credential this session is authenticated
+    /// with, in the namespace of the *interactive* login methods a client
+    /// advertises — so a picker can mark the row actually in use.
+    ///
+    /// Normalized, not literal: `cached_token` is not an identity (the same
+    /// account reports `grok.com` right after a login and `cached_token` on the
+    /// next launch), so it resolves to the interactive method that owns the
+    /// credential. A plugin sign-in reports its own
+    /// `plugin-oauth:<plugin>#<account>` id, which already names the account and
+    /// so distinguishes two accounts held by one plugin.
+    ///
+    /// `None` when nothing owns the credential: a plain API key, or no
+    /// credential at all. Absent rather than guessed — a client must badge
+    /// nothing rather than badge the default.
+    ///
+    /// An identifier only. Never a token: this crosses to the pager and lands
+    /// in transcripts.
+    #[serde(default)]
+    pub auth_method_id: Option<String>,
     /// `true` when the active session credential is a first-party xAI account
     /// login: a grok.com web login, an OIDC login (including enterprise
     /// issuers), or an external auth provider that declared an xAI issuer.
@@ -61,6 +80,7 @@ impl Default for AuthMeta {
         Self {
             email: None,
             auth_mode: None,
+            auth_method_id: None,
             is_first_party_account: false,
             team_id: None,
             team_name: None,

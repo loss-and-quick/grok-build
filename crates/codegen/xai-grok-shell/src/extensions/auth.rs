@@ -174,10 +174,19 @@ async fn handle_logout(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 /// response with gate info so the pager can refresh the gate state.
 async fn handle_check_subscription(agent: &MvpAgent) -> ExtResult {
     agent.retry_subscription_check().await;
-    let response = agent.auth_response_with_meta();
+    // Scoped to the first-party account on purpose. This answers "is the
+    // subscription gate lifted", and the pager treats a missing `meta` as
+    // "unverified" and keeps a deferred gate up. A plugin-OAuth session has no
+    // subscription to check, so replying with its meta would lift a gate that
+    // was never verified -- `auth_response_with_meta` reports that session for
+    // the login picker's benefit, which is a different question.
+    let meta = agent
+        .auth_manager
+        .current()
+        .and_then(|_| agent.auth_response_with_meta().meta);
     to_raw_response(&serde_json::json!({
-        "authenticated": response.meta.is_some(),
-        "meta": response.meta,
+        "authenticated": meta.is_some(),
+        "meta": meta,
     }))
 }
 

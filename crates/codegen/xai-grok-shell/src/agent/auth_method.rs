@@ -284,6 +284,53 @@ fn push_interactive_login(
     }
 }
 
+/// The one first-party interactive login method advertised for this
+/// deployment. Enterprise OIDC and `grok.com` are mutually exclusive, so the
+/// answer is a single id.
+///
+/// Must agree with `push_interactive_login`, which advertises the method
+/// itself; the two build different objects (issuer vs. provider label) so they
+/// cannot literally share a branch, and a test pins them to the same answer.
+pub fn interactive_login_method_id(has_enterprise_oidc: bool) -> &'static str {
+    if has_enterprise_oidc {
+        OIDC_METHOD_ID
+    } else {
+        GROK_COM_METHOD_ID
+    }
+}
+
+/// Identity of the credential a session is authenticated with, as the id of the
+/// interactive method that owns it — the picker's row key.
+///
+/// `authenticated_with` is the method id the last `authenticate` ran, which is
+/// *not* an identity on its own: the same account reports `grok.com` right
+/// after a login and `cached_token` on the next launch, once the token is
+/// served from `auth.json`. Normalizing `cached_token` to the interactive
+/// method that owns it is what makes the answer survive a re-auth — and a
+/// restart — of the same account. A plugin sign-in needs no normalization: its
+/// id carries the plugin and the account selector, both declared in the
+/// manifest rather than derived from a token.
+///
+/// `session_credential` says a first-party *session* token backs the id (see
+/// [`crate::auth::GrokAuth::is_session_auth`]). A stored plain API key is not
+/// owned by any interactive method, so it resolves to `None` rather than
+/// badging a login row the user never used.
+pub fn credential_method_id(
+    authenticated_with: Option<&acp::AuthMethodId>,
+    session_credential: bool,
+    has_enterprise_oidc: bool,
+) -> Option<acp::AuthMethodId> {
+    let id = authenticated_with?;
+    match AuthMethodKind::from_id(id) {
+        AuthMethodKind::GrokCom | AuthMethodKind::Oidc | AuthMethodKind::PluginOauth => {
+            Some(id.clone())
+        }
+        AuthMethodKind::CachedToken => session_credential
+            .then(|| acp::AuthMethodId::new(interactive_login_method_id(has_enterprise_oidc))),
+        AuthMethodKind::XaiApiKey | AuthMethodKind::Unknown => None,
+    }
+}
+
 /// ACP session auth method. Use `is_session_based_method` for classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMethodKind {
@@ -1421,5 +1468,116 @@ mod tests {
         });
         assert_eq!(method_ids(&built), vec![GROK_COM_METHOD_ID]);
         assert!(built.default_auth_method_id.is_none());
+    }
+
+    // ── credential identity ─────────────────────────────────────────────
+
+    /// `interactive_login_method_id` must name the method the builder actually
+    /// advertises, in both deployment shapes. They are separate branches, so
+    /// only a test keeps them honest.
+    #[test]
+    fn interactive_login_method_id_matches_what_is_advertised() {
+        for (has_enterprise_oidc, issuer) in
+            [(false, None), (true, Some("https://idp.example.test"))]
+        {
+            let built = build_auth_methods(AuthMethodsBuildInputs {
+                has_enterprise_oidc,
+                enterprise_oidc_issuer: issuer,
+                ..default_inputs()
+            });
+            let advertised: Vec<&str> = built
+                .methods
+                .iter()
+                .filter(|m| AuthMethodKind::from_id(m.id()).needs_interactive_login())
+                .map(|m| m.id().0.as_ref())
+                .collect();
+            assert_eq!(
+                advertised,
+                vec![interactive_login_method_id(has_enterprise_oidc)],
+                "has_enterprise_oidc={has_enterprise_oidc}"
+            );
+        }
+    }
+
+    /// The identity must not change when the same account is authenticated
+    /// again, nor when the next launch serves it from `auth.json` instead. A
+    /// raw method id fails this: it reads `grok.com` then `cached_token`.
+    #[test]
+    fn identity_survives_a_reauth_of_the_same_account() {
+        let after_login = credential_method_id(
+            Some(&acp::AuthMethodId::new(GROK_COM_METHOD_ID)),
+            true,
+            false,
+        );
+        let after_relaunch = credential_method_id(
+            Some(&acp::AuthMethodId::new(CACHED_TOKEN_AUTH_METHOD_ID)),
+            true,
+            false,
+        );
+        assert_eq!(after_login, after_relaunch);
+        assert_eq!(
+            after_login.map(|id| id.0.to_string()),
+            Some(GROK_COM_METHOD_ID.to_string())
+        );
+
+        // Same for an enterprise deployment, whose interactive row is `oidc`.
+        assert_eq!(
+            credential_method_id(Some(&acp::AuthMethodId::new(OIDC_METHOD_ID)), true, true),
+            credential_method_id(
+                Some(&acp::AuthMethodId::new(CACHED_TOKEN_AUTH_METHOD_ID)),
+                true,
+                true
+            ),
+        );
+    }
+
+    /// A plugin sign-in is already stable: plugin name and account selector are
+    /// declared in the manifest, so re-authorizing the same account yields the
+    /// same id — and the two accounts stay distinct.
+    #[test]
+    fn plugin_identity_keeps_accounts_apart_across_reauth() {
+        let work = acp::AuthMethodId::new(plugin_oauth_method_id("acme", Some("work")));
+        let other = acp::AuthMethodId::new(plugin_oauth_method_id("acme", Some("personal")));
+        assert_eq!(
+            credential_method_id(Some(&work), false, false),
+            credential_method_id(Some(&work), false, false)
+        );
+        assert_ne!(
+            credential_method_id(Some(&work), false, false),
+            credential_method_id(Some(&other), false, false)
+        );
+        assert_eq!(
+            credential_method_id(Some(&work), false, false).map(|id| id.0.to_string()),
+            Some("plugin-oauth:acme#work".to_string())
+        );
+    }
+
+    /// Nothing owns a plain API key, and a cached entry that is not a session
+    /// credential (an API key stored in `auth.json`) must not be attributed to
+    /// the interactive login row. Absent, never guessed.
+    #[test]
+    fn api_key_and_unknown_credentials_have_no_owning_method() {
+        assert_eq!(
+            credential_method_id(
+                Some(&acp::AuthMethodId::new(XAI_API_KEY_METHOD_ID)),
+                false,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            credential_method_id(
+                Some(&acp::AuthMethodId::new(CACHED_TOKEN_AUTH_METHOD_ID)),
+                false,
+                false
+            ),
+            None,
+            "a non-session cached credential is owned by no login row"
+        );
+        assert_eq!(
+            credential_method_id(Some(&acp::AuthMethodId::new("something-else")), true, false),
+            None
+        );
+        assert_eq!(credential_method_id(None, true, false), None);
     }
 }

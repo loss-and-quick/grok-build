@@ -2032,10 +2032,26 @@ impl MvpAgent {
             subscription_tier,
             self.auth_manager.current_or_expired().as_ref(),
         );
-        let meta = self
-            .auth_manager
-            .current()
-            .map(|auth| {
+        let current = self.auth_manager.current();
+        let auth = current.as_ref();
+        let credential_method_id = crate::agent::auth_method::credential_method_id(
+            self.auth_method_id.load().as_deref(),
+            auth.is_some_and(crate::auth::GrokAuth::is_session_auth),
+            self.cfg.borrow().grok_com_config.oidc.is_some(),
+        );
+        // A plugin sign-in mints nothing into the `AuthManager` -- that
+        // credential lives behind the plugin's own seam -- so `current()` stays
+        // `None` even though the session is authenticated. Emit meta anyway, or
+        // the one case where several accounts really do share a provider is the
+        // one case the pager is told nothing about. Every first-party field then
+        // reports its honest absence rather than a default that reads like an
+        // account.
+        let plugin_signed_in = credential_method_id.as_ref().is_some_and(|id| {
+            crate::agent::auth_method::AuthMethodKind::from_id(id)
+                == crate::agent::auth_method::AuthMethodKind::PluginOauth
+        });
+        let meta = (auth.is_some() || plugin_signed_in)
+            .then(|| {
                 let gate = if !self.tier_allowed.get() && gate.is_none() {
                     let message = "A subscription is required.".to_string();
                     Some(crate::auth::GateInfo {
@@ -2049,14 +2065,19 @@ impl MvpAgent {
                     gate
                 };
                 let auth_meta = crate::auth::AuthMeta {
-                    email: auth.email.clone(),
-                    auth_mode: Some(format!("{:?}", auth.auth_mode)),
-                    is_first_party_account: auth.is_session_auth(),
-                    team_id: auth.team_id.clone(),
-                    team_name: auth.team_name.clone(),
-                    is_zdr: auth.is_zdr_team(),
-                    team_role: auth.team_role.clone(),
-                    coding_data_retention_opt_out: auth.coding_data_retention_opt_out,
+                    email: auth.and_then(|a| a.email.clone()),
+                    auth_mode: auth.map(|a| format!("{:?}", a.auth_mode)),
+                    auth_method_id: credential_method_id.map(|id| id.0.to_string()),
+                    is_first_party_account: auth
+                        .is_some_and(crate::auth::GrokAuth::is_session_auth),
+                    team_id: auth.and_then(|a| a.team_id.clone()),
+                    team_name: auth.and_then(|a| a.team_name.clone()),
+                    is_zdr: auth.is_some_and(crate::auth::GrokAuth::is_zdr_team),
+                    team_role: auth.and_then(|a| a.team_role.clone()),
+                    coding_data_retention_opt_out: auth.map_or_else(
+                        crate::auth::default_coding_data_retention_opt_out,
+                        |a| a.coding_data_retention_opt_out,
+                    ),
                     show_resolved_model,
                     gate,
                     subscription_tier,
