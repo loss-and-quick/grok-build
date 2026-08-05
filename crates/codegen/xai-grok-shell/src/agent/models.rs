@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
@@ -130,6 +130,10 @@ struct Inner {
     /// Set once the user explicitly picks a model (`/model`); guards the
     /// first-catalog reselect from clobbering that choice.
     user_selected_model: AtomicBool,
+    /// Hash of the last set of unresolvable `[[model_fallbacks]] from` values
+    /// reported, so a persistently broken chain is logged once instead of on
+    /// every catalog publish. See [`ModelsManager::audit_fallback_chains`].
+    fallback_audit_hash: AtomicU64,
 }
 
 /// Clears an in-flight flag on drop so a panicking task can't wedge future refreshes.
@@ -206,7 +210,7 @@ impl ModelsManagerBuilder {
         let has_session = self.auth_manager.current_or_expired().is_some();
         let fetch_auth = ModelFetchAuth::resolve(&self.cfg.endpoints, has_session);
         let current_reasoning_effort = self.cfg.models.default_reasoning_effort;
-        ModelsManager {
+        let mgr = ModelsManager {
             inner: Arc::new(Inner {
                 catalog: RwLock::new(CatalogState {
                     prefetched: self.prefetched,
@@ -225,8 +229,11 @@ impl ModelsManagerBuilder {
                 refresh_in_flight: AtomicBool::new(false),
                 model_switch_watch: tokio::sync::watch::channel(0u64).0,
                 user_selected_model: AtomicBool::new(false),
+                fallback_audit_hash: AtomicU64::new(0),
             }),
-        }
+        };
+        mgr.audit_fallback_chains();
+        mgr
     }
 }
 
@@ -366,7 +373,65 @@ impl ModelsManager {
             self.reselect_current_model_if_missing(&new_config);
         }
 
+        self.audit_fallback_chains();
         self.notify_models_updated();
+    }
+
+    /// Report `[[model_fallbacks]]` chains whose `from` names no catalog entry.
+    ///
+    /// Such a chain can never fire, and without this it is indistinguishable
+    /// from one that simply has not been needed yet — the failure mode is a
+    /// failover feature that is configured, believed active, and silently inert.
+    ///
+    /// A warning, not a hard error. The catalog is published in stages: bundled
+    /// defaults and `[[provider]]` expansions first, the remote listing only
+    /// once a fetch lands. A `from` naming a remotely-listed model is therefore
+    /// legitimately unresolvable for the first moments of a run, and rejecting
+    /// the config there would refuse a correct one. For the same reason the
+    /// audit is skipped while the catalog is empty (nothing has been published
+    /// to check against), and the reported set is remembered so a chain that
+    /// resolves once the catalog fills stops warning while a permanently
+    /// broken one is logged once rather than on every publish.
+    fn audit_fallback_chains(&self) {
+        use std::hash::{Hash as _, Hasher as _};
+
+        let chains = self.model_fallbacks();
+        if chains.is_empty() {
+            return;
+        }
+        let unresolved: Vec<String> = {
+            let cat = self.inner.catalog.read();
+            if cat.models.is_empty() {
+                return;
+            }
+            chains
+                .iter()
+                .map(|chain| chain.from.clone())
+                .filter(|from| {
+                    resolve_catalog_key(&cat.models, &acp::ModelId::new(from.clone())).is_none()
+                })
+                .collect()
+        };
+
+        // 0 means "every chain resolves"; real hashes are clamped to nonzero.
+        let hash = if unresolved.is_empty() {
+            0
+        } else {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            unresolved.hash(&mut hasher);
+            hasher.finish().max(1)
+        };
+        if self.inner.fallback_audit_hash.swap(hash, Ordering::Relaxed) == hash {
+            return;
+        }
+        for from in &unresolved {
+            tracing::warn!(
+                from = %from,
+                "[[model_fallbacks]]: `from` names no model in the catalog; this chain \
+                 can never fire. Use the `<provider>/<model>` key or the model slug that \
+                 `grok models` lists."
+            );
+        }
     }
 
     /// [`Self::apply_config`] plus an unconditional default re-resolve, for remote-settings arrival while no session exists.
@@ -1165,6 +1230,9 @@ impl ModelsManager {
         if excludes_all {
             tracing::error!("allowed_models excludes all fetched models; prompts will be blocked");
         }
+        // The catalog just grew: a chain that could not be checked, or looked
+        // broken, against the pre-fetch catalog gets its real answer here.
+        self.audit_fallback_chains();
 
         // Respect an explicit pre-catalog `/model` pick: auto-select the
         // default on the first catalog only when the user hasn't chosen.

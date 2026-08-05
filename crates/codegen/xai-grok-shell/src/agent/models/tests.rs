@@ -2148,3 +2148,123 @@ async fn identity_switch_clears_user_pick_latch() {
         "a new identity's first catalog must reselect the default after clear()",
     );
 }
+
+/// Collects `tracing` output written while a subscriber using it is in scope.
+#[derive(Clone, Default)]
+struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log sink").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Run `f` with a thread-local subscriber and return the warnings it emitted.
+/// The thread-local default outranks the global one the other tests install.
+fn captured_warnings(f: impl FnOnce()) -> String {
+    let sink = LogSink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = sink.0.lock().expect("log sink").clone();
+    String::from_utf8(bytes).expect("log output is utf-8")
+}
+
+/// A chain whose `from` names nothing in the catalog can never fire, and used
+/// to be indistinguishable from one that had simply not been needed yet.
+#[test]
+fn a_fallback_chain_naming_no_catalog_entry_warns_once() {
+    let cfg = config_from_toml(
+        r#"
+        [[provider]]
+        id = "acme"
+        base_url = "https://acme.example/v1"
+        api_key = "sk-acme"
+        models = ["m-one", "m-two"]
+
+        [[model_fallbacks]]
+        from = "acme/m-one"
+        to = ["acme/m-two"]
+        on_errors = ["auth"]
+
+        [[model_fallbacks]]
+        from = "typo-not-in-catalog"
+        to = ["acme/m-two"]
+        on_errors = ["auth"]
+        "#,
+    );
+    let catalog = config::resolve_model_list(&cfg, None);
+    let tmp = std::env::temp_dir().join("grok-test-fallback-audit");
+    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+
+    let logs = captured_warnings(|| {
+        let mgr = ModelsManagerBuilder::new(
+            None,
+            catalog,
+            acp::ModelId::new("m-one"),
+            auth_manager,
+            cfg.clone(),
+        )
+        .cache(test_cache_manager(&tmp))
+        .build();
+        // Republishing the same catalog must not repeat the warning.
+        mgr.apply_config(cfg);
+    });
+
+    assert_eq!(
+        logs.matches("typo-not-in-catalog").count(),
+        1,
+        "the unmatched `from` is named once, not on every catalog publish: {logs}"
+    );
+    assert!(
+        !logs.contains("acme/m-one"),
+        "a chain the catalog can place must not be reported: {logs}"
+    );
+}
+
+/// The catalog is published in stages, so an empty one means "nothing to check
+/// against yet" rather than "every chain is broken".
+#[test]
+fn an_empty_catalog_reports_nothing() {
+    let cfg = config_from_toml(
+        r#"
+        [[model_fallbacks]]
+        from = "only-in-the-remote-listing"
+        to = ["rescue"]
+        on_errors = ["auth"]
+        "#,
+    );
+    let tmp = std::env::temp_dir().join("grok-test-fallback-audit-empty");
+    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+
+    let logs = captured_warnings(|| {
+        ModelsManagerBuilder::new(
+            None,
+            IndexMap::new(),
+            acp::ModelId::new("default"),
+            auth_manager,
+            cfg,
+        )
+        .cache(test_cache_manager(&tmp))
+        .build();
+    });
+
+    assert!(
+        !logs.contains("only-in-the-remote-listing"),
+        "an unpublished catalog must not be read as a broken config: {logs}"
+    );
+}
