@@ -10,21 +10,27 @@ pub fn user_query(user_message: &str) -> String {
     )
 }
 
+/// Cut text to [`LARGE_PROMPT_THRESHOLD`] on a UTF-8 boundary, marking the cut.
+/// Shared by every out-of-band injection so no single message, whatever framing
+/// it arrives under, can displace the turn's own context.
+pub fn truncate_large_prompt(text: String) -> String {
+    if text.len() <= LARGE_PROMPT_THRESHOLD {
+        return text;
+    }
+    let end = text
+        .char_indices()
+        .take_while(|(i, _)| *i < LARGE_PROMPT_THRESHOLD)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(text.len());
+    format!("{}... [truncated]", &text[..end])
+}
+
 /// Wrap interjection text as a synthetic user message with a mid-turn note.
 /// No deferral instruction: the model decides how to weigh it against
 /// in-flight work. Output is byte-identical to the shell's historical format.
 pub fn format_interjection(text: String) -> String {
-    let truncated = if text.len() > LARGE_PROMPT_THRESHOLD {
-        let end = text
-            .char_indices()
-            .take_while(|(i, _)| *i < LARGE_PROMPT_THRESHOLD)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(text.len());
-        format!("{}... [truncated]", &text[..end])
-    } else {
-        text
-    };
+    let truncated = truncate_large_prompt(text);
 
     format!(
         "The user sent a message while you were working:\n{}",
