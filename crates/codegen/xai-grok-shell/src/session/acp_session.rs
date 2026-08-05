@@ -1885,6 +1885,9 @@ mod media_gen_auth_retry_tests;
 #[path = "acp_session_tests/memory_config_tests.rs"]
 mod memory_config_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/model_fallback_effort_wire_tests.rs"]
+mod model_fallback_effort_wire_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/parallel_dispatch_tests.rs"]
 mod parallel_dispatch_tests;
 #[cfg(test)]

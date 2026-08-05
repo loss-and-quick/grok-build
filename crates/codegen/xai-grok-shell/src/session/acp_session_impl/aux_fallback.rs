@@ -41,10 +41,7 @@
 //! session. The constants below carry the reasoning for each.
 
 use xai_grok_sampler::SamplingClient;
-use xai_grok_sampling_types::{
-    ConversationRequest, ConversationResponse, ReasoningEffort, ReasoningEffortOption,
-    SamplingError,
-};
+use xai_grok_sampling_types::{ConversationRequest, ConversationResponse, SamplingError};
 
 use super::*;
 
@@ -106,42 +103,6 @@ impl AuxHopStop {
             Self::TargetUnroutable => "target_unroutable",
         }
     }
-}
-
-/// Fit a reasoning effort to what the hop's target model declares it accepts.
-///
-/// A hop moves the request to a different `[[provider]]` entry, which may
-/// declare a different `reasoning_efforts` menu than the entry the request was
-/// built for — or none at all. Carrying the origin's effort across converts one
-/// failure into two: an endpoint that does not take the parameter rejects the
-/// request outright, and one whose menu lacks the named level rejects it by
-/// name.
-///
-/// * no effort requested, or the target does not take the parameter -> unset,
-///   and the endpoint applies its own default;
-/// * the target declares no menu -> keep the request as built, since there is
-///   nothing to check it against and `supports` already said the parameter is
-///   accepted;
-/// * the level is on the target's menu -> keep it;
-/// * otherwise -> the target's own default level, so a call that asked for
-///   reasoning still gets reasoning rather than silently dropping to none.
-pub(super) fn effort_for_hop_target(
-    requested: Option<ReasoningEffort>,
-    supports: bool,
-    menu: &[ReasoningEffortOption],
-    target_default: Option<ReasoningEffort>,
-) -> Option<ReasoningEffort> {
-    let requested = requested?;
-    if !supports {
-        return None;
-    }
-    if menu.is_empty() || menu.iter().any(|o| o.value == requested) {
-        return Some(requested);
-    }
-    target_default
-        .filter(|d| menu.iter().any(|o| o.value == *d))
-        .or_else(|| menu.iter().find(|o| o.default).map(|o| o.value))
-        .or_else(|| menu.first().map(|o| o.value))
 }
 
 /// The identities a chain's `from` may be spelled as for one resolved aux model.
@@ -365,103 +326,6 @@ impl SessionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn opt(value: ReasoningEffort, default: bool) -> ReasoningEffortOption {
-        ReasoningEffortOption {
-            id: value.as_str().to_owned(),
-            value,
-            label: value.as_str().to_owned(),
-            description: None,
-            default,
-        }
-    }
-
-    // ── effort fitting across a hop ────────────────────────────────────────
-
-    #[test]
-    fn hop_without_a_requested_effort_stays_unset() {
-        assert_eq!(
-            effort_for_hop_target(None, true, &[opt(ReasoningEffort::High, true)], None),
-            None
-        );
-    }
-
-    #[test]
-    fn hop_drops_the_effort_when_the_target_does_not_take_one() {
-        // The failure this prevents: an endpoint that rejects `reasoningEffort`
-        // outright would turn the hop into a second, different failure.
-        assert_eq!(
-            effort_for_hop_target(Some(ReasoningEffort::High), false, &[], None),
-            None
-        );
-    }
-
-    #[test]
-    fn hop_keeps_the_effort_when_the_target_declares_no_menu() {
-        assert_eq!(
-            effort_for_hop_target(Some(ReasoningEffort::High), true, &[], None),
-            Some(ReasoningEffort::High)
-        );
-    }
-
-    #[test]
-    fn hop_keeps_an_effort_the_target_menu_lists() {
-        let menu = [
-            opt(ReasoningEffort::Low, true),
-            opt(ReasoningEffort::High, false),
-        ];
-        assert_eq!(
-            effort_for_hop_target(Some(ReasoningEffort::High), true, &menu, None),
-            Some(ReasoningEffort::High)
-        );
-    }
-
-    #[test]
-    fn hop_substitutes_the_target_default_for_a_level_it_does_not_serve() {
-        let menu = [
-            opt(ReasoningEffort::Low, false),
-            opt(ReasoningEffort::High, true),
-        ];
-        // Origin asked for a level this provider's menu never lists: fall to the
-        // target's own default rather than to no reasoning at all...
-        assert_eq!(
-            effort_for_hop_target(Some(ReasoningEffort::Xhigh), true, &menu, None),
-            Some(ReasoningEffort::High)
-        );
-        // ...and the entry's declared default wins over the menu's flag when it
-        // is itself on the menu.
-        assert_eq!(
-            effort_for_hop_target(
-                Some(ReasoningEffort::Xhigh),
-                true,
-                &menu,
-                Some(ReasoningEffort::Low)
-            ),
-            Some(ReasoningEffort::Low)
-        );
-        // A declared default the menu does not list is ignored, not forwarded.
-        assert_eq!(
-            effort_for_hop_target(
-                Some(ReasoningEffort::Xhigh),
-                true,
-                &menu,
-                Some(ReasoningEffort::Xhigh)
-            ),
-            Some(ReasoningEffort::High)
-        );
-    }
-
-    #[test]
-    fn hop_falls_to_the_first_menu_entry_when_nothing_is_flagged_default() {
-        let menu = [
-            opt(ReasoningEffort::Low, false),
-            opt(ReasoningEffort::High, false),
-        ];
-        assert_eq!(
-            effort_for_hop_target(Some(ReasoningEffort::Xhigh), true, &menu, None),
-            Some(ReasoningEffort::Low)
-        );
-    }
 
     // ── chain identity ────────────────────────────────────────────────────
 

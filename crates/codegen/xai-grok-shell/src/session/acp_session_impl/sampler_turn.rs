@@ -1408,7 +1408,7 @@ impl SessionActor {
     ///    `send_xai_notification(RetryState::Failed)`.
     pub(crate) async fn run_turn_via_sampler(
         self: &Arc<Self>,
-        request: ConversationRequest,
+        mut request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
         self.prepare_sampler_for_turn().await;
         // Snapshot the active config so failover can build model-substituted
@@ -1476,6 +1476,32 @@ impl SessionActor {
                             )
                             .await
                         {
+                            // The hop's target may declare a narrower
+                            // `reasoning_efforts` menu than the entry the
+                            // request was built for, or no effort dial at
+                            // all — carrying the origin's level across
+                            // unchanged would turn one provider failure into
+                            // a second, different one on the new endpoint.
+                            // `catalog_key` re-derives the entry these
+                            // capability lookups key on from the wire slug
+                            // `try_provider_failover` just resolved to; a
+                            // target this shell cannot place in the catalog
+                            // (the same-provider swap fallback) falls
+                            // through to the raw model string, which none of
+                            // the lookups below match, so the effort is
+                            // dropped rather than guessed at.
+                            let target_key = self
+                                .models_manager
+                                .catalog_key(&new_config.model)
+                                .unwrap_or_else(|| new_config.model.clone());
+                            request.reasoning_effort = effort_for_hop_target(
+                                request.reasoning_effort,
+                                self.models_manager
+                                    .model_supports_reasoning_effort(&target_key),
+                                &self.models_manager.model_reasoning_efforts(&target_key),
+                                self.models_manager
+                                    .model_default_reasoning_effort(&target_key),
+                            );
                             current_model = new_config.model.clone();
                             active_config = new_config;
                             continue;

@@ -28,8 +28,47 @@ use xai_grok_sampler::{
     ErrorDirective, RequestInterceptor, RequestReplacement, RequestView, SamplerConfig,
     SeamFuture, SharedRequestInterceptor,
 };
+use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
 
 use super::*;
+
+/// Fit a reasoning effort to what a hop's target model declares it accepts.
+///
+/// A hop moves the request to a different `[[provider]]` entry, which may
+/// declare a different `reasoning_efforts` menu than the entry the request was
+/// built for — or none at all. Carrying the origin's effort across converts one
+/// failure into two: an endpoint that does not take the parameter rejects the
+/// request outright, and one whose menu lacks the named level rejects it by
+/// name. Shared by the main-turn hop (`run_turn_via_sampler`) and the
+/// auxiliary one-shot hop (`aux_fallback::build_aux_hop`) so the two rules
+/// cannot drift apart.
+///
+/// * no effort requested, or the target does not take the parameter -> unset,
+///   and the endpoint applies its own default;
+/// * the target declares no menu -> keep the request as built, since there is
+///   nothing to check it against and `supports` already said the parameter is
+///   accepted;
+/// * the level is on the target's menu -> keep it;
+/// * otherwise -> the target's own default level, so a call that asked for
+///   reasoning still gets reasoning rather than silently dropping to none.
+pub(super) fn effort_for_hop_target(
+    requested: Option<ReasoningEffort>,
+    supports: bool,
+    menu: &[ReasoningEffortOption],
+    target_default: Option<ReasoningEffort>,
+) -> Option<ReasoningEffort> {
+    let requested = requested?;
+    if !supports {
+        return None;
+    }
+    if menu.is_empty() || menu.iter().any(|o| o.value == requested) {
+        return Some(requested);
+    }
+    target_default
+        .filter(|d| menu.iter().any(|o| o.value == *d))
+        .or_else(|| menu.iter().find(|o| o.default).map(|o| o.value))
+        .or_else(|| menu.first().map(|o| o.value))
+}
 
 /// Default cap on provider-fallback model switches within a single turn when
 /// `[provider_fallback_max_attempts]` is unset. Distinct from the sampler's
@@ -497,6 +536,16 @@ impl SessionActor {
             None => {
                 let mut cfg = active.clone();
                 cfg.model = target_model.to_string();
+                // A same-provider swap has no catalog entry of its own, so
+                // there is nothing to check the origin's `thinking` dialect
+                // against — unlike `reasoning_effort`, refined per
+                // `[model."<id>/<model>"]` and therefore legitimately
+                // different between two models one `[[provider]]` serves.
+                // Asserting the origin's dialect onto an unrelated model
+                // name is a guess dressed up as a fact; undeclared instead
+                // leaves the sampler to its own adaptive inference, the same
+                // fallback an entry that never declared `thinking` gets.
+                cfg.thinking = None;
                 cfg
             }
         };
@@ -562,6 +611,103 @@ impl SessionActor {
 mod tests {
     use super::*;
     use crate::agent::config::{Config, FallbackErrorClass, ModelFallback};
+
+    fn opt(value: ReasoningEffort, default: bool) -> ReasoningEffortOption {
+        ReasoningEffortOption {
+            id: value.as_str().to_owned(),
+            value,
+            label: value.as_str().to_owned(),
+            description: None,
+            default,
+        }
+    }
+
+    // ── effort fitting across a hop ────────────────────────────────────────
+
+    #[test]
+    fn hop_without_a_requested_effort_stays_unset() {
+        assert_eq!(
+            effort_for_hop_target(None, true, &[opt(ReasoningEffort::High, true)], None),
+            None
+        );
+    }
+
+    #[test]
+    fn hop_drops_the_effort_when_the_target_does_not_take_one() {
+        // The failure this prevents: an endpoint that rejects `reasoningEffort`
+        // outright would turn the hop into a second, different failure.
+        assert_eq!(
+            effort_for_hop_target(Some(ReasoningEffort::High), false, &[], None),
+            None
+        );
+    }
+
+    #[test]
+    fn hop_keeps_the_effort_when_the_target_declares_no_menu() {
+        assert_eq!(
+            effort_for_hop_target(Some(ReasoningEffort::High), true, &[], None),
+            Some(ReasoningEffort::High)
+        );
+    }
+
+    #[test]
+    fn hop_keeps_an_effort_the_target_menu_lists() {
+        let menu = [
+            opt(ReasoningEffort::Low, true),
+            opt(ReasoningEffort::High, false),
+        ];
+        assert_eq!(
+            effort_for_hop_target(Some(ReasoningEffort::High), true, &menu, None),
+            Some(ReasoningEffort::High)
+        );
+    }
+
+    #[test]
+    fn hop_substitutes_the_target_default_for_a_level_it_does_not_serve() {
+        let menu = [
+            opt(ReasoningEffort::Low, false),
+            opt(ReasoningEffort::High, true),
+        ];
+        // Origin asked for a level this provider's menu never lists: fall to the
+        // target's own default rather than to no reasoning at all...
+        assert_eq!(
+            effort_for_hop_target(Some(ReasoningEffort::Xhigh), true, &menu, None),
+            Some(ReasoningEffort::High)
+        );
+        // ...and the entry's declared default wins over the menu's flag when it
+        // is itself on the menu.
+        assert_eq!(
+            effort_for_hop_target(
+                Some(ReasoningEffort::Xhigh),
+                true,
+                &menu,
+                Some(ReasoningEffort::Low)
+            ),
+            Some(ReasoningEffort::Low)
+        );
+        // A declared default the menu does not list is ignored, not forwarded.
+        assert_eq!(
+            effort_for_hop_target(
+                Some(ReasoningEffort::Xhigh),
+                true,
+                &menu,
+                Some(ReasoningEffort::Xhigh)
+            ),
+            Some(ReasoningEffort::High)
+        );
+    }
+
+    #[test]
+    fn hop_falls_to_the_first_menu_entry_when_nothing_is_flagged_default() {
+        let menu = [
+            opt(ReasoningEffort::Low, false),
+            opt(ReasoningEffort::High, false),
+        ];
+        assert_eq!(
+            effort_for_hop_target(Some(ReasoningEffort::Xhigh), true, &menu, None),
+            Some(ReasoningEffort::Low)
+        );
+    }
 
     fn retry(model: Option<&str>) -> ErrorDirective {
         ErrorDirective::Retry {
@@ -775,6 +921,36 @@ mod tests {
                         .try_provider_failover("auth", &active, "primary", 1, 3)
                         .await
                         .is_none()
+                );
+            })
+            .await;
+    }
+
+    /// A chain target this shell cannot place in the catalog is treated as a
+    /// same-provider model swap on the active config — but the active config's
+    /// `thinking` dialect is the *origin's* catalog entry, not a fact about the
+    /// swap target, which has no entry to check it against. Carrying it across
+    /// would assert a dialect for a model that never declared one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn catalog_miss_swap_does_not_carry_the_origins_thinking_dialect() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let actor = make_actor(models_manager_with(vec![])).await;
+                let active = xai_grok_sampler::SamplerConfig {
+                    model: "primary".to_string(),
+                    base_url: "https://primary.example/v1".to_string(),
+                    thinking: Some(xai_grok_sampling_types::ThinkingDialect::Adaptive),
+                    ..Default::default()
+                };
+
+                let cfg = actor.build_failover_config(&active, "backup").await;
+
+                assert_eq!(cfg.model, "backup");
+                assert_eq!(
+                    cfg.thinking, None,
+                    "a same-provider swap has no catalog entry to source a dialect \
+                     from, so it must not inherit the origin's"
                 );
             })
             .await;
