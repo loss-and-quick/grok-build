@@ -24,6 +24,7 @@ pub struct RunContext<'a> {
     /// hooks. `None` (the default) means no plugin host is wired: plugin hooks
     /// then fail open. Command/http hooks never consult it.
     pub plugin_invoker: Option<Arc<dyn PluginHookInvoker>>,
+    pub process_scope: Option<xai_grok_tools::util::ProcessScope>,
 }
 
 /// Result of running a single hook (any handler type).

@@ -52,7 +52,10 @@ mod workflow_ingest;
 
 #[cfg(test)]
 use permissions::{MCP_ARGS_MAX_LINE_CHARS, MCP_ARGS_MAX_LINES, mcp_args_lines};
-use permissions::{apply_recap_block, handle_permission_request, should_drop_late_auto_recap};
+use permissions::{
+    apply_recap_block, handle_permission_request, should_drop_duplicate_auto_recap,
+    should_drop_late_auto_recap,
+};
 
 // Hub + child modules (via `use super::*`) need sibling symbols in this scope.
 use routing::{
@@ -392,11 +395,20 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             detect_plan_mode_change(&notif.request.update, agent);
 
                         let had_activity_before = agent.session.tracker.activity().is_some();
-                        agent.session.handle_update(
-                            notif.request.update,
-                            &meta,
-                            &mut agent.scrollback,
-                        );
+                        let update = notif.request.update;
+                        let user_echo = matches!(update, acp::SessionUpdate::UserMessageChunk(_));
+                        agent
+                            .session
+                            .handle_update(update, &meta, &mut agent.scrollback);
+                        // Skip user echo: shell broadcasts it before history commit.
+                        if !user_echo
+                            && !meta.is_replay
+                            && !agent.session.loading_replay
+                            && meta.prompt_id.as_deref()
+                                == agent.session.current_prompt_id.as_deref()
+                        {
+                            agent.front_message_committed = true;
+                        }
                         // Once the server has emitted any activity (chunk, tool,
                         // retry, etc.), the in-flight prompt can no longer be
                         // "rewound" by Ctrl+C. Clear the stash on the transition.

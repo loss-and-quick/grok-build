@@ -47,9 +47,9 @@ pub use xai_grok_workspace_types::rpc::git::{
     DiffStatsSummary, GitBranchesReq, GitCheckoutCommitReq, GitCheckoutReq, GitCollectChangesReq,
     GitCollectChangesResponse, GitCommitReq, GitCurrentCommitReq, GitDiffReq, GitDiscardReq,
     GitFilesReq, GitInfoReq, GitResolveRootReq, GitStageContentReq, GitStageReq, GitStashReq,
-    GitStatusExtReq, GitStatusExtResponse, GitStatusFormat, GitStatusReq, GitUnstageReq,
-    IdentityData, PublicBaseData, RepoInfo, UNTRACKED_CONTENT_THRESHOLD, UncommittedChangesData,
-    UntrackedFileData,
+    GitStatusExtReq, GitStatusExtResponse, GitStatusFormat, GitStatusReq, GitSyncBaseReq,
+    GitUnstageReq, IdentityData, PublicBaseData, RepoInfo, UNTRACKED_CONTENT_THRESHOLD,
+    UncommittedChangesData, UntrackedFileData,
 };
 pub use xai_grok_workspace_types::rpc::hooks::{
     HookEventNameWire, HookRegistryReq, HookRegistryWire, HookSpecWire,
@@ -389,13 +389,24 @@ impl WorkspaceOp for GitCommitReq {
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
         let cwd = git_op_cwd(ws, &self.git_root)?;
-        crate::session::git::commit(
+        crate::session::git::commit(&cwd, self)
+            .await
+            .map_err(|e| WorkspaceError::HubError(e.to_string()))
+    }
+}
+#[async_trait]
+impl WorkspaceOp for GitSyncBaseReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        _session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        let cwd = git_op_cwd(ws, &self.git_root)?;
+        crate::session::git::sync_base(
             &cwd,
-            &self.message,
-            self.amend,
-            self.signoff,
-            self.push,
-            self.sync,
+            self.base_ref.as_deref(),
+            self.abort,
+            self.expected_branch.as_deref(),
         )
         .await
         .map_err(|e| WorkspaceError::HubError(e.to_string()))
@@ -504,64 +515,12 @@ impl WorkspaceOp for GitCheckoutCommitReq {
         _ws: &WorkspaceHandle,
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
-        use crate::session::git::git_cli;
-        let git_root = &self.git_root;
-        let head_commit = &self.head_commit;
-        if let Some(current) = crate::session::git::get_current_commit(git_root).await
-            && current == *head_commit
-        {
-            return Ok(CheckoutCommitResponse {
-                checked_out: true,
-                stashed: false,
-                fetched: false,
-                error: None,
-            });
-        }
-        let mut stashed = false;
-        if self.stash_if_dirty {
-            let status = git_cli(git_root, &["status", "--porcelain"]).await;
-            if let Ok(output) = &status
-                && !output.trim().is_empty()
-            {
-                let msg = format!("auto-stash before checkout {head_commit}");
-                if git_cli(git_root, &["stash", "push", "-m", &msg])
-                    .await
-                    .is_ok()
-                {
-                    stashed = true;
-                }
-            }
-        }
-        match git_cli(git_root, &["checkout", head_commit]).await {
-            Ok(_) => Ok(CheckoutCommitResponse {
-                checked_out: true,
-                stashed,
-                fetched: false,
-                error: None,
-            }),
-            Err(_) => {
-                let _ = git_cli(git_root, &["fetch", "origin"]).await;
-                match git_cli(git_root, &["checkout", head_commit]).await {
-                    Ok(_) => Ok(CheckoutCommitResponse {
-                        checked_out: true,
-                        stashed,
-                        fetched: true,
-                        error: None,
-                    }),
-                    Err(e) => {
-                        if stashed {
-                            let _ = git_cli(git_root, &["stash", "pop"]).await;
-                        }
-                        Ok(CheckoutCommitResponse {
-                            checked_out: false,
-                            stashed: false,
-                            fetched: true,
-                            error: Some(e.to_string()),
-                        })
-                    }
-                }
-            }
-        }
+        Ok(crate::session::git::checkout_commit_with_fetch(
+            &self.git_root,
+            &self.head_commit,
+            self.stash_if_dirty,
+        )
+        .await)
     }
 }
 workspace_rpc!(

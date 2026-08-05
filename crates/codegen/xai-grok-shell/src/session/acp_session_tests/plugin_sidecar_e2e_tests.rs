@@ -213,6 +213,7 @@ async fn demo_plugin_and_command_hook_reach_identical_outcomes() {
     let plugin_ctx = RunContext {
         session_id: "e2e-session",
         workspace_root: "/tmp",
+        process_scope: None,
         plugin_invoker: Some(invoker.clone()),
     };
     let denied_input = serde_json::json!({ "command": format!("echo {DENY_MARKER}") });
@@ -242,6 +243,7 @@ async fn demo_plugin_and_command_hook_reach_identical_outcomes() {
     let cmd_ctx = RunContext {
         session_id: "e2e-session",
         workspace_root: "/tmp",
+        process_scope: None,
         plugin_invoker: None,
     };
     let cmd_deny = xai_grok_hooks::dispatcher::dispatch_pre_tool_use(

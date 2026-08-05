@@ -18,6 +18,7 @@ use ratatui::text::{Line, Span};
 
 use crate::acp::context_facts::{BarPartition, ContextFacts, ContributorKind};
 use crate::acp::tracker::CompactionRecord;
+use crate::appearance::AppearanceConfig;
 use crate::render::wrapping::word_wrap_lines;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockLine, BlockOutput};
@@ -698,7 +699,7 @@ impl BlockContent for ContextInfoBlock {
         None
     }
 
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         false // Compact like SystemMessageBlock
     }
 

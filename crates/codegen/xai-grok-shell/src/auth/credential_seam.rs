@@ -187,6 +187,10 @@ impl HookCredentialSeam {
         RunContext {
             session_id: &self.session_id,
             workspace_root: &self.workspace_root,
+            // No scope to enrol into: this seam is also built session-less
+            // (welcome-screen `/login`), so there is no session lifetime a
+            // hook's process group could honestly be tied to.
+            process_scope: None,
             plugin_invoker: Some(self.invoker.clone()),
         }
     }

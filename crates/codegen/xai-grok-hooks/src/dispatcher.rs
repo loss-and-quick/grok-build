@@ -781,6 +781,7 @@ mod tests {
         RunContext {
             session_id: "test-session",
             workspace_root: "/tmp",
+            process_scope: None,
             plugin_invoker: None,
         }
     }
@@ -1461,6 +1462,7 @@ mod tests {
         RunContext {
             session_id: "test-session",
             workspace_root: "/tmp",
+            process_scope: None,
             plugin_invoker: Some(Arc::new(MockInvoker(response))),
         }
     }
@@ -1653,6 +1655,7 @@ mod tests {
         let ctx = RunContext {
             session_id: "test-session",
             workspace_root: "/tmp",
+            process_scope: None,
             plugin_invoker: Some(Arc::new(ChainInvoker {
                 seen: Arc::clone(&seen),
             })),
@@ -1702,6 +1705,7 @@ mod tests {
         let ctx = RunContext {
             session_id: "test-session",
             workspace_root: "/tmp",
+            process_scope: None,
             plugin_invoker: Some(Arc::new(OnlyFirstInvoker)),
         };
         let mut first = plugin_spec("first-hook", HookEventName::ProviderRequest);
@@ -1816,6 +1820,7 @@ mod tests {
         let ctx = RunContext {
             session_id: "test-session",
             workspace_root: "/tmp",
+            process_scope: None,
             plugin_invoker: Some(Arc::new(CountingInvoker {
                 calls: Arc::clone(&calls),
             })),

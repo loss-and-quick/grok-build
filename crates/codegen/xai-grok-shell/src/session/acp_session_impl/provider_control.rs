@@ -199,6 +199,10 @@ pub(crate) struct HookRequestInterceptor {
     /// session tool catalog at build time (same reason as `agent`).
     tools: Vec<String>,
     registry: Arc<HookRegistry>,
+    /// The session's process scope, so a `provider_request` command hook's
+    /// process group is reaped when the session closes. Snapshotted at build
+    /// time for the same reason `agent`/`tools` are.
+    process_scope: Option<xai_grok_tools::util::ProcessScope>,
     plugin_invoker: Option<Arc<dyn PluginHookInvoker>>,
 }
 
@@ -242,6 +246,7 @@ impl RequestInterceptor for HookRequestInterceptor {
             let ctx = xai_grok_hooks::runner::RunContext {
                 session_id: &self.session_id,
                 workspace_root: &self.workspace_root,
+                process_scope: self.process_scope.clone(),
                 plugin_invoker: self.plugin_invoker.clone(),
             };
             let replaced = xai_grok_hooks::dispatcher::dispatch_replace(
@@ -325,6 +330,7 @@ impl SessionActor {
             agent,
             tools,
             registry,
+            process_scope: self.tool_context.process_scope.clone(),
             plugin_invoker,
         }
     }
@@ -1152,6 +1158,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
 
         let mut renames = std::collections::HashMap::new();
@@ -1195,6 +1204,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         apply_tool_call_renames(&mut response, &std::collections::HashMap::new());
         assert_eq!(response.tool_calls()[0].name, "masked_read");

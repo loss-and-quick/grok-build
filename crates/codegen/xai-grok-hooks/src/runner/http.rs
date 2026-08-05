@@ -679,6 +679,7 @@ mod tests {
             session_id: "test",
             workspace_root: "/tmp",
             plugin_invoker: None,
+            process_scope: None,
         };
         let (result, _, info) = run_http_hook(&spec, &envelope, &ctx, GateKind::Tool).await;
 
@@ -760,6 +761,7 @@ mod tests {
             session_id: "test",
             workspace_root: "/tmp",
             plugin_invoker: None,
+            process_scope: None,
         };
 
         let (result, _, info) = run_http_hook(&spec, &envelope, &ctx, GateKind::Tool).await;

@@ -322,6 +322,7 @@ mod tests {
         RunContext {
             session_id: "s",
             workspace_root: "/tmp",
+            process_scope: None,
             plugin_invoker: invoker,
         }
     }

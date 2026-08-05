@@ -186,6 +186,7 @@ pub fn stream_gemini<'a>(
                 },
                 reasoning_tokens: 0,
                 cached_prompt_tokens: cached_tokens,
+                cache_creation_prompt_tokens: 0,
             })
         } else {
             None
@@ -217,6 +218,9 @@ pub fn stream_gemini<'a>(
             message_chunks_emitted: message_chunk_count,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
 
         yield SamplingEvent::Completed {

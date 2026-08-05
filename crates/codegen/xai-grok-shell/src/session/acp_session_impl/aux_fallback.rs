@@ -835,7 +835,7 @@ mod tests {
         let mut generator = crate::session::summary::SummaryGenerator::new(
             crate::session::summary::SummaryConfig {
                 model: pin.to_owned(),
-                persistence_tx: tx,
+                persistence_tx: tx.downgrade(),
                 aux: Some(actor.spawn_aux_inference_bridge()),
             },
         );

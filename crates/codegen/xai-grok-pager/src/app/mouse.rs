@@ -138,28 +138,38 @@ impl AgentView {
                 }
                 if self
                     .privacy_banner
-                    .hit_accept
+                    .hit_opt_in
                     .contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
-                    return InputOutcome::Action(Action::PrivacyBannerAccept);
+                    return InputOutcome::Action(Action::PrivacyBannerOptIn);
                 }
                 if self
                     .privacy_banner
-                    .hit_customize
+                    .hit_opt_out
                     .contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
-                    return InputOutcome::Action(Action::PrivacyBannerCustomize);
+                    return InputOutcome::Action(Action::PrivacyBannerOptOut);
                 }
                 if self
                     .privacy_banner
-                    .hit_legal
+                    .hit_terms
                     .contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
                     return InputOutcome::Action(Action::OpenUrl(
-                        crate::views::privacy_banner::PRIVACY_BANNER_LEGAL_URL.to_string(),
+                        crate::views::privacy_banner::PRIVACY_BANNER_TERMS_URL.to_string(),
+                    ));
+                }
+                if self
+                    .privacy_banner
+                    .hit_policy
+                    .contains(mouse.column, mouse.row)
+                    && !self.pos_occluded(mouse.column, mouse.row)
+                {
+                    return InputOutcome::Action(Action::OpenUrl(
+                        crate::views::privacy_banner::PRIVACY_BANNER_POLICY_URL.to_string(),
                     ));
                 }
                 if self.hit_watching_cue.contains(mouse.column, mouse.row)
@@ -261,6 +271,13 @@ impl AgentView {
                 }
                 if self.hit_follow_indicator.contains(mouse.column, mouse.row) {
                     self.scrollback.goto_bottom();
+                    return InputOutcome::Changed;
+                }
+                if self
+                    .hit_response_top_indicator
+                    .contains(mouse.column, mouse.row)
+                {
+                    self.scrollback.prev_response();
                     return InputOutcome::Changed;
                 }
                 if let Some(hd_area) = self.history_dropdown_area
@@ -1088,6 +1105,9 @@ impl AgentView {
                 changed |= self
                     .hit_follow_indicator
                     .update_hover(mouse.column, mouse.row);
+                changed |= self
+                    .hit_response_top_indicator
+                    .update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cancel_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_bg_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_watching_cue.update_hover(mouse.column, mouse.row);
@@ -1099,15 +1119,19 @@ impl AgentView {
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .privacy_banner
-                    .hit_accept
+                    .hit_opt_in
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .privacy_banner
-                    .hit_customize
+                    .hit_opt_out
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .privacy_banner
-                    .hit_legal
+                    .hit_terms
+                    .update_hover(mouse.column, mouse.row);
+                changed |= self
+                    .privacy_banner
+                    .hit_policy
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .plugin_cta

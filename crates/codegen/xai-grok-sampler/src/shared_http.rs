@@ -11,7 +11,7 @@
 //! Wire-level behavior (connection reuse, header isolation, pool-less http1
 //! fallback, kill switch) is pinned by the `shared_http_wire` and
 //! `shared_http_kill_switch` integration binaries, which own their process
-//! environment.
+//! environment. Extra roots: `GROK_EXTRA_CA_BUNDLE` via `xai_grok_extra_ca`.
 //!
 //! Proxying: reqwest already honors the `HTTP_PROXY` / `HTTPS_PROXY` /
 //! `NO_PROXY` environment variables by default (the shared builders never call
@@ -119,15 +119,19 @@ fn base_h2_builder() -> reqwest::ClientBuilder {
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
 
-    reqwest::Client::builder()
-        .pool_max_idle_per_host(pool_max_idle)
-        .pool_idle_timeout(Duration::from_secs(pool_idle_timeout_secs))
-        .connect_timeout(Duration::from_secs(connect_timeout_secs))
-        .tcp_nodelay(true)
-        // HTTP/2 keep-alive: ping every 15s, timeout after 5s.
-        .http2_keep_alive_interval(Duration::from_secs(15))
-        .http2_keep_alive_timeout(Duration::from_secs(5))
-        .http2_keep_alive_while_idle(true)
+    // Extra roots ride on the *builder*, so the per-provider proxied client
+    // gets `GROK_EXTRA_CA_BUNDLE` on the same terms as the shared one.
+    xai_grok_extra_ca::with_extra_root_certificates(
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(pool_max_idle)
+            .pool_idle_timeout(Duration::from_secs(pool_idle_timeout_secs))
+            .connect_timeout(Duration::from_secs(connect_timeout_secs))
+            .tcp_nodelay(true)
+            // HTTP/2 keep-alive: ping every 15s, timeout after 5s.
+            .http2_keep_alive_interval(Duration::from_secs(15))
+            .http2_keep_alive_timeout(Duration::from_secs(5))
+            .http2_keep_alive_while_idle(true),
+    )
 }
 
 /// Shared HTTP/1.1 builder config (pool-less). Reused by the shared fallback
@@ -138,12 +142,14 @@ fn base_http1_builder() -> reqwest::ClientBuilder {
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
 
-    reqwest::Client::builder()
-        .pool_max_idle_per_host(0)
-        .pool_idle_timeout(Duration::from_secs(0))
-        .connect_timeout(Duration::from_secs(connect_timeout_secs))
-        .tcp_nodelay(true)
-        .http1_only()
+    xai_grok_extra_ca::with_extra_root_certificates(
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .pool_idle_timeout(Duration::from_secs(0))
+            .connect_timeout(Duration::from_secs(connect_timeout_secs))
+            .tcp_nodelay(true)
+            .http1_only(),
+    )
 }
 
 #[cfg(test)]

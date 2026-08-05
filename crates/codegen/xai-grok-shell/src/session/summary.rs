@@ -30,7 +30,8 @@ pub(crate) struct SummaryConfig {
     /// switch or a token refresh.
     pub(crate) model: String,
     /// Channel back to the persistence actor for sequential storage writes.
-    pub(crate) persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
+    /// Weak: a strong sender here would keep the actor's own channel and task alive.
+    pub(crate) persistence_tx: mpsc::WeakUnboundedSender<PersistenceMsg>,
     /// Seam onto the session's routing and its `[[model_fallbacks]]` chains.
     ///
     /// `None` until the session actor exists and installs one
@@ -140,7 +141,12 @@ impl SummaryGenerator {
                     // actor persists it (only if the session has no title yet)
                     // and notifies the client there, so a title rejected for
                     // racing a manual `/rename` never reaches the client.
-                    let _ = persistence_tx.send(PersistenceMsg::GeneratedTitle(title));
+                    match persistence_tx.upgrade() {
+                        Some(tx) => {
+                            let _ = tx.send(PersistenceMsg::GeneratedTitle(title));
+                        }
+                        None => tracing::debug!("session closed before its title was generated"),
+                    }
                 });
             }
         }
@@ -171,4 +177,20 @@ pub(crate) fn notify_client(gateway: &Option<GatewaySender>, info: &Info, title:
             params.into(),
         ));
     }
+
+    gateway.forward_fire_and_forget(session_info_update(info.id.clone(), title));
+}
+
+pub(crate) fn session_info_update(
+    session_id: acp::SessionId,
+    title: &str,
+) -> acp::SessionNotification {
+    // `updatedAt` is omitted, not refreshed: renaming is not activity, and
+    // `session/list` sorts on `last_active_at`, which a title write never moves.
+    acp::SessionNotification::new(
+        session_id,
+        acp::SessionUpdate::SessionInfoUpdate(
+            acp::SessionInfoUpdate::new().title(title.to_owned()),
+        ),
+    )
 }
