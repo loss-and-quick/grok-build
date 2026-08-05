@@ -465,6 +465,29 @@ impl SessionActor {
             .unwrap_or(DEFAULT_PROVIDER_FALLBACK_ATTEMPTS)
     }
 
+    /// The catalog key a fallback identity is compared under.
+    ///
+    /// The two sides of the comparison arrive spelled differently. A chain's
+    /// `from` is naturally written as the catalog key `<provider>/<model>` —
+    /// what `grok models` prints, what `/model` shows, and the only spelling
+    /// that disambiguates a slug two providers both serve — while the model
+    /// reaching the failover loop is a [`SamplerConfig::model`], i.e. the bare
+    /// wire slug a `[[provider]]` expansion puts in the request body. Comparing
+    /// those raw strings never matched, so every qualified chain was inert.
+    ///
+    /// Both sides are reduced to a catalog key by the one rule the rest of the
+    /// shell resolves ids with (exact key wins, else the last entry serving the
+    /// slug), so either spelling names the same entry and a bare `from` lands
+    /// on exactly the entry the bare slug would select anywhere else — never
+    /// silently on the other provider's. A model the catalog cannot place (the
+    /// same-provider swap target) keeps its raw string, which still compares
+    /// equal to a chain written against it.
+    fn fallback_identity(&self, model: &str) -> String {
+        self.models_manager
+            .catalog_key(model)
+            .unwrap_or_else(|| model.to_owned())
+    }
+
     /// Pick the first eligible fallback target for `current_model` on an error
     /// of `error_class` from the built-in `[[model_fallbacks]]` chains, honoring
     /// per-`(from, to)` cooldowns. Returns the chosen target model and its
@@ -476,15 +499,22 @@ impl SessionActor {
         error_class: &str,
     ) -> Option<(String, std::time::Duration)> {
         let now = std::time::Instant::now();
-        let chains = self.models_manager.model_fallbacks();
+        let current_id = self.fallback_identity(current_model);
+        // Every `from` is resolved before the cooldown lock is taken: resolving
+        // reads the catalog under its own lock, and no path should hold both.
+        let applicable: Vec<_> = self
+            .models_manager
+            .model_fallbacks()
+            .into_iter()
+            .filter(|chain| chain.triggers_on(error_class))
+            .map(|chain| (self.fallback_identity(&chain.from), chain))
+            .filter(|(from_id, _)| *from_id == current_id)
+            .collect();
         let cooldowns = self.provider_fallback_cooldowns.lock();
-        for chain in &chains {
-            if chain.from != current_model || !chain.triggers_on(error_class) {
-                continue;
-            }
+        for (from_id, chain) in &applicable {
             let cooldown = std::time::Duration::from_secs(chain.cooldown_seconds);
             for target in &chain.to {
-                let key = (chain.from.clone(), target.clone());
+                let key = (from_id.clone(), target.clone());
                 let cooling = cooldowns
                     .get(&key)
                     .is_some_and(|armed| now.duration_since(*armed) < cooldown);
@@ -498,9 +528,13 @@ impl SessionActor {
 
     /// Arm the cooldown for a `(from, to)` fallback pair.
     pub(super) fn arm_fallback_cooldown(&self, from: &str, to: &str) {
+        // Keyed on the same normalized identity the lookup checks under, so a
+        // cooldown armed from the wire slug still cools the chain that was
+        // declared with a provider-qualified `from`.
+        let from = self.fallback_identity(from);
         self.provider_fallback_cooldowns
             .lock()
-            .insert((from.to_string(), to.to_string()), std::time::Instant::now());
+            .insert((from, to.to_string()), std::time::Instant::now());
     }
 
     /// Build a sampler config that re-issues the current turn against
@@ -782,6 +816,29 @@ mod tests {
         )
     }
 
+    /// A manager whose catalog is the one `cfg` resolves to, so chain lookups
+    /// see real `<provider>/<model>` keys and the wire slugs they serve.
+    fn models_manager_for(cfg: Config) -> crate::agent::models::ModelsManager {
+        let catalog = crate::agent::config::resolve_model_list(&cfg, None);
+        let tmp = std::env::temp_dir().join("grok-test-provider-fallback");
+        let auth_manager = std::sync::Arc::new(crate::auth::AuthManager::new(
+            &tmp,
+            crate::auth::GrokComConfig::default(),
+        ));
+        crate::agent::models::ModelsManager::new(
+            None,
+            catalog,
+            agent_client_protocol::ModelId::new("primary"),
+            auth_manager,
+            cfg,
+        )
+    }
+
+    fn cfg_from_toml(toml: &str) -> Config {
+        let raw: toml::Value = toml::from_str(toml).expect("fixture config should parse");
+        Config::new_from_toml_cfg(&raw).expect("fixture config should build")
+    }
+
     async fn make_actor(mm: crate::agent::models::ModelsManager) -> SessionActor {
         let (gateway_tx, _g) = tokio::sync::mpsc::unbounded_channel();
         let (persistence_tx, _p) = tokio::sync::mpsc::unbounded_channel();
@@ -828,6 +885,115 @@ mod tests {
                     .builtin_fallback_target("primary", "5xx")
                     .expect("second target after first cools down");
                 assert_eq!(target, "tertiary");
+            })
+            .await;
+    }
+
+    /// A chain written the documented way — `from` as the `<provider>/<model>`
+    /// catalog key — was compared verbatim against the active
+    /// `SamplerConfig::model`, which for a `[[provider]]`-expanded entry is the
+    /// bare wire slug. The two never compared equal, so no chain ever matched
+    /// and `[[model_fallbacks]]` was inert with nothing logged to say so.
+    #[tokio::test(flavor = "current_thread")]
+    async fn chain_declared_by_catalog_key_matches_the_active_wire_slug() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let cfg = cfg_from_toml(
+                    r#"
+                    [[provider]]
+                    id = "acme"
+                    base_url = "https://acme.example/v1"
+                    api_key = "sk-acme"
+                    models = ["m-one"]
+
+                    [[provider]]
+                    id = "beta"
+                    base_url = "https://beta.example/v1"
+                    api_key = "sk-beta"
+                    models = ["m-two"]
+
+                    [[model_fallbacks]]
+                    from = "acme/m-one"
+                    to = ["beta/m-two"]
+                    cooldown_seconds = 60
+                    on_errors = ["auth"]
+                    "#,
+                );
+                let actor = make_actor(models_manager_for(cfg)).await;
+
+                // What the turn loop actually passes: `active_config.model`.
+                let (target, cooldown) = actor
+                    .builtin_fallback_target("m-one", "auth")
+                    .expect("a chain keyed by catalog key must match the wire slug it serves");
+                assert_eq!(target, "beta/m-two");
+                assert_eq!(cooldown, std::time::Duration::from_secs(60));
+
+                // The catalog key itself keeps working, unchanged.
+                assert_eq!(
+                    actor.builtin_fallback_target("acme/m-one", "auth"),
+                    Some(("beta/m-two".to_string(), std::time::Duration::from_secs(60)))
+                );
+
+                // A class the chain does not list still does not trigger it.
+                assert!(actor.builtin_fallback_target("m-one", "5xx").is_none());
+
+                // Arming from the slug must cool the chain declared by key,
+                // or the same target would be handed out on every error.
+                actor.arm_fallback_cooldown("m-one", "beta/m-two");
+                let after_arming = actor.builtin_fallback_target("acme/m-one", "auth");
+                assert!(after_arming.is_none(), "the only target is cooling down");
+            })
+            .await;
+    }
+
+    /// When two providers serve one slug, the bare slug names the
+    /// last-declared entry everywhere else in the shell; a chain must not use
+    /// that ambiguity to match the provider the operator did not name.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_qualified_chain_does_not_match_the_other_provider_of_a_shared_slug() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let providers = r#"
+                    [[provider]]
+                    id = "acme"
+                    base_url = "https://acme.example/v1"
+                    api_key = "sk-acme"
+                    models = ["shared"]
+
+                    [[provider]]
+                    id = "beta"
+                    base_url = "https://beta.example/v1"
+                    api_key = "sk-beta"
+                    models = ["shared"]
+                "#;
+                let chain_from = |id: &str| {
+                    format!(
+                        "{providers}\n[[model_fallbacks]]\nfrom = \"{id}\"\nto = \
+                         [\"rescue\"]\non_errors = [\"auth\"]\n"
+                    )
+                };
+
+                // The bare slug resolves to the last-declared entry, so a chain
+                // pinned to the first one is not what it names.
+                let actor = make_actor(models_manager_for(cfg_from_toml(&chain_from(
+                    "acme/shared",
+                ))))
+                .await;
+                assert!(actor.builtin_fallback_target("shared", "auth").is_none());
+
+                // The entry the slug does name matches.
+                let actor = make_actor(models_manager_for(cfg_from_toml(&chain_from(
+                    "beta/shared",
+                ))))
+                .await;
+                assert_eq!(
+                    actor
+                        .builtin_fallback_target("shared", "auth")
+                        .map(|(target, _)| target),
+                    Some("rescue".to_string())
+                );
             })
             .await;
     }
