@@ -41,6 +41,7 @@ use xai_grok_tools::implementations::grok_build::task::coordinator::{
     ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, LocalBoxFuture, StartedChild,
     SubagentProgress,
 };
+use xai_grok_tools::implementations::grok_build::task::types::SubagentMessageOutcome;
 use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_tools::types::tool::ToolKind;
 use xai_grok_workspace::file_system::AsyncFileSystem;
@@ -428,6 +429,30 @@ pub(crate) struct ShellChildRuntime {
 }
 impl ChildControl for ShellChildRuntime {
     type ProgressFuture = LocalBoxFuture<SubagentProgress>;
+    type MessageFuture = LocalBoxFuture<SubagentMessageOutcome>;
+    /// Post the text to the child session's own mailbox and wait for the child
+    /// to say what became of it.
+    ///
+    /// No deadline: the child session actor answers as soon as its turn reaches
+    /// an injection point, and a child inside a long tool call is not idle — it
+    /// simply has not got there yet, so a timeout would report a failure that is
+    /// about to become a delivery. The two ways this cannot resolve both
+    /// terminate the future on their own: a closed command channel fails the
+    /// send, and a session actor that goes away drops the acknowledgement.
+    fn message(&self, text: String) -> Self::MessageFuture {
+        let cmd_tx = self.child_handle.cmd_tx.clone();
+        Box::pin(async move {
+            let (ack, ack_rx) = oneshot::channel();
+            if cmd_tx.send(SessionCommand::Steer { text, ack }).is_err() {
+                return SubagentMessageOutcome::Unreachable;
+            }
+            match ack_rx.await {
+                Ok(true) => SubagentMessageOutcome::Delivered,
+                Ok(false) => SubagentMessageOutcome::NotDelivered,
+                Err(_) => SubagentMessageOutcome::Unreachable,
+            }
+        })
+    }
     fn progress(&self) -> Self::ProgressFuture {
         let signals = self.child_handle.signals_handle.clone();
         Box::pin(async move {

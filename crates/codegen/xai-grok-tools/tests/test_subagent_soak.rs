@@ -27,8 +27,8 @@ use xai_grok_tools::implementations::grok_build::task::coordinator::{
     LocalBoxFuture, MAX_COMPLETED_ENTRIES, StartedChild, SubagentCoordinator, SubagentProgress,
 };
 use xai_grok_tools::implementations::grok_build::task::types::{
-    SubagentDescribeOutcome, SubagentOwner, SubagentRegistryCounts, SubagentRequest,
-    SubagentResult, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
+    SubagentDescribeOutcome, SubagentMessageOutcome, SubagentOwner, SubagentRegistryCounts,
+    SubagentRequest, SubagentResult, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
 };
 
 const PARENT_SESSION_ID: &str = "subagent-soak-parent";
@@ -282,6 +282,11 @@ struct SoakControl {
 
 impl ChildControl for SoakControl {
     type ProgressFuture = std::future::Ready<SubagentProgress>;
+    type MessageFuture = std::future::Ready<SubagentMessageOutcome>;
+
+    fn message(&self, _text: String) -> Self::MessageFuture {
+        std::future::ready(SubagentMessageOutcome::Delivered)
+    }
 
     fn progress(&self) -> Self::ProgressFuture {
         std::future::ready(SubagentProgress::default())

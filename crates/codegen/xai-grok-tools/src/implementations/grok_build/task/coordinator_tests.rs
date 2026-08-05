@@ -11,10 +11,30 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 struct TestControl {
     cancellation: CancellationToken,
+    /// What the mock child reports for a delivered message, and where the
+    /// delivered text is recorded so a test can assert the child saw it.
+    messages: mpsc::UnboundedSender<String>,
+    message_outcome: SubagentMessageOutcome,
+    /// Held open by a test that wants a message to stay in flight; the
+    /// control's future does not resolve until this fires.
+    message_gate: Option<tokio::sync::broadcast::Sender<()>>,
 }
 
 impl ChildControl for TestControl {
     type ProgressFuture = std::future::Ready<SubagentProgress>;
+    type MessageFuture = SendBoxFuture<SubagentMessageOutcome>;
+
+    fn message(&self, text: String) -> Self::MessageFuture {
+        let _ = self.messages.send(text);
+        let outcome = self.message_outcome.clone();
+        let mut gate = self.message_gate.as_ref().map(|g| g.subscribe());
+        Box::pin(async move {
+            if let Some(gate) = gate.as_mut() {
+                let _ = gate.recv().await;
+            }
+            outcome
+        })
+    }
 
     fn progress(&self) -> Self::ProgressFuture {
         std::future::ready(SubagentProgress {
@@ -41,6 +61,9 @@ struct TestRunner {
     completions: mpsc::UnboundedSender<CompletionDisposition>,
     requests: mpsc::UnboundedSender<SubagentRequest>,
     started: mpsc::UnboundedSender<String>,
+    messages: mpsc::UnboundedSender<String>,
+    message_outcome: SubagentMessageOutcome,
+    message_gate: Option<tokio::sync::broadcast::Sender<()>>,
 }
 
 impl ChildRunner for TestRunner {
@@ -58,6 +81,9 @@ impl ChildRunner for TestRunner {
         let mut finish = self.finish.subscribe();
         let requests = self.requests.clone();
         let started = self.started.clone();
+        let messages = self.messages.clone();
+        let message_outcome = self.message_outcome.clone();
+        let message_gate = self.message_gate.clone();
         Box::pin(async move {
             let ChildRunRequest {
                 request,
@@ -92,6 +118,9 @@ impl ChildRunner for TestRunner {
                     definition_background: request.subagent_type == "background-default",
                     control: TestControl {
                         cancellation: cancellation.clone(),
+                        messages: messages.clone(),
+                        message_outcome: message_outcome.clone(),
+                        message_gate: message_gate.clone(),
                     },
                 })
                 .await
@@ -196,6 +225,10 @@ struct Harness {
     completions: mpsc::UnboundedReceiver<CompletionDisposition>,
     requests: mpsc::UnboundedReceiver<SubagentRequest>,
     started: mpsc::UnboundedReceiver<String>,
+    /// Text each mock child was handed by `ChildControl::message`.
+    messages: mpsc::UnboundedReceiver<String>,
+    /// Releases a gated message future (see [`TestControl::message_gate`]).
+    message_gate: tokio::sync::broadcast::Sender<()>,
     actor: tokio::task::JoinHandle<()>,
 }
 
@@ -218,12 +251,33 @@ fn harness_with_options(
     wait_after_cancel: bool,
     config: CoordinatorConfig,
 ) -> Harness {
+    harness_with_messaging(
+        wait_before_start,
+        wait_after_cancel,
+        config,
+        SubagentMessageOutcome::Delivered,
+        false,
+    )
+}
+
+/// [`harness_with_options`] plus control over what the mock child answers to a
+/// delivered message, and whether that answer is withheld until the harness's
+/// `message_gate` fires.
+fn harness_with_messaging(
+    wait_before_start: bool,
+    wait_after_cancel: bool,
+    config: CoordinatorConfig,
+    message_outcome: SubagentMessageOutcome,
+    gate_messages: bool,
+) -> Harness {
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (start, _) = tokio::sync::broadcast::channel(4);
     let (finish, _) = tokio::sync::broadcast::channel(4);
     let (completion_tx, completions) = mpsc::unbounded_channel();
     let (request_tx, requests) = mpsc::unbounded_channel();
     let (started_tx, started) = mpsc::unbounded_channel();
+    let (message_tx, messages) = mpsc::unbounded_channel();
+    let (message_gate, _) = tokio::sync::broadcast::channel(4);
     let actor = tokio::spawn(
         SubagentCoordinator::new(
             command_rx,
@@ -235,6 +289,9 @@ fn harness_with_options(
                 completions: completion_tx,
                 requests: request_tx,
                 started: started_tx,
+                messages: message_tx,
+                message_outcome,
+                message_gate: gate_messages.then(|| message_gate.clone()),
             },
             config,
         )
@@ -247,6 +304,8 @@ fn harness_with_options(
         completions,
         requests,
         started,
+        messages,
+        message_gate,
         actor,
     }
 }
@@ -1196,5 +1255,231 @@ async fn completed_cache_evicts_oldest_entry_at_cap() {
             .await
             .is_some()
     );
+    harness.actor.abort();
+}
+
+/// The whole point of the seam: a child that is already running takes the text
+/// without being killed and restarted, and the sender is told it landed.
+#[tokio::test]
+async fn message_reaches_a_running_child_and_reports_delivery() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("steerable", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("steerable"));
+
+    let outcome = harness
+        .backend
+        .message("steerable", "check the lockfile too")
+        .await;
+    assert_eq!(outcome, SubagentMessageOutcome::Delivered);
+    assert_eq!(
+        harness.messages.recv().await.as_deref(),
+        Some("check the lockfile too"),
+    );
+
+    // Still one child, still the same one: no kill, no respawn.
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+/// A message that arrives while the child is between turns is reported as
+/// undelivered and dropped. It is deliberately NOT parked for a later turn and
+/// NOT turned into a turn of its own: a subagent runs exactly one prompt, so a
+/// message resurrected into a fresh turn would race the child's own teardown,
+/// and a silent park would leave the sender believing it steered.
+#[tokio::test]
+async fn message_between_turns_is_reported_undelivered_and_dropped() {
+    let mut harness = harness_with_messaging(
+        false,
+        false,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(60),
+            ..CoordinatorConfig::default()
+        },
+        SubagentMessageOutcome::NotDelivered,
+        false,
+    );
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("idle-child", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("idle-child"));
+
+    let outcome = harness.backend.message("idle-child", "too late").await;
+    assert_eq!(outcome, SubagentMessageOutcome::NotDelivered);
+
+    // The child was asked; it simply had no turn left to merge the text into.
+    assert_eq!(harness.messages.recv().await.as_deref(), Some("too late"));
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+/// An id nobody spawned, and an id that has already reached a terminal state,
+/// are two different answers — neither is a silent drop.
+#[tokio::test]
+async fn message_to_unknown_and_finished_ids_are_distinguishable() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    assert_eq!(
+        harness.backend.message("never-existed", "hello").await,
+        SubagentMessageOutcome::NotFound,
+    );
+
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("short-lived", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("short-lived"));
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+
+    assert_eq!(
+        harness.backend.message("short-lived", "hello").await,
+        SubagentMessageOutcome::AlreadyFinished {
+            status: "completed".to_owned(),
+        },
+    );
+    // A terminal child is never handed the text.
+    assert!(harness.messages.try_recv().is_err());
+    harness.actor.abort();
+}
+
+/// A child that has been accepted but whose session has not been built yet has
+/// no turn to steer. Reported as its own outcome rather than queued, so the
+/// sender can put the instruction in the spawn prompt instead.
+#[tokio::test]
+async fn message_to_a_child_that_has_not_started_reports_not_started() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("not-yet", true)).await }
+    });
+    // Registered as pending: the runner is parked before `started`.
+    assert!(harness.requests.recv().await.is_some());
+
+    assert_eq!(
+        harness.backend.message("not-yet", "early word").await,
+        SubagentMessageOutcome::NotStarted,
+    );
+    assert!(harness.messages.try_recv().is_err());
+
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("not-yet"));
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+/// Addressing is scoped exactly like cancel and query: a session may only
+/// steer children it spawned. A child belonging to someone else reads as
+/// absent, so a wrong id can never reach a stranger's subagent.
+#[tokio::test]
+async fn a_session_cannot_message_a_child_it_did_not_spawn() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("owned-elsewhere", true)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("owned-elsewhere"),
+    );
+
+    // `request()` parents every child to "parent"; this backend speaks for a
+    // different session.
+    let stranger = ChannelBackend::for_session(harness.backend.sender(), "other-session");
+    assert_eq!(
+        stranger.message("owned-elsewhere", "not yours").await,
+        SubagentMessageOutcome::NotFound,
+    );
+    assert!(harness.messages.try_recv().is_err());
+
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+/// Kill wins a race with a message. Once the child's cancellation is set its
+/// turn is being torn down, so the coordinator answers from the registry
+/// instead of queueing a delivery that could only resolve after the teardown
+/// it is racing.
+#[tokio::test]
+async fn a_message_racing_a_kill_is_undelivered_and_never_reaches_the_child() {
+    let mut harness = harness_with_options(
+        false,
+        true,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(60),
+            ..CoordinatorConfig::default()
+        },
+    );
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("doomed", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("doomed"));
+
+    assert!(matches!(
+        harness.backend.cancel("doomed").await,
+        SubagentCancelOutcome::Cancelled,
+    ));
+    assert_eq!(
+        harness.backend.message("doomed", "keep going").await,
+        SubagentMessageOutcome::NotDelivered,
+    );
+    assert!(harness.messages.try_recv().is_err());
+
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().cancelled);
+    harness.actor.abort();
+}
+
+/// A message in flight must not wedge the actor: a blocking waiter registered
+/// against the same child is still served while the child's reply is pending,
+/// and the message resolves afterwards.
+#[tokio::test]
+async fn an_in_flight_message_does_not_stall_a_blocking_waiter() {
+    let mut harness = harness_with_messaging(
+        false,
+        false,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(60),
+            ..CoordinatorConfig::default()
+        },
+        SubagentMessageOutcome::Delivered,
+        true,
+    );
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("busy", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("busy"));
+
+    let message = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.message("busy", "steer").await }
+    });
+    assert_eq!(harness.messages.recv().await.as_deref(), Some("steer"));
+
+    // The child has not answered the message yet; the actor still serves a
+    // blocking wait on the very same child.
+    let waiter = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.query("busy", true, Some(60_000)).await }
+    });
+    tokio::task::yield_now().await;
+    let _ = harness.finish.send(());
+    let snapshot = waiter.await.unwrap().expect("waiter served");
+    assert!(matches!(
+        snapshot.status,
+        SubagentSnapshotStatus::Completed { .. },
+    ));
+
+    let _ = harness.message_gate.send(());
+    assert_eq!(message.await.unwrap(), SubagentMessageOutcome::Delivered);
+    assert!(spawn.await.unwrap().unwrap().success);
     harness.actor.abort();
 }

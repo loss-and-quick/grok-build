@@ -26,9 +26,9 @@ use super::coordinator_state::{
 };
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome,
-    SubagentEvent, SubagentOutstandingReply, SubagentRegistryCounts, SubagentRequest,
-    SubagentResult, SubagentResumeLookup, SubagentResumeSource, SubagentTypeDescriptor,
-    SubagentValidateTypeOutcome,
+    SubagentEvent, SubagentMessageOutcome, SubagentOutstandingReply, SubagentRegistryCounts,
+    SubagentRequest, SubagentResult, SubagentResumeLookup, SubagentResumeSource,
+    SubagentTypeDescriptor, SubagentValidateTypeOutcome,
 };
 
 pub use super::coordinator_state::{
@@ -59,9 +59,18 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     descriptions: FuturesUnordered<ReplyFuture<R::DescribeFuture, SubagentDescribeOutcome>>,
     type_lists: FuturesUnordered<ReplyFuture<R::ListTypesFuture, Vec<SubagentTypeDescriptor>>>,
     progress: FuturesUnordered<ProgressFuture<<R::Control as ChildControl>::ProgressFuture>>,
+    messages: FuturesUnordered<
+        ReplyFuture<<R::Control as ChildControl>::MessageFuture, SubagentMessageOutcome>,
+    >,
     list_requests: HashMap<u64, ListRequest>,
     next_list_request_id: u64,
 }
+
+/// A message the registry settles on its own, paired with the caller's channel.
+type ImmediateMessageReply = (
+    oneshot::Sender<SubagentMessageOutcome>,
+    SubagentMessageOutcome,
+);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PromptScope {
@@ -104,6 +113,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             descriptions: FuturesUnordered::new(),
             type_lists: FuturesUnordered::new(),
             progress: FuturesUnordered::new(),
+            messages: FuturesUnordered::new(),
             list_requests: HashMap::new(),
             next_list_request_id: 0,
         }
@@ -118,6 +128,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 && self.descriptions.is_empty()
                 && self.type_lists.is_empty()
                 && self.progress.is_empty()
+                && self.messages.is_empty()
             {
                 break;
             }
@@ -143,6 +154,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 }
                 Some((seed, target, progress)) = self.progress.next(), if !self.progress.is_empty() => {
                     self.finish_progress(seed, target, progress);
+                }
+                Some((respond_to, outcome)) = self.messages.next(), if !self.messages.is_empty() => {
+                    let _ = respond_to.send(outcome);
                 }
                 command = self.commands.recv(), if commands_open => {
                     match command {
@@ -265,6 +279,17 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     }
                 }
             },
+            SubagentEvent::Message(request) => {
+                let outcome = self.begin_message(
+                    &request.subagent_id,
+                    request.parent_session_id.as_deref(),
+                    request.text,
+                    request.respond_to,
+                );
+                if let Some((respond_to, outcome)) = outcome {
+                    let _ = respond_to.send(outcome);
+                }
+            }
             SubagentEvent::ListActive(request) => {
                 let summaries = self
                     .active
@@ -681,6 +706,55 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 snapshot_ref: None,
             },
         );
+    }
+
+    /// Resolve a message against the registry and, when there is a live child
+    /// to steer, queue its control future. Returns `Some((respond_to, outcome))`
+    /// when the registry alone settles the answer, `None` once the child has
+    /// been asked and the reply rides on [`Self::messages`].
+    ///
+    /// Registry state is checked before any control is touched, so a caller
+    /// naming a child of another session, a child that has not started, or one
+    /// that already finished gets its own answer instead of a delivery attempt
+    /// against something that cannot take it. A child whose cancellation token
+    /// is already set is answered `NotDelivered` here rather than handed the
+    /// text: its turn is being torn down, and a control future queued against
+    /// it would only resolve after the teardown it is racing.
+    fn begin_message(
+        &mut self,
+        id: &str,
+        parent_session_id: Option<&str>,
+        text: String,
+        respond_to: oneshot::Sender<SubagentMessageOutcome>,
+    ) -> Option<ImmediateMessageReply> {
+        if let Some(child) = self.active.get(id)
+            && belongs_to_session(&child.request, parent_session_id)
+        {
+            if child.cancellation.is_cancelled() {
+                return Some((respond_to, SubagentMessageOutcome::NotDelivered));
+            }
+            self.messages.push(ReplyFuture {
+                future: Box::pin(child.control.message(text)),
+                respond_to: Some(respond_to),
+            });
+            return None;
+        }
+        if let Some(child) = self.pending.get(id)
+            && belongs_to_session(&child.request, parent_session_id)
+        {
+            return Some((respond_to, SubagentMessageOutcome::NotStarted));
+        }
+        if let Some(child) = self.completed.get(id)
+            && belongs_to_session(&child.request, parent_session_id)
+        {
+            return Some((
+                respond_to,
+                SubagentMessageOutcome::AlreadyFinished {
+                    status: child.result.status().to_owned(),
+                },
+            ));
+        }
+        Some((respond_to, SubagentMessageOutcome::NotFound))
     }
 
     fn cancel_one(

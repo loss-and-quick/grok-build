@@ -15,10 +15,10 @@ use tokio::sync::{mpsc, oneshot};
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget,
     SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent, SubagentInspectRequest,
-    SubagentInspection, SubagentListRunningRequest, SubagentQueryRequest, SubagentRegistryCounts,
-    SubagentRegistryCountsRequest, SubagentRequest, SubagentResult, SubagentSnapshot,
-    SubagentSpawnRequest, SubagentSpawnedRefsRequest, SubagentValidateTypeOutcome,
-    SubagentValidateTypeRequest,
+    SubagentInspection, SubagentListRunningRequest, SubagentMessageOutcome, SubagentMessageRequest,
+    SubagentQueryRequest, SubagentRegistryCounts, SubagentRegistryCountsRequest, SubagentRequest,
+    SubagentResult, SubagentSnapshot, SubagentSpawnRequest, SubagentSpawnedRefsRequest,
+    SubagentValidateTypeOutcome, SubagentValidateTypeRequest,
 };
 use crate::register_resource;
 use xai_tool_runtime::ToolError;
@@ -50,6 +50,16 @@ pub trait SubagentBackend: Send + Sync + 'static {
 
     /// Request cancellation of a subagent by ID.
     async fn cancel(&self, id: &str) -> SubagentCancelOutcome;
+
+    /// Steer a running subagent: hand it `text` out of band, without
+    /// cancelling it and without spawning a replacement.
+    ///
+    /// Awaits the real outcome rather than acknowledging the post. A child in
+    /// a long tool call is not "between turns" — it just has not reached its
+    /// next injection point — so a deadline here would report a failure that
+    /// is about to become a delivery. The reply arrives when the child settles
+    /// it, or when the child's session goes away and the reply channel drops.
+    async fn message(&self, id: &str, text: &str) -> SubagentMessageOutcome;
 
     /// Validate a subagent type synchronously before spawning.
     /// Returns `ValidationUnavailable` on channel close / responder drop / timeout.
@@ -324,6 +334,22 @@ impl SubagentBackend for ChannelBackend {
             return SubagentCancelOutcome::NotFound;
         }
         response_rx.await.unwrap_or(SubagentCancelOutcome::NotFound)
+    }
+
+    async fn message(&self, id: &str, text: &str) -> SubagentMessageOutcome {
+        let (respond_to, response_rx) = oneshot::channel();
+        let sent = self.tx.send(SubagentEvent::Message(SubagentMessageRequest {
+            subagent_id: id.to_string(),
+            parent_session_id: self.parent_session_id(),
+            text: text.to_string(),
+            respond_to,
+        }));
+        if sent.is_err() {
+            return SubagentMessageOutcome::Unreachable;
+        }
+        response_rx
+            .await
+            .unwrap_or(SubagentMessageOutcome::Unreachable)
     }
 
     async fn validate_type(

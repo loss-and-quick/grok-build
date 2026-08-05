@@ -9,8 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::types::{
     ActiveSubagentSummary, SubagentCompletionSummary, SubagentDescribeOutcome, SubagentInspection,
-    SubagentRequest, SubagentResult, SubagentResumeLookup, SubagentSnapshot,
-    SubagentSnapshotStatus, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
+    SubagentMessageOutcome, SubagentRequest, SubagentResult, SubagentResumeLookup,
+    SubagentSnapshot, SubagentSnapshotStatus, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
 };
 
 /// Cap on retained completed-subagent entries before the oldest are evicted.
@@ -35,9 +35,19 @@ pub struct SubagentProgress {
 /// Runtime handle retained while a child is active.
 pub trait ChildControl: 'static {
     type ProgressFuture: Future<Output = SubagentProgress> + 'static;
+    type MessageFuture: Future<Output = SubagentMessageOutcome> + 'static;
 
     fn progress(&self) -> Self::ProgressFuture;
     fn cancel(&self);
+
+    /// Hand `text` to the running child out of band, resolving only once the
+    /// child has put it in its conversation or established that it will not.
+    ///
+    /// A control may only answer with the child-observable outcomes —
+    /// [`SubagentMessageOutcome::Delivered`], `NotDelivered`, or `Unreachable`.
+    /// `NotFound` / `NotStarted` / `AlreadyFinished` describe registry state the
+    /// coordinator resolves before a control is ever consulted.
+    fn message(&self, text: String) -> Self::MessageFuture;
 }
 
 /// Data reported when runtime initialization has produced a live child.

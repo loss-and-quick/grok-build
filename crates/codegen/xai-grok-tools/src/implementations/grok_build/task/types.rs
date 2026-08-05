@@ -577,6 +577,50 @@ pub enum SubagentCancelOutcome {
     NotFound,
 }
 
+/// Out-of-band message aimed at a subagent that is already running.
+///
+/// Scoped by `parent_session_id` exactly like [`SubagentCancelRequest`] and
+/// `SubagentQueryRequest`: a caller may only reach children its own session
+/// spawned. `respond_to` is answered once the outcome is *known*, not once the
+/// message is posted — see [`SubagentMessageOutcome`].
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct SubagentMessageRequest {
+    pub subagent_id: String,
+    pub parent_session_id: Option<String>,
+    pub text: String,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<SubagentMessageOutcome>,
+}
+
+/// What became of a message sent to a running subagent.
+///
+/// Every variant is a distinguishable answer to the sender. There is
+/// deliberately no "posted, probably fine" state: a sender that believes it
+/// steered a child which never saw the text is worse than no feature at all,
+/// so the reply waits until the child has either put the message in its
+/// conversation or established that it never will.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubagentMessageOutcome {
+    /// In the child's conversation, ahead of its next inference request.
+    Delivered,
+    /// The child was accepted the message but its turn ended (or was
+    /// cancelled) before the next injection point, so nothing was added to its
+    /// conversation. The message is dropped, never rerun as a turn of its own.
+    NotDelivered,
+    /// The child exists but has not started its session yet, so there is no
+    /// turn to steer. Not queued: the sender should retry or let the spawn
+    /// prompt carry the instruction.
+    NotStarted,
+    /// The child reached a terminal state before the message could land.
+    AlreadyFinished { status: String },
+    /// The child is running but its session channel is gone (mid-teardown, or
+    /// a crashed child session actor).
+    Unreachable,
+    /// No subagent with this id belongs to the calling session.
+    NotFound,
+}
+
 /// Summary of a completed subagent, used for between-turn delivery.
 /// Session ownership lives on the coordinator's `BufferedCompletion` wrapper;
 /// drains are scoped there, so delivered summaries carry no owner field.
@@ -868,6 +912,7 @@ pub enum SubagentEvent {
     Spawn(SubagentSpawnRequest),
     Query(SubagentQueryRequest),
     Cancel(SubagentCancelRequest),
+    Message(SubagentMessageRequest),
     ListActive(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),
     Completions(SubagentCompletionsRequest),
