@@ -3632,6 +3632,7 @@ mod tests {
             };
             db.register(&record).unwrap();
 
+            #[allow(clippy::disallowed_methods)] // test fixture; killed and reaped below
             let mut child = std::process::Command::new("sleep")
                 .arg("30")
                 .current_dir(&nested)
