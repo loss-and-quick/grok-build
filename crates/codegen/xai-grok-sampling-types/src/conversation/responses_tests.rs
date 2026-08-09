@@ -2034,3 +2034,96 @@ fn bare_responses_response() -> rs::Response {
         usage: None,
     }
 }
+
+/// The provider names the offending item in prose. The scan finds the
+/// reasoning id in it and ignores everything else in the sentence.
+#[test]
+fn encrypted_content_item_id_is_read_out_of_the_provider_prose() {
+    let message = "The encrypted content for item rs_00abc123def could not be verified. \
+                   Reason: Encrypted content could not be decrypted or parsed.";
+    assert_eq!(
+        encrypted_content_item_id(message),
+        Some("rs_00abc123def"),
+        "the named item is the one the request has to lose"
+    );
+    assert_eq!(
+        encrypted_content_item_id("Could not decrypt the provided encrypted_content"),
+        None,
+        "a message that names no item must not invent one"
+    );
+    assert_eq!(
+        encrypted_content_item_id("item rs_ has no id after the prefix"),
+        None
+    );
+}
+
+/// The repair the encrypted-content 400 asks for: every reasoning item
+/// carrying a blob leaves the history, the named item with it, and nothing
+/// else is touched. Reasoning without a blob is not issuer-bound, so it
+/// stays.
+#[test]
+fn drop_unverifiable_reasoning_removes_every_encrypted_item() {
+    let mut items = vec![
+        ConversationItem::user("first question"),
+        reasoning_sibling("rs_stale", "old thought", Some("blob-from-a-past-issuer")),
+        ConversationItem::assistant("first answer"),
+        ConversationItem::user("second question"),
+        reasoning_sibling("rs_named", "named thought", Some("blob-the-400-named")),
+        reasoning_sibling("rs_plain", "unencrypted thought", None),
+        ConversationItem::assistant("second answer"),
+    ];
+
+    let dropped = drop_unverifiable_reasoning(&mut items, Some("rs_named"));
+
+    assert_eq!(dropped, 2);
+    assert_eq!(
+        summarise_items(&items),
+        vec![
+            "user: first question",
+            "assistant: first answer",
+            "user: second question",
+            "reasoning: rs_plain",
+            "assistant: second answer",
+        ]
+    );
+}
+
+/// A named item with no blob of its own is still dropped: the provider
+/// rejected that id, so replaying it repeats the same 400.
+#[test]
+fn drop_unverifiable_reasoning_drops_the_named_item_without_a_blob() {
+    let mut items = vec![
+        reasoning_sibling("rs_named", "named thought", None),
+        ConversationItem::assistant("answer"),
+    ];
+    assert_eq!(drop_unverifiable_reasoning(&mut items, Some("rs_named")), 1);
+    assert_eq!(summarise_items(&items), vec!["assistant: answer"]);
+
+    // Nothing to repair: the caller uses this to stop, rather than resubmit
+    // an unchanged request that fails the same way.
+    let mut items = vec![ConversationItem::user("hi")];
+    assert_eq!(drop_unverifiable_reasoning(&mut items, Some("rs_named")), 0);
+}
+
+/// `role: text` for messages, `reasoning: <id>` for reasoning siblings.
+fn summarise_items(items: &[ConversationItem]) -> Vec<String> {
+    items
+        .iter()
+        .map(|item| match item {
+            ConversationItem::User(u) => format!("user: {}", item_text(&u.content)),
+            ConversationItem::Assistant(a) => format!("assistant: {}", a.content),
+            ConversationItem::Reasoning(r) => format!("reasoning: {}", r.id),
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
+fn item_text(content: &[ContentPart]) -> String {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_ref()),
+            _ => None,
+        })
+        .collect()
+}

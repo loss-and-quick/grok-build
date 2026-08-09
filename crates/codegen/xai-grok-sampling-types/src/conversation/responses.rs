@@ -376,6 +376,53 @@ fn reasoning_item_is_wire_legal(item: &rs::ReasoningItem) -> bool {
     !item.id.is_empty()
 }
 
+/// The reasoning item id a provider named in an encrypted-content rejection,
+/// e.g. `The encrypted content for item rs_abc123 could not be verified.`
+///
+/// `rs_` is the Responses API's own prefix for a reasoning item, not a
+/// provider-specific spelling, so the scan keys on it rather than on the
+/// sentence around it. `None` when the message names no item — the caller
+/// then repairs the history on the blobs alone.
+pub fn encrypted_content_item_id(message: &str) -> Option<&str> {
+    message
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .find(|token| token.len() > 3 && token.starts_with("rs_"))
+}
+
+/// Drop reasoning items whose `encrypted_content` the endpoint on the other
+/// end cannot verify, plus `named_id` if the rejection named one. Returns how
+/// many items were removed.
+///
+/// Encrypted reasoning is bound to whoever minted it: replaying an item to a
+/// different provider, account or deployment answers
+/// `400 ... could not be decrypted or parsed`, and the request fails
+/// identically on every retry because the payload is unchanged. It happens
+/// whenever a conversation outlives its issuer — a `model_fallbacks` hop, a
+/// re-pointed `base_url`, a rotated account, a resumed session.
+///
+/// Everything carrying a blob goes, not only the named item, because
+/// [`ConversationItem::Reasoning`] records no issuer (the same gap
+/// [`reasoning_item_is_wire_legal`] documents): with no way to tell whose
+/// blob is whose, the named item only proves the history holds foreign ones.
+/// Dropping just that one would cost a full round trip per stale item — the
+/// provider reports them one at a time — and each round trip is a failed
+/// turn the user waits through. What is lost is the model's own reasoning
+/// trace, never user-visible content or tool results; the alternative on
+/// offer was discarding the whole session.
+pub fn drop_unverifiable_reasoning(
+    items: &mut Vec<ConversationItem>,
+    named_id: Option<&str>,
+) -> usize {
+    let before = items.len();
+    items.retain(|item| match item {
+        ConversationItem::Reasoning(r) => {
+            r.encrypted_content.is_none() && Some(r.id.as_str()) != named_id
+        }
+        _ => true,
+    });
+    before - items.len()
+}
+
 /// Inject the `type: "reasoning_text"` discriminator the API requires.
 /// `async-openai`'s `ReasoningTextContent` has no `type` field, so it
 /// serializes to `{"text": ...}` and the API answers 400. Delete this once

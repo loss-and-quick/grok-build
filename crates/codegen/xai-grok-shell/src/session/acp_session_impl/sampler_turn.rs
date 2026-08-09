@@ -1073,6 +1073,51 @@ impl SessionActor {
             })),
         );
     }
+    /// Repair the history behind an encrypted-content 400 and report how many
+    /// reasoning items it cost.
+    ///
+    /// Zero means there was nothing to repair, and the caller must not
+    /// resubmit: the rebuilt request would be byte-identical and earn the
+    /// same rejection. Anything above zero means the next turn attempt sends
+    /// a strictly smaller history, so the recovery cannot cycle.
+    ///
+    /// `replace_conversation` is fire-and-forget, but the actor serializes its
+    /// commands, so the `build_request` the resubmit issues is processed after
+    /// this replacement lands.
+    pub(crate) async fn repair_unverifiable_reasoning(&self, message: &str) -> usize {
+        let named_id = xai_grok_sampling_types::encrypted_content_item_id(message);
+        let mut items = self.chat_state_handle.get_conversation().await;
+        let dropped = xai_grok_sampling_types::drop_unverifiable_reasoning(&mut items, named_id);
+        if dropped == 0 {
+            return 0;
+        }
+        self.chat_state_handle.replace_conversation(items);
+        tracing::warn!(
+            dropped,
+            named_item = named_id.unwrap_or("<unnamed>"),
+            "encrypted reasoning rejected by the endpoint; dropped it from the history"
+        );
+        xai_grok_telemetry::unified_log::warn(
+            "turn.encrypted_reasoning_dropped",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "dropped": dropped,
+                "named_item": named_id.is_some(),
+            })),
+        );
+        self.send_xai_notification(XaiSessionUpdate::RetryState(
+            crate::extensions::notification::RetryState::Retrying {
+                attempt: 1,
+                max_retries: 1,
+                reason: "The model's earlier reasoning cannot be verified by this endpoint; \
+                         dropping it and retrying"
+                    .to_string(),
+            },
+        ))
+        .await;
+        dropped
+    }
+
     pub(crate) async fn handle_sampling_failure(
         self: &Arc<Self>,
         error: xai_grok_sampler::SamplingErrorInfo,
@@ -1136,10 +1181,15 @@ impl SessionActor {
         let detailed_message = error.message.clone();
         if matches!(error.kind, SamplingErrorKind::Api)
             && error.status_code == Some(400)
-            && error.message.contains("encrypted_content")
+            && xai_grok_sampling_types::is_encrypted_content_message(&error.message)
         {
             self.signals_handle()
                 .record_error_typed("encrypted_content_mismatch");
+            if self.repair_unverifiable_reasoning(&error.message).await > 0 {
+                return Ok(SamplerFailureRecovery::ResubmitWithoutReasoning);
+            }
+            // Nothing left to drop: the rejection is about content this shell
+            // cannot find in the history, so resubmitting would repeat it.
             let friendly = "This session's conversation history is incompatible \
                             with the current model. Please start a new session."
                 .to_string();
@@ -1541,6 +1591,9 @@ impl SessionActor {
                     return match self.handle_sampling_failure(info).await? {
                         SamplerFailureRecovery::CompactAndResubmit => {
                             Ok(SamplerTurnOutcome::CompactAndResubmit)
+                        }
+                        SamplerFailureRecovery::ResubmitWithoutReasoning => {
+                            Ok(SamplerTurnOutcome::ResubmitWithoutReasoning)
                         }
                         SamplerFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
                             Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store })

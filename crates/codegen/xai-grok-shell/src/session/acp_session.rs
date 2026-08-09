@@ -1894,6 +1894,10 @@ mod between_turn_completion_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/build_tool_parse_error_message_tests.rs"]
 mod build_tool_parse_error_message_tests;
+/// Recovery from a 400 that refuses replayed encrypted reasoning content.
+#[cfg(test)]
+#[path = "acp_session_tests/encrypted_reasoning_recovery_tests.rs"]
+mod encrypted_reasoning_recovery_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/cancel_running_task_tests.rs"]
 mod cancel_running_task_tests;

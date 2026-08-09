@@ -33,6 +33,12 @@ pub(crate) enum SamplerFailureRecovery {
     /// Compaction ran. The turn loop should rebuild the request from
     /// the compacted conversation and resubmit.
     CompactAndResubmit,
+    /// The endpoint refused to verify replayed encrypted reasoning and those
+    /// items have been dropped from the history. The turn loop should rebuild
+    /// the request and resubmit. Bounded by construction: the recovery only
+    /// reports this after removing at least one item, so a second rejection
+    /// finds nothing left to drop and falls through to the terminal message.
+    ResubmitWithoutReasoning,
     /// Auth 401 recovery succeeded; the turn loop should resubmit with the
     /// fresh token. `credential` is the wire provenance of the rejected
     /// request: a 401 for a request that carried no credential at all (a
@@ -55,6 +61,10 @@ pub(crate) enum SamplerTurnOutcome {
         Box<xai_grok_sampler::InferenceLatencyStats>,
     ),
     CompactAndResubmit,
+    /// Unverifiable encrypted reasoning has been dropped from the history;
+    /// the outer loop should rebuild and retry. Mirrors
+    /// [`SamplerFailureRecovery::ResubmitWithoutReasoning`].
+    ResubmitWithoutReasoning,
     /// Auth recovery succeeded; the outer loop should retry. Mirrors
     /// [`SamplerFailureRecovery::RefreshAuthAndResubmit`].
     RefreshAuthAndResubmit {

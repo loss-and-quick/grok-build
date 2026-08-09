@@ -2214,6 +2214,10 @@ impl SessionActor {
                     auth_retry_schedule.reset_on_success();
                     continue;
                 }
+                // The history lost the reasoning items the endpoint could not
+                // verify; rebuild the request from it and send again. No auth
+                // incident is involved, so the 401 budget is left alone.
+                Ok(SamplerTurnOutcome::ResubmitWithoutReasoning) => continue,
                 Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store }) => {
                     if auth_retry_schedule.reset_if_incident_spans_suspend() {
                         tracing::info!("auth 401 retry: incident spanned a suspend; budget reset");

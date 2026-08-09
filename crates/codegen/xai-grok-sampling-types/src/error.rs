@@ -284,10 +284,10 @@ impl SamplingError {
         }
     }
 
-    /// The server rejected the request because the conversation history
-    /// contains `encrypted_content` from a different model family that the
-    /// current model cannot decrypt. Never retryable — the user must start
-    /// a new session.
+    /// The server rejected the request because the replayed conversation
+    /// carries encrypted reasoning content it cannot verify. Never retryable
+    /// as sent — the offending items have to leave the history first (see
+    /// [`crate::drop_unverifiable_reasoning`]).
     pub fn is_encrypted_content_error(&self) -> bool {
         matches!(
             self,
@@ -295,7 +295,7 @@ impl SamplingError {
                 status: StatusCode::BAD_REQUEST,
                 message,
                 ..
-            } if message.contains("encrypted_content")
+            } if is_encrypted_content_message(message)
         )
     }
 
@@ -565,6 +565,22 @@ pub fn is_context_length_error(message: &str) -> bool {
         || m.contains("maximum context length")
         || m.contains("context_length_exceeded")
         || (m.contains("current message") && m.contains("exceeds budget"))
+}
+
+/// True when a 400's message reports that replayed encrypted reasoning
+/// content could not be verified.
+///
+/// There is no error code for this: providers report it in prose, and the
+/// wording differs between them — one names the request field
+/// (`Could not decrypt the provided encrypted_content`), another writes
+/// English about the item (`The encrypted content for item rs_... could not
+/// be verified`). Matching one spelling of the phrase missed the other
+/// entirely, so the recovery never ran and the turn died as a generic
+/// failure. Both spellings of the noun are matched, case-insensitively, and
+/// the caller still gates on the 400.
+pub fn is_encrypted_content_message(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("encrypted_content") || m.contains("encrypted content")
 }
 
 /// Whether an HTTP status is worth retrying: the same 429 + any 5xx rule CCP
@@ -1145,6 +1161,26 @@ mod tests {
             !err.is_retryable(),
             "encrypted_content errors must not be retried"
         );
+    }
+
+    /// The other spelling seen in the wild: English prose about the item,
+    /// not the request field. Matching only `encrypted_content` missed it,
+    /// and the turn died as a generic failure instead of repairing the
+    /// history.
+    #[test]
+    fn encrypted_content_400_detected_in_provider_prose() {
+        let err = SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "invalid_request_error: The encrypted content for item rs_00abc123 could \
+                      not be verified. Reason: Encrypted content could not be decrypted or \
+                      parsed."
+                .into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(err.is_encrypted_content_error());
+        assert!(!err.is_retryable(), "the same payload fails the same way");
     }
 
     #[test]
