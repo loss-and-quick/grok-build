@@ -73,8 +73,12 @@ impl ToolBridge {
         ctx: SessionContext,
     ) -> Result<Self, xai_tool_runtime::ToolError> {
         let finalized_toolset = builder.finalize(config, ctx).map_err(|errs| {
+            // This string is what a failed session start shows its user, so render
+            // the remedies (`RequirementError::summary`) instead of Debug structs.
+            let summaries: Vec<String> = errs.iter().map(|e| e.summary()).collect();
             xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Requirements unsatisfied: {errs:?}"
+                "toolset is not usable as configured: {}",
+                summaries.join("; ")
             ))
         })?;
 

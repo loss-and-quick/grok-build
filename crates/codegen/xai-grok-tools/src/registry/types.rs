@@ -2004,7 +2004,11 @@ fn explain_requirement_failure(
                 .with_expected("include get_task_output and kill_task")
                 .with_category("requirements")
         }
-        "GrokBuild:get_task_output" => {
+        // `wait_tasks` and `kill_task` share `get_task_output`'s requirement, so they
+        // share its explanation — without this they fall through to the bare
+        // "unsatisfied requirements" arm and say nothing about how to fix it.
+        "GrokBuild:get_task_output" | "GrokBuild:wait_tasks" | "GrokBuild:kill_task" => {
+            let tool = entry.id.as_str();
             let has_grok_build_bash = has_tool_with_bool_param(
                 proposed,
                 "GrokBuild",
@@ -2038,8 +2042,9 @@ fn explain_requirement_failure(
                         "GrokBuildConcise:run_terminal_cmd is present but enabled_background=false",
                     );
             }
-            let mut message = "get_task_output requires a background-capable bash tool (GrokBuild:run_terminal_cmd or GrokBuildConcise:run_terminal_cmd with enabled_background=true), OpenCode:bash, or GrokBuild:task"
-                .to_string();
+            let mut message = format!(
+                "{tool} manages tasks but nothing in this toolset starts one; it needs GrokBuild:task, or a bash tool that can background (GrokBuild:run_terminal_cmd or GrokBuildConcise:run_terminal_cmd with enabled_background=true, or OpenCode:bash)"
+            );
             let has_provider = has_grok_build_bash || has_grok_build_concise_bash
                 || has_opencode_bash || has_task;
             if !has_provider && !notes.is_empty() {
@@ -2048,7 +2053,7 @@ fn explain_requirement_failure(
             RequirementError::new(fq_tool_id, message)
                 .with_field_path("tools")
                 .with_expected(
-                    "include a background-capable bash tool, OpenCode:bash, or GrokBuild:task",
+                    "add GrokBuild:task to the toolset, or drop the task-lifecycle tools",
                 )
                 .with_category("requirements")
         }
@@ -4129,32 +4134,50 @@ mod tests {
         assert!(error.message.contains("GrokBuild:kill_task"));
         assert_eq!(error.field_path.as_deref(), Some("tools"));
     }
+    /// Every task-lifecycle tool explains the same missing producer. `wait_tasks`
+    /// and `kill_task` used to fall through to a bare "unsatisfied requirements",
+    /// which told a user with a hand-written toolset nothing at all.
     #[test]
-    fn get_task_output_requirement_error_mentions_supported_providers() {
-        let builder = ToolRegistryBuilder::new();
-        let config = ToolServerConfig {
-            tools: vec![ToolConfig {
-                id: "GrokBuild:get_task_output".to_string(),
-                params: None,
-                name_override: None,
-                params_name_overrides: None,
-                description_override: None,
-                behavior_version: None,
-                kind: None,
-            }],
-            behavior_preset: None,
-        };
-        let errors = builder.validate_config(&config);
-        assert_eq!(
-            errors.len(),
-            1,
-            "expected one get_task_output requirement error: {errors:?}"
-        );
-        let error = &errors[0];
-        assert_eq!(error.tool, "GrokBuild:get_task_output");
-        assert!(error.message.contains("background-capable bash tool"));
-        assert!(error.message.contains("OpenCode:bash"));
-        assert!(error.message.contains("GrokBuild:task"));
+    fn task_lifecycle_requirement_errors_name_the_missing_producer() {
+        for id in [
+            "GrokBuild:get_task_output",
+            "GrokBuild:wait_tasks",
+            "GrokBuild:kill_task",
+        ] {
+            let builder = ToolRegistryBuilder::new();
+            let config = ToolServerConfig {
+                tools: vec![ToolConfig {
+                    id: id.to_string(),
+                    params: None,
+                    name_override: None,
+                    params_name_overrides: None,
+                    description_override: None,
+                    behavior_version: None,
+                    kind: None,
+                }],
+                behavior_preset: None,
+            };
+            let errors = builder.validate_config(&config);
+            assert_eq!(errors.len(), 1, "expected one error for {id}: {errors:?}");
+            let error = &errors[0];
+            assert_eq!(error.tool, id);
+            let short = id.trim_start_matches("GrokBuild:");
+            let summary = error.summary();
+            for expected in [
+                short,
+                "nothing in this toolset starts one",
+                "GrokBuild:task",
+                "OpenCode:bash",
+                "enabled_background=true",
+            ] {
+                assert!(
+                    summary.contains(expected),
+                    "{id} summary must mention `{expected}`: {summary}"
+                );
+            }
+            assert_eq!(error.field_path.as_deref(), Some("tools"));
+            assert!(error.expected.is_some(), "{id} must state a remedy");
+        }
     }
     #[test]
     fn search_replace_requirement_error_mentions_read_tool() {
