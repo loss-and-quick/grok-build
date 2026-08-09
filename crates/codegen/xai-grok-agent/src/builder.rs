@@ -177,6 +177,65 @@ fn merge_tool_params(
         }
     }
 }
+/// The tools that observe and cancel already-started tasks.
+const TASK_LIFECYCLE_TOOLS: [&str; 3] = ["get_task_output", "wait_tasks", "kill_task"];
+/// Drop task-lifecycle tools that nothing in the toolset can ever feed.
+///
+/// `get_task_output` / `wait_tasks` / `kill_task` only ever act on ids minted by
+/// `task` or by a background-capable bash. With neither producer in the toolset
+/// they are unreachable, and the registry rejects them outright — which would
+/// abort the whole session over tools the agent could not have called. Dropping
+/// them costs nothing and keeps the agent alive, so the warning (not the error)
+/// is what surfaces the config mistake.
+///
+/// Must run last: earlier stages (the `tools:` allowlist, the session clamp,
+/// `disallowedTools`) can remove `task` or bash after the lifecycle tools have
+/// already been let through, so any check placed before them can be invalidated.
+fn drop_orphaned_task_lifecycle_tools(
+    tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
+    agent_name: &str,
+) {
+    use xai_grok_tools::types::tool::ToolNamespace;
+    let has_satisfier = |ns: ToolNamespace, id: &str, needs_bg: bool| {
+        let fq = format!("{ns}:{id}");
+        tool_config.tools.iter().any(|tc| {
+            tc.id == fq
+                && (!needs_bg
+                    || tc
+                        .params
+                        .as_ref()
+                        .and_then(|p| p.get("enabled_background"))
+                        .and_then(|v| v.as_bool())
+                        // Absent means the tool's own default, which is `true`.
+                        .unwrap_or(true))
+        })
+    };
+    if has_satisfier(ToolNamespace::GrokBuild, "task", false)
+        || has_satisfier(ToolNamespace::GrokBuild, "run_terminal_cmd", true)
+        || has_satisfier(ToolNamespace::GrokBuildConcise, "run_terminal_cmd", true)
+        || has_satisfier(ToolNamespace::OpenCode, "bash", false)
+    {
+        return;
+    }
+    let dropped: Vec<&str> = tool_config
+        .tools
+        .iter()
+        .map(|tc| short_tool_name(&tc.id))
+        .filter(|name| TASK_LIFECYCLE_TOOLS.contains(name))
+        .collect();
+    if dropped.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        agent = %agent_name,
+        "agent '{agent_name}': dropping {} — nothing in its toolset starts a task. \
+         Add `task` to its tools, or enable background on its bash.",
+        dropped.join(", "),
+    );
+    tool_config
+        .tools
+        .retain(|tc| !TASK_LIFECYCLE_TOOLS.contains(&short_tool_name(&tc.id)));
+}
 fn apply_workflow_tool_gates(
     tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
     background_workflows_enabled: bool,
@@ -792,10 +851,8 @@ impl AgentBuilder {
             xai_grok_tools::types::tool::ToolNamespace::GrokBuild,
             "task"
         );
-        let mut task_stripped = false;
         if !self.subagents_enabled {
             tool_config.tools.retain(|tc| tc.id != task_tool_id);
-            task_stripped = true;
         } else {
             let subagents = crate::discovery::all_subagents_with_plugins(
                 &self.working_directory,
@@ -804,7 +861,6 @@ impl AgentBuilder {
             );
             if subagents.is_empty() {
                 tool_config.tools.retain(|tc| tc.id != task_tool_id);
-                task_stripped = true;
             } else if self.prompt_audience == crate::prompt::context::PromptAudience::Subagent {
                 if let Some(task_tc) = tool_config
                     .tools
@@ -820,31 +876,6 @@ impl AgentBuilder {
             {
                 task_tc.description_override =
                     Some(build_task_description(&subagents, &self.task_model_slugs));
-            }
-        }
-        if task_stripped {
-            use xai_grok_tools::types::tool::ToolNamespace;
-            let has_satisfier = |ns: ToolNamespace, id: &str, needs_bg: bool| {
-                let fq = format!("{ns}:{id}");
-                tool_config.tools.iter().any(|tc| {
-                    tc.id == fq
-                        && (!needs_bg
-                            || tc
-                                .params
-                                .as_ref()
-                                .and_then(|p| p.get("enabled_background"))
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(true))
-                })
-            };
-            if !has_satisfier(ToolNamespace::GrokBuild, "run_terminal_cmd", true)
-                && !has_satisfier(ToolNamespace::GrokBuildConcise, "run_terminal_cmd", true)
-                && !has_satisfier(ToolNamespace::OpenCode, "bash", false)
-            {
-                let lifecycle = ["get_task_output", "wait_tasks", "kill_task"];
-                tool_config
-                    .tools
-                    .retain(|tc| !lifecycle.contains(&short_tool_name(&tc.id)));
             }
         }
         if let xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig::Enabled {
@@ -1021,6 +1052,7 @@ impl AgentBuilder {
                 }
             }
         }
+        drop_orphaned_task_lifecycle_tools(&mut tool_config, &definition.name);
         let use_backend_search = self.backend_search;
         let web_search_enabled = self.web_search_config.is_enabled();
         let tool_bridge = ToolBridge::finalize_builder(
@@ -1055,7 +1087,11 @@ impl AgentBuilder {
             },
         )
         .await
-        .map_err(|e| AgentBuildError::ToolError(e.to_string()))?;
+        .map_err(|e| {
+            // The registry names tools, never the agent that asked for them; without
+            // the name a toolset mistake reads as an internal fault of the harness.
+            AgentBuildError::ToolError(format!("agent '{}': {e}", definition.name))
+        })?;
         if let Some(bytes) = self.mcp_max_output_bytes {
             tool_bridge.toolset().resources.lock().await.insert(
                 xai_grok_tools::types::resources::TruncationCfg(
@@ -1945,6 +1981,101 @@ mod tests {
         assert!(!d.hosted_tool_allowed("web_search"));
     }
     const AGENT_TOOLS_BASE: &[&str] = &["read_file", "run_terminal_cmd"];
+    /// An `Agent(...)` entry exempts the task-lifecycle tools from the `tools:`
+    /// allowlist, but the allowlist itself can drop the bash that would have fed
+    /// them, and `task` is already gone when subagents are off. That set used to
+    /// reach the registry and abort session init with three `RequirementError`s.
+    #[tokio::test]
+    async fn agent_entry_without_task_producer_drops_lifecycle_tools() {
+        let tools = vec!["Agent(worker)".into(), "read_file".into(), "grep".into()];
+        let agent = build_with_tools(tools, vec![]).await;
+        let names: Vec<String> = agent
+            .tool_definitions()
+            .await
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"read_file".to_string()),
+            "the requested tools must survive: {names:?}"
+        );
+        for orphan in [
+            "spawn_subagent",
+            "get_command_or_subagent_output",
+            "wait_commands_or_subagents",
+            "kill_command_or_subagent",
+        ] {
+            assert!(
+                !names.contains(&orphan.to_string()),
+                "`{orphan}` has no task producer and must be dropped: {names:?}"
+            );
+        }
+    }
+    /// The drop is scoped to orphans: a background-capable bash still feeds the
+    /// lifecycle tools even with no `task`, so they must stay.
+    #[tokio::test]
+    async fn background_bash_keeps_lifecycle_tools_without_task() {
+        let tools = vec!["Agent(worker)".into(), "run_terminal_cmd".into()];
+        let agent = build_with_tools(tools, vec![]).await;
+        let names: Vec<String> = agent
+            .tool_definitions()
+            .await
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        assert!(
+            !names.contains(&"spawn_subagent".to_string()),
+            "subagents are disabled in this build: {names:?}"
+        );
+        for kept in [
+            "get_command_or_subagent_output",
+            "wait_commands_or_subagents",
+            "kill_command_or_subagent",
+        ] {
+            assert!(
+                names.contains(&kept.to_string()),
+                "`{kept}` still manages background bash and must be kept: {names:?}"
+            );
+        }
+    }
+    /// What survives the degradation must still read as a config problem: the
+    /// message names the agent and the remedy, not Debug-formatted structs.
+    #[tokio::test]
+    async fn unsatisfiable_toolset_error_names_agent_and_remedy() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+        let mut def = crate::config::AgentDefinition::default_grok_build();
+        def.name = "sample-agent".into();
+        def.inject_default_tools = false;
+        def.tool_config = xai_grok_tools::registry::types::ToolServerConfig {
+            tools: vec![(&xai_grok_tools::implementations::grok_build::SearchReplaceTool).into()],
+            behavior_preset: None,
+        };
+        let result = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(def)
+        .build()
+        .await;
+        let text = match result {
+            Ok(_) => panic!("search_replace without a read tool is not satisfiable"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            text.contains("agent 'sample-agent'"),
+            "the failure must name the agent: {text}"
+        );
+        assert!(
+            text.contains("requires a Read tool") && text.contains("expected"),
+            "the failure must state the remedy: {text}"
+        );
+        assert!(
+            !text.contains("RequirementError {"),
+            "the failure must not print Debug structs: {text}"
+        );
+    }
     #[tokio::test]
     async fn agent_type_restricted_to_listed_types() {
         let mut tools: Vec<String> = AGENT_TOOLS_BASE.iter().map(|s| s.to_string()).collect();
