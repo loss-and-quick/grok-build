@@ -891,6 +891,62 @@ async fn responses_confident_doom_loop_signal_resamples_once() {
 }
 
 // ---------------------------------------------------------------------------
+// Responses stream tolerance
+// ---------------------------------------------------------------------------
+
+/// A gateway in front of the model can inject frames the pinned Responses
+/// event enum knows nothing about — a `keepalive` heartbeat here. Nothing in
+/// the pipeline reads such a frame, so the decoder skips it and the stream
+/// runs on to the terminal event. Before this, the first heartbeat failed the
+/// turn with a serialization error, and the retry hit the same frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_unknown_stream_event_is_skipped_and_stream_continues() {
+    let attempts = Arc::new(AtomicU32::new(0));
+    let attempts_handler = Arc::clone(&attempts);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let attempts = Arc::clone(&attempts_handler);
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                let mut events = sse::responses_api_script_exact("hello world", "test-model");
+                let beat = || SseEvent::data(r#"{"type":"keepalive"}"#);
+                // Before any output, mid-stream between two text deltas, and
+                // immediately before the terminal frame.
+                let before_terminal = events.len() - 2;
+                events.insert(before_terminal, beat());
+                events.insert(2, beat());
+                events.insert(1, beat());
+                let events = sse_events_to_axum(events);
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        responses_config(server.base_url(), None),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let result = handle
+        .submit_and_collect(RequestId::from("req-keepalive"), user_request("hi"))
+        .await;
+    server.shutdown();
+
+    let (response, _metrics) = result.expect("heartbeat frames must not fail the turn");
+    assert_eq!(response.assistant_text(), "hello world");
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "no retry: the turn never failed"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Helpers for draining the event channel
 // ---------------------------------------------------------------------------
 

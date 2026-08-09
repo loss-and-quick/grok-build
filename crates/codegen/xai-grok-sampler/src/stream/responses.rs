@@ -94,6 +94,39 @@ pub(crate) fn responses_event_may_have_output(event: &rs::ResponseStreamEvent) -
         && responses_event_has_meaningful_content(event)
 }
 
+/// The Responses API event types this transform reads a payload out of.
+///
+/// The wire event set is vendor-extensible and still growing, and a
+/// third-party gateway in front of the model can emit whatever it likes (a
+/// `keepalive` heartbeat is what motivated this list). `rs::ResponseStreamEvent`
+/// is a closed enum pinned by revision, so any such event fails to
+/// deserialize. The SSE decoder therefore skips an undeserializable event
+/// whose `type` is not listed here — nothing downstream reads it, so it
+/// carries no state we can lose — and only reports a deserialization error
+/// for the types below, where a dropped frame would change the turn's
+/// outcome (lost output, a lost terminal frame, a swallowed failure).
+///
+/// Keep in sync with the `match event` arms of `stream_responses_tracked`:
+/// a type handled there but missing here is decoded leniently, so a
+/// malformed frame of it is dropped instead of failing the turn.
+pub(crate) const CONSUMED_EVENT_TYPES: &[&str] = &[
+    "error",
+    "response.code_interpreter_call.in_progress",
+    "response.completed",
+    "response.custom_tool_call_input.done",
+    "response.failed",
+    "response.function_call_arguments.delta",
+    "response.incomplete",
+    "response.output_item.added",
+    "response.output_item.done",
+    "response.output_text.delta",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_text.delta",
+    "response.refusal.delta",
+    "response.refusal.done",
+    "response.web_search_call.in_progress",
+];
+
 /// Transform a raw Responses API event stream into a stream of
 /// [`SamplingEvent`]s.
 ///

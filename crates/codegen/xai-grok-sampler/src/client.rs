@@ -12,6 +12,9 @@
 //! headers (proxy auth, OTel context, etc.)
 //! into [`SamplerConfig::extra_headers`] before constructing the client.
 
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
+
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
@@ -121,37 +124,88 @@ impl GrokRequestHeaders<'_> {
 /// `ResponseUsage` unchanged so billing telemetry stays correct. When
 /// the API doesn't emit `context_details` (older deployments) `total_tokens`
 /// passes through unchanged.
-fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
-    let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
-        Ok(event) => event,
-        Err(first_err) => {
-            // Try sanitizing: parse as Value, strip unknown tools, retry.
-            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) {
-                // Strip tools that async_openai's rs::Tool can't deserialize
-                // (e.g., xAI-specific "x_search"). Instead of maintaining a
-                // hardcoded allowlist, try deserializing each tool entry —
-                // if it fails, drop it.
-                if let Some(tools) = value
-                    .pointer_mut("/response/tools")
-                    .and_then(|v| v.as_array_mut())
-                {
-                    tools.retain(|t| serde_json::from_value::<rs::Tool>(t.clone()).is_ok());
-                }
-                if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
-                    apply_terminal_event_overrides(&mut event, data);
-                    return Ok(event);
-                }
-            }
-            tracing::error!(
-                error = %first_err,
-                raw_data = %data,
-                "Failed to deserialize ResponseStreamEvent from stream"
-            );
-            return Err(SamplingError::Serialization(first_err));
+///
+/// `Ok(None)` means "skip this frame": the event did not deserialize and its
+/// `type` is not one [`CONSUMED_EVENT_TYPES`] lists, so no part of the
+/// pipeline would have read it. That covers vendor extensions and gateway
+/// heartbeats (`keepalive`) alike — the event set is open-ended and
+/// `rs::ResponseStreamEvent` is a closed enum pinned by revision, so a frame
+/// nobody reads must not be able to kill a turn. A frame whose `type` *is*
+/// consumed still fails with [`SamplingError::Serialization`]: that one is
+/// malformed data we would otherwise lose silently.
+///
+/// The distinction is drawn on the peeked `type` field, never on the serde
+/// error text: the error string is not a stable interface, and "unknown
+/// variant" and "invalid type at field x" would be indistinguishable to any
+/// caller reading it.
+fn deserialize_response_event(data: &str) -> Result<Option<rs::ResponseStreamEvent>> {
+    let first_err = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
+        Ok(mut event) => {
+            apply_terminal_event_overrides(&mut event, data);
+            return Ok(Some(event));
         }
+        Err(first_err) => first_err,
     };
-    apply_terminal_event_overrides(&mut event, data);
-    Ok(event)
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) else {
+        tracing::error!(
+            error = %first_err,
+            raw_data = %data,
+            "Failed to deserialize ResponseStreamEvent from stream"
+        );
+        return Err(SamplingError::Serialization(first_err));
+    };
+    let event_type = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if !crate::stream::responses::CONSUMED_EVENT_TYPES.contains(&event_type) {
+        log_skipped_response_event_once(event_type);
+        return Ok(None);
+    }
+    // Strip tools that async_openai's rs::Tool can't deserialize
+    // (e.g., xAI-specific "x_search"). Instead of maintaining a
+    // hardcoded allowlist, try deserializing each tool entry —
+    // if it fails, drop it.
+    if let Some(tools) = value
+        .pointer_mut("/response/tools")
+        .and_then(|v| v.as_array_mut())
+    {
+        tools.retain(|t| serde_json::from_value::<rs::Tool>(t.clone()).is_ok());
+    }
+    if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
+        apply_terminal_event_overrides(&mut event, data);
+        return Ok(Some(event));
+    }
+    tracing::error!(
+        error = %first_err,
+        raw_data = %data,
+        "Failed to deserialize ResponseStreamEvent from stream"
+    );
+    Err(SamplingError::Serialization(first_err))
+}
+
+/// Event types already reported by [`log_skipped_response_event_once`].
+static SKIPPED_RESPONSE_EVENT_TYPES: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Report a skipped Responses API event type once per process.
+///
+/// Once per *type*, not per event: a gateway heartbeat arrives every few
+/// seconds for the life of every stream, and logging each one would bury the
+/// log while saying nothing new. The first frame of a type is the only one
+/// that carries information — that the gateway emits it at all.
+fn log_skipped_response_event_once(event_type: &str) {
+    let first_sighting = match SKIPPED_RESPONSE_EVENT_TYPES.lock() {
+        Ok(mut seen) => seen.insert(event_type.to_owned()),
+        // A poisoned set only costs repeated logging; never drop the report.
+        Err(_) => true,
+    };
+    if first_sighting {
+        tracing::warn!(
+            event_type = %event_type,
+            "responses stream: skipping unrecognized event type"
+        );
+    }
 }
 
 /// On terminal Responses API events (`response.completed` /
@@ -1796,7 +1850,15 @@ impl SamplingClient {
                         } else if let Some(stream_error) = try_parse_stream_error(data) {
                             Some(Some(Err(stream_error)))
                         } else {
-                            Some(Some(deserialize_response_event(data)))
+                            // `Ok(None)` is a frame the decoder skipped
+                            // (unrecognized event type); like an absorbed
+                            // doom-loop event it drops out of the stream
+                            // without ending it.
+                            match deserialize_response_event(data) {
+                                Ok(Some(event)) => Some(Some(Ok(event))),
+                                Ok(None) => Some(None),
+                                Err(err) => Some(Some(Err(err))),
+                            }
                         }
                     }
                     Err(e) => {
@@ -3619,7 +3681,9 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = deserialize_response_event(sse)
+            .expect("parse")
+            .expect("a consumed event type decodes");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3657,7 +3721,9 @@ mod tests {
             )
         };
 
-        let event = deserialize_response_event(&make(78)).expect("parse");
+        let event = deserialize_response_event(&make(78))
+            .expect("parse")
+            .expect("a consumed event type decodes");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3671,7 +3737,9 @@ mod tests {
         );
 
         // The REST mapper backfills 0 for unbilled requests: no stash.
-        let event = deserialize_response_event(&make(0)).expect("parse");
+        let event = deserialize_response_event(&make(0))
+            .expect("parse")
+            .expect("a consumed event type decodes");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3701,7 +3769,9 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = deserialize_response_event(sse)
+            .expect("parse")
+            .expect("a consumed event type decodes");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3738,7 +3808,9 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = deserialize_response_event(sse)
+            .expect("parse")
+            .expect("a consumed event type decodes");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3759,10 +3831,50 @@ mod tests {
             "delta": "hello",
             "logprobs": []
         }"#;
-        let event = deserialize_response_event(sse).expect("non-terminal event parses");
+        let event = deserialize_response_event(sse)
+            .expect("non-terminal event parses")
+            .expect("a consumed event type decodes");
         assert!(matches!(
             event,
             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
+        ));
+    }
+
+    /// A gateway heartbeat (`keepalive`) is not in the pinned
+    /// `rs::ResponseStreamEvent` and cannot be added to it here. Nothing
+    /// downstream reads it, so it is skipped rather than failing the turn —
+    /// the failure was deterministic, so the retry died on it too.
+    #[test]
+    fn deserialize_response_event_skips_unknown_event_type() {
+        for sse in [
+            r#"{"type": "keepalive"}"#,
+            r#"{"type": "response.some_future_thing.delta", "delta": "x"}"#,
+            // No `type` at all: not an event this pipeline reads either.
+            r#"{"keepalive": true}"#,
+        ] {
+            let event =
+                deserialize_response_event(sse).expect("an unrecognized event must not error");
+            assert!(event.is_none(), "expected a skipped frame for {sse}");
+        }
+    }
+
+    /// The counterpart: a type the stream transform *does* read is real data,
+    /// so a malformed frame of it stays an error instead of being dropped.
+    #[test]
+    fn deserialize_response_event_errors_on_malformed_known_event() {
+        // `delta` must be a string, and the rest of the required fields are
+        // missing — a consumed type that cannot be decoded.
+        let sse = r#"{"type": "response.output_text.delta", "delta": 7}"#;
+        assert!(matches!(
+            deserialize_response_event(sse),
+            Err(SamplingError::Serialization(_))
+        ));
+
+        // Terminal frames matter most: dropping one loses the response.
+        let sse = r#"{"type": "response.completed", "sequence_number": 0}"#;
+        assert!(matches!(
+            deserialize_response_event(sse),
+            Err(SamplingError::Serialization(_))
         ));
     }
 }
