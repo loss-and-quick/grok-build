@@ -133,6 +133,27 @@ pub enum OrchestratorCancel {
     NotFound,
 }
 
+/// Steering outcome, mirroring the coordinator's own message vocabulary. The
+/// variants stay separate all the way to the wire: a plugin that believes it
+/// steered a child which never saw the text is worse off than one told plainly
+/// that nothing landed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrchestratorMessage {
+    /// In the child's conversation, ahead of its next inference request.
+    Delivered,
+    /// Accepted, but the child's turn ended before the next injection point;
+    /// the text was dropped rather than rerun as a turn of its own.
+    NotDelivered,
+    /// The child has not started its session yet — no turn to steer.
+    NotStarted,
+    /// The child was already terminal.
+    AlreadyFinished,
+    /// The child is running but its session channel is gone.
+    Unreachable,
+    /// No such child in the calling session.
+    NotFound,
+}
+
 /// Injected seam the `agent_*` capability handlers call. Implemented by the
 /// shell over the session's subagent coordinator channel; every method is
 /// callable from the host's plain-`tokio::spawn` request tasks (`Send`).
@@ -148,6 +169,16 @@ pub trait AgentOrchestrator: Send + Sync {
 
     /// Cancel a subagent by id.
     fn cancel<'a>(&'a self, id: &'a str) -> OrchestratorFuture<'a, OrchestratorCancel>;
+
+    /// Steer a *running* subagent: deliver `text` into the live child, which
+    /// picks it up at its next injection point. Resolves once the outcome is
+    /// known, not once the text is posted — so a `Delivered` really means the
+    /// child has it. Nothing is queued for a child that cannot take it now.
+    fn message<'a>(
+        &'a self,
+        id: &'a str,
+        text: &'a str,
+    ) -> OrchestratorFuture<'a, OrchestratorMessage>;
 
     /// Spawnable agent types for this session (sorted, toggle-filtered), each
     /// with its name, description, and explicit model override.

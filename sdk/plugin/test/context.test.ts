@@ -195,6 +195,30 @@ describe("PluginContext", () => {
     await endpoint.stop();
   });
 
+  test("agents.message steers the same subagent and returns the outcome", async () => {
+    const reader = new MemoryByteReader();
+    const writer = new MemoryByteWriter();
+    const endpoint = new JsonRpcEndpoint({ reader, writer });
+    endpoint.start();
+    const ctx = createPluginContext(new HostClient(endpoint), INIT_PARAMS);
+
+    const messageP = ctx.agents.message("agent-1", "stop, use serde");
+    await respondToNext(writer, reader, 1, { outcome: "delivered" });
+    expect(await messageP).toBe("delivered");
+    const messageReq = writer.messages[0] as { method: string; params: unknown };
+    // Steering keeps the child's id — no new subagent, unlike `send`.
+    expect(messageReq.method).toBe("agent_message");
+    expect(messageReq.params).toEqual({ id: "agent-1", text: "stop, use serde" });
+
+    // A non-delivery is surfaced, not swallowed: the caller must be able to
+    // tell a landed correction from one the child's turn outran.
+    const missedP = ctx.agents.message("agent-1", "too late");
+    await respondToNext(writer, reader, 2, { outcome: "not_delivered" });
+    expect(await missedP).toBe("not_delivered");
+
+    await endpoint.stop();
+  });
+
   test("ui.publishPanel/closePanel round-trip through the ui_* RPCs", async () => {
     const reader = new MemoryByteReader();
     const writer = new MemoryByteWriter();

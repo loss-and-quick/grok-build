@@ -105,6 +105,25 @@ await ctx.agents.list();   // [{ name, description, model? }] per spawnable type
 await ctx.agents.cancel(id);
 ```
 
+Two different ways to say something more to a subagent, and they are not
+interchangeable:
+
+```ts
+// Still running: steer it. Lands in the live child's conversation before
+// its next inference request; same id, no new subagent.
+const outcome = await ctx.agents.message(id, "skip the tests, just the parser");
+if (outcome !== "delivered") { /* "not_delivered" | "not_started" | ... */ }
+
+// Already finished: continue it. Resumes that conversation into a FRESH
+// child — key wait/events/cancel on the returned id, not the old one.
+const nextId = await ctx.agents.send(id, "now write the tests", 60_000);
+```
+
+`message` never queues: if the child's turn ended before the text landed
+you get `"not_delivered"` and nothing was added to its conversation, so
+re-send if the correction still matters. It is text only — no attachments,
+and no slash-command expansion.
+
 Progress is delivered by **cursor-based polling rather than host→plugin
 notifications**: the capability server is plain request/reply and keeps
 this state host-side, so a poll cursor survives a sidecar crash-restart

@@ -8,6 +8,11 @@
  * is stateless-continued via resume — a new subagent with a new id — so the
  * full `agent_*` surface (`wait`/`events`/`cancel`, and `timeout_ms`) applies
  * to the returned id exactly as for `agent_spawn`.
+ *
+ * This is NOT a way to talk to a running child. `id` must already be terminal,
+ * and the reply carries a *new* id — the returned child is the one to key
+ * subsequent calls on. To correct a subagent that is still working, use
+ * [`AgentMessageParams`], which delivers into the live child and keeps its id.
  */
 export type AgentSendParams = { 
 /**

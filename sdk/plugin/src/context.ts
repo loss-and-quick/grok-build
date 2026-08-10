@@ -9,6 +9,7 @@ import type { AgentSpawnParams } from "./generated/AgentSpawnParams.ts";
 import type { AgentWaitResult } from "./generated/AgentWaitResult.ts";
 import type { AgentEventsResult } from "./generated/AgentEventsResult.ts";
 import type { AgentCancelOutcomeDto } from "./generated/AgentCancelOutcomeDto.ts";
+import type { AgentMessageOutcomeDto } from "./generated/AgentMessageOutcomeDto.ts";
 import type { AgentDescriptorDto } from "./generated/AgentDescriptorDto.ts";
 import type { PanelViewModel } from "./generated/PanelViewModel.ts";
 
@@ -72,12 +73,24 @@ export interface PluginAgents {
   /** Spawns a subagent; resolves with its id. Validation failures (unknown
    * type, bad model) surface as the terminal result of `wait()`. */
   spawn(spec: AgentSpawnParams): Promise<string>;
-  /** Continues a prior terminal subagent with a follow-up `prompt`: resolves
-   * with a NEW id (a fresh child that resumes `id`'s conversation, then runs
-   * `prompt`). Multi-turn via stateless-continue; the prior id stays terminal.
-   * Wait/events/cancel on the returned id. `timeoutMs` bounds the
-   * continuation like a spawn timeout. */
+  /** Continues a prior **terminal** subagent with a follow-up `prompt`:
+   * resolves with a NEW id (a fresh child that resumes `id`'s conversation,
+   * then runs `prompt`). Multi-turn via stateless-continue; the prior id stays
+   * terminal. Wait/events/cancel on the returned id. `timeoutMs` bounds the
+   * continuation like a spawn timeout. Not a way to reach a subagent that is
+   * still working — for that use `message()`. */
   send(id: string, prompt: string, timeoutMs?: number): Promise<string>;
+  /** Steers a subagent that is **running right now**: `text` lands in the live
+   * child's conversation before its next inference request, so it corrects
+   * course mid-task. Same id, no new subagent — the opposite trade from
+   * `send()`, which needs a finished child and hands back a new id.
+   *
+   * Resolves once the outcome is known, never on a hopeful "posted": check it.
+   * `"not_delivered"` means the child's turn ended before the text landed
+   * (re-send if it still matters), `"not_started"` that there is no turn yet,
+   * `"already_finished"` that `send()` is now the way in. Text only — no
+   * attachments, and no slash-command expansion. */
+  message(id: string, text: string): Promise<AgentMessageOutcomeDto>;
   /** Waits up to `timeoutMs` (default 30 000) for the terminal result; a
    * still-running subagent resolves with `status: "running"`. */
   wait(id: string, timeoutMs?: number): Promise<AgentWaitResult>;
@@ -208,6 +221,10 @@ function createAgents(host: HostClient): PluginAgents {
         timeout_ms: timeoutMs ?? null,
       });
       return nextId;
+    },
+    async message(id, text) {
+      const { outcome } = await host.agentMessage({ id, text });
+      return outcome;
     },
     async wait(id, timeoutMs) {
       const budget = timeoutMs ?? AGENT_WAIT_DEFAULT_TIMEOUT_MS;

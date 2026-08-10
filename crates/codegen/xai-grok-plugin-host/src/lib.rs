@@ -41,7 +41,8 @@ use std::path::PathBuf;
 
 pub use orchestration::{
     AgentDescriptor, AgentOrchestrator, AgentOutcome, AgentProgress, AgentSpawnSpec,
-    AgentStatusDto, OrchestratorCancel, OrchestratorFuture, PanelSink, SignInSink, SpawnedSubagent,
+    AgentStatusDto, OrchestratorCancel, OrchestratorFuture, OrchestratorMessage, PanelSink,
+    SignInSink, SpawnedSubagent,
 };
 pub use runtime::RuntimeKind;
 pub use supervisor::{PluginHost, SpawnHardener};

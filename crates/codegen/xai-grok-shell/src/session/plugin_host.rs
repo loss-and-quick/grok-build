@@ -606,6 +606,48 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
         })
     }
 
+    fn message<'a>(
+        &'a self,
+        id: &'a str,
+        text: &'a str,
+    ) -> xai_grok_plugin_host::OrchestratorFuture<'a, xai_grok_plugin_host::OrchestratorMessage>
+    {
+        use xai_grok_plugin_host::OrchestratorMessage;
+        use xai_grok_tools::implementations::grok_build::task::types::{
+            SubagentEvent, SubagentMessageOutcome, SubagentMessageRequest,
+        };
+        Box::pin(async move {
+            let (respond_to, rx) = tokio::sync::oneshot::channel();
+            if self
+                .tx
+                .send(SubagentEvent::Message(SubagentMessageRequest {
+                    subagent_id: id.to_string(),
+                    // Same scoping as `progress` and `cancel`: a plugin cannot
+                    // steer a child belonging to another session.
+                    parent_session_id: Some(self.session_id.clone()),
+                    text: text.to_string(),
+                    respond_to,
+                }))
+                .is_err()
+            {
+                return OrchestratorMessage::Unreachable;
+            }
+            match rx.await {
+                Ok(SubagentMessageOutcome::Delivered) => OrchestratorMessage::Delivered,
+                Ok(SubagentMessageOutcome::NotDelivered) => OrchestratorMessage::NotDelivered,
+                Ok(SubagentMessageOutcome::NotStarted) => OrchestratorMessage::NotStarted,
+                Ok(SubagentMessageOutcome::AlreadyFinished { .. }) => {
+                    OrchestratorMessage::AlreadyFinished
+                }
+                Ok(SubagentMessageOutcome::Unreachable) => OrchestratorMessage::Unreachable,
+                Ok(SubagentMessageOutcome::NotFound) => OrchestratorMessage::NotFound,
+                // The coordinator dropped the reply channel: the agent is going
+                // away, which is an unreachable child rather than a missing one.
+                Err(_) => OrchestratorMessage::Unreachable,
+            }
+        })
+    }
+
     fn list_agent_types<'a>(
         &'a self,
     ) -> xai_grok_plugin_host::OrchestratorFuture<'a, Vec<xai_grok_plugin_host::AgentDescriptor>>

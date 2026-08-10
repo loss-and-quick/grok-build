@@ -1061,6 +1061,64 @@ pub struct AgentCancelResult {
     pub outcome: AgentCancelOutcomeDto,
 }
 
+/// `agent_message` request params. Plugin→core. Steers a subagent that is
+/// **running right now**: `text` is handed to the live child and lands in its
+/// conversation as a system reminder before its next inference request, so the
+/// child changes course mid-task.
+///
+/// Not to be confused with [`AgentSendParams`]: `agent_send` applies only to a
+/// subagent that has already *finished*, and answers with a NEW subagent id.
+/// Reach for `agent_message` for a mid-flight correction, `agent_send` for a
+/// follow-up turn once the child is terminal.
+///
+/// Deliberately text-only: no images/attachments, and no slash-command
+/// expansion — a correction is not a command invocation.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AgentMessageParams {
+    /// A subagent id this plugin spawned (via `agent_spawn`/`agent_send`).
+    pub id: String,
+    /// The correction handed to the running child.
+    pub text: String,
+}
+
+/// `agent_message` outcome. Plugin→core.
+///
+/// Every variant is a separate answer on purpose — "queued but the turn ended"
+/// and "the child's channel is gone" call for different reactions from the
+/// plugin, so they are never merged into a single success flag. The reply comes
+/// once the outcome is *known*, not once the text is posted.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub enum AgentMessageOutcomeDto {
+    /// In the child's conversation, ahead of its next inference request.
+    Delivered,
+    /// The child took the message but its turn ended (or was cancelled) before
+    /// the next injection point; the text was dropped, never rerun as a turn of
+    /// its own. Re-send if the correction still matters.
+    NotDelivered,
+    /// The child exists but has not started its session yet, so there is no
+    /// turn to steer. Nothing was queued: retry, or let the spawn prompt carry
+    /// the instruction.
+    NotStarted,
+    /// The child reached a terminal state before the text could land. Use
+    /// `agent_send` to continue it with a fresh turn.
+    AlreadyFinished,
+    /// The child is running but its session channel is gone (mid-teardown, or a
+    /// crashed child session).
+    Unreachable,
+    /// No subagent with this id belongs to this plugin's session.
+    NotFound,
+}
+
+/// `agent_message` reply. Plugin→core.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct AgentMessageResult {
+    pub outcome: AgentMessageOutcomeDto,
+}
+
 /// `agent_send` request params. Plugin→core. Continues a prior subagent with a
 /// follow-up `prompt`: `id` is a terminal subagent this plugin spawned, whose
 /// conversation (raw transcript, tool state, model) is resumed into a fresh
@@ -1068,6 +1126,11 @@ pub struct AgentCancelResult {
 /// is stateless-continued via resume — a new subagent with a new id — so the
 /// full `agent_*` surface (`wait`/`events`/`cancel`, and `timeout_ms`) applies
 /// to the returned id exactly as for `agent_spawn`.
+///
+/// This is NOT a way to talk to a running child. `id` must already be terminal,
+/// and the reply carries a *new* id — the returned child is the one to key
+/// subsequent calls on. To correct a subagent that is still working, use
+/// [`AgentMessageParams`], which delivers into the live child and keeps its id.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
 pub struct AgentSendParams {
@@ -1370,6 +1433,9 @@ mod bindings_export {
             AgentCancelResult,
             AgentSendParams,
             AgentSendResult,
+            AgentMessageParams,
+            AgentMessageOutcomeDto,
+            AgentMessageResult,
             PanelTone,
             PanelStatusItem,
             PanelButton,
@@ -1796,6 +1862,25 @@ mod tests {
             &AgentSendResult { id: "a-9".into() },
             json!({ "id": "a-9" }),
         );
+        round_trip(
+            &AgentMessageParams {
+                id: "a-1".into(),
+                text: "stop rewriting the parser".into(),
+            },
+            json!({ "id": "a-1", "text": "stop rewriting the parser" }),
+        );
+        // Every outcome keeps its own wire token: a plugin distinguishes "the
+        // child has it" from "its turn outran the text" from "dead channel".
+        for (outcome, wire) in [
+            (AgentMessageOutcomeDto::Delivered, "delivered"),
+            (AgentMessageOutcomeDto::NotDelivered, "not_delivered"),
+            (AgentMessageOutcomeDto::NotStarted, "not_started"),
+            (AgentMessageOutcomeDto::AlreadyFinished, "already_finished"),
+            (AgentMessageOutcomeDto::Unreachable, "unreachable"),
+            (AgentMessageOutcomeDto::NotFound, "not_found"),
+        ] {
+            round_trip(&AgentMessageResult { outcome }, json!({ "outcome": wire }));
+        }
     }
 
     /// An agent descriptor deserializes from just a `name`: `description`

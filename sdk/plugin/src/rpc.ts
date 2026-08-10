@@ -34,6 +34,8 @@ import type { AgentCancelParams } from "./generated/AgentCancelParams.ts";
 import type { AgentCancelResult } from "./generated/AgentCancelResult.ts";
 import type { AgentSendParams } from "./generated/AgentSendParams.ts";
 import type { AgentSendResult } from "./generated/AgentSendResult.ts";
+import type { AgentMessageParams } from "./generated/AgentMessageParams.ts";
+import type { AgentMessageResult } from "./generated/AgentMessageResult.ts";
 import type { PanelViewModel } from "./generated/PanelViewModel.ts";
 import type { PanelPublishResult } from "./generated/PanelPublishResult.ts";
 import type { PanelCloseParams } from "./generated/PanelCloseParams.ts";
@@ -68,6 +70,7 @@ export const PluginToCoreMethod = {
   AgentEvents: "agent_events",
   AgentList: "agent_list",
   AgentCancel: "agent_cancel",
+  AgentMessage: "agent_message",
   UiPublishPanel: "ui_publish_panel",
   UiClosePanel: "ui_close_panel",
   AuthPublishUrl: "auth_publish_url",
@@ -178,9 +181,20 @@ export class HostClient {
     );
   }
 
+  /** Continues an already-terminated subagent; resolves with a NEW id. For a
+   * subagent that is still running, use {@link agentMessage}. */
   agentSend(params: AgentSendParams): Promise<AgentSendResult> {
     return this.endpoint.request<AgentSendResult>(
       PluginToCoreMethod.AgentSend,
+      params,
+    );
+  }
+
+  /** Steers a running subagent in place (same id). Unlike {@link agentSend},
+   * this requires the child to be live and never creates a new subagent. */
+  agentMessage(params: AgentMessageParams): Promise<AgentMessageResult> {
+    return this.endpoint.request<AgentMessageResult>(
+      PluginToCoreMethod.AgentMessage,
       params,
     );
   }

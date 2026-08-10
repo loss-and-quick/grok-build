@@ -24,7 +24,8 @@ use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
 use xai_grok_plugin_protocol::{
     AgentCancelOutcomeDto, AgentCancelParams, AgentCancelResult, AgentDescriptorDto, AgentEventDto,
-    AgentEventKindDto, AgentEventsParams, AgentEventsResult, AgentListResult, AgentSendParams,
+    AgentEventKindDto, AgentEventsParams, AgentEventsResult, AgentListResult,
+    AgentMessageOutcomeDto, AgentMessageParams, AgentMessageResult, AgentSendParams,
     AgentSendResult, AgentSpawnParams, AgentSpawnResult, AgentStatusDto, AgentWaitParams,
     AgentWaitResult, AuthAwaitCodeParams, AuthAwaitCodeResult, AuthPublishUrlParams,
     AuthPublishUrlResult, ConfigGetResult, LogEmitParams, LogLevelDto, PanelCloseParams,
@@ -34,8 +35,8 @@ use xai_grok_plugin_protocol::{
 };
 
 use crate::orchestration::{
-    AgentOrchestrator, AgentOutcome, AgentProgress, AgentSpawnSpec, OrchestratorCancel, PanelSink,
-    SignInSink,
+    AgentOrchestrator, AgentOutcome, AgentProgress, AgentSpawnSpec, OrchestratorCancel,
+    OrchestratorMessage, PanelSink, SignInSink,
 };
 use crate::rpc::RpcError;
 
@@ -143,6 +144,7 @@ impl PluginCapabilities {
             "agent_events" => self.agent_events(params).await,
             "agent_list" => self.agent_list().await,
             "agent_cancel" => self.agent_cancel(params).await,
+            "agent_message" => self.agent_message(params).await,
             "ui_publish_panel" => self.ui_publish_panel(params).await,
             "ui_close_panel" => self.ui_close_panel(params).await,
             "auth_publish_url" => self.auth_publish_url(params).await,
@@ -447,6 +449,40 @@ impl PluginCapabilities {
             AgentCancelOutcomeDto::NotFound
         };
         to_result(&AgentCancelResult { outcome })
+    }
+
+    /// Steer a running subagent: hand `text` to the live child, which picks it
+    /// up at its next injection point. Distinct from `agent_send`, which only
+    /// applies once a subagent is terminal and answers with a new id — this
+    /// keeps the child (and its id) and changes what it is doing.
+    ///
+    /// Every coordinator outcome keeps its own wire token; the plugin needs to
+    /// tell "the child has it" from "its turn ended first" from "its channel is
+    /// gone" to decide whether re-sending would help.
+    async fn agent_message(&self, params: &Value) -> Result<Value, RpcError> {
+        let orchestrator = self.orchestrator_for("agent_message")?;
+        let p: AgentMessageParams = parse_params(params)?;
+        // Foreign/unknown id -> a NotFound outcome (not an RPC error), matching
+        // `agent_cancel`: steering is scoped to this plugin's own spawns, and
+        // the orchestrator additionally scopes to the plugin's own session.
+        let known = self
+            .agents
+            .lock()
+            .expect("agents map poisoned")
+            .contains_key(&p.id);
+        let outcome = if known {
+            match orchestrator.message(&p.id, &p.text).await {
+                OrchestratorMessage::Delivered => AgentMessageOutcomeDto::Delivered,
+                OrchestratorMessage::NotDelivered => AgentMessageOutcomeDto::NotDelivered,
+                OrchestratorMessage::NotStarted => AgentMessageOutcomeDto::NotStarted,
+                OrchestratorMessage::AlreadyFinished => AgentMessageOutcomeDto::AlreadyFinished,
+                OrchestratorMessage::Unreachable => AgentMessageOutcomeDto::Unreachable,
+                OrchestratorMessage::NotFound => AgentMessageOutcomeDto::NotFound,
+            }
+        } else {
+            AgentMessageOutcomeDto::NotFound
+        };
+        to_result(&AgentMessageResult { outcome })
     }
 
     /// Serve a plugin notification (no reply). Only `log_emit` today.
@@ -882,6 +918,7 @@ mod tests {
             "agent_events",
             "agent_list",
             "agent_cancel",
+            "agent_message",
             "agent_events_subscribe",
             "ui_publish_panel",
             "ui_close_panel",
@@ -896,7 +933,7 @@ mod tests {
 
     use crate::orchestration::{
         AgentDescriptor, AgentOrchestrator, AgentOutcome, AgentProgress, AgentSpawnSpec,
-        OrchestratorCancel, OrchestratorFuture, SpawnedSubagent,
+        OrchestratorCancel, OrchestratorFuture, OrchestratorMessage, SpawnedSubagent,
     };
     use std::collections::HashMap;
     use xai_grok_plugin_protocol::AgentStatusDto;
@@ -916,6 +953,10 @@ mod tests {
         /// answers a cancel (or a subagent that ignores its token). The
         /// watcher must still force-finalize by the grace deadline.
         cancel_hangs: std::sync::atomic::AtomicBool,
+        /// Every `(id, text)` the host asked to steer, in order.
+        messaged: std::sync::Mutex<Vec<(String, String)>>,
+        /// Outcome `message` answers with; `None` means `Delivered`.
+        message_outcome: std::sync::Mutex<Option<OrchestratorMessage>>,
     }
 
     impl MockOrchestrator {
@@ -931,6 +972,10 @@ mod tests {
 
         fn set_progress(&self, progress: Option<AgentProgress>) {
             *self.progress.lock().unwrap() = progress;
+        }
+
+        fn set_message_outcome(&self, outcome: OrchestratorMessage) {
+            *self.message_outcome.lock().unwrap() = Some(outcome);
         }
     }
 
@@ -974,6 +1019,24 @@ mod tests {
                     }
                     None => OrchestratorCancel::AlreadyFinished,
                 }
+            })
+        }
+
+        fn message<'a>(
+            &'a self,
+            id: &'a str,
+            text: &'a str,
+        ) -> OrchestratorFuture<'a, OrchestratorMessage> {
+            Box::pin(async move {
+                self.messaged
+                    .lock()
+                    .unwrap()
+                    .push((id.to_string(), text.to_string()));
+                self.message_outcome
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or(OrchestratorMessage::Delivered)
             })
         }
 
@@ -1508,6 +1571,73 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r["outcome"], "not_found");
+    }
+
+    /// Steering reaches the live child with the plugin's exact text, and every
+    /// coordinator outcome arrives at the plugin as its own token. Collapsing
+    /// these would leave a plugin unable to tell "the child has it" from "its
+    /// turn ended first" — the two call for opposite reactions.
+    #[tokio::test]
+    async fn agent_message_forwards_text_and_maps_every_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, orch) = caps_with_orchestrator(dir.path());
+        let id = spawn_one(&c, json!({ "prompt": "refactor the parser" })).await;
+
+        for (outcome, wire) in [
+            (OrchestratorMessage::Delivered, "delivered"),
+            (OrchestratorMessage::NotDelivered, "not_delivered"),
+            (OrchestratorMessage::NotStarted, "not_started"),
+            (OrchestratorMessage::AlreadyFinished, "already_finished"),
+            (OrchestratorMessage::Unreachable, "unreachable"),
+            (OrchestratorMessage::NotFound, "not_found"),
+        ] {
+            orch.set_message_outcome(outcome.clone());
+            let r = c
+                .handle_request(
+                    "agent_message",
+                    &json!({ "id": id, "text": "stop, use serde" }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r["outcome"], wire, "outcome {outcome:?}");
+        }
+
+        // The text is forwarded verbatim, once per call, against the same id.
+        let messaged = orch.messaged.lock().unwrap().clone();
+        assert_eq!(messaged.len(), 6);
+        assert!(
+            messaged
+                .iter()
+                .all(|(mid, text)| *mid == id && text == "stop, use serde"),
+            "unexpected steering calls: {messaged:?}"
+        );
+    }
+
+    /// A plugin may only steer its own session's children. The id scoping the
+    /// host applies is the near half of that: an id this plugin never spawned
+    /// is `not_found` and never reaches the orchestrator, so a guessed id can
+    /// not be used to probe (or steer) a stranger's subagent. The far half —
+    /// refusing a child of another session that shares an id space — lives in
+    /// the coordinator, which the orchestrator hands `parent_session_id`.
+    #[tokio::test]
+    async fn agent_message_refuses_a_foreign_id_without_calling_the_orchestrator() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, orch) = caps_with_orchestrator(dir.path());
+        // A real spawn exists, so the refusal is about ownership, not emptiness.
+        let _mine = spawn_one(&c, json!({ "prompt": "mine" })).await;
+
+        let r = c
+            .handle_request(
+                "agent_message",
+                &json!({ "id": "someone-elses", "text": "abort" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r["outcome"], "not_found");
+        assert!(
+            orch.messaged.lock().unwrap().is_empty(),
+            "a foreign id must not reach the orchestrator"
+        );
     }
 
     /// The session dying (result sender dropped without a value) surfaces as a
