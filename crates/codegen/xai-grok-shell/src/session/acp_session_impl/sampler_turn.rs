@@ -133,16 +133,34 @@ pub(super) fn is_auth_tool_error(err: &xai_tool_runtime::ToolError) -> bool {
 /// pre-resolved token. Carries a plugin-supplied credential (resolved once per
 /// turn in [`SessionActor::reconstruct_full_config`]) onto the sampler's
 /// per-request auth-attachment path.
-struct StaticBearerResolver(String);
+///
+/// It reports the endpoint it was minted for, which is what lets the aux,
+/// failover and subagent config paths tell this credential apart from the
+/// session's own: those paths may attach it to a config for that same endpoint,
+/// and to nothing else.
+struct StaticBearerResolver {
+    token: String,
+    /// The `base_url` the plugin was asked to mint this credential for.
+    endpoint: String,
+}
 impl std::fmt::Debug for StaticBearerResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StaticBearerResolver")
+            .field("endpoint", &self.endpoint)
             .finish_non_exhaustive()
     }
 }
 impl xai_grok_sampler::BearerResolver for StaticBearerResolver {
     fn current_bearer(&self) -> Option<String> {
-        Some(self.0.clone())
+        Some(self.token.clone())
+    }
+    fn minted_for(&self) -> Option<xai_grok_sampler::MintedFor<'_>> {
+        Some(xai_grok_sampler::MintedFor {
+            base_url: &self.endpoint,
+            // The seam is bearer-shaped, so this is the scheme the credential
+            // is usable in — see `resolve_custom_provider_auth`.
+            auth_scheme: xai_grok_sampler::AuthScheme::Bearer,
+        })
     }
 }
 
@@ -191,8 +209,10 @@ async fn resolve_custom_provider_auth(
         .await
     {
         Some(cred) if cred.is_unexpired(now_ms) => {
-            let resolver: xai_grok_sampler::SharedBearerResolver =
-                Arc::new(StaticBearerResolver(cred.token));
+            let resolver: xai_grok_sampler::SharedBearerResolver = Arc::new(StaticBearerResolver {
+                token: cred.token,
+                endpoint: base_url.to_owned(),
+            });
             (Some(resolver), Some(xai_grok_sampler::AuthScheme::Bearer))
         }
         _ => (None, None),
@@ -926,6 +946,31 @@ impl SessionActor {
             creds.client_version.clone(),
         )
     }
+    /// Gather this session's side of
+    /// [`crate::agent::config::aux_config_on_session_credential`] — the second
+    /// chance for an aux slug the catalog resolver refused a credential.
+    async fn aux_config_on_session_credential(
+        &self,
+        slug: &str,
+        active_session_config: &xai_grok_sampler::SamplerConfig,
+    ) -> Option<xai_grok_sampler::SamplerConfig> {
+        let creds = self.chat_state_handle.get_credentials().await;
+        let models = self.models_manager.models();
+        let cfg = crate::agent::config::aux_config_on_session_credential(
+            slug,
+            &models,
+            active_session_config,
+            creds.alpha_test_key.clone(),
+            creds.client_version.clone(),
+        )?;
+        tracing::debug!(
+            aux_model = %slug,
+            base_url = %cfg.base_url,
+            "aux model carries no credential of its own; routing it on the session's own \
+             provider credential, which was minted for that same endpoint"
+        );
+        Some(cfg)
+    }
     /// Resolve a dedicated sampler client plus the wire model for an auxiliary
     /// one-shot model `slug` (Auto-mode classifier, next-prompt suggestion, ...),
     /// stamping session-local auth/attribution like image-describe (which relies
@@ -946,7 +991,15 @@ impl SessionActor {
         slug: &str,
     ) -> Option<(xai_grok_sampler::SamplingClient, String)> {
         let active_session_config = self.reconstruct_full_config().await;
-        let mut cfg = self.resolve_aux_sampler_config(slug).await?;
+        let mut cfg = match self.resolve_aux_sampler_config(slug).await {
+            Some(cfg) => cfg,
+            // The catalog refused this entry a credential. It is still routable
+            // when the session's own credential was minted for its endpoint.
+            None => {
+                self.aux_config_on_session_credential(slug, &active_session_config)
+                    .await?
+            }
+        };
         crate::agent::config::stamp_session_local_sampler_fields(
             &mut cfg,
             &active_session_config,

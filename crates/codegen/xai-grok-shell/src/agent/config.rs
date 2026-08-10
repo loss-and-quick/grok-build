@@ -5518,6 +5518,47 @@ pub(crate) fn resolve_aux_model_sampling_config(
     );
     None
 }
+/// Second chance for an aux slug [`resolve_aux_model_sampling_config`] refused:
+/// route it credential-less when the session's own credential was minted for
+/// that entry's endpoint.
+///
+/// The refusal there is correct — the entry has no credential of its own and is
+/// not first-party, so nothing in the *catalog* may be attached to it. But a
+/// `[[provider]]` whose bearer a plugin mints is exactly that shape, and when
+/// the session is already running on it, the credential for that endpoint is in
+/// hand. Refusing anyway is what silently removed every routed aux feature —
+/// prompt suggestion, `web_fetch` distillation, chain hops — from such a
+/// session, and made each survivor fall back to the session's own model.
+///
+/// Credentials are built here rather than via `resolve_credentials`, whose
+/// documented fall-through reaches the session token and then `XAI_API_KEY`.
+/// This config leaves with no credential at all; the only one it can acquire is
+/// the endpoint-scoped resolver [`stamp_session_local_sampler_fields`] attaches,
+/// under the same [`session_credential_covers`] check applied here.
+pub(crate) fn aux_config_on_session_credential(
+    model_id: &str,
+    models: &IndexMap<String, ModelEntry>,
+    active_session_config: &SamplerConfig,
+    alpha_test_key: Option<String>,
+    client_version: Option<String>,
+) -> Option<SamplerConfig> {
+    let entry = find_model_by_id(models, model_id)?;
+    let auth_scheme = session_credential_covers(active_session_config, &entry.info.base_url)?;
+    let credentials = ResolvedCredentials {
+        api_key: None,
+        base_url: entry.info.base_url.clone(),
+        auth_type: xai_chat_state::AuthType::ApiKey,
+        auth_scheme,
+    };
+    Some(sampling_config_for_model(
+        entry,
+        credentials,
+        alpha_test_key,
+        client_version,
+        None,
+        None,
+    ))
+}
 /// Stamp the session-local fields (client id, attribution, bearer resolver,
 /// retries) from the active session onto a routed aux `SamplerConfig` so a
 /// helper model keeps the session's auth/attribution. Shared by image-describe
@@ -5526,6 +5567,11 @@ pub(crate) fn resolve_aux_model_sampling_config(
 /// The resolver gate is host-based, stricter than `session_token_auth_gate`:
 /// a session-token deployment on a custom `models_base_url` loses aux-sampler
 /// refresh, rather than risk the session bearer on a third-party endpoint.
+///
+/// That host check answers "may the SESSION's credential go here", which is the
+/// right question for a session-wide credential and the wrong one for a
+/// credential a plugin minted for one named provider. The second arm below asks
+/// the second question — see [`session_credential_covers`].
 pub(crate) fn stamp_session_local_sampler_fields(
     cfg: &mut SamplerConfig,
     active_session_config: &SamplerConfig,
@@ -5541,8 +5587,30 @@ pub(crate) fn stamp_session_local_sampler_fields(
     cfg.error_hook = active_session_config.error_hook.clone();
     if crate::util::is_xai_api_bearer_url(&cfg.base_url) {
         cfg.bearer_resolver = active_session_config.bearer_resolver.clone();
+    } else if let Some(minted) = session_credential_covers(active_session_config, &cfg.base_url) {
+        // The scheme travels with the credential: this config's own
+        // `auth_scheme` describes the static key the entry would have used, and
+        // sending a bearer under an `x-api-key` header is not authentication.
+        cfg.auth_scheme = minted;
+        cfg.bearer_resolver = active_session_config.bearer_resolver.clone();
     }
     cfg.max_retries = max_retries;
+}
+/// Whether the session's live credential was minted for `base_url`, and if so
+/// the scheme it must ride in.
+///
+/// This is the provenance question, kept apart from the endpoint question on
+/// purpose. A credential a plugin issued for a named `[[provider]]` is the
+/// right credential for that provider's endpoint and for no other; the
+/// session's own bearer reports no minting endpoint at all and therefore never
+/// satisfies this, which is what keeps it off third-party hosts.
+pub(crate) fn session_credential_covers(
+    active_session_config: &SamplerConfig,
+    base_url: &str,
+) -> Option<AuthScheme> {
+    let resolver = active_session_config.bearer_resolver.as_ref()?;
+    let minted = resolver.minted_for()?;
+    (minted.base_url == base_url).then_some(minted.auth_scheme)
 }
 /// Finalize the model + sampler config of an auxiliary one-shot call that was
 /// routed through [`resolve_aux_model_sampling_config`] — image description for
@@ -6934,6 +7002,160 @@ reasoning_effort = "low"
         .expect("a first-party aux entry still resolves");
         assert_eq!(resolved.base_url, first_party_url);
         assert_eq!(resolved.api_key.as_deref(), Some("session-jwt"));
+    }
+    /// A credential with no minting endpoint — the session's own bearer, which
+    /// is what the first-party resolver installs.
+    #[derive(Debug)]
+    struct SessionWideResolver;
+    impl xai_grok_sampler::BearerResolver for SessionWideResolver {
+        fn current_bearer(&self) -> Option<String> {
+            Some("session-jwt".to_owned())
+        }
+    }
+    /// A credential a plugin minted for one named endpoint.
+    #[derive(Debug)]
+    struct EndpointScopedResolver(String);
+    impl xai_grok_sampler::BearerResolver for EndpointScopedResolver {
+        fn current_bearer(&self) -> Option<String> {
+            Some("provider-oauth-bearer".to_owned())
+        }
+        fn minted_for(&self) -> Option<xai_grok_sampler::MintedFor<'_>> {
+            Some(xai_grok_sampler::MintedFor {
+                base_url: &self.0,
+                auth_scheme: AuthScheme::Bearer,
+            })
+        }
+    }
+    fn session_on(
+        base_url: &str,
+        resolver: xai_grok_sampler::SharedBearerResolver,
+    ) -> SamplerConfig {
+        SamplerConfig {
+            model: "session-model".into(),
+            base_url: base_url.to_owned(),
+            bearer_resolver: Some(resolver),
+            ..Default::default()
+        }
+    }
+    /// The guard this pins is a *provenance* guard, not a path guard. A
+    /// session-wide credential reports no minting endpoint, so no amount of
+    /// endpoint matching may move it onto a third-party host — the whole point
+    /// of keeping the two questions apart.
+    #[test]
+    fn a_session_wide_credential_is_still_refused_on_a_third_party_endpoint() {
+        let third_party = "https://acme.example/v1";
+        let session = session_on(third_party, std::sync::Arc::new(SessionWideResolver));
+        assert!(
+            session_credential_covers(&session, third_party).is_none(),
+            "a credential with no minting endpoint covers nothing, not even its own host"
+        );
+        let mut aux = SamplerConfig {
+            base_url: third_party.to_owned(),
+            ..Default::default()
+        };
+        stamp_session_local_sampler_fields(&mut aux, &session, None, Some(1));
+        assert!(
+            aux.bearer_resolver.is_none(),
+            "the session's own bearer must never be stamped onto a third-party endpoint"
+        );
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "acme/aux-model".to_string(),
+            test_model_entry("aux-model", third_party, None, None, None),
+        );
+        assert!(
+            aux_config_on_session_credential("aux-model", &catalog, &session, None, None).is_none(),
+            "a credential-less third-party entry stays unroutable without a credential minted \
+             for it — the caller degrades, it does not send an unauthenticated request"
+        );
+    }
+    /// The credential a plugin minted for this very provider is the right
+    /// credential for it. Refusing it is what made every routed aux feature
+    /// silently unavailable on a subscription-backed provider.
+    #[test]
+    fn a_credential_minted_for_this_endpoint_reaches_a_config_built_for_it() {
+        let provider = "https://acme.example/v1";
+        let session = session_on(
+            provider,
+            std::sync::Arc::new(EndpointScopedResolver(provider.to_owned())),
+        );
+        let mut catalog = IndexMap::new();
+        let mut entry = test_model_entry("aux-model", provider, None, None, None);
+        // The `messages`-format shape: a static x-api-key scheme that the
+        // plugin's bearer must not be sent under.
+        entry.info.auth_scheme = AuthScheme::XApiKey;
+        catalog.insert("acme/aux-model".to_string(), entry);
+        let mut cfg = aux_config_on_session_credential("aux-model", &catalog, &session, None, None)
+            .expect("an entry on the session's own provider is routable");
+        assert_eq!(cfg.base_url, provider);
+        assert_eq!(cfg.model, "aux-model");
+        assert!(
+            cfg.api_key.is_none(),
+            "the routed config must leave with no credential of its own — no session-token or \
+             environment-key fall-through"
+        );
+        stamp_session_local_sampler_fields(&mut cfg, &session, None, Some(1));
+        assert_eq!(
+            cfg.bearer_resolver
+                .as_ref()
+                .and_then(|r| r.current_bearer())
+                .as_deref(),
+            Some("provider-oauth-bearer"),
+        );
+        assert_eq!(
+            cfg.auth_scheme,
+            AuthScheme::Bearer,
+            "the scheme travels with the credential: a bearer sent under x-api-key is not auth"
+        );
+    }
+    /// One plugin can hold credentials for several providers. A credential
+    /// minted for one endpoint must not travel to another one.
+    #[test]
+    fn a_minted_credential_does_not_travel_to_a_different_endpoint() {
+        let session = session_on(
+            "https://acme.example/v1",
+            std::sync::Arc::new(EndpointScopedResolver("https://acme.example/v1".to_owned())),
+        );
+        let other = "https://other.example/v1";
+        assert!(session_credential_covers(&session, other).is_none());
+        let mut cfg = SamplerConfig {
+            base_url: other.to_owned(),
+            ..Default::default()
+        };
+        stamp_session_local_sampler_fields(&mut cfg, &session, None, Some(1));
+        assert!(
+            cfg.bearer_resolver.is_none(),
+            "a credential minted for one provider must not be sent to another"
+        );
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "other/aux-model".to_string(),
+            test_model_entry("aux-model", other, None, None, None),
+        );
+        assert!(
+            aux_config_on_session_credential("aux-model", &catalog, &session, None, None).is_none()
+        );
+    }
+    /// A session with no live resolver at all (a static-key `[[provider]]`)
+    /// must not start issuing credential-less aux requests: the caller degrades
+    /// to the session model instead, as it did before.
+    #[test]
+    fn a_session_without_a_live_credential_routes_no_aux_model() {
+        let provider = "https://acme.example/v1";
+        let session = SamplerConfig {
+            base_url: provider.to_owned(),
+            api_key: Some("static-key".into()),
+            ..Default::default()
+        };
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "acme/aux-model".to_string(),
+            test_model_entry("aux-model", provider, None, None, None),
+        );
+        assert!(
+            aux_config_on_session_credential("aux-model", &catalog, &session, None, None).is_none(),
+            "no live credential means no route — an unauthenticated request is pure waste"
+        );
     }
     /// Cold cache falls back to the session model, never the xAI proxy;
     /// warm cache serves the provider token at the provider endpoint.
