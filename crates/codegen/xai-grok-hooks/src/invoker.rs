@@ -50,8 +50,10 @@ pub enum PluginHookResponse {
     /// Carries no decision: every gate treats it exactly as it treats a
     /// no-signal reply (fail-open).
     NotSubscribed,
-    /// Observe gate: the hook ran, no decision.
-    Observed,
+    /// Observe gate: the hook ran, no decision. `additional_context` is text
+    /// the hook wants the model to see — the observe gate has no decision to
+    /// hang it on, so it rides the acknowledgement.
+    Observed { additional_context: Option<String> },
     /// Tool gate: allow or deny the tool call, with an optional deny reason.
     Decision { allow: bool, reason: Option<String> },
     /// Stop gate: any combination of a block, a forced stop, and extra context.

@@ -214,9 +214,9 @@ async fn non_blocking_dispatch() {
     )
     .await;
 
-    assert_eq!(results.len(), 1);
+    assert_eq!(results.results.len(), 1);
     assert!(matches!(
-        &results[0],
+        &results.results[0],
         xai_grok_hooks::result::HookRunResult::Success { .. }
     ));
 }
@@ -443,20 +443,20 @@ async fn new_event_types_fire_and_receive_correct_envelope() {
             dispatcher::dispatch_non_blocking(&registry, case.event_name, &envelope, &ctx).await;
 
         assert_eq!(
-            results.len(),
+            results.results.len(),
             1,
             "{}: expected 1 result, got {}",
             case.json_key,
-            results.len()
+            results.results.len()
         );
         assert!(
             matches!(
-                &results[0],
+                &results.results[0],
                 xai_grok_hooks::result::HookRunResult::Success { .. }
             ),
             "{}: hook did not succeed: {:?}",
             case.json_key,
-            results[0]
+            results.results[0]
         );
 
         let raw = std::fs::read_to_string(&output_file)

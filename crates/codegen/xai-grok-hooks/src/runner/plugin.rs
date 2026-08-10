@@ -127,15 +127,21 @@ fn response_to_result(
         return HookRunnerResult::Skipped;
     }
     match mode {
-        GateKind::Observe => {
-            if !matches!(response, PluginHookResponse::Observed) {
+        GateKind::Observe => match response {
+            // The observe gate has no decision, but a hook may still hand the
+            // model text; blank strings are dropped here so downstream never
+            // renders an empty block.
+            PluginHookResponse::Observed { additional_context } => additional_context
+                .filter(|context| !context.trim().is_empty())
+                .map_or(HookRunnerResult::Success, HookRunnerResult::Context),
+            _ => {
                 tracing::warn!(
                     hook_name,
                     "plugin returned a decision for an observe gate; ignoring"
                 );
+                HookRunnerResult::Success
             }
-            HookRunnerResult::Success
-        }
+        },
         GateKind::Tool => match response {
             PluginHookResponse::Decision {
                 allow: false,
@@ -149,7 +155,7 @@ fn response_to_result(
             }
             // Observe/Stop/Replace replies to a Tool gate carry no allow/deny
             // signal: fail open (allow), warning on the clear gate mismatch.
-            PluginHookResponse::Observed => HookRunnerResult::Decision(HookDecision::Allow),
+            PluginHookResponse::Observed { .. } => HookRunnerResult::Decision(HookDecision::Allow),
             PluginHookResponse::Stop { .. } => {
                 tracing::warn!(
                     hook_name,
@@ -197,7 +203,9 @@ fn response_to_result(
             }
             // Observe/Decision/Replace replies to a Stop gate carry no stop
             // signal: allow the stop (empty outcome), warning on the mismatch.
-            PluginHookResponse::Observed => HookRunnerResult::Stop(StopHookOutcome::default()),
+            PluginHookResponse::Observed { .. } => {
+                HookRunnerResult::Stop(StopHookOutcome::default())
+            }
             PluginHookResponse::Decision { .. } => {
                 tracing::warn!(
                     hook_name,
@@ -226,7 +234,7 @@ fn response_to_result(
             PluginHookResponse::Replace { payload } => HookRunnerResult::Replace(payload),
             // A non-replace reply to a Replace/Intercept gate carries no value:
             // pass through, warning on the clear mismatch.
-            PluginHookResponse::Observed => HookRunnerResult::Replace(None),
+            PluginHookResponse::Observed { .. } => HookRunnerResult::Replace(None),
             PluginHookResponse::Decision { .. } | PluginHookResponse::Stop { .. } => {
                 tracing::warn!(
                     hook_name,
@@ -268,7 +276,9 @@ mod tests {
                     MockOutcome::Fail(msg) => Err(PluginInvokeError::new(msg.clone())),
                     MockOutcome::Sleep(dur) => {
                         tokio::time::sleep(*dur).await;
-                        Ok(PluginHookResponse::Observed)
+                        Ok(PluginHookResponse::Observed {
+                            additional_context: None,
+                        })
                     }
                 }
             })
@@ -464,7 +474,9 @@ mod tests {
     #[tokio::test]
     async fn observe_returns_success() {
         let invoker = Arc::new(MockInvoker {
-            outcome: MockOutcome::Respond(PluginHookResponse::Observed),
+            outcome: MockOutcome::Respond(PluginHookResponse::Observed {
+                additional_context: None,
+            }),
         });
         let (result, _) = run_plugin_hook(
             &plugin_spec(None),

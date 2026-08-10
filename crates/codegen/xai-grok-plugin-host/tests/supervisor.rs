@@ -544,10 +544,36 @@ async fn plugin_to_core_storage_round_trips_over_the_wire() {
     );
 
     let resp = host.invoke(req("pre_tool_use", 5000)).await.unwrap();
-    assert!(matches!(resp, PluginHookResponse::Observed));
+    assert!(matches!(resp, PluginHookResponse::Observed { .. }));
 
     let status = host.status().await;
     assert_eq!(status[0].state, PluginState::Running);
+
+    host.dispose().await;
+}
+
+/// An `observed` reply may carry model-facing text: the host must map
+/// `additional_context` through instead of flattening it to a bare ack.
+#[tokio::test]
+async fn observed_reply_carries_additional_context() {
+    let (host, _d, _w) = host_with(
+        &[
+            ("FAKE_MODE", "observe_context".into()),
+            ("FAKE_OBSERVE_CONTEXT", "scratch dir: /tmp/s".into()),
+            ("FAKE_SUBSCRIPTIONS", "session_start".into()),
+        ],
+        Duration::from_millis(10),
+    );
+
+    let resp = host.invoke(req("session_start", 5000)).await.unwrap();
+    assert!(
+        matches!(
+            &resp,
+            PluginHookResponse::Observed { additional_context }
+                if additional_context.as_deref() == Some("scratch dir: /tmp/s")
+        ),
+        "expected observed with context, got {resp:?}"
+    );
 
     host.dispose().await;
 }

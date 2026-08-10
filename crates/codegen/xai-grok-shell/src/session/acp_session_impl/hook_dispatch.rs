@@ -251,9 +251,14 @@ impl SessionActor {
             return;
         };
         let ctx = self.hook_run_ctx();
+        // `additional_context` is dropped here on purpose: this is the generic
+        // observe fan-out and has no injection point. `session_start` is
+        // dispatched separately (see the `DispatchSessionStartHook` command) so
+        // it can fold the text into the session's opening context.
         let results =
             xai_grok_hooks::dispatcher::dispatch_non_blocking(&registry, event, &envelope, &ctx)
-                .await;
+                .await
+                .results;
         self.send_hook_execution(&event.to_string(), tool_name, prompt_id, &results)
             .await;
         self.emit_hook_executed_telemetry(&event.to_string(), tool_name, &results)

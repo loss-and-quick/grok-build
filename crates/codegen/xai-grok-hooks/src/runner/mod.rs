@@ -34,6 +34,12 @@ pub enum HookRunnerResult {
     Stop(StopHookOutcome),
     /// Replace gate: `Some` is the transformed payload, `None` a passthrough.
     Replace(Option<serde_json::Value>),
+    /// Observe gate: the hook ran and attached model-facing text. Separate from
+    /// [`Self::Success`] (a hook that ran and said nothing) so the observe
+    /// dispatcher can aggregate the text without every silent hook paying for
+    /// an `Option`. Only [`crate::dispatcher::dispatch_non_blocking`] reads it;
+    /// every other gate treats it exactly as [`Self::Success`].
+    Context(String),
     Success,
     /// Nothing ran: the handler provably does not exist, so there is no
     /// execution to report. Only the plugin runner produces it, for a plugin
@@ -93,13 +99,48 @@ pub(crate) struct StopHookJson {
     #[serde(default, rename = "stopReason")]
     pub stop_reason: Option<String>,
     #[serde(default, rename = "hookSpecificOutput")]
-    pub hook_specific_output: Option<StopHookSpecificOutputJson>,
+    pub hook_specific_output: Option<HookSpecificOutputJson>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub(crate) struct StopHookSpecificOutputJson {
+pub(crate) struct HookSpecificOutputJson {
     #[serde(default, rename = "additionalContext")]
     pub additional_context: Option<String>,
+}
+
+/// JSON from an `Observe` gate hook. An observe hook has no decision to return,
+/// so only `hookSpecificOutput.additionalContext` carries anything — the same
+/// key the `Stop` gate uses, so one hook script can serve both.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ObserveHookJson {
+    #[serde(default, rename = "hookSpecificOutput")]
+    pub hook_specific_output: Option<HookSpecificOutputJson>,
+}
+
+/// Interpret an observe hook's stdout: JSON carrying a non-blank
+/// `hookSpecificOutput.additionalContext` becomes
+/// [`HookRunnerResult::Context`]; anything else (no output, plain text,
+/// unparseable JSON) is a plain [`HookRunnerResult::Success`]. Never fails —
+/// an observe hook has no decision that a malformed reply could corrupt.
+pub(crate) fn observe_result_from_stdout(stdout: &str) -> HookRunnerResult {
+    let trimmed = stdout.trim();
+    if !trimmed.starts_with('{') {
+        return HookRunnerResult::Success;
+    }
+    match serde_json::from_str::<ObserveHookJson>(trimmed) {
+        Ok(json) => json
+            .hook_specific_output
+            .and_then(|output| output.additional_context)
+            .filter(|context| !context.trim().is_empty())
+            .map_or(HookRunnerResult::Success, HookRunnerResult::Context),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "observe hook stdout looks like JSON but failed to parse; ignoring"
+            );
+            HookRunnerResult::Success
+        }
+    }
 }
 
 /// Interpret a [`StopHookJson`] as a [`StopHookOutcome`].

@@ -140,7 +140,7 @@ impl SessionActor {
             &ctx,
         )
         .await;
-        self.send_hook_execution("session_end", None, None, &results)
+        self.send_hook_execution("session_end", None, None, &results.results)
             .await;
     }
 

@@ -18,6 +18,9 @@
 //!     - `exit_after_handshake` — reply to initialize, then exit(0).
 //!     - `storage_probe`      — on invoke, round-trip through `storage_*`/`log_emit`,
 //!                              then reply Observed (exercises the plugin→core path).
+//!     - `observe_context`    — reply Observed carrying `FAKE_OBSERVE_CONTEXT`
+//!                              (default `fixture-observe-ctx`) as
+//!                              `additional_context` (Observe gate).
 //!     - `heartbeat`          — not a sidecar at all: append to
 //!                              `FAKE_HEARTBEAT_FILE` forever. Used as the
 //!                              grandchild below.
@@ -47,6 +50,10 @@ use xai_grok_plugin_protocol::{
 
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok()
+}
+
+fn observed(additional_context: Option<String>) -> HookInvokeResult {
+    HookInvokeResult::Observed { additional_context }
 }
 
 fn main() {
@@ -127,7 +134,12 @@ fn main() {
 
                 let result = if mode == "storage_probe" {
                     storage_probe(&mut reader, &mut next_id);
-                    HookInvokeResult::Observed
+                    observed(None)
+                } else if mode == "observe_context" {
+                    observed(Some(
+                        env("FAKE_OBSERVE_CONTEXT")
+                            .unwrap_or_else(|| "fixture-observe-ctx".to_string()),
+                    ))
                 } else if mode == "replace_payload" {
                     // Echo the received payload back under a marker so the test can
                     // confirm the host forwarded it, plus the substitution.
@@ -146,7 +158,7 @@ fn main() {
                             continue_: None,
                             additional_context: Some("fixture-ctx".to_string()),
                         },
-                        _ => HookInvokeResult::Observed,
+                        _ => observed(None),
                     }
                 };
                 reply_ok(&id, serde_json::to_value(result).unwrap());

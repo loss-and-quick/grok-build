@@ -150,6 +150,7 @@ pub async fn dispatch_pre_tool_use(
                 });
             }
             HookRunnerResult::Success
+            | HookRunnerResult::Context(_)
             | HookRunnerResult::Stop(_)
             | HookRunnerResult::Replace(_) => {
                 tracing::info!(
@@ -358,6 +359,7 @@ pub async fn dispatch_stop(
                 });
             }
             HookRunnerResult::Success
+            | HookRunnerResult::Context(_)
             | HookRunnerResult::Decision(_)
             | HookRunnerResult::Replace(_) => {
                 out.results.push(HookRunResult::Success {
@@ -373,20 +375,32 @@ pub async fn dispatch_stop(
     out
 }
 
+/// Aggregated signals from an observe-gate dispatch.
+///
+/// Observe events have no decision, so `results` (what ran, for scrollback and
+/// telemetry) is the whole story for most callers. `additional_context` is the
+/// model-facing text hooks attached, in hook call order; only fire sites that
+/// have somewhere to put it read it — today that is `session_start`.
+#[derive(Debug, Default)]
+pub struct ObserveDispatchResult {
+    pub results: Vec<HookRunResult>,
+    pub additional_context: Vec<String>,
+}
+
 /// Dispatch an observe-only event against all matching hooks; never denies.
 pub async fn dispatch_non_blocking(
     registry: &HookRegistry,
     event: HookEventName,
     envelope: &HookEventEnvelope,
     ctx: &RunContext<'_>,
-) -> Vec<HookRunResult> {
+) -> ObserveDispatchResult {
     debug_assert!(
         event.traits().gate == GateKind::Observe,
         "dispatch_non_blocking called with gate event {event:?}"
     );
     let hooks = registry.hooks_for_canonical(event);
     if hooks.is_empty() {
-        return Vec::new();
+        return ObserveDispatchResult::default();
     }
 
     let span = dispatch_span(event, hooks.len());
@@ -394,6 +408,7 @@ pub async fn dispatch_non_blocking(
 
     let match_value = envelope.payload.match_value().map(str::to_string);
     let mut results = Vec::with_capacity(hooks.len());
+    let mut additional_context = Vec::new();
 
     for spec in hooks {
         if !eligible_or_record_skip(spec, match_value.as_deref(), &mut results) {
@@ -437,6 +452,23 @@ pub async fn dispatch_non_blocking(
                     http_info,
                 });
             }
+            // Ran and attached model-facing text. Reported as a plain success:
+            // the context is a payload, not a decision, so scrollback and
+            // telemetry must not distinguish it from a silent run.
+            HookRunnerResult::Context(context) => {
+                tracing::info!(
+                    hook_name = %spec.name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    context_bytes = context.len(),
+                    "hook completed with additional context"
+                );
+                additional_context.push(context);
+                results.push(HookRunResult::Success {
+                    hook_name: spec.name.clone(),
+                    elapsed,
+                    http_info,
+                });
+            }
             // Nothing ran: an observe dispatch has no decision to make either
             // way, so only the reporting changes — skipped, not a success.
             HookRunnerResult::Skipped => {
@@ -463,7 +495,10 @@ pub async fn dispatch_non_blocking(
 
     record_dispatch_counts(&span, &results);
 
-    results
+    ObserveDispatchResult {
+        results,
+        additional_context,
+    }
 }
 
 /// Dispatch a `Replace`-gate event against all matching hooks, chaining their
@@ -551,6 +586,7 @@ pub async fn dispatch_replace(
             // Explicit passthrough (`Replace(None)`) or any non-replace success:
             // keep the current payload.
             HookRunnerResult::Replace(None)
+            | HookRunnerResult::Context(_)
             | HookRunnerResult::Success
             | HookRunnerResult::Decision(_)
             | HookRunnerResult::Stop(_) => {
@@ -656,6 +692,7 @@ pub async fn dispatch_intercept(
                 false
             }
             HookRunnerResult::Replace(None)
+            | HookRunnerResult::Context(_)
             | HookRunnerResult::Success
             | HookRunnerResult::Decision(_)
             | HookRunnerResult::Stop(_) => {
@@ -1318,7 +1355,7 @@ mod tests {
             &run_ctx(),
         )
         .await;
-        assert!(results.is_empty());
+        assert!(results.results.is_empty());
     }
 
     #[tokio::test]
@@ -1334,8 +1371,8 @@ mod tests {
             &run_ctx(),
         )
         .await;
-        assert_eq!(results.len(), 1);
-        assert!(matches!(results[0], HookRunResult::Skipped { .. }));
+        assert_eq!(results.results.len(), 1);
+        assert!(matches!(results.results[0], HookRunResult::Skipped { .. }));
     }
 
     #[tokio::test]
@@ -1353,9 +1390,9 @@ mod tests {
             &run_ctx(),
         )
         .await;
-        assert_eq!(results.len(), 2);
-        assert!(matches!(results[0], HookRunResult::Failed { .. }));
-        assert!(matches!(results[1], HookRunResult::Success { .. }));
+        assert_eq!(results.results.len(), 2);
+        assert!(matches!(results.results[0], HookRunResult::Failed { .. }));
+        assert!(matches!(results.results[1], HookRunResult::Success { .. }));
     }
 
     #[test]
@@ -1531,7 +1568,9 @@ mod tests {
         let mut spec = plugin_spec("guard", HookEventName::SessionStart);
         spec.event = HookEventName::SessionStart;
         let registry = registry_from_specs(vec![spec]);
-        let ctx = plugin_ctx(PluginHookResponse::Observed);
+        let ctx = plugin_ctx(PluginHookResponse::Observed {
+            additional_context: None,
+        });
         let results = dispatch_non_blocking(
             &registry,
             HookEventName::SessionStart,
@@ -1539,8 +1578,72 @@ mod tests {
             &ctx,
         )
         .await;
-        assert_eq!(results.len(), 1);
-        assert!(matches!(results[0], HookRunResult::Success { .. }));
+        assert_eq!(results.results.len(), 1);
+        assert!(matches!(results.results[0], HookRunResult::Success { .. }));
+        assert!(results.additional_context.is_empty());
+    }
+
+    /// A plugin `session_start` hook that attaches `additional_context` is
+    /// reported as a plain success and its text is aggregated for the fire site.
+    #[tokio::test]
+    async fn plugin_observe_additional_context_is_aggregated() {
+        let spec = plugin_spec("scratch", HookEventName::SessionStart);
+        let registry = registry_from_specs(vec![spec]);
+        let ctx = plugin_ctx(PluginHookResponse::Observed {
+            additional_context: Some("scratch dir: /tmp/s".into()),
+        });
+        let results = dispatch_non_blocking(
+            &registry,
+            HookEventName::SessionStart,
+            &session_start_envelope(),
+            &ctx,
+        )
+        .await;
+        assert!(matches!(results.results[0], HookRunResult::Success { .. }));
+        assert_eq!(results.additional_context, ["scratch dir: /tmp/s"]);
+    }
+
+    /// Blank context is dropped at the runner boundary, so the fire site never
+    /// has to decide whether an empty block is worth rendering.
+    #[tokio::test]
+    async fn plugin_observe_blank_context_is_dropped() {
+        let spec = plugin_spec("scratch", HookEventName::SessionStart);
+        let registry = registry_from_specs(vec![spec]);
+        let ctx = plugin_ctx(PluginHookResponse::Observed {
+            additional_context: Some("   \n".into()),
+        });
+        let results = dispatch_non_blocking(
+            &registry,
+            HookEventName::SessionStart,
+            &session_start_envelope(),
+            &ctx,
+        )
+        .await;
+        assert!(matches!(results.results[0], HookRunResult::Success { .. }));
+        assert!(results.additional_context.is_empty());
+    }
+
+    /// A command `session_start` hook reaches the same aggregation through
+    /// `hookSpecificOutput.additionalContext` — the Stop gate's spelling.
+    #[tokio::test]
+    async fn command_observe_additional_context_is_aggregated() {
+        let mut spec = make_command_spec(
+            "note",
+            None,
+            true,
+            "echo '{\"hookSpecificOutput\":{\"additionalContext\":\"scratch dir: /tmp/s\"}}'",
+        );
+        spec.event = HookEventName::SessionStart;
+        let registry = registry_from_specs(vec![spec]);
+        let results = dispatch_non_blocking(
+            &registry,
+            HookEventName::SessionStart,
+            &session_start_envelope(),
+            &run_ctx(),
+        )
+        .await;
+        assert!(matches!(results.results[0], HookRunResult::Success { .. }));
+        assert_eq!(results.additional_context, ["scratch dir: /tmp/s"]);
     }
 
     #[tokio::test]

@@ -269,7 +269,7 @@ pub async fn run_command_hook(
             match mode {
                 GateKind::Observe => {
                     if exit_code == 0 {
-                        return (HookRunnerResult::Success, elapsed);
+                        return (super::observe_result_from_stdout(&stdout), elapsed);
                     }
                     (
                         HookRunnerResult::Failed(format!("exit code {exit_code}")),

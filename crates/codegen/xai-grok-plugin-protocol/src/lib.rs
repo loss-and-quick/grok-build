@@ -620,8 +620,19 @@ pub struct HookInvokeParams {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
 pub enum HookInvokeResult {
-    /// Observe gate: acknowledged, no control.
-    Observed,
+    /// Observe gate: acknowledged, no control. `additional_context` is text the
+    /// hook wants the model to see; the observe gate has no decision to carry it
+    /// on, so it rides the acknowledgement. Consumed at `session_start` (the
+    /// core folds it into the session's opening context); every other observe
+    /// event records it and moves on. Absent on the wire for a plain
+    /// acknowledgement, so `{"kind":"observed"}` stays valid.
+    Observed {
+        // Skipped when absent: a bare acknowledgement is by far the most common
+        // reply on this wire, and it must keep serializing to exactly
+        // `{"kind":"observed"}`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        additional_context: Option<String>,
+    },
     /// Tool gate: allow/deny with an optional reason.
     Decision {
         decision: DecisionDto,
@@ -1630,7 +1641,19 @@ mod tests {
     /// `continue` field name on the `Stop` variant.
     #[test]
     fn hook_invoke_result_variants_round_trip() {
-        round_trip(&HookInvokeResult::Observed, json!({ "kind": "observed" }));
+        round_trip(
+            &HookInvokeResult::Observed {
+                additional_context: None,
+            },
+            json!({ "kind": "observed" }),
+        );
+
+        round_trip(
+            &HookInvokeResult::Observed {
+                additional_context: Some("scratch dir: /tmp/s".into()),
+            },
+            json!({ "kind": "observed", "additional_context": "scratch dir: /tmp/s" }),
+        );
 
         round_trip(
             &HookInvokeResult::Decision {

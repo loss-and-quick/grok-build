@@ -6,4 +6,4 @@ import type { DecisionDto } from "./DecisionDto";
  * Internally tagged on `kind`. The `Stop` variant's `continue_` field is
  * `continue` on the wire.
  */
-export type HookInvokeResult = { "kind": "observed" } | { "kind": "decision", decision: DecisionDto, reason?: string | null, } | { "kind": "stop", block: boolean, reason?: string | null, continue?: boolean | null, additional_context?: string | null, } | { "kind": "replace", payload?: unknown, };
+export type HookInvokeResult = { "kind": "observed", additional_context?: string | null, } | { "kind": "decision", decision: DecisionDto, reason?: string | null, } | { "kind": "stop", block: boolean, reason?: string | null, continue?: boolean | null, additional_context?: string | null, } | { "kind": "replace", payload?: unknown, };

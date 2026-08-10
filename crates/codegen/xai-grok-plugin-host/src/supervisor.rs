@@ -811,7 +811,9 @@ fn map_result(event: &str, value: Value) -> Result<PluginHookResponse, PluginInv
     let result: HookInvokeResult = serde_json::from_value(value)
         .map_err(|e| PluginInvokeError::new(format!("bad hook result for '{event}': {e}")))?;
     Ok(match result {
-        HookInvokeResult::Observed => PluginHookResponse::Observed,
+        HookInvokeResult::Observed { additional_context } => {
+            PluginHookResponse::Observed { additional_context }
+        }
         HookInvokeResult::Decision { decision, reason } => PluginHookResponse::Decision {
             allow: matches!(decision, DecisionDto::Allow),
             reason,
