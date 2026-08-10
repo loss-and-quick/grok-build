@@ -207,7 +207,7 @@ async fn protocol_version_mismatch_disables_plugin() {
 #[tokio::test]
 async fn unsubscribed_event_short_circuits_without_rpc() {
     // The fixture would crash if it ever received a hook_invoke, so a returned
-    // Observed proves the host short-circuited before sending one.
+    // NotSubscribed proves the host short-circuited before sending one.
     let (host, _d, _w) = host_with(
         &[
             ("FAKE_MODE", "crash_on_invoke".into()),
@@ -217,7 +217,7 @@ async fn unsubscribed_event_short_circuits_without_rpc() {
     );
 
     let resp = host.invoke(req("pre_tool_use", 5000)).await.unwrap();
-    assert!(matches!(resp, PluginHookResponse::Observed));
+    assert!(matches!(resp, PluginHookResponse::NotSubscribed));
 
     // Still alive: the sidecar never got the crashing invoke.
     let status = host.status().await;
