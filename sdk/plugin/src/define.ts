@@ -212,6 +212,24 @@ export function observed(): HookInvokeResult {
   return { kind: "observed" };
 }
 
+/**
+ * Observe gate: acknowledge *and* hand the model `text`.
+ *
+ * An observe hook has no decision to attach context to, so it rides the
+ * acknowledgement. Consumed by `session_start`: the host folds the text into
+ * the session's opening `<user_info>` context, where it stays visible for
+ * every turn and is re-established after a compaction — which is how a hook
+ * tells the agent about something it computed at startup (a scratch
+ * directory, an identity, a policy). Other observe events accept the field
+ * and record it, but have no injection point, so treat it as session_start-only.
+ *
+ * Keep it short: the host clips the rendered block and it is billed on every
+ * request for the rest of the session.
+ */
+export function injectContext(text: string): HookInvokeResult {
+  return { kind: "observed", additional_context: text };
+}
+
 /** Tool gate: allow the action. */
 export function allow(reason?: string): HookInvokeResult {
   return { kind: "decision", decision: "allow", reason };

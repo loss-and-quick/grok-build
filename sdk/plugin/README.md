@@ -32,6 +32,53 @@ That call *is* the program: it starts the stdio JSON-RPC loop, answers the
 host's `initialize` handshake (subscriptions are derived from the `hooks`
 keys), dispatches `hook_invoke`, and exits on `shutdown`.
 
+## Telling the model something (`injectContext`)
+
+`ctx.log` is the plugin's own log channel — the model never sees it. To hand
+the model something a hook computed, return `injectContext(text)`:
+
+```ts
+import { definePlugin, injectContext } from "@grok-build/plugin";
+
+definePlugin({
+  name: "scratchpad",
+  hooks: {
+    session_start: async (payload) => {
+      const dir = `${payload.workspaceRoot}/.scratch/${payload.sessionId}`;
+      await mkdir(dir, { recursive: true });   // node:fs/promises
+      return injectContext(
+        `A scratch directory for this session exists at ${dir}. ` +
+          `Use it for throwaway files instead of /tmp.`,
+      );
+    },
+  },
+});
+```
+
+The host folds the text into the session's opening `<user_info>` context, so
+it is in front of the model from turn one and stays there for the whole
+session — including after a compaction, which rebuilds that context verbatim.
+Several plugins may contribute; their entries are concatenated in dispatch
+order into one `<system-reminder>` block. On a **resumed** session the loaded
+transcript already carries the previous run's block, so a fresh contribution
+arrives as a standalone reminder and is folded into the prefix at the next
+compaction.
+
+Three things to know:
+
+- **Keep it short.** The block is billed on every request for the rest of the
+  session. The host clips the rendered block at 4 000 characters, marking the
+  cut (`… [+N chars]`) rather than dropping the text.
+- **`session_start` is the consuming event.** Other observe events accept
+  `additional_context` on the wire and record it, but have no injection point.
+- **Don't stall startup.** `session_start` runs before the first turn and the
+  session waits for it, bounded by the hook timeout (5 s by default). Do the
+  slow part in the background and return promptly.
+
+The same text can also come from a plain `hooks.json` command hook, via
+`{"hookSpecificOutput": {"additionalContext": "…"}}` on stdout — the spelling
+the `Stop` gate already uses.
+
 ## Model-visible tools (`tools`)
 
 A plugin can serve tools the model calls like any other tool. Declare each
@@ -271,7 +318,7 @@ for editor/typecheck support) are devDependencies only.
   `ToolCallContext`.
 - `src/define.ts` — `definePlugin()` (hooks + tools) and the gate-aware
   result helpers (`allow`, `deny`, `stopBlock`, `forceStop`, `observed`,
-  `replace`).
+  `injectContext`, `replace`).
 - `src/generated/*.ts` — **read-only**, generated from the Rust side via
   `ts-rs`. Do not edit; do not redefine these shapes elsewhere. `src/index.ts`
   re-exports them.

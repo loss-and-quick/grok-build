@@ -5,6 +5,7 @@ import {
   definePlugin,
   deny,
   forceStop,
+  injectContext,
   observed,
   replace,
   stopBlock,
@@ -211,6 +212,25 @@ describe("definePlugin — hook_invoke dispatch", () => {
 
     const result = await invokeHook(reader, writer, "notification", "observe", 1);
     expect(result).toEqual({ kind: "observed" });
+  });
+
+  test("injectContext() rides model-facing text on the observed reply", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      {
+        hooks: {
+          session_start: () => injectContext("scratch dir: /tmp/scratch/s1"),
+        },
+      },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    const result = await invokeHook(reader, writer, "session_start", "observe", 1);
+    expect(result).toEqual({
+      kind: "observed",
+      additional_context: "scratch dir: /tmp/scratch/s1",
+    });
   });
 
   test("replace() carries a payload", async () => {

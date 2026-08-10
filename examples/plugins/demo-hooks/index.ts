@@ -7,7 +7,8 @@
 //                         marker string (parity target for the e2e test).
 //   • stop              — a *Stop* gate: inject `additionalContext` into the
 //                         next turn without blocking the stop.
-//   • session_start     — an *Observe* event: log that the session began.
+//   • session_start     — an *Observe* event: hand the model context about the
+//                         session (and log that it began).
 //   • resolve_credential — a *Replace* gate: hand the core a fixed bearer
 //                         instead of its built-in credential resolution.
 //   • provider_request  — a *Replace* gate: observe the issuing `agent` and the
@@ -31,6 +32,7 @@
 import {
   definePlugin,
   deny,
+  injectContext,
   observed,
   replace,
   type HookInvokeResult,
@@ -47,6 +49,10 @@ export const DENY_REASON =
 /** Context injected on `stop` (the e2e test asserts parity on this string). */
 export const STOP_CONTEXT =
   "demo-hooks: remember to run the demo checklist before stopping";
+
+/** Context injected on `session_start` (the e2e test asserts parity on it). */
+export const SESSION_START_CONTEXT =
+  "demo-hooks: this session was started with the demo plugin loaded";
 
 /** A fixed bearer this demo hands the core via `resolve_credential`. Not a real
  * provider token — it just shows the Replace credential shape end to end. */
@@ -72,11 +78,14 @@ definePlugin({
     },
   },
   hooks: {
-    // Observe-only: the return value is ignored, but we log the session id so
-    // the host's capability channel (`log_emit`) is exercised end to end.
+    // Observe event with a payload the *model* sees: `ctx.log` goes to the
+    // plugin's log channel, which the model never reads, so anything the agent
+    // needs to know about this session has to come back as `injectContext`.
+    // The core folds it into the session's opening context (and re-establishes
+    // it after a compaction).
     session_start(_payload, ctx): HookInvokeResult {
       ctx.log.info("demo-hooks: session started", { sessionId: ctx.sessionId });
-      return observed();
+      return injectContext(SESSION_START_CONTEXT);
     },
 
     // Tool gate: deny when the tool input carries the demo marker anywhere in

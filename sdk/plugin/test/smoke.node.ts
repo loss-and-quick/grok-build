@@ -17,6 +17,7 @@ const requiredExports = [
   "stopBlock",
   "forceStop",
   "observed",
+  "injectContext",
   "replace",
   "PROTOCOL_VERSION",
   "JsonRpcEndpoint",

@@ -143,6 +143,7 @@ export {
   stopBlock,
   forceStop,
   observed,
+  injectContext,
   replace,
   PROTOCOL_VERSION,
 } from "./define.ts";
