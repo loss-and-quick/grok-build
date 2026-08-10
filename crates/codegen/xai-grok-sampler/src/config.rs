@@ -232,9 +232,37 @@ impl Default for SamplerConfig {
     }
 }
 
+/// Where a resolver's credential came from, for the sites that copy a live
+/// resolver from one [`SamplerConfig`] onto another.
+///
+/// Such a site cannot ask "is this endpoint safe" — it has to ask "is this
+/// *credential* the right one for that endpoint". A credential minted for one
+/// specific provider says so here; a session-wide credential does not, and a
+/// copying site must keep refusing to attach it anywhere but its own host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MintedFor<'a> {
+    /// The exact `base_url` the credential was issued for.
+    pub base_url: &'a str,
+    /// The header shape that endpoint expects it in. Carried alongside the URL
+    /// because the two are one fact: a credential is only usable at the
+    /// endpoint it was minted for *and* in the scheme it was minted as.
+    pub auth_scheme: AuthScheme,
+}
+
 /// Cheap sync read of the current bearer for [`SamplerConfig::bearer_resolver`].
 pub trait BearerResolver: Send + Sync + std::fmt::Debug {
     fn current_bearer(&self) -> Option<String>;
+
+    /// `Some` when this credential was minted for one specific endpoint, so a
+    /// config built for that same endpoint may legitimately carry it.
+    ///
+    /// `None` — the default — means the credential is the session's own and is
+    /// not scoped to any endpoint. Copying sites must not infer permission to
+    /// move it: an unscoped credential stays subject to whatever host check the
+    /// site already applies.
+    fn minted_for(&self) -> Option<MintedFor<'_>> {
+        None
+    }
 }
 
 pub type SharedBearerResolver = std::sync::Arc<dyn BearerResolver>;
