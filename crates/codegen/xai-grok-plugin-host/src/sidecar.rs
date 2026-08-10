@@ -34,7 +34,7 @@ use xai_grok_plugin_protocol::{
     InitializeParams, InitializeResult, PROTOCOL_VERSION, PanelActionParams, ShutdownParams,
     ToolCancelParams,
 };
-use xai_tty_utils::ProcessGroup;
+use xai_tty_utils::{ProcessGroup, ProcessScope};
 
 use crate::capabilities::PluginCapabilities;
 use crate::rpc::{self, Inbound, RpcError};
@@ -96,7 +96,9 @@ pub struct PluginSidecar {
     /// Child + group behind std mutexes so `Drop` (sync) and `dispose` (async)
     /// can both reach them without holding a guard across an await.
     child: Mutex<Option<tokio::process::Child>>,
-    group: Mutex<Option<ProcessGroup>>,
+    /// Strong `Arc` owner of the enrolled group; the scope holds only a `Weak`,
+    /// so clearing this at reap is what keeps `kill_all` off a reused pid.
+    group: Mutex<Option<Arc<ProcessGroup>>>,
 }
 
 impl PluginSidecar {
@@ -104,19 +106,29 @@ impl PluginSidecar {
     /// call [`Self::handshake`] next.
     ///
     /// `caps` serves inbound plugin→core traffic and is shared across restarts.
+    /// `scope` reaps this sidecar's whole process tree if the owner never gets
+    /// to: `kill_on_drop` and [`Self::dispose`] both need a `Drop` or an actor
+    /// to still run, which is exactly what a wedged session no longer has.
+    /// Errors if `scope` is already closed — the child is killed before this
+    /// returns and must not be handshaked.
     pub fn spawn(
         mut cmd: Command,
         name: String,
         caps: Arc<PluginCapabilities>,
+        scope: &ProcessScope,
     ) -> std::io::Result<Arc<Self>> {
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         // Detach into its own session/group so teardown can killpg grandchildren
-        // (e.g. bun/node spawning workers) without orphaning them.
+        // (e.g. bun/node spawning workers) without orphaning them. This is also
+        // what makes the child enrollable: `setsid` leaves it leading its own
+        // group, so `ProcessScope::prepare` would be redundant here — and on
+        // Windows harmful, since `creation_flags` replaces rather than ORs.
         xai_tty_utils::detach_command(&mut cmd);
 
+        #[allow(clippy::disallowed_methods)] // enrolled in `scope` below
         let mut child = cmd.spawn()?;
         let stdin = child
             .stdin
@@ -129,9 +141,13 @@ impl PluginSidecar {
         let stderr = child.stderr.take();
 
         // Best-effort process group; a failure just degrades to leader-only kill.
+        // Built here rather than via `ProcessScope::enroll` so that stays true:
+        // `enroll` folds group creation into enrollment and would turn a failed
+        // job/group handle into a failed plugin start, when a sidecar without a
+        // group is merely degraded, not broken.
         let group = match ProcessGroup::new() {
             Ok(mut g) => match g.attach(&child) {
-                Ok(()) => Some(g),
+                Ok(()) => Some(Arc::new(g)),
                 Err(e) => {
                     tracing::warn!(plugin = %name, "process group attach failed: {e}");
                     None
@@ -142,6 +158,24 @@ impl PluginSidecar {
                 None
             }
         };
+        // Enroll the group so the scope can reap this tree when its owner never
+        // runs teardown. Ordinary shutdown is still `dispose`/`Drop`; the scope
+        // covers the wedged-owner case those cannot reach. With no group there
+        // is nothing to enroll, so consult the scope directly rather than let an
+        // unreapable child start.
+        let enrolled = match &group {
+            Some(group) => scope.register(group),
+            None => !scope.is_closed(),
+        };
+        if !enrolled {
+            // The scope latched closed (this spawn raced session teardown), so
+            // `register` already killpg'd the tree. Fail the start instead of
+            // handshaking a child that is already dead; dropping `child` reaps
+            // the leader via `kill_on_drop`.
+            return Err(std::io::Error::other(
+                "process scope already closed; sidecar not started",
+            ));
+        }
 
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<String>();
         let pending: Arc<Mutex<std::collections::HashMap<i64, oneshot::Sender<RpcOutcome>>>> =
@@ -325,7 +359,9 @@ impl PluginSidecar {
                 }
             }
         }
-        // Leader is reaped; drop the group so `Drop` can't killpg a reused pid.
+        // Leader is reaped; drop the strong `Arc` so neither `Drop` nor the
+        // scope's `kill_all` can killpg a pid this leader no longer owns — the
+        // scope's `Weak` dies with it.
         *self.group.lock().expect("group lock poisoned") = None;
     }
 }

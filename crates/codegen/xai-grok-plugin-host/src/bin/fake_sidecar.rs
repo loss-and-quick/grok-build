@@ -18,6 +18,14 @@
 //!     - `exit_after_handshake` — reply to initialize, then exit(0).
 //!     - `storage_probe`      — on invoke, round-trip through `storage_*`/`log_emit`,
 //!                              then reply Observed (exercises the plugin→core path).
+//!     - `heartbeat`          — not a sidecar at all: append to
+//!                              `FAKE_HEARTBEAT_FILE` forever. Used as the
+//!                              grandchild below.
+//! - `FAKE_GRANDCHILD_HEARTBEAT` — path; before serving, spawn this same binary
+//!   in `heartbeat` mode as a grandchild and keep serving. The grandchild
+//!   inherits the sidecar's (setsid'd) process group but none of its stdio, so a
+//!   stalled heartbeat file says the teardown reached past the leader into the
+//!   group — the shape a real sidecar's bun/node workers have.
 //! - `FAKE_TOOL_MODE` (independent of `FAKE_MODE`; governs `tool_invoke`):
 //!     - `echo` (default)     — reply with a content string echoing the tool,
 //!                              arguments, and per-call context.
@@ -43,6 +51,13 @@ fn env(key: &str) -> Option<String> {
 
 fn main() {
     let mode = env("FAKE_MODE").unwrap_or_else(|| "normal".to_string());
+    if mode == "heartbeat" {
+        heartbeat_forever();
+        return;
+    }
+    if let Some(path) = env("FAKE_GRANDCHILD_HEARTBEAT") {
+        spawn_heartbeat_grandchild(&path);
+    }
     let stdin = std::io::stdin();
     // One reader over one buffer for the whole session (no re-locking).
     let mut reader = stdin.lock();
@@ -230,6 +245,51 @@ fn main() {
             None => {}
         }
     }
+}
+
+/// Append a byte to `FAKE_HEARTBEAT_FILE` every [`HEARTBEAT_PERIOD`] until
+/// killed. A caller that killed only the sidecar leader leaves this running and
+/// the file still growing.
+fn heartbeat_forever() {
+    let Some(path) = env("FAKE_HEARTBEAT_FILE") else {
+        return;
+    };
+    loop {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = f.write_all(b".");
+            let _ = f.flush();
+        }
+        std::thread::sleep(HEARTBEAT_PERIOD);
+    }
+}
+
+/// How often the heartbeat grandchild writes; a test's stall window must be a
+/// comfortable multiple of this.
+const HEARTBEAT_PERIOD: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Spawn this binary again as a heartbeat grandchild. Stdio is nulled so it
+/// cannot hold the sidecar's stdout pipe open (which would confuse the
+/// transport-death signal) or write into the JSON-RPC stream.
+fn spawn_heartbeat_grandchild(path: &str) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    // No scope to enroll in: this runs inside the fixture child, and being
+    // reapable only through the sidecar's process group is exactly the property
+    // the test asserts.
+    #[allow(clippy::disallowed_methods)]
+    let _ = std::process::Command::new(exe)
+        .env("FAKE_MODE", "heartbeat")
+        .env("FAKE_HEARTBEAT_FILE", path)
+        .env_remove("FAKE_GRANDCHILD_HEARTBEAT")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Exercise the plugin→core capability surface: log, then set/get/list/delete,

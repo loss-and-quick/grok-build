@@ -1380,6 +1380,15 @@ pub(crate) async fn spawn_session_actor(
             )
         },
     );
+    // Enroll this session's sidecars in the same scope its MCP children and
+    // terminals use, so a wedged session's plugin trees (a sidecar plus whatever
+    // workers it spawned) are reclaimed when the handle leaves residency — the
+    // host's own `dispose`/`Drop` teardown needs an actor that still runs. A
+    // subagent's scope is its parent's clone, so this is idempotent for the
+    // inherited host rather than a second, competing owner.
+    if let (Some(host), Some(scope)) = (&built_plugin_host, &tool_context.process_scope) {
+        host.set_process_scope(scope.clone());
+    }
     // Now that the plugin host exists, fill the deferred `permission_ask` seam so
     // the permission manager can dispatch to sidecar plugins. Only sidecar plugins
     // (those the host registered) can subscribe.

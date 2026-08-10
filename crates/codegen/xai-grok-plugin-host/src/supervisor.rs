@@ -98,6 +98,9 @@ pub struct PluginHost {
     /// server (current and future registrations). `None` keeps
     /// `auth_publish_url`/`auth_await_code` answering `method_not_found`.
     sign_in_sink: std::sync::Mutex<Option<Arc<dyn crate::orchestration::SignInSink>>>,
+    /// Where sidecar process trees enroll for reaping. `None` falls back to the
+    /// process-global scope; see [`Self::set_process_scope`].
+    process_scope: std::sync::Mutex<Option<xai_tty_utils::ProcessScope>>,
 }
 
 /// One registered plugin: its spec, capability server (shared across restarts),
@@ -141,6 +144,7 @@ impl PluginHost {
             agent_orchestrator: std::sync::Mutex::new(None),
             panel_sink: std::sync::Mutex::new(None),
             sign_in_sink: std::sync::Mutex::new(None),
+            process_scope: std::sync::Mutex::new(None),
         }
     }
 
@@ -171,6 +175,7 @@ impl PluginHost {
             agent_orchestrator: std::sync::Mutex::new(None),
             panel_sink: std::sync::Mutex::new(None),
             sign_in_sink: std::sync::Mutex::new(None),
+            process_scope: std::sync::Mutex::new(None),
         }
     }
 
@@ -216,6 +221,35 @@ impl PluginHost {
         for entry in plugins.values() {
             entry.caps.set_sign_in_sink(Arc::clone(&sink));
         }
+    }
+
+    /// Point sidecar enrollment at the owning session's [`ProcessScope`], so a
+    /// session whose worker wedges still has its sidecar trees reclaimed when
+    /// the handle leaves residency — `dispose` and `Drop` both need something of
+    /// this host's to still be running, which is precisely what a wedged session
+    /// no longer offers. Takes `&self` like the other seams: the shell installs
+    /// it after the host is behind an `Arc`.
+    ///
+    /// Without it, sidecars enroll in the process-global scope instead, which is
+    /// the right owner for the session-less (sign-in) host but only reaps at
+    /// process exit.
+    ///
+    /// [`ProcessScope`]: xai_tty_utils::ProcessScope
+    pub fn set_process_scope(&self, scope: xai_tty_utils::ProcessScope) {
+        *self
+            .process_scope
+            .lock()
+            .expect("process scope slot poisoned") = Some(scope);
+    }
+
+    /// The scope new sidecars enroll in. Cloned out rather than borrowed so the
+    /// lock is never held across a spawn.
+    fn process_scope(&self) -> xai_tty_utils::ProcessScope {
+        self.process_scope
+            .lock()
+            .expect("process scope slot poisoned")
+            .clone()
+            .unwrap_or_else(|| xai_tty_utils::global_process_scope().clone())
     }
 
     /// Register a plugin. Idempotent per name (a re-register replaces the entry,
@@ -397,8 +431,13 @@ impl PluginHost {
         if let Some(hardener) = &self.spawn_hardener {
             hardener(&mut cmd, spec.network);
         }
-        let sidecar = PluginSidecar::spawn(cmd, spec.name.clone(), Arc::clone(&entry.caps))
-            .map_err(|e| StartError::Spawn(e.to_string()))?;
+        let sidecar = PluginSidecar::spawn(
+            cmd,
+            spec.name.clone(),
+            Arc::clone(&entry.caps),
+            &self.process_scope(),
+        )
+        .map_err(|e| StartError::Spawn(e.to_string()))?;
 
         let params = initialize_params(
             spec.name.clone(),
