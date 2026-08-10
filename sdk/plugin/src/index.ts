@@ -16,6 +16,8 @@ export type { AgentListResult } from "./generated/AgentListResult.ts";
 export type { AgentMessageOutcomeDto } from "./generated/AgentMessageOutcomeDto.ts";
 export type { AgentMessageParams } from "./generated/AgentMessageParams.ts";
 export type { AgentMessageResult } from "./generated/AgentMessageResult.ts";
+export type { AgentSendParams } from "./generated/AgentSendParams.ts";
+export type { AgentSendResult } from "./generated/AgentSendResult.ts";
 export type { AgentSpawnParams } from "./generated/AgentSpawnParams.ts";
 export type { AgentSpawnResult } from "./generated/AgentSpawnResult.ts";
 export type { AgentStatusDto } from "./generated/AgentStatusDto.ts";
