@@ -102,7 +102,6 @@ pub struct AgentBuilder {
     background_workflows_enabled: bool,
     ask_user_question_enabled: bool,
     subagent_toggle: HashMap<String, bool>,
-    task_model_slugs: Vec<String>,
     skills_config: crate::prompt::skills::SkillsConfig,
     /// Resolved vendor-compat config governing which vendor (`.claude`/`.cursor`)
     /// dirs are scanned for skills / rules / AGENTS.md. Defaults to all-on,
@@ -301,7 +300,6 @@ impl AgentBuilder {
             background_workflows_enabled: false,
             ask_user_question_enabled: true,
             subagent_toggle: HashMap::new(),
-            task_model_slugs: Vec::new(),
             skills_config: Default::default(),
             compat: Default::default(),
             bash_params_json: None,
@@ -613,11 +611,6 @@ impl AgentBuilder {
         self.background_workflows_enabled = enabled;
         self
     }
-    /// Set public model slugs advertised in the GrokBuild Task description.
-    pub fn with_task_model_slugs(mut self, slugs: Vec<String>) -> Self {
-        self.task_model_slugs = slugs;
-        self
-    }
     /// Enable or disable the `ask_user_question` tool.
     ///
     /// When disabled, `GrokBuild:ask_user_question` is stripped from the
@@ -874,8 +867,7 @@ impl AgentBuilder {
                 .iter_mut()
                 .find(|tc| tc.id == task_tool_id)
             {
-                task_tc.description_override =
-                    Some(build_task_description(&subagents, &self.task_model_slugs));
+                task_tc.description_override = Some(build_task_description(&subagents));
             }
         }
         if let xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig::Enabled {
@@ -1303,28 +1295,14 @@ fn builtin_tools_fragment(name: BuiltinAgentName) -> String {
     };
     subagent.render_tools(&SUBAGENT_TOOL_NAMING)
 }
-const TASK_MODEL_PARAM: &str = "${{ params.task.model }}";
-fn task_model_guidance(model_slugs: &[String]) -> String {
-    let mut model_slugs = model_slugs.to_vec();
-    model_slugs.sort_unstable();
-    model_slugs.dedup();
-    if model_slugs.is_empty() {
-        return format!(
-            "\n\nNo explicit model slugs are currently available. \
-             Omit `{TASK_MODEL_PARAM}` to inherit the parent model."
-        );
-    }
-    let model_list = model_slugs
-        .into_iter()
-        .map(|slug| format!("- {slug}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "\n\nIf the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
-         {model_list}\n\n\
-         If the user does not explicitly request a model, omit `{TASK_MODEL_PARAM}` to inherit the parent model."
-    )
-}
+/// Replaces the upstream paragraph that listed every catalog slug and invited
+/// the caller to pass one. The `task` tool takes no model argument, so a list of
+/// slugs only advertises a call the tool now rejects. Stated positively instead,
+/// because the caller still needs an answer when a user asks for a given model:
+/// the answer is a different `subagent_type`.
+const TASK_MODEL_GUIDANCE: &str = "\n\nEach subagent type runs the model its own definition pins \
+     — choosing the type is choosing the model, and there is no model argument. \
+     If the user wants a different model, launch a subagent type whose role uses it.";
 /// Build the Task tool description with the effective subagent list.
 ///
 /// Maps each [`SubagentEntry`] to the shared
@@ -1333,10 +1311,7 @@ fn task_model_guidance(model_slugs: &[String]) -> String {
 /// stack share one builder. Built-in (unshadowed) entries carry the hardcoded
 /// tool-name fragment; user-defined entries carry `None` so their raw
 /// `description` is used verbatim (markdown is fine — it's model-facing text).
-pub(crate) fn build_task_description(
-    subagents: &[SubagentEntry],
-    model_slugs: &[String],
-) -> String {
+pub(crate) fn build_task_description(subagents: &[SubagentEntry]) -> String {
     let descriptors: Vec<xai_tool_types::SubagentDescriptor> = subagents
         .iter()
         .map(|entry| {
@@ -1352,7 +1327,7 @@ pub(crate) fn build_task_description(
         })
         .collect();
     let mut description = xai_tool_types::build_task_description(&descriptors, &TASK_TOOL_NAMING);
-    description.push_str(&task_model_guidance(model_slugs));
+    description.push_str(TASK_MODEL_GUIDANCE);
     description
 }
 /// Resolve the shell name for the system prompt.
@@ -1398,7 +1373,7 @@ mod tests {
                 SubagentSource::Builtin(BuiltinAgentName::Explore),
             ),
         ];
-        let desc = build_task_description(&subagents, &[]);
+        let desc = build_task_description(&subagents);
         assert!(
             desc.contains(xai_tool_types::GENERAL_PURPOSE_SUBAGENT.tools_template),
             "should include general-purpose tool names"
@@ -1421,7 +1396,7 @@ mod tests {
                 scope: AgentScope::Project,
             },
         )];
-        let desc = build_task_description(&subagents, &[]);
+        let desc = build_task_description(&subagents);
         assert!(desc.contains("- **code-reviewer**: Reviews code for bugs and style issues."));
         assert!(
             !desc.contains("Has access to all tools:"),
@@ -1437,7 +1412,7 @@ mod tests {
                 scope: AgentScope::User,
             },
         )];
-        let desc = build_task_description(&subagents, &[]);
+        let desc = build_task_description(&subagents);
         assert!(
             desc.contains("${{ some.template }}"),
             "template-like syntax in user descriptions should be rendered verbatim"
@@ -1456,7 +1431,7 @@ mod tests {
                 path: std::path::PathBuf::new(),
             },
         }];
-        let desc = build_task_description(&subagents, &[]);
+        let desc = build_task_description(&subagents);
         assert!(
             desc.contains("- **explore**: My custom explore agent."),
             "shadowed built-in should use user description"
@@ -1473,7 +1448,7 @@ mod tests {
             "Explore.",
             SubagentSource::Builtin(BuiltinAgentName::Explore),
         )];
-        let desc = build_task_description(&subagents, &[]);
+        let desc = build_task_description(&subagents);
         assert!(
             desc.contains("Start a subagent that works on a task independently"),
             "should contain header"
@@ -1490,7 +1465,7 @@ mod tests {
             "Explore.",
             SubagentSource::Builtin(BuiltinAgentName::Explore),
         )];
-        let desc = build_task_description(&subagents, &[]);
+        let desc = build_task_description(&subagents);
         assert!(
             desc.contains("${{ tools.by_kind.task }}"),
             "should use tools.by_kind.task template variable"
@@ -1503,61 +1478,31 @@ mod tests {
             desc.contains("${{ params.task.subagent_type }}"),
             "should use params.task.subagent_type template variable"
         );
+    }
+
+    /// The description must not name a model argument the tool would reject,
+    /// and must not hand the caller a catalog to shop from — it points at the
+    /// subagent type instead.
+    #[test]
+    fn build_task_description_offers_no_model_argument() {
+        let subagents = vec![entry(
+            "explore",
+            "Explore.",
+            SubagentSource::Builtin(BuiltinAgentName::Explore),
+        )];
+        let desc = build_task_description(&subagents);
         assert!(
-            desc.contains("${{ params.task.model }}"),
-            "should use params.task.model template variable"
+            !desc.contains("params.task.model"),
+            "the description must not reference a model parameter: {desc}"
         );
-    }
-    #[test]
-    fn build_task_description_lists_public_model_slugs() {
-        let subagents = vec![entry(
-            "explore",
-            "Explore.",
-            SubagentSource::Builtin(BuiltinAgentName::Explore),
-        )];
-        let desc = build_task_description(
-            &subagents,
-            &["zeta".to_string(), "alpha".to_string(), "alpha".to_string()],
+        assert!(
+            desc.contains("there is no model argument"),
+            "the description must say the knob does not exist: {desc}"
         );
-        assert!(desc.contains(
-            "If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
-             - alpha\n\
-             - zeta"
-        ));
-        assert!(desc.contains(
-            "If the user does not explicitly request a model, omit `${{ params.task.model }}` to inherit the parent model."
-        ));
-        assert!(!desc.contains("Available model slugs:"));
-        assert!(!desc.contains(concat!("grok", " models")));
-    }
-    #[test]
-    fn build_task_description_handles_empty_model_catalog() {
-        let subagents = vec![entry(
-            "explore",
-            "Explore.",
-            SubagentSource::Builtin(BuiltinAgentName::Explore),
-        )];
-        let desc = build_task_description(&subagents, &[]);
-        assert!(desc.contains("No explicit model slugs are currently available."));
-        assert!(desc.contains("Omit `${{ params.task.model }}` to inherit the parent model."));
-        assert!(!desc.contains(concat!("grok", " models")));
-    }
-    #[test]
-    fn task_model_guidance_resolves_model_param_override() {
-        use xai_grok_tools::types::template_renderer::TemplateRenderer;
-        use xai_grok_tools::types::tool::ToolKind;
-        let renderer = TemplateRenderer::new(
-            Default::default(),
-            std::collections::HashMap::from([(
-                ToolKind::Task,
-                std::collections::HashMap::from([("model".to_string(), "child_model".to_string())]),
-            )]),
+        assert!(
+            desc.contains("launch a subagent type whose role uses it"),
+            "the description must name the usable alternative: {desc}"
         );
-        let rendered = renderer
-            .render(&task_model_guidance(&["alpha".to_string()]))
-            .expect("model guidance should render");
-        assert!(rendered.contains("omit `child_model` to inherit the parent model"));
-        assert!(!rendered.contains("params.task.model"));
     }
     #[test]
     fn child_task_description_is_concise() {
@@ -1586,7 +1531,7 @@ mod tests {
             "GP agent.",
             SubagentSource::Builtin(BuiltinAgentName::GeneralPurpose),
         )];
-        let desc = build_task_description(&subagents, &[]);
+        let desc = build_task_description(&subagents);
         assert!(
             desc.contains("Resuming a previous agent (resume_from)"),
             "should contain resume_from section header"

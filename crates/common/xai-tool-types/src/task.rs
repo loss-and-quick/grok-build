@@ -93,13 +93,21 @@ pub struct TaskToolInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
 
-    /// Optional model slug for this subagent.
-    #[schemars(
-        description = "Optional model slug for this agent. If provided, it must resolve to one \
-            of the available model slugs. If omitted, the subagent uses the same model as the \
-            parent agent. Do not pass if resume_from is set (prior model will be used). Only \
-            choose an explicit model when the user directly requests it."
-    )]
+    /// Model slug for this subagent. **Not a model-facing argument.**
+    ///
+    /// Every `subagent_type` in the roster pins its own model — the role *is*
+    /// the model choice — so letting the caller name a slug silently overrides
+    /// a deliberate decision. Hidden from the JSON schema so the model never
+    /// sees it, but deliberately still deserialized: a caller that emits
+    /// `model` anyway (out of habit, or from a stale prompt) must get a visible
+    /// `invalid_arguments` error from the tool body rather than have the key
+    /// silently dropped. Dropping the field outright would give exactly that
+    /// silent no-op, since the input is not `deny_unknown_fields`.
+    ///
+    /// Spawn paths that legitimately choose a model — plugin `agent_spawn`,
+    /// workflow scripts, the `subagent_resolve` hook — build a
+    /// `SubagentRequest` directly and never pass through this struct.
+    #[schemars(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
@@ -1374,12 +1382,31 @@ mod tests {
         assert!(input.model.is_none());
     }
 
+    /// The field stays deserializable on purpose. The tool body turns a present
+    /// `model` into a visible error; if serde dropped the key here instead, the
+    /// caller would get the silent no-op that behaviour exists to prevent.
     #[test]
     fn task_tool_input_model_parses_explicit() {
         let input: TaskToolInput =
             serde_json::from_str(r#"{"description": "d", "prompt": "p", "model": "grok-3"}"#)
                 .unwrap();
         assert_eq!(input.model.as_deref(), Some("grok-3"));
+    }
+
+    /// …but it is never advertised, so a caller has no reason to send it: the
+    /// subagent type it picks already determines the model.
+    #[test]
+    fn task_tool_input_schema_hides_model() {
+        let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
+        let properties = &schema["properties"];
+        assert!(
+            properties.get("model").is_none(),
+            "model must not be a documented task argument: {properties}"
+        );
+        assert!(
+            properties.get("reasoning_effort").is_some(),
+            "the other per-spawn dials stay model-facing"
+        );
     }
 
     #[test]

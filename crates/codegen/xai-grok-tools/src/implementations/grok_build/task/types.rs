@@ -13,7 +13,8 @@
 //! - `SubagentDepthCounter` — current nesting depth
 //! - `MaxSubagentDepth` — configured max nesting depth
 //! - `SessionIdResource` — carries the current session ID for parent scoping
-//! - `TaskModelValidator` — validates explicit model slugs before background spawn
+//! - `TaskModelValidator` — catalog check for an explicit model slug; no
+//!   current reader, since the `task` tool takes no `model` argument
 //!
 //! All coordinator messages are funnelled through a single
 //! `SubagentEventSender` / `SubagentEvent` enum channel.
@@ -137,10 +138,18 @@ impl SubagentSpawnRequest {
 /// precedence over role defaults.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ModelOverrideProvenance {
-    /// Internal harness, role, persona, or config resolution.
+    /// Internal harness, role, persona, or config resolution. Trusted: the slug
+    /// came from configuration the operator wrote, so it is applied as given.
     #[default]
     Harness,
-    /// A model-facing `Task.model` argument.
+    /// A slug supplied from outside the harness, which must be checked against
+    /// the live model catalog before the spawn commits: plugin `agent_spawn`, a
+    /// workflow script's `model` option, or a `subagent_resolve` hook directive.
+    ///
+    /// The `task` tool no longer reaches this variant with a slug — it rejects a
+    /// model-facing `model` argument outright, because a subagent type already
+    /// pins its model. So `Tool` now reads as "untrusted caller", not "the model
+    /// asked"; the validation it gates is what the remaining callers need.
     Tool,
 }
 
@@ -148,7 +157,8 @@ pub enum ModelOverrideProvenance {
 pub struct SubagentRuntimeOverrides {
     /// Override the model (e.g. "test-model").
     pub model: Option<String>,
-    /// Whether `model` came from a model-facing Task call or internal harness logic.
+    /// Whether `model` came from an untrusted external caller or internal
+    /// harness resolution. See [`ModelOverrideProvenance`].
     pub model_override_provenance: ModelOverrideProvenance,
     /// Override reasoning effort (e.g. "low", "medium", "high").
     pub reasoning_effort: Option<String>,
@@ -992,7 +1002,13 @@ pub struct MaxSubagentDepth(pub u32);
 
 register_resource!("grok_build", "MaxSubagentDepth", MaxSubagentDepth);
 
-/// Session-scoped validator for model-facing `Task.model` arguments.
+/// Session-scoped validator for externally supplied model slugs.
+///
+/// Currently read by nobody: the `task` tool rejects a `model` argument rather
+/// than validating one, and the remaining [`ModelOverrideProvenance::Tool`]
+/// callers are checked against the catalog inside the shell's own spawn path.
+/// Kept registered and covered by a test so the seam stays live — it is the
+/// injection point any future tool-side slug check would use.
 ///
 /// Returns an error message for an invalid slug and `None` for a valid slug.
 /// The closure reads the live model catalog so refreshes apply without rebuilding

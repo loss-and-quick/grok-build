@@ -12,7 +12,9 @@
 //! - `MaxSubagentDepth` — max nesting (optional, defaults to [`MAX_SUBAGENT_DEPTH`])
 //! - `SessionIdResource` — current session ID for parent scoping (optional)
 //! - `SubagentForegroundWait` — host wait-window guard factory (optional)
-//! - `TaskModelValidator` — validates explicit model slugs before spawn
+//!
+//! `TaskModelValidator` is deliberately absent from that list: this tool rejects
+//! a `model` argument outright, so it has no slug to validate.
 
 pub mod backend;
 pub mod coordinator;
@@ -274,15 +276,7 @@ impl xai_tool_runtime::Tool for TaskTool {
             .map(|cancellation| cancellation.0.clone());
 
         // 1. Depth check
-        let (
-            depth,
-            max_depth,
-            backend,
-            model_validator,
-            parent_session_id,
-            parent_prompt_id,
-            foreground_wait,
-        ) = {
+        let (depth, max_depth, backend, parent_session_id, parent_prompt_id, foreground_wait) = {
             let res = resources.lock().await;
 
             let depth = res.get::<SubagentDepthCounter>().map(|d| d.0).unwrap_or(0);
@@ -297,8 +291,6 @@ impl xai_tool_runtime::Tool for TaskTool {
                     )
                 })?
                 .clone();
-
-            let model_validator = res.get::<TaskModelValidator>().cloned();
 
             let parent_session_id = res
                 .get::<SessionIdResource>()
@@ -315,7 +307,6 @@ impl xai_tool_runtime::Tool for TaskTool {
                 depth,
                 max_depth,
                 backend,
-                model_validator,
                 parent_session_id,
                 parent_prompt_id,
                 foreground_wait,
@@ -335,19 +326,22 @@ impl xai_tool_runtime::Tool for TaskTool {
             is_valid_resume_id(trimmed).then(|| trimmed.to_string())
         });
 
-        // Model overrides are soft-ignored on resume (source model is always pinned).
-        let model = xai_tool_types::sanitize_optional_arg(input.model);
-        let model = if resume_from.is_some() {
-            if let Some(ref ignored) = model {
-                tracing::debug!(
-                    model = %ignored,
-                    "ignoring model override because resume_from is set"
-                );
-            }
-            None
-        } else {
-            model
-        };
+        // Fork divergence from upstream: the caller does not pick a subagent's
+        // model. Each `subagent_type` pins one, so an argument here overrides a
+        // deliberate choice with a guess. `model` is hidden from the schema
+        // (see `TaskToolInput::model`); if it arrives anyway it is rejected, not
+        // dropped — a silent drop would leave the caller believing the override
+        // took effect while the child's `meta.json` records a run that never
+        // happened, the same failure the `reasoning_effort` gate avoids.
+        // Sentinels (`""`, `"null"`, …) are not a request for anything, so they
+        // stay tolerated rather than becoming a spurious error.
+        if let Some(requested) = xai_tool_types::sanitize_optional_arg(input.model) {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "`model` is not an argument of this tool: each subagent type runs the model its \
+                 definition pins. Drop `model` (requested '{requested}') and pick the \
+                 subagent_type whose role is the model you want."
+            )));
+        }
 
         // Treat blank/empty/"null" cwd as absent (models sometimes emit these).
         // Also strip stray surrounding quote characters and expand `~`.
@@ -440,18 +434,6 @@ impl xai_tool_runtime::Tool for TaskTool {
             }
         }
 
-        if let Some(ref requested) = model {
-            let validator = model_validator.ok_or_else(|| {
-                xai_tool_runtime::ToolError::custom(
-                    "validation_unavailable",
-                    "Cannot validate Task.model: model catalog validator is unavailable.",
-                )
-            })?;
-            if let Some(error) = validator.error_for(requested) {
-                return Err(xai_tool_runtime::ToolError::invalid_arguments(error));
-            }
-        }
-
         // Canonicalize the effort here rather than downstream: the resolution
         // layer silently ignores a value it cannot parse, which would leave the
         // model believing an override took effect. `invalid_arguments` lets it
@@ -499,7 +481,11 @@ impl xai_tool_runtime::Tool for TaskTool {
             resume_from,
             cwd,
             runtime_overrides: SubagentRuntimeOverrides {
-                model,
+                // Always inherited from the role/parent — see the `model`
+                // rejection above. Provenance stays `Tool` so a slug a
+                // `subagent_resolve` hook stamps onto this request downstream
+                // still gets catalog-validated.
+                model: None,
                 model_override_provenance: ModelOverrideProvenance::Tool,
                 reasoning_effort,
                 persona: None,
@@ -1266,32 +1252,41 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// A `model` argument is refused, not quietly dropped. A drop would leave
+    /// the caller believing it picked the child's model while the child ran on
+    /// its role's, and the child's `meta.json` would record the request.
     #[tokio::test]
-    async fn invalid_model_returns_error_before_background_spawn() {
-        let (backend, mut rx) = make_backend();
-        let mut resources = resources_for_task(backend);
-        resources.insert(TaskModelValidator::new(|requested| {
-            (requested == "invented-model").then(|| {
-                "Unknown Task.model slug 'invented-model'. Valid model slugs: alpha, zeta. \
-                 Omit `model` to inherit the parent model."
-                    .to_string()
-            })
-        }));
-        let mut input = task_input("general-purpose", true);
-        input.model = Some("invented-model".to_string());
+    async fn model_argument_is_rejected_before_spawn() {
+        for slug in ["invented-model", "grok-4"] {
+            let (backend, mut rx) = make_backend();
+            let resources = resources_for_task(backend);
+            let mut input = task_input("general-purpose", true);
+            input.model = Some(slug.to_string());
 
-        let result =
-            xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input).await;
+            let result =
+                xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input)
+                    .await;
 
-        let msg = result
-            .expect_err("invalid model must reject before spawn")
-            .to_string();
-        assert!(msg.contains("Unknown Task.model slug 'invented-model'"));
-        assert!(msg.contains("Valid model slugs: alpha, zeta"));
-        assert!(
-            rx.try_recv().is_err(),
-            "spawn must not reach the coordinator"
-        );
+            let msg = result
+                .expect_err("a model argument must reject the spawn")
+                .to_string();
+            assert!(
+                msg.contains("`model` is not an argument"),
+                "error must say the argument is refused, got: {msg}"
+            );
+            assert!(
+                msg.contains(slug),
+                "error must name the requested slug, got: {msg}"
+            );
+            assert!(
+                msg.contains("subagent_type"),
+                "error must point at the usable alternative, got: {msg}"
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "spawn must not reach the coordinator"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1600,16 +1595,19 @@ mod tests {
         assert!(input.model.is_none());
     }
 
+    /// The caller must not be offered a model knob at all: the subagent type it
+    /// picks already decides the model.
     #[test]
-    fn task_tool_input_schema_includes_model() {
+    fn task_tool_input_schema_omits_model() {
         let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
-        assert_eq!(
-            schema["properties"]["model"]["description"],
-            "Optional model slug for this agent. If provided, it must resolve to one of the \
-             available model slugs. If omitted, the subagent uses the same model as the parent \
-             agent. Do not pass if resume_from is set (prior model will be used). Only choose \
-             an explicit model when the user directly requests it."
+        assert!(
+            schema["properties"].get("model").is_none(),
+            "the task schema must not advertise a model argument: {}",
+            schema["properties"]
         );
+        // The neighbouring per-spawn dials are unaffected.
+        assert!(schema["properties"].get("reasoning_effort").is_some());
+        assert!(schema["properties"].get("capability_mode").is_some());
     }
 
     #[test]
@@ -2740,54 +2738,14 @@ mod tests {
         }
     }
 
-    // ── model override tests ─────────────────────────────────────
+    // ── model argument tests ─────────────────────────────────────
 
+    /// A spawn the tool does let through carries no model at all, so the child
+    /// always lands on its role's pin. Provenance stays `Tool` for the
+    /// `subagent_resolve` hook, which may stamp a slug onto this request later
+    /// and needs it catalog-checked.
     #[tokio::test]
-    async fn model_threads_to_runtime_overrides() {
-        let (backend, mut rx) = make_backend();
-        let resources = resources_for_task(backend);
-        let shared = resources.into_shared();
-
-        let handle = tokio::spawn(async move {
-            let request = unwrap_spawn(rx.recv().await.unwrap());
-            assert_eq!(
-                request.runtime_overrides.model.as_deref(),
-                Some("test-model"),
-                "explicit model must reach SubagentRuntimeOverrides"
-            );
-            assert_eq!(
-                request.runtime_overrides.model_override_provenance,
-                ModelOverrideProvenance::Tool,
-            );
-            assert!(request.runtime_overrides.reasoning_effort.is_none());
-            assert!(request.runtime_overrides.persona.is_none());
-            let id = request.id.clone();
-            request
-                .result_tx
-                .send(SubagentResult {
-                    success: true,
-                    output: "ok".into(),
-                    subagent_id: id.clone(),
-                    child_session_id: id,
-                    ..Default::default()
-                })
-                .unwrap();
-        });
-
-        let mut input = task_input("general-purpose", false);
-        input.model = Some("test-model".into());
-        let result = xai_tool_runtime::Tool::run(&TaskTool, test_ctx(shared), input)
-            .await
-            .unwrap();
-        handle.await.unwrap();
-        match result {
-            ToolOutput::SubagentCompleted(sub) => assert!(sub.output.contains("ok")),
-            other => panic!("Expected SubagentCompleted, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn omitted_model_stays_none_on_runtime_overrides() {
+    async fn spawn_never_carries_a_model_override() {
         let (backend, mut rx) = make_backend();
         let resources = resources_for_task(backend);
         let shared = resources.into_shared();
@@ -2796,9 +2754,15 @@ mod tests {
             let request = unwrap_spawn(rx.recv().await.unwrap());
             assert!(
                 request.runtime_overrides.model.is_none(),
-                "omitted model must stay None, got {:?}",
+                "no task spawn may pin a model, got {:?}",
                 request.runtime_overrides.model
             );
+            assert_eq!(
+                request.runtime_overrides.model_override_provenance,
+                ModelOverrideProvenance::Tool,
+            );
+            assert!(request.runtime_overrides.reasoning_effort.is_none());
+            assert!(request.runtime_overrides.persona.is_none());
             let id = request.id.clone();
             request
                 .result_tx
@@ -2826,6 +2790,8 @@ mod tests {
         }
     }
 
+    /// Placeholders are not a request for anything, so they stay tolerated as
+    /// "absent" rather than turning a sloppy call into a rejected spawn.
     #[tokio::test]
     async fn model_sentinel_values_treated_as_none() {
         for sentinel in [
@@ -2877,84 +2843,43 @@ mod tests {
         }
     }
 
+    /// Padding must not smuggle a slug past the rejection, and the error names
+    /// the trimmed value so it matches what the caller meant to send.
     #[tokio::test]
-    async fn model_whitespace_is_trimmed() {
+    async fn padded_model_is_rejected_and_reported_trimmed() {
         let (backend, mut rx) = make_backend();
         let resources = resources_for_task(backend);
-        let shared = resources.into_shared();
-
-        let handle = tokio::spawn(async move {
-            let request = unwrap_spawn(rx.recv().await.unwrap());
-            assert_eq!(
-                request.runtime_overrides.model.as_deref(),
-                Some("test-model"),
-                "leading/trailing whitespace should be trimmed"
-            );
-            let id = request.id.clone();
-            request
-                .result_tx
-                .send(SubagentResult {
-                    success: true,
-                    output: "ok".into(),
-                    subagent_id: id.clone(),
-                    child_session_id: id,
-                    ..Default::default()
-                })
-                .unwrap();
-        });
 
         let mut input = task_input("general-purpose", false);
         input.model = Some("  test-model  ".into());
-        let _ = xai_tool_runtime::Tool::run(&TaskTool, test_ctx(shared), input)
+        let msg = xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input)
             .await
-            .unwrap();
-        handle.await.unwrap();
+            .expect_err("a padded model argument must still reject")
+            .to_string();
+
+        assert!(msg.contains("'test-model'"), "got: {msg}");
+        assert!(rx.try_recv().is_err());
     }
 
+    /// `resume_from` used to swallow a `model` argument with a debug log. It is
+    /// now the same visible rejection as any other spawn — a resume pins the
+    /// source's model, so accepting the argument silently was the one case
+    /// where the caller was most likely to think it had changed something.
     #[tokio::test]
-    async fn resume_from_with_model_soft_ignores_model() {
+    async fn resume_from_with_model_is_rejected() {
         let (backend, mut rx) = make_backend();
         let resources = resources_for_task(backend);
-        let shared = resources.into_shared();
-
-        let handle = tokio::spawn(async move {
-            let request = unwrap_spawn(rx.recv().await.unwrap());
-            assert_eq!(request.resume_from.as_deref(), Some("prev-id"));
-            assert!(
-                request.runtime_overrides.model.is_none(),
-                "model must be soft-ignored when resume_from is set, got {:?}",
-                request.runtime_overrides.model
-            );
-            assert_eq!(
-                request.runtime_overrides.model_override_provenance,
-                ModelOverrideProvenance::Tool,
-            );
-            assert!(request.runtime_overrides.reasoning_effort.is_none());
-            assert!(request.runtime_overrides.persona.is_none());
-            let id = request.id.clone();
-            request
-                .result_tx
-                .send(SubagentResult {
-                    success: true,
-                    output: "resumed".into(),
-                    subagent_id: id.clone(),
-                    child_session_id: id,
-                    ..Default::default()
-                })
-                .unwrap();
-        });
 
         let mut input = task_input("general-purpose", false);
         input.resume_from = Some("prev-id".into());
         input.model = Some("test-model".into());
-        let result = xai_tool_runtime::Tool::run(&TaskTool, test_ctx(shared), input)
+        let msg = xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input)
             .await
-            .unwrap();
-        handle.await.unwrap();
-        match result {
-            ToolOutput::SubagentCompleted(sub) => assert!(sub.output.contains("resumed")),
-            other => panic!("Expected SubagentCompleted, got {other:?}"),
-        }
+            .expect_err("a model argument must reject even on resume")
+            .to_string();
+
+        assert!(msg.contains("`model` is not an argument"), "got: {msg}");
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

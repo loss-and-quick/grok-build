@@ -264,13 +264,6 @@ impl AgentRebuildSpec {
         .with_subagents_enabled(*subagents_enabled)
         .with_subagent_toggle(subagent_toggle.clone())
         .with_background_workflows_enabled(*background_workflows_enabled)
-        .with_task_model_slugs(
-            models_manager
-                .available()
-                .keys()
-                .map(|model_id| model_id.0.to_string())
-                .collect::<Vec<_>>(),
-        )
         .with_ask_user_question_enabled(*ask_user_question_enabled)
         .with_persona_summaries(persona_summaries.clone())
         .with_prompt_audience(*prompt_audience)
@@ -483,8 +476,13 @@ mod tests {
             .and_then(|definition| definition.function.description)
             .expect("GrokBuild Task description should be present")
     }
+    /// The task description used to project the public model catalog so the
+    /// caller could pick a slug. It must not any longer — `task` has no `model`
+    /// argument, and a list of slugs would only invite a rejected call. The
+    /// `TaskModelValidator` resource stays registered and catalog-live; nothing
+    /// reads it today, and this pins the seam so it does not rot silently.
     #[tokio::test(flavor = "current_thread")]
-    async fn rebuild_projects_fresh_public_model_keys_into_task_description() {
+    async fn task_description_hides_the_model_catalog_but_the_validator_stays_live() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let mut spec = test_rebuild_spec_default();
@@ -492,32 +490,32 @@ mod tests {
                     .expect("test rebuild spec should be uniquely owned")
                     .subagents_enabled = true;
                 let models_manager = spec.models_manager.clone();
-                models_manager
-                    .insert_test_entry("zeta-public", model_entry("internal-zeta"));
-                models_manager
-                    .insert_test_entry("alpha-public", model_entry("internal-alpha"));
+                models_manager.insert_test_entry("zeta-public", model_entry("internal-zeta"));
+                models_manager.insert_test_entry("alpha-public", model_entry("internal-alpha"));
                 let mut hidden = model_entry("internal-hidden");
                 hidden.info.hidden = true;
                 models_manager.insert_test_entry("private-hidden-model", hidden);
                 let mut unselectable = model_entry("internal-unselectable");
                 unselectable.info.user_selectable = false;
-                models_manager
-                    .insert_test_entry("private-unselectable-model", unselectable);
+                models_manager.insert_test_entry("private-unselectable-model", unselectable);
                 let first = spec
                     .build_agent(AgentDefinition::default_grok_build())
                     .await
                     .expect("first agent build should succeed");
                 let first_description = task_description(&first);
-                assert!(
-                    first_description.contains(
-                        "If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
-                         - alpha-public\n\
-                         - zeta-public"
-                    )
-                );
-                assert!(!first_description.contains("private-hidden-model"));
-                assert!(!first_description.contains("private-unselectable-model"));
-                assert!(!first_description.contains("internal-alpha"));
+                for slug in [
+                    "alpha-public",
+                    "zeta-public",
+                    "private-hidden-model",
+                    "private-unselectable-model",
+                    "internal-alpha",
+                ] {
+                    assert!(
+                        !first_description.contains(slug),
+                        "the task description must not offer '{slug}' to pick from"
+                    );
+                }
+                assert!(first_description.contains("there is no model argument"));
                 let validator = first
                     .tool_bridge()
                     .toolset()
@@ -526,8 +524,7 @@ mod tests {
                     .expect("Task model validator should be registered");
                 assert!(validator.error_for("alpha-public").is_none());
                 assert!(validator.error_for("private-hidden-model").is_some());
-                models_manager
-                    .insert_test_entry("beta-public", model_entry("internal-beta"));
+                models_manager.insert_test_entry("beta-public", model_entry("internal-beta"));
                 assert!(validator.error_for("beta-public").is_none());
                 let rebuilt = spec
                     .build_agent(AgentDefinition::default_grok_build())
@@ -535,12 +532,8 @@ mod tests {
                     .expect("rebuilt agent should succeed");
                 let rebuilt_description = task_description(&rebuilt);
                 assert!(
-                    rebuilt_description.contains(
-                        "If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
-                         - alpha-public\n\
-                         - beta-public\n\
-                         - zeta-public"
-                    )
+                    !rebuilt_description.contains("beta-public"),
+                    "a catalog refresh must not leak slugs into the description either"
                 );
             })
             .await;
