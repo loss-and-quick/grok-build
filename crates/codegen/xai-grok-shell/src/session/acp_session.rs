@@ -194,6 +194,8 @@ mod rewind;
 mod run_loop;
 #[path = "acp_session_impl/session_setup.rs"]
 mod session_setup;
+#[path = "acp_session_impl/session_start_context.rs"]
+mod session_start_context;
 #[path = "acp_session_impl/side_call.rs"]
 mod side_call;
 #[path = "acp_session_impl/turn_end.rs"]
@@ -976,6 +978,13 @@ pub(crate) struct SessionActor {
     pub(crate) vcs_kind: xai_grok_workspace::session::git::VcsKind,
     /// Errors from last hook config load (parse failures, etc.).
     pub(crate) hook_load_errors: std::cell::RefCell<Vec<String>>,
+    /// Model-facing context this session's `session_start` hooks returned,
+    /// already rendered as one bounded `<system-reminder>` body. Folded into
+    /// the `<user_info>` prefix each time that prefix is built, so it reaches
+    /// the model on turn one and is re-established verbatim after compaction
+    /// and on a model switch. `None` when no hook returned any.
+    /// `RefCell`: the session actor is single-threaded (LocalSet).
+    pub(crate) session_start_context: std::cell::RefCell<Option<String>>,
     /// Plugin registry snapshot for this session. Updated on `/plugins reload`.
     /// `RefCell` for mid-session reload from `&self` methods.
     pub(crate) plugin_registry:

@@ -11,6 +11,9 @@
 //! - **Stop (Stop gate):** `additionalContext` is injected without blocking.
 //!   Assert the plugin's aggregated `additional_context` equals the command
 //!   hook's.
+//! - **SessionStart (Observe gate):** the hook hands the model context for the
+//!   whole session. Assert the plugin's aggregated `additional_context` equals
+//!   the command hook's, and that neither is reported as anything but a run.
 //!
 //! # Runtime gating
 //!
@@ -36,6 +39,8 @@ use xai_grok_plugin_host::{PluginHost, RegisteredPlugin, RuntimeKind};
 const DENY_MARKER: &str = "DEMO_DENY_MARKER";
 const DENY_REASON: &str = "demo-hooks denied: tool input contained the demo marker";
 const STOP_CONTEXT: &str = "demo-hooks: remember to run the demo checklist before stopping";
+const SESSION_START_CONTEXT: &str =
+    "demo-hooks: this session was started with the demo plugin loaded";
 
 /// Repo root, derived from this crate's manifest dir (`crates/codegen/xai-grok-shell`).
 fn repo_root() -> PathBuf {
@@ -154,6 +159,25 @@ fn pre_tool_use_envelope(tool_input: serde_json::Value) -> HookEventEnvelope {
             tool_input,
             tool_input_truncated: false,
             subagent_type: None,
+        },
+    }
+}
+
+fn session_start_envelope() -> HookEventEnvelope {
+    HookEventEnvelope {
+        hook_event_name: HookEventName::SessionStart,
+        session_id: "e2e-session".into(),
+        cwd: "/tmp".into(),
+        workspace_root: "/tmp".into(),
+        timestamp: "2026-01-01T00:00:00Z".into(),
+        transcript_path: None,
+        client_identifier: None,
+        prompt_id: None,
+        permission_mode: Some("default".into()),
+        payload: HookPayload::SessionStart {
+            source: "new".into(),
+            model_id: None,
+            agent_type: None,
         },
     }
 }
@@ -313,6 +337,54 @@ async fn demo_plugin_and_command_hook_reach_identical_outcomes() {
         plugin_stop.blocks.is_empty(),
         cmd_stop.blocks.is_empty(),
         "plugin and command block behavior must match"
+    );
+
+    // ── SessionStart (Observe gate): plugin path ───────────────────────────
+    let plugin_session_start = xai_grok_hooks::dispatcher::dispatch_non_blocking(
+        &plugin_reg,
+        HookEventName::SessionStart,
+        &session_start_envelope(),
+        &plugin_ctx,
+    )
+    .await;
+
+    // ── SessionStart (Observe gate): command path ──────────────────────────
+    let session_start_json =
+        format!(r#"{{"hookSpecificOutput":{{"additionalContext":"{SESSION_START_CONTEXT}"}}}}"#);
+    let cmd_session_start_script =
+        write_script(scripts.path(), "session_start.sh", &session_start_json);
+    let cmd_session_start_reg = command_registry(command_spec(
+        HookEventName::SessionStart,
+        cmd_session_start_script,
+        scripts.path(),
+    ));
+    let cmd_session_start = xai_grok_hooks::dispatcher::dispatch_non_blocking(
+        &cmd_session_start_reg,
+        HookEventName::SessionStart,
+        &session_start_envelope(),
+        &cmd_ctx,
+    )
+    .await;
+
+    // Parity assertion #3: the observe gate carries model-facing context, and a
+    // plugin and a command hook deliver it identically.
+    assert_eq!(
+        plugin_session_start.additional_context,
+        vec![SESSION_START_CONTEXT.to_string()],
+        "plugin session_start hook must contribute the demo context"
+    );
+    assert_eq!(
+        plugin_session_start.additional_context, cmd_session_start.additional_context,
+        "plugin and command session_start contexts must be identical"
+    );
+    // Context is a payload, not a decision: both must still report a plain run.
+    assert!(
+        matches!(
+            plugin_session_start.results.as_slice(),
+            [xai_grok_hooks::result::HookRunResult::Success { .. }]
+        ),
+        "session_start context must not be reported as anything but a success: {:?}",
+        plugin_session_start.results
     );
 
     host.dispose().await;

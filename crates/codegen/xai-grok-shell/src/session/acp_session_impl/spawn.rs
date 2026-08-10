@@ -1916,6 +1916,7 @@ pub(crate) async fn spawn_session_actor(
             }
         },
         hook_load_errors: std::cell::RefCell::new(_hook_load_errors),
+        session_start_context: std::cell::RefCell::new(None),
         plugin_registry: std::cell::RefCell::new(plugin_registry.clone()),
         plugin_registry_handle,
         plugin_host: built_plugin_host,

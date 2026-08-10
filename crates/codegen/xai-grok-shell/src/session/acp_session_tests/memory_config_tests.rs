@@ -290,6 +290,7 @@ async fn create_test_actor_with_memory(
         hook_resolved_workspace_root: String::new(),
         vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
         hook_load_errors: std::cell::RefCell::new(Vec::new()),
+        session_start_context: std::cell::RefCell::new(None),
         plugin_registry: std::cell::RefCell::new(None),
         plugin_registry_handle: None,
         plugin_host: None,

@@ -162,6 +162,9 @@ impl SessionActor {
                 (self.build_user_message_prefix().await, "sync_fallback")
             }
         };
+        // Both branches above produce a context-free prefix; the append happens
+        // here so it lands exactly once regardless of which one ran.
+        let prefix = self.with_session_start_context(prefix);
         let mut conversation = self.chat_state_handle.get_conversation().await;
         let insert_at = conversation.len().min(1);
         conversation.insert(insert_at, ConversationItem::user(prefix));

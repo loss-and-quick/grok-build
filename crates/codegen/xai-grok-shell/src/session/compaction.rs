@@ -1302,7 +1302,11 @@ impl SessionActor {
             }
         };
         let generate_session_compact = compact_output.content.clone();
-        let user_message_prefix = self.build_user_message_prefix().await;
+        // Compaction rebuilds the prefix verbatim, so re-appending the
+        // `session_start` context here is what carries it across: without it a
+        // per-session path the agent still needs would evaporate mid-session.
+        let user_message_prefix =
+            self.with_session_start_context(self.build_user_message_prefix().await);
         let conversation = self.chat_state_handle.get_conversation().await;
         let (discovered_agents_md, all_skills_for_compaction, _agent_edited_paths, state_context) =
             if use_short_prompt {
@@ -2473,6 +2477,7 @@ mod inline_auto_compact_flow_tests {
             hook_resolved_workspace_root: String::new(),
             vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
             hook_load_errors: std::cell::RefCell::new(Vec::new()),
+            session_start_context: std::cell::RefCell::new(None),
             plugin_registry: std::cell::RefCell::new(None),
             plugin_registry_handle: None,
             plugin_host: None,

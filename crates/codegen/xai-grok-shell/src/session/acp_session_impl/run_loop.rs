@@ -1889,6 +1889,15 @@ pub(super) async fn run_session(
                             });
                         }
                         SessionCommand::DispatchSessionStartHook { source } => {
+                            // A fresh session still has its `<user_info>` prefix
+                            // pending (inserted by `ensure_prefix_ready` on the
+                            // first prompt, which this command precedes on the
+                            // actor's FIFO), so the recorded context reaches the
+                            // model there. A resumed one already has its prefix
+                            // in the loaded transcript and gets a standalone
+                            // reminder instead; the next compaction folds the
+                            // block into the rebuilt prefix.
+                            let session_is_new = source == "new";
                             let envelope = session.fire_hook(
                                 xai_grok_hooks::event::HookEventName::SessionStart,
                                 None,
@@ -1900,14 +1909,20 @@ pub(super) async fn run_session(
                             );
                             if let Some(registry) = session.hook_registry.borrow().clone() {
                                 let ctx = session.hook_run_ctx();
-                                let results = xai_grok_hooks::dispatcher::dispatch_non_blocking(
+                                let dispatch = xai_grok_hooks::dispatcher::dispatch_non_blocking(
                                     &registry,
                                     xai_grok_hooks::event::HookEventName::SessionStart,
                                     &envelope,
                                     &ctx,
                                 )
                                 .await;
-                                session.send_hook_execution("session_start", None, None, &results).await;
+                                if let Some(body) = session
+                                    .record_session_start_context(&dispatch.additional_context)
+                                    && !session_is_new
+                                {
+                                    session.push_system_reminder(&body);
+                                }
+                                session.send_hook_execution("session_start", None, None, &dispatch.results).await;
                             }
                         }
                         SessionCommand::GetFeedbackContext { turn_number, responds_to } => {
