@@ -27,11 +27,11 @@ use serde::Serialize;
 use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_error_message};
 use xai_grok_sampling_types::gemini::{GeminiRequest, GeminiStreamChunk};
 use xai_grok_sampling_types::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
-    ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper,
-    ResponseModelMetadata, Result, SamplingError, SentCredential, build_gemini_request,
-    build_messages_request,
-    is_check_event, messages, rs,
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatContentBlock,
+    ChatRequestMessage, ConversationRequest, ConversationResponse, CreateResponseWrapper,
+    DOOM_LOOP_CHECK_HEADER, MessageContent, MessagesRequestWrapper, ResponseModelMetadata, Result,
+    SamplingError, SentCredential, build_gemini_request, build_messages_request, is_check_event,
+    messages, rs,
 };
 
 use crate::concurrency::{AdmissionPermit, ConcurrencyClass, admit, hold_permit_for_stream};
@@ -950,6 +950,34 @@ impl SamplingClient {
             .collect()
     }
 
+    /// Normalize a post-interceptor request body for endpoint-specific wire
+    /// constraints.
+    ///
+    /// Today only Chat Completions needs this: strict OpenAI-compatible
+    /// providers such as `llama.cpp` reject multiple leading `system`
+    /// messages, while plugins inject auxiliary instructions by adding another
+    /// `role = "system"` item. Collapse any leading run of system messages
+    /// into the first one, preserving order by joining with a blank line.
+    fn normalize_intercepted_body(endpoint_path: &str, body: &mut serde_json::Value) {
+        if endpoint_path != "chat/completions" {
+            return;
+        }
+        let Some(messages_value) = body.get_mut("messages") else {
+            return;
+        };
+        let Ok(mut messages) =
+            serde_json::from_value::<Vec<ChatRequestMessage>>(messages_value.clone())
+        else {
+            return;
+        };
+        if !coalesce_leading_system_messages(&mut messages) {
+            return;
+        }
+        if let Ok(next) = serde_json::to_value(messages) {
+            *messages_value = next;
+        }
+    }
+
     /// Run the wired request interceptor over `body`. Returns the
     /// (possibly replaced) body plus, when the interceptor rewrote them, the
     /// non-auth headers to send. Only call this when
@@ -990,6 +1018,7 @@ impl SamplingClient {
         {
             obj.insert("model".to_string(), serde_json::Value::String(new_model));
         }
+        Self::normalize_intercepted_body(endpoint_path, &mut body);
         let headers = replacement.headers.map(|pairs| {
             let mut map = HeaderMap::new();
             for (name, value) in pairs {
@@ -1985,7 +2014,10 @@ impl SamplingClient {
                 builder,
                 sent_bearer,
             } = self.post(endpoint);
-            (grok_headers.apply(builder).json(&request.inner), sent_bearer)
+            (
+                grok_headers.apply(builder).json(&request.inner),
+                sent_bearer,
+            )
         };
 
         let response = http_request.send().await.map_err(|e| {
@@ -2710,6 +2742,47 @@ fn stream_collect_error(info: SamplingErrorInfo) -> SamplingError {
     }
 }
 
+fn coalesce_leading_system_messages(messages: &mut Vec<ChatRequestMessage>) -> bool {
+    let leading = messages
+        .iter()
+        .take_while(|m| m.is_system_message())
+        .count();
+    if leading < 2 {
+        return false;
+    }
+
+    let mut head = messages.remove(0);
+    for extra in messages.drain(0..(leading - 1)) {
+        merge_message_content(&mut head.content, extra.content);
+    }
+    messages.insert(0, head);
+    true
+}
+
+fn merge_message_content(dst: &mut MessageContent, src: MessageContent) {
+    if src.is_empty() {
+        return;
+    }
+    if dst.is_empty() {
+        *dst = src;
+        return;
+    }
+    match (&mut *dst, src) {
+        (MessageContent::Text(dst_text), MessageContent::Text(src_text)) => {
+            dst_text.push_str("\n\n");
+            dst_text.push_str(&src_text);
+        }
+        (dst_content, src_content) => {
+            let mut blocks = dst_content.blocks();
+            blocks.push(ChatContentBlock::Text {
+                text: "\n\n".to_string(),
+            });
+            blocks.extend(src_content.blocks());
+            *dst_content = MessageContent::Blocks(blocks);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2793,6 +2866,156 @@ mod tests {
             request_interceptor: None,
             error_hook: None,
         }
+    }
+
+    #[derive(Debug)]
+    struct StaticBodyInterceptor(serde_json::Value);
+
+    impl crate::intercept::RequestInterceptor for StaticBodyInterceptor {
+        fn intercept<'a>(
+            &'a self,
+            _view: &'a crate::intercept::RequestView,
+        ) -> crate::intercept::SeamFuture<'a, Option<crate::intercept::RequestReplacement>>
+        {
+            let body = self.0.clone();
+            Box::pin(async move {
+                Some(crate::intercept::RequestReplacement {
+                    body: Some(body),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn coalesce_leading_system_messages_merges_consecutive_system_entries() {
+        let mut messages = vec![
+            ChatRequestMessage::system("base system"),
+            ChatRequestMessage::system("memory reminder"),
+            ChatRequestMessage::user("hi"),
+        ];
+
+        assert!(coalesce_leading_system_messages(&mut messages));
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].is_system_message());
+        assert_eq!(messages[0].text_content(), "base system\n\nmemory reminder");
+        assert_eq!(messages[1].text_content(), "hi");
+    }
+
+    #[tokio::test]
+    async fn run_request_interceptor_normalizes_chat_completions_leading_system_messages() {
+        let mut cfg = minimal_config();
+        cfg.request_interceptor = Some(std::sync::Arc::new(StaticBodyInterceptor(
+            serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    { "role": "system", "content": "core system" },
+                    { "role": "system", "content": "plugin context" },
+                    { "role": "user", "content": "hi" }
+                ]
+            }),
+        )));
+        let client = SamplingClient::new(cfg).expect("client should build");
+
+        let (body, headers) = client
+            .run_request_interceptor(
+                "chat/completions",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [
+                        { "role": "system", "content": "core system" },
+                        { "role": "user", "content": "hi" }
+                    ]
+                }),
+            )
+            .await;
+
+        assert!(
+            headers.is_none(),
+            "body-only rewrite must not fabricate headers"
+        );
+        let messages = body
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .expect("messages array present");
+        assert_eq!(messages.len(), 2, "leading system messages should collapse");
+        assert_eq!(
+            messages[0].get("role").and_then(serde_json::Value::as_str),
+            Some("system")
+        );
+        assert_eq!(
+            messages[0]
+                .get("content")
+                .and_then(serde_json::Value::as_str),
+            Some("core system\n\nplugin context")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_request_interceptor_leaves_responses_and_messages_shapes_unchanged() {
+        let mut responses_cfg = minimal_config();
+        responses_cfg.request_interceptor = Some(std::sync::Arc::new(StaticBodyInterceptor(
+            serde_json::json!({
+                "model": "test-model",
+                "instructions": "core instructions\n\nplugin context",
+                "input": [{ "role": "user", "content": "hi" }]
+            }),
+        )));
+        let responses_client = SamplingClient::new(responses_cfg).expect("client should build");
+        let (responses_body, _) = responses_client
+            .run_request_interceptor(
+                "responses",
+                serde_json::json!({
+                    "model": "test-model",
+                    "instructions": "core instructions",
+                    "input": [{ "role": "user", "content": "hi" }]
+                }),
+            )
+            .await;
+        assert_eq!(
+            responses_body,
+            serde_json::json!({
+                "model": "test-model",
+                "instructions": "core instructions\n\nplugin context",
+                "input": [{ "role": "user", "content": "hi" }]
+            }),
+            "responses bodies should pass through unchanged"
+        );
+
+        let mut messages_cfg = minimal_config();
+        messages_cfg.request_interceptor = Some(std::sync::Arc::new(StaticBodyInterceptor(
+            serde_json::json!({
+                "model": "test-model",
+                "system": [
+                    { "type": "text", "text": "core system" },
+                    { "type": "text", "text": "plugin context" }
+                ],
+                "messages": [{ "role": "user", "content": "hi" }]
+            }),
+        )));
+        let messages_client = SamplingClient::new(messages_cfg).expect("client should build");
+        let (messages_body, _) = messages_client
+            .run_request_interceptor(
+                "messages",
+                serde_json::json!({
+                    "model": "test-model",
+                    "system": [{ "type": "text", "text": "core system" }],
+                    "messages": [{ "role": "user", "content": "hi" }]
+                }),
+            )
+            .await;
+        assert_eq!(
+            messages_body,
+            serde_json::json!({
+                "model": "test-model",
+                "system": [
+                    { "type": "text", "text": "core system" },
+                    { "type": "text", "text": "plugin context" }
+                ],
+                "messages": [{ "role": "user", "content": "hi" }]
+            }),
+            "messages bodies should pass through unchanged"
+        );
     }
 
     /// The failure mode that would kill admission control in production: a

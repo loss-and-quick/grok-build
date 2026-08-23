@@ -1045,6 +1045,47 @@ impl RequestInterceptor for ModelRewriteInterceptor {
     }
 }
 
+/// Injects an extra leading `system` message, mirroring the plugin path that
+/// strict OpenAI-compatible providers reject unless the core normalizes it.
+#[derive(Debug)]
+struct LeadingSystemInjector;
+
+impl RequestInterceptor for LeadingSystemInjector {
+    fn intercept<'a>(
+        &'a self,
+        view: &'a RequestView,
+    ) -> SeamFuture<'a, Option<RequestReplacement>> {
+        let mut body = view.body.clone();
+        if let Some(messages) = body
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            let mut insert_at = 0usize;
+            while insert_at < messages.len()
+                && messages[insert_at]
+                    .get("role")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("system")
+            {
+                insert_at += 1;
+            }
+            messages.insert(
+                insert_at,
+                json!({
+                    "role": "system",
+                    "content": "plugin context"
+                }),
+            );
+        }
+        Box::pin(async move {
+            Some(RequestReplacement {
+                body: Some(body),
+                ..Default::default()
+            })
+        })
+    }
+}
+
 /// Always directs the sampler to fail fast, recording the class it saw.
 #[derive(Debug)]
 struct FailHook {
@@ -1068,28 +1109,26 @@ async fn request_interceptor_rewrites_model_and_reattaches_auth() {
     let ca = Arc::clone(&captured_auth);
     let app = Router::new().route(
         "/v1/chat/completions",
-        post(
-            move |headers: axum::http::HeaderMap, body: String| {
-                let cm = Arc::clone(&cm);
-                let ca = Arc::clone(&ca);
-                async move {
-                    let parsed: serde_json::Value =
-                        serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
-                    *cm.lock().unwrap() = parsed
-                        .get("model")
-                        .and_then(|m| m.as_str())
-                        .map(str::to_string);
-                    *ca.lock().unwrap() = headers
-                        .get("authorization")
-                        .and_then(|h| h.to_str().ok())
-                        .map(str::to_string);
-                    let events = sse::chat_completion_events("ok", "switched-model");
-                    Sse::new(stream::iter(
-                        events.into_iter().map(Ok::<_, std::convert::Infallible>),
-                    ))
-                }
-            },
-        ),
+        post(move |headers: axum::http::HeaderMap, body: String| {
+            let cm = Arc::clone(&cm);
+            let ca = Arc::clone(&ca);
+            async move {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
+                *cm.lock().unwrap() = parsed
+                    .get("model")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string);
+                *ca.lock().unwrap() = headers
+                    .get("authorization")
+                    .and_then(|h| h.to_str().ok())
+                    .map(str::to_string);
+                let events = sse::chat_completion_events("ok", "switched-model");
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
     );
     let server = MockServer::spawn(app).await;
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
@@ -1122,6 +1161,71 @@ async fn request_interceptor_rewrites_model_and_reattaches_auth() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_interceptor_collapses_leading_system_messages_before_wire() {
+    let captured_body = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let cb = Arc::clone(&captured_body);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |body: String| {
+            let cb = Arc::clone(&cb);
+            async move {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
+                *cb.lock().unwrap() = Some(parsed);
+                let events = sse::chat_completion_events("ok", "test-model");
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.request_interceptor = Some(Arc::new(LeadingSystemInjector));
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    let request = ConversationRequest::from_items(vec![
+        ConversationItem::system("core system"),
+        ConversationItem::user("hi"),
+    ]);
+    handle
+        .submit_and_collect(RequestId::from("req-system-collapse"), request)
+        .await
+        .expect("collected ok");
+    server.shutdown();
+
+    let body = captured_body
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("request body captured");
+    let messages = body
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .expect("messages array present");
+    assert_eq!(
+        messages.len(),
+        2,
+        "wire body must carry one leading system message and one user message"
+    );
+    assert_eq!(
+        messages[0].get("role").and_then(serde_json::Value::as_str),
+        Some("system")
+    );
+    assert_eq!(
+        messages[0]
+            .get("content")
+            .and_then(serde_json::Value::as_str),
+        Some("core system\n\nplugin context")
+    );
+    assert_eq!(
+        messages[1].get("role").and_then(serde_json::Value::as_str),
+        Some("user")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn error_hook_fail_directive_short_circuits_internal_retries() {
     let req_count = Arc::new(AtomicU32::new(0));
     let rc = Arc::clone(&req_count);
@@ -1133,7 +1237,10 @@ async fn error_hook_fail_directive_short_circuits_internal_retries() {
                 rc.fetch_add(1, Ordering::SeqCst);
                 // A retryable 503 would normally be retried by the sampler's
                 // internal budget; the Fail directive must stop that.
-                (axum::http::StatusCode::SERVICE_UNAVAILABLE, "temporary outage")
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "temporary outage",
+                )
             }
         }),
     );
