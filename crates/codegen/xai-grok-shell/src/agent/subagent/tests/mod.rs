@@ -1972,11 +1972,15 @@ fn subagent_effort_off_the_declared_menu_is_rejected_at_spawn() {
         super::handle_request::ReasoningEffortGate::Reject(msg) => msg,
         _ => panic!("a level outside the declared menu must not reach the wire"),
     };
+    // The level can only have come from a role/persona/agent definition now, so
+    // the message must send the reader there rather than at a tool argument
+    // that no longer exists.
     assert_eq!(
         msg,
         "Model 'menu-model' does not offer reasoning effort 'xhigh'. \
          Available levels: low, medium, high. \
-         Omit `reasoning_effort` to use the model's default."
+         Set a level the model offers in the subagent's role, persona, or agent definition, \
+         or drop it there to use the model's default."
     );
 }
 #[test]

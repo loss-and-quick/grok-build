@@ -70,9 +70,13 @@ pub(super) enum ReasoningEffortGate {
 /// otherwise reach the wire and 400 once the child session and any worktree
 /// already exist, and the child's `meta.json` records the *requested* effort, so
 /// quietly running at another one would leave a record of work that never
-/// happened. A model with no dial at all keeps the older lenient behaviour —
-/// the effort can come from a role or persona definition rather than this
-/// spawn's arguments, and there the model's own default is the right answer.
+/// happened. A model with no dial at all keeps the lenient behaviour and runs at
+/// its own default.
+///
+/// Every level reaching here now comes from configuration — a role, persona, or
+/// agent definition — since the `task` tool rejects a caller-supplied
+/// `reasoning_effort` outright. So the rejection message points the operator at
+/// the definition to fix rather than at an argument to drop.
 pub(super) fn gate_reasoning_effort(
     requested: xai_grok_sampling_types::ReasoningEffort,
     offered: &[xai_grok_sampling_types::ReasoningEffort],
@@ -91,7 +95,8 @@ pub(super) fn gate_reasoning_effort(
         .join(", ");
     ReasoningEffortGate::Reject(format!(
         "Model '{model_id}' does not offer reasoning effort '{}'. \
-         Available levels: {levels}. Omit `reasoning_effort` to use the model's default.",
+         Available levels: {levels}. Set a level the model offers in the subagent's role, \
+         persona, or agent definition, or drop it there to use the model's default.",
         requested.as_str(),
     ))
 }

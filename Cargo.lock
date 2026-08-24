@@ -13908,7 +13908,6 @@ dependencies = [
  "xai-circuit-breaker",
  "xai-grok-compaction",
  "xai-grok-tools",
- "xai-tool-types",
 ]
 
 [[package]]

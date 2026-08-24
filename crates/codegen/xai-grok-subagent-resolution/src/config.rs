@@ -36,7 +36,9 @@ pub struct SubagentRole {
     #[serde(default)]
     pub model: Option<String>,
     /// Default reasoning effort for this role (e.g. "low", "medium", "high").
-    /// Can be overridden per-spawn via `reasoning_effort` in the task tool.
+    /// Outranked only by a spawn-time `SubagentRuntimeOverrides` value; the
+    /// task tool has no `reasoning_effort` argument, so a calling model cannot
+    /// reach past this.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     /// Path to a prompt/instruction file (relative to workspace root).

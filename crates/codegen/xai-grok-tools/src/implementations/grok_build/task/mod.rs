@@ -332,7 +332,7 @@ impl xai_tool_runtime::Tool for TaskTool {
         // (see `TaskToolInput::model`); if it arrives anyway it is rejected, not
         // dropped — a silent drop would leave the caller believing the override
         // took effect while the child's `meta.json` records a run that never
-        // happened, the same failure the `reasoning_effort` gate avoids.
+        // happened.
         // Sentinels (`""`, `"null"`, …) are not a request for anything, so they
         // stay tolerated rather than becoming a spurious error.
         if let Some(requested) = xai_tool_types::sanitize_optional_arg(input.model) {
@@ -340,6 +340,35 @@ impl xai_tool_runtime::Tool for TaskTool {
                 "`model` is not an argument of this tool: each subagent type runs the model its \
                  definition pins. Drop `model` (requested '{requested}') and pick the \
                  subagent_type whose role is the model you want."
+            )));
+        }
+
+        // The same divergence, for the same reason: a subagent type pins how
+        // hard it thinks exactly as it pins what it thinks with, so a
+        // caller-supplied level replaces a roster decision with the model's own
+        // judgement. Hidden from the schema (see
+        // `TaskToolInput::reasoning_effort`) and rejected rather than dropped.
+        //
+        // `sanitize_optional_arg` is deliberately not reused here: it folds the
+        // literal `"none"` into "absent", and `"none"` is a real effort level
+        // (think as little as possible). Silently accepting it would be the one
+        // case where the caller is most sure it changed something. Only the
+        // placeholders that genuinely carry no value are tolerated.
+        if let Some(requested) = input
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| {
+                !value.is_empty()
+                    && !value.eq_ignore_ascii_case("null")
+                    && !value.eq_ignore_ascii_case("undefined")
+            })
+        {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "`reasoning_effort` is not an argument of this tool: each subagent type runs at \
+                 the effort its definition pins. Drop `reasoning_effort` (requested \
+                 '{requested}') and pick the subagent_type whose role thinks as hard as the work \
+                 needs."
             )));
         }
 
@@ -434,25 +463,6 @@ impl xai_tool_runtime::Tool for TaskTool {
             }
         }
 
-        // Canonicalize the effort here rather than downstream: the resolution
-        // layer silently ignores a value it cannot parse, which would leave the
-        // model believing an override took effect. `invalid_arguments` lets it
-        // correct the spelling instead. Whether the child's model *supports*
-        // effort at all is a separate, later gate (handle_request drops the
-        // value for a model that has no effort control) — that one is
-        // deliberately silent, since the role default behaves the same way.
-        let reasoning_effort = match input.reasoning_effort.as_deref() {
-            None => None,
-            Some(raw) => xai_tool_types::canonical_reasoning_effort(raw)
-                .map_err(|bad| {
-                    xai_tool_runtime::ToolError::invalid_arguments(format!(
-                        "Task.reasoning_effort must be one of: {}; got '{bad}'",
-                        xai_tool_types::REASONING_EFFORT_VALUES.join(", ")
-                    ))
-                })?
-                .map(str::to_string),
-        };
-
         // 3. Build the subagent request
         let id = input
             .task_id
@@ -487,7 +497,10 @@ impl xai_tool_runtime::Tool for TaskTool {
                 // still gets catalog-validated.
                 model: None,
                 model_override_provenance: ModelOverrideProvenance::Tool,
-                reasoning_effort,
+                // Likewise left to the resolution cascade (role → persona →
+                // agent definition) — see the `reasoning_effort` rejection
+                // above. A `task` spawn never sits at the top of it.
+                reasoning_effort: None,
                 persona: None,
                 capability_mode: input.capability_mode,
                 isolation: input.isolation,
@@ -1289,6 +1302,85 @@ mod tests {
         }
     }
 
+    /// Same for `reasoning_effort`, including the levels a caller is most
+    /// likely to reach for. `"none"` is in the list on purpose: the generic
+    /// sentinel sanitizer would swallow it, and a caller that asked for no
+    /// reasoning at all must not be told nothing.
+    #[tokio::test]
+    async fn reasoning_effort_argument_is_rejected_before_spawn() {
+        for level in ["high", "low", "none", "  XHigh  ", "enormous"] {
+            let (backend, mut rx) = make_backend();
+            let resources = resources_for_task(backend);
+            let mut input = task_input("general-purpose", true);
+            input.reasoning_effort = Some(level.to_string());
+
+            let msg =
+                xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input)
+                    .await
+                    .expect_err("a reasoning_effort argument must reject the spawn")
+                    .to_string();
+
+            assert!(
+                msg.contains("`reasoning_effort` is not an argument"),
+                "error must say the argument is refused, got: {msg}"
+            );
+            assert!(
+                msg.contains(level.trim()),
+                "error must name the requested level, got: {msg}"
+            );
+            assert!(
+                msg.contains("subagent_type"),
+                "error must point at the usable alternative, got: {msg}"
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "spawn must not reach the coordinator"
+            );
+        }
+    }
+
+    /// Placeholders carry no request, so they stay tolerated as "absent" rather
+    /// than turning a sloppy call into a rejected spawn.
+    #[tokio::test]
+    async fn reasoning_effort_placeholders_are_treated_as_absent() {
+        for placeholder in ["", "   ", "null", "NULL", "undefined"] {
+            let (backend, mut rx) = make_backend();
+            let resources = resources_for_task(backend);
+            let shared = resources.into_shared();
+
+            let handle = tokio::spawn(async move {
+                let request = unwrap_spawn(rx.recv().await.unwrap());
+                assert!(
+                    request.runtime_overrides.reasoning_effort.is_none(),
+                    "a placeholder must not become an override, got {:?}",
+                    request.runtime_overrides.reasoning_effort
+                );
+                let id = request.id.clone();
+                request
+                    .result_tx
+                    .send(SubagentResult {
+                        success: true,
+                        output: "ok".into(),
+                        subagent_id: id.clone(),
+                        child_session_id: id,
+                        ..Default::default()
+                    })
+                    .unwrap();
+            });
+
+            let mut input = task_input("general-purpose", false);
+            input.reasoning_effort = Some(placeholder.to_string());
+            let result = xai_tool_runtime::Tool::run(&TaskTool, test_ctx(shared), input)
+                .await
+                .unwrap_or_else(|e| panic!("'{placeholder}' must not reject the spawn: {e}"));
+            handle.await.unwrap();
+            match result {
+                ToolOutput::SubagentCompleted(sub) => assert!(sub.output.contains("ok")),
+                other => panic!("Expected SubagentCompleted, got {other:?}"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn background_spawn_succeeds_when_coordinator_accepts() {
         let (backend, mut rx) = make_backend();
@@ -1595,18 +1687,19 @@ mod tests {
         assert!(input.model.is_none());
     }
 
-    /// The caller must not be offered a model knob at all: the subagent type it
-    /// picks already decides the model.
+    /// The caller must not be offered a model or an effort knob at all: the
+    /// subagent type it picks already decides both.
     #[test]
-    fn task_tool_input_schema_omits_model() {
+    fn task_tool_input_schema_omits_the_role_owned_dials() {
         let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
-        assert!(
-            schema["properties"].get("model").is_none(),
-            "the task schema must not advertise a model argument: {}",
-            schema["properties"]
-        );
-        // The neighbouring per-spawn dials are unaffected.
-        assert!(schema["properties"].get("reasoning_effort").is_some());
+        for dial in ["model", "reasoning_effort"] {
+            assert!(
+                schema["properties"].get(dial).is_none(),
+                "the task schema must not advertise a '{dial}' argument: {}",
+                schema["properties"]
+            );
+        }
+        // A genuinely per-spawn dial is unaffected.
         assert!(schema["properties"].get("capability_mode").is_some());
     }
 
@@ -1619,9 +1712,9 @@ mod tests {
         assert!(overrides.capability_mode.is_none());
     }
 
-    /// A model-supplied effort must survive deserialization verbatim; the
-    /// canonicalization/rejection happens in the tool body against
-    /// `xai_tool_types::canonical_reasoning_effort`.
+    /// A model-supplied effort must survive deserialization verbatim so the
+    /// tool body can reject it; serde dropping the key would be the silent
+    /// no-op the rejection exists to prevent.
     #[test]
     fn task_input_parses_reasoning_effort() {
         let input: TaskToolInput = serde_json::from_str(
@@ -1629,21 +1722,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(input.reasoning_effort.as_deref(), Some("xhigh"));
-    }
-
-    /// The two outcomes the tool body branches on. A bogus level must be an
-    /// error the model can see and correct — NOT a silent drop, which would
-    /// leave it believing the override applied.
-    #[test]
-    fn reasoning_effort_argument_is_canonicalized_or_rejected() {
-        assert_eq!(
-            xai_tool_types::canonical_reasoning_effort("HIGH"),
-            Ok(Some("high"))
-        );
-        assert_eq!(
-            xai_tool_types::canonical_reasoning_effort("enormous"),
-            Err("enormous")
-        );
     }
 
     #[test]

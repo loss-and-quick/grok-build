@@ -111,27 +111,28 @@ pub struct TaskToolInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// Optional reasoning effort for this subagent, overriding the role's
-    /// default for this spawn only.
+    /// Reasoning effort for this subagent. **Not a model-facing argument.**
     ///
-    /// Kept as a `String` rather than the `ReasoningEffort` enum so this crate
-    /// stays free of a sampling-types dependency; the tool layer parses it with
-    /// `ReasoningEffort::from_str` and rejects an unknown value with an
-    /// argument error, so there is one source of truth for the vocabulary.
+    /// A `subagent_type` pins its depth exactly the way it pins its model — the
+    /// role *is* the choice — so a caller-supplied level replaces a roster
+    /// decision with the model's own guess at how hard the child should think.
+    /// Hidden from the JSON schema, but deliberately still deserialized for the
+    /// same reason as [`TaskToolInput::model`]: the input is not
+    /// `deny_unknown_fields`, so dropping the field would make serde discard the
+    /// key silently and leave the caller believing an override applied while the
+    /// child ran at its role's level.
     ///
-    /// NOTE: do **not** funnel this through [`sanitize_optional_arg`] — that
-    /// treats the literal `"none"` as an absent-value sentinel, and `"none"` is
-    /// a real effort level here (send no effort at all). Conflating the two
-    /// would silently turn "think as little as possible" into "inherit the
-    /// role's default", which may be the opposite.
-    #[schemars(
-        description = "Optional reasoning effort for this agent: \"none\", \"minimal\", \
-            \"low\", \"medium\", \"high\", \"xhigh\", or \"max\". Overrides the subagent \
-            type's default for this spawn. Scale it to the task — \"low\" for a scoped \
-            lookup or a mechanical edit, \"high\" or above for work needing multi-step \
-            reasoning. Omit to inherit the default, and note the value is ignored if the \
-            child's model does not support effort at all."
-    )]
+    /// NOTE for the tool body: do **not** funnel this through
+    /// [`sanitize_optional_arg`] — that treats the literal `"none"` as an
+    /// absent-value sentinel, and `"none"` is a real effort level (send no
+    /// effort at all). A caller asking for it must get the error rather than
+    /// silence.
+    ///
+    /// Effort chosen by anything that is not the calling model — a role,
+    /// persona, or agent definition, config, a workflow script — travels through
+    /// `SubagentRuntimeOverrides` or the resolution cascade and never passes
+    /// through this struct.
+    #[schemars(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 
@@ -144,40 +145,6 @@ pub struct TaskToolInput {
 /// Default `subagent_type` for [`TaskToolInput`] when the caller omits it.
 pub fn default_subagent_type() -> String {
     "general-purpose".to_string()
-}
-
-/// Canonical reasoning-effort values accepted by
-/// [`TaskToolInput::reasoning_effort`], in ascending order of depth.
-///
-/// This crate is a leaf (no sampling-types dependency, and the reverse edge
-/// would be a cycle), so the vocabulary is spelled here rather than derived
-/// from `ReasoningEffort`. The two are pinned together by a test in
-/// `xai-grok-sampling-types` that round-trips every entry through
-/// `ReasoningEffort::from_str` and asserts the list is exhaustive — drift
-/// breaks that test instead of silently rejecting a level grok supports.
-pub const REASONING_EFFORT_VALUES: [&str; 7] =
-    ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-
-/// Canonicalize a model-supplied reasoning-effort argument.
-///
-/// Trims and lower-cases, then matches against [`REASONING_EFFORT_VALUES`],
-/// returning the canonical spelling. An empty/whitespace-only string is
-/// `Ok(None)` ("treat as omitted"); anything else unrecognized is `Err(input)`
-/// so the caller can name the offending value in an argument error.
-///
-/// Deliberately not built on `sanitize_optional_arg`: that maps the literal
-/// `"none"` to absent, and here `"none"` is a real level (send no effort).
-pub fn canonical_reasoning_effort(value: &str) -> Result<Option<&'static str>, &str> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let lowered = trimmed.to_ascii_lowercase();
-    REASONING_EFFORT_VALUES
-        .into_iter()
-        .find(|candidate| *candidate == lowered)
-        .map(Some)
-        .ok_or(trimmed)
 }
 
 /// True when `s` is not a model-emitted placeholder (`""`, `"null"`, `"none"`,
@@ -1394,19 +1361,20 @@ mod tests {
     }
 
     /// …but it is never advertised, so a caller has no reason to send it: the
-    /// subagent type it picks already determines the model.
+    /// subagent type it picks already determines the model — and the effort,
+    /// which the roster pins the same way and for the same reason.
     #[test]
-    fn task_tool_input_schema_hides_model() {
+    fn task_tool_input_schema_hides_the_role_owned_dials() {
         let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
         let properties = &schema["properties"];
-        assert!(
-            properties.get("model").is_none(),
-            "model must not be a documented task argument: {properties}"
-        );
-        assert!(
-            properties.get("reasoning_effort").is_some(),
-            "the other per-spawn dials stay model-facing"
-        );
+        for dial in ["model", "reasoning_effort"] {
+            assert!(
+                properties.get(dial).is_none(),
+                "'{dial}' belongs to the subagent type, not the caller: {properties}"
+            );
+        }
+        // A genuinely per-spawn dial is unaffected.
+        assert!(properties.get("capability_mode").is_some());
     }
 
     #[test]
@@ -1908,60 +1876,27 @@ mod tests {
         assert!(desc.contains("Prefer get_task_output with task_ids"));
     }
 
+    /// Like `model`, the field stays deserializable on purpose: the tool body
+    /// turns a present `reasoning_effort` into a visible error, and serde
+    /// dropping the key here instead would produce exactly the silent no-op
+    /// that error exists to prevent.
     #[test]
-    fn canonical_reasoning_effort_accepts_every_level() {
-        for value in REASONING_EFFORT_VALUES {
-            assert_eq!(canonical_reasoning_effort(value), Ok(Some(value)));
-        }
+    fn task_tool_input_reasoning_effort_parses_explicit() {
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{"description": "d", "prompt": "p", "reasoning_effort": "xhigh"}"#,
+        )
+        .unwrap();
+        assert_eq!(input.reasoning_effort.as_deref(), Some("xhigh"));
     }
 
+    /// Why the tool body must not reach for [`sanitize_optional_arg`] when it
+    /// decides whether an effort was supplied: the generic sanitizer folds
+    /// `"none"` into "absent", but as an effort `"none"` is a level someone
+    /// deliberately asked for, so it has to reach the rejection.
     #[test]
-    fn canonical_reasoning_effort_normalizes_case_and_padding() {
-        assert_eq!(canonical_reasoning_effort("  XHigh "), Ok(Some("xhigh")));
-        assert_eq!(canonical_reasoning_effort("MAX"), Ok(Some("max")));
-    }
-
-    /// The `"none"` collision with [`is_not_sentinel`] is the whole reason this
-    /// helper exists: as an effort it means "send no effort", which is a real
-    /// choice and must NOT be folded into "argument omitted".
-    #[test]
-    fn canonical_reasoning_effort_keeps_none_as_a_level() {
-        assert!(
-            !is_not_sentinel("none"),
-            "precondition: the generic sanitizer treats \"none\" as absent"
-        );
-        assert_eq!(
-            canonical_reasoning_effort("none"),
-            Ok(Some("none")),
-            "as an effort, \"none\" is a level and must survive canonicalization"
-        );
+    fn sanitize_optional_arg_swallows_the_none_effort_level() {
+        assert!(!is_not_sentinel("none"));
         assert_eq!(sanitize_optional_arg(Some("none".into())), None);
-    }
-
-    #[test]
-    fn canonical_reasoning_effort_treats_blank_as_omitted() {
-        assert_eq!(canonical_reasoning_effort(""), Ok(None));
-        assert_eq!(canonical_reasoning_effort("   "), Ok(None));
-    }
-
-    #[test]
-    fn canonical_reasoning_effort_rejects_unknown_and_echoes_it_trimmed() {
-        assert_eq!(canonical_reasoning_effort(" ultra "), Err("ultra"));
-        assert_eq!(canonical_reasoning_effort("hihg"), Err("hihg"));
-    }
-
-    #[test]
-    fn task_tool_input_schema_documents_reasoning_effort_levels() {
-        let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
-        let description = schema["properties"]["reasoning_effort"]["description"]
-            .as_str()
-            .expect("reasoning_effort must be a documented property the model can see");
-        for value in REASONING_EFFORT_VALUES {
-            assert!(
-                description.contains(value),
-                "the schema must name the '{value}' level so the model knows it is allowed"
-            );
-        }
     }
 
     #[test]
