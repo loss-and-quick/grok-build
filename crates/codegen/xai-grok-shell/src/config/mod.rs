@@ -4,8 +4,9 @@ use crate::bundle;
 use serde::Deserialize;
 pub use xai_grok_config_types::{
     DEFAULT_RECENCY_DECAY, MemoryDreamConfig, MemoryEmbeddingConfig, MemoryFlushConfig,
-    MemoryGcConfig, MemoryIndexConfig, MemoryInitialInjectionConfig, MemorySearchConfig,
-    MemorySessionConfig, MemoryWatcherConfig, MmrConfig, PruningConfig, TemporalDecayConfig,
+    MemoryGcConfig, MemoryIndexConfig, MemoryIndexInjectionConfig, MemoryInitialInjectionConfig,
+    MemorySearchConfig, MemorySessionConfig, MemoryWatcherConfig, MmrConfig, PruningConfig,
+    TemporalDecayConfig,
 };
 /// Full configuration for the memory system.
 ///
@@ -30,6 +31,8 @@ pub struct MemoryConfig {
     pub search: MemorySearchConfig,
     /// First-turn memory injection behavior.
     pub initial_injection: MemoryInitialInjectionConfig,
+    /// Whether the memory index rides in the `<user_info>` prefix.
+    pub index_injection: MemoryIndexInjectionConfig,
     /// Session lifecycle settings.
     pub session: MemorySessionConfig,
     /// File watcher settings for detecting external memory edits.

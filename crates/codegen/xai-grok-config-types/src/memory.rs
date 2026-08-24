@@ -244,6 +244,27 @@ impl Default for MemoryInitialInjectionConfig {
     }
 }
 
+/// Memory index injection configuration (`[memory.index_injection]`).
+///
+/// Separate from [`MemoryInitialInjectionConfig`] because the two answer
+/// different questions. Initial injection is *retrieval*: it searches once,
+/// with the first turn's query, and lands whatever scored. This one is
+/// *awareness*: the pointer lines of `memories/MEMORY.md`, every one of them,
+/// so the model knows a memory exists even when no query would have surfaced
+/// it. Turning one off should never turn the other off.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct MemoryIndexInjectionConfig {
+    /// Whether to fold the memory index into the `<user_info>` prefix.
+    pub enabled: bool,
+}
+
+impl Default for MemoryIndexInjectionConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Session lifecycle configuration (`[memory.session]`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]

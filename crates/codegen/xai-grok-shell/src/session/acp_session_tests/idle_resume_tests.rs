@@ -207,6 +207,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     save_on_end: true,
                     backend_params: None,
                     initial_injection_config: Default::default(),
+                    index_injection_config: Default::default(),
                     context_injected: std::sync::atomic::AtomicBool::new(false),
                     flush_count: std::sync::atomic::AtomicU64::new(0),
                     last_flush_content: std::cell::RefCell::new(None),

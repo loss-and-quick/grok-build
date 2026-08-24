@@ -266,8 +266,11 @@ impl SessionActor {
         if let Some(old_handle) = self.deferred_prefix.take() {
             old_handle.abort();
         }
-        let new_user_prefix =
-            self.with_session_start_context(self.build_user_message_prefix().await);
+        let new_user_prefix = self
+            .with_memory_index(
+                self.with_session_start_context(self.build_user_message_prefix().await),
+            )
+            .await;
         {
             let mut conversation = self.chat_state_handle.get_conversation().await;
             let _ = replace_or_insert_system_head(&mut conversation, &new_system_prompt);

@@ -820,6 +820,9 @@ pub(crate) async fn spawn_session_actor(
     let memory_initial_injection_config = memory_config
         .as_ref()
         .map_or_else(Default::default, |mc| mc.initial_injection.clone());
+    let memory_index_injection_config = memory_config
+        .as_ref()
+        .map_or_else(Default::default, |mc| mc.index_injection);
     let mut memory_backend_params_for_session: Option<crate::session::memory::MemoryBackendParams> =
         None;
     let mut memory_search_counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>> = None;
@@ -1783,6 +1786,7 @@ pub(crate) async fn spawn_session_actor(
                 .is_none_or(|mc| mc.session.save_on_end),
             backend_params: memory_backend_params_for_session,
             initial_injection_config: memory_initial_injection_config,
+            index_injection_config: memory_index_injection_config,
             context_injected: std::sync::atomic::AtomicBool::new(false),
             flush_count: std::sync::atomic::AtomicU64::new(0),
             last_flush_content: std::cell::RefCell::new(None),

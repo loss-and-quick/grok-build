@@ -19,6 +19,10 @@ pub(crate) struct SessionMemory {
     pub backend_params: Option<crate::session::memory::MemoryBackendParams>,
     /// First-turn memory injection behavior resolved from local + remote config.
     pub initial_injection_config: crate::config::MemoryInitialInjectionConfig,
+    /// Whether the memory index rides in this session's `<user_info>` prefix.
+    /// Independent of `initial_injection_config`: retrieval and awareness are
+    /// separate mechanisms, and turning one off must not turn the other off.
+    pub index_injection_config: crate::config::MemoryIndexInjectionConfig,
     /// Per-process latch: the first-turn injection decision already ran in
     /// this session segment. Cross-segment idempotency comes from
     /// `conversation_has_memory_context`, not this flag.

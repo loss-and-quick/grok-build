@@ -427,6 +427,21 @@ pub fn upsert_index_line(existing: &str, file_name: &str, new_line: &str) -> Str
     join_lines(&lines)
 }
 
+/// The pointer lines of an index file, trimmed, in file order.
+///
+/// Headings, prose and blank lines are dropped. An index is allowed to carry
+/// them — [`upsert_index_line`] preserves whatever a user or Claude Code wrote
+/// around the pointers — but a caller that puts the index in front of the model
+/// wants its size to track the number of entries, not the length of a preamble
+/// somebody pasted into `MEMORY.md`.
+pub fn index_pointer_lines(index: &str) -> Vec<&str> {
+    index
+        .lines()
+        .filter(|line| pointer_target(line).is_some())
+        .map(str::trim)
+        .collect()
+}
+
 /// Extract the link target of a `- [Title](target) — hook` pointer line.
 fn pointer_target(line: &str) -> Option<&str> {
     let rest = line.trim_start().strip_prefix("- [")?;
@@ -756,6 +771,38 @@ mod tests {
         assert_eq!(
             out,
             "See [the docs](https://example.com) first.\n\n- [a](a.md) — hook\n"
+        );
+    }
+
+    // ── index reading ─────────────────────────────────────────────────────
+
+    #[test]
+    fn pointer_lines_keep_file_order_and_drop_everything_else() {
+        let index = "# Memory\n\nSome preamble.\n\n\
+                     - [a](a.md) — first\n\
+                     ## Group\n\
+                     - [b](b.md) — second\n\n\
+                     See [the docs](https://example.com).\n";
+        assert_eq!(
+            index_pointer_lines(index),
+            vec!["- [a](a.md) — first", "- [b](b.md) — second"],
+        );
+    }
+
+    #[test]
+    fn pointer_lines_of_an_empty_index_are_empty() {
+        assert!(index_pointer_lines("").is_empty());
+        assert!(index_pointer_lines("# Memory\n\n_(nothing yet)_\n").is_empty());
+    }
+
+    /// An indented pointer (a nested list in a hand-grouped index) is still a
+    /// pointer, and comes back without its indentation so a renderer can put
+    /// it under its own heading.
+    #[test]
+    fn pointer_lines_are_trimmed() {
+        assert_eq!(
+            index_pointer_lines("  - [a](a.md) — hook  \n"),
+            vec!["- [a](a.md) — hook"],
         );
     }
 

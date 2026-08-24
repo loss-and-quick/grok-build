@@ -2164,6 +2164,8 @@ Search memory for "auth middleware patterns"
 Read my workspace MEMORY.md
 ```
 
+Search only finds what scores for the query it is given. So that a saved memory is never invisible for want of a matching query, the index of `memories/MEMORY.md` — one line per entry, both scopes, labelled with the directory to read them from — rides in the session prefix, and the model opens whichever entry it wants with `memory_get`. Turn it off with `index_injection.enabled = false`; that is a separate switch from `[memory.initial_injection]`.
+
 ### CLI commands
 
 ```bash
@@ -2190,6 +2192,7 @@ Key options under `[memory]` in `~/.grok/config.toml`:
 | `search.min_score` | `0.35` | Minimum relevance score threshold for explicit memory search and recovery paths |
 | `initial_injection.enabled` | `true` | Enable automatic first-turn memory injection |
 | `initial_injection.min_score` | `0.0` | Override score threshold for first-turn injection (`0.0` preserves historical no-filter behavior) |
+| `index_injection.enabled` | `true` | List every saved memory entry in the session prefix, so the model knows what it can look up |
 | `embedding.model` | *(unset)* | Embedding model for vector search; unset disables embeddings |
 | `embedding.dimensions` | `1024` | Embedding vector dimensions |
 

@@ -1303,10 +1303,14 @@ impl SessionActor {
         };
         let generate_session_compact = compact_output.content.clone();
         // Compaction rebuilds the prefix verbatim, so re-appending the
-        // `session_start` context here is what carries it across: without it a
-        // per-session path the agent still needs would evaporate mid-session.
-        let user_message_prefix =
-            self.with_session_start_context(self.build_user_message_prefix().await);
+        // `session_start` context and the memory index here is what carries
+        // them across: without it a per-session path the agent still needs, or
+        // the list of what it can recall, would evaporate mid-session.
+        let user_message_prefix = self
+            .with_memory_index(
+                self.with_session_start_context(self.build_user_message_prefix().await),
+            )
+            .await;
         let conversation = self.chat_state_handle.get_conversation().await;
         let (discovered_agents_md, all_skills_for_compaction, _agent_edited_paths, state_context) =
             if use_short_prompt {
@@ -2375,6 +2379,7 @@ mod inline_auto_compact_flow_tests {
                 save_on_end: true,
                 backend_params: None,
                 initial_injection_config: Default::default(),
+                index_injection_config: Default::default(),
                 context_injected: std::sync::atomic::AtomicBool::new(false),
                 flush_count: std::sync::atomic::AtomicU64::new(0),
                 last_flush_content: std::cell::RefCell::new(None),
@@ -3612,6 +3617,7 @@ mod inline_auto_compact_flow_tests {
             save_on_end: true,
             backend_params: None,
             initial_injection_config: memory_initial_injection_config,
+            index_injection_config: Default::default(),
             context_injected: std::sync::atomic::AtomicBool::new(false),
             flush_count: std::sync::atomic::AtomicU64::new(0),
             last_flush_content: std::cell::RefCell::new(None),

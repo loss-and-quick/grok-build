@@ -185,6 +185,7 @@ async fn create_test_actor_with_memory(
             save_on_end: true,
             backend_params: None,
             initial_injection_config: memory_initial_injection_config,
+            index_injection_config: Default::default(),
             context_injected: std::sync::atomic::AtomicBool::new(false),
             flush_count: std::sync::atomic::AtomicU64::new(0),
             last_flush_content: std::cell::RefCell::new(None),
@@ -669,6 +670,145 @@ async fn test_idle_flush_timeout_from_config() {
             )
             .await;
             assert_eq!(actor2.idle_flush_timeout, None);
+        })
+        .await;
+}
+/// Actor whose memory store holds one entry per scope, with `tools`
+/// registered in the catalog the index gate consults.
+#[allow(clippy::field_reassign_with_default)]
+async fn create_index_actor(
+    tools: Vec<xai_grok_tools::registry::types::ToolConfig>,
+) -> SessionActor {
+    use crate::session::memory::MemoryScope;
+    use crate::session::memory::entry::{EntryType, MemoryEntry};
+    let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+    let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+    let mut config = crate::config::MemoryConfig::default();
+    config.enabled = true;
+    let mut actor =
+        create_test_actor_with_memory(1_000, 100_000, 85, gateway_tx, persistence_tx, Some(config))
+            .await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let global_dir = tmp.path().join("memory");
+    let workspace_dir = global_dir.join("test_ws");
+    let storage =
+        crate::session::memory::MemoryStorage::with_paths(global_dir, workspace_dir.clone());
+    for (scope, name, hook) in [
+        (MemoryScope::Global, "prefers-tabs", "indent with tabs"),
+        (MemoryScope::Workspace, "uses-nix", "build runs under nix"),
+    ] {
+        let entry = MemoryEntry::new(name, None, hook, EntryType::User, "body").unwrap();
+        storage.write_entry(scope, &entry).unwrap();
+    }
+    std::mem::forget(tmp);
+    actor.memory.storage = std::cell::RefCell::new(Some(storage));
+    actor.agent = std::cell::RefCell::new(test_agent_with_tools(tools).await);
+    actor
+}
+
+/// The index rides in the `<user_info>` prefix rather than a one-shot
+/// reminder, so it survives the compaction and model switch that rebuild it.
+#[tokio::test(flavor = "current_thread")]
+async fn memory_index_reaches_the_prefix_when_the_agent_can_open_an_entry() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = create_index_actor(vec![
+                xai_grok_tools::registry::types::ToolConfig::for_tool::<
+                    xai_grok_tools::implementations::memory::MemoryGetImpl,
+                >(),
+            ])
+            .await;
+            let prefix = actor.with_memory_index("<user_info>".to_string()).await;
+            assert!(
+                prefix.starts_with("<user_info>"),
+                "prefix is kept: {prefix}"
+            );
+            assert!(prefix.contains("## This workspace"), "got: {prefix}");
+            assert!(prefix.contains("## Global"), "got: {prefix}");
+            assert!(prefix.contains("- [uses nix](uses-nix.md) — build runs under nix"));
+            assert!(prefix.contains("- [prefers tabs](prefers-tabs.md) — indent with tabs"));
+        })
+        .await;
+}
+
+/// Ported from the out-of-tree memory plugin's catalog gate: an agent that
+/// cannot open an entry has no use for a list of entries, and would pay for
+/// the block on every request of its session.
+#[tokio::test(flavor = "current_thread")]
+async fn an_agent_without_memory_get_carries_no_index() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = create_index_actor(vec![]).await;
+            assert!(
+                !actor
+                    .registered_tool_names()
+                    .await
+                    .iter()
+                    .any(|n| n == xai_grok_tools::implementations::memory::MEMORY_GET_TOOL_NAME),
+                "harness precondition: this catalog has no memory_get"
+            );
+            assert_eq!(
+                "<user_info>",
+                actor.with_memory_index("<user_info>".to_string()).await,
+            );
+        })
+        .await;
+}
+
+/// The two injections are separate switches: turning the index off must not
+/// disturb first-turn retrieval, which has its own config section.
+#[tokio::test(flavor = "current_thread")]
+async fn the_index_switch_is_independent_of_first_turn_retrieval() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut actor = create_index_actor(vec![
+                xai_grok_tools::registry::types::ToolConfig::for_tool::<
+                    xai_grok_tools::implementations::memory::MemoryGetImpl,
+                >(),
+            ])
+            .await;
+            actor.memory.index_injection_config =
+                crate::config::MemoryIndexInjectionConfig { enabled: false };
+            assert_eq!(
+                "<user_info>",
+                actor.with_memory_index("<user_info>".to_string()).await,
+            );
+            assert!(
+                actor.memory.initial_injection_config.enabled,
+                "retrieval stays on when awareness is switched off"
+            );
+        })
+        .await;
+}
+
+/// A fresh install has no entries: no index, and no how-to for a store with
+/// nothing in it.
+#[tokio::test(flavor = "current_thread")]
+async fn an_empty_store_injects_nothing() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut actor = create_index_actor(vec![
+                xai_grok_tools::registry::types::ToolConfig::for_tool::<
+                    xai_grok_tools::implementations::memory::MemoryGetImpl,
+                >(),
+            ])
+            .await;
+            let tmp = tempfile::TempDir::new().unwrap();
+            let global_dir = tmp.path().join("empty");
+            actor.memory.storage =
+                std::cell::RefCell::new(Some(crate::session::memory::MemoryStorage::with_paths(
+                    global_dir.clone(),
+                    global_dir.join("ws"),
+                )));
+            std::mem::forget(tmp);
+            assert_eq!(
+                "<user_info>",
+                actor.with_memory_index("<user_info>".to_string()).await,
+            );
         })
         .await;
 }

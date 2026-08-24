@@ -261,6 +261,17 @@ enabled = true     # Enable or disable first-turn injection
 min_score = 0.0    # Optional score threshold; unset by default, which applies no filtering
 ```
 
+### The Memory Index
+
+Search only returns what scores for the query it is given, so a saved memory can stay invisible for a whole session simply because nothing asked for it. To close that gap, the index of your saved entries — one line per entry, workspace scope first, then global, each section labelled with the directory the entries live in — is folded into the session prefix, and Grok opens whichever entry it wants with `memory_get`. Nothing is injected when you have no entries yet.
+
+```toml
+[memory.index_injection]
+enabled = true     # Enable or disable the memory index in the session prefix
+```
+
+This is a separate switch from `[memory.initial_injection]`: one lists what exists, the other retrieves what matches.
+
 ### After Compaction
 
 Memory is also searched after auto-compaction to recover relevant context that may have been discarded.
@@ -387,6 +398,12 @@ To edit memory from the shell, open the files in your editor directly -- for exa
 |-----|---------|-------------|
 | `enabled` | `true` | Enable first-turn memory injection |
 | `min_score` | unset | Score threshold for first-turn results. When unset, Grok applies no threshold, which is equivalent to `0.0`. |
+
+### Index Injection Settings (`[memory.index_injection]`)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | List every saved entry in the session prefix so Grok knows what it can look up |
 
 ### Dream Settings (`[memory.dream]`)
 

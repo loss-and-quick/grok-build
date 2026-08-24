@@ -316,6 +316,7 @@ pub(crate) async fn create_test_actor_with_terminal(
             save_on_end: true,
             backend_params: None,
             initial_injection_config: Default::default(),
+            index_injection_config: Default::default(),
             context_injected: std::sync::atomic::AtomicBool::new(false),
             flush_count: std::sync::atomic::AtomicU64::new(0),
             last_flush_content: std::cell::RefCell::new(None),

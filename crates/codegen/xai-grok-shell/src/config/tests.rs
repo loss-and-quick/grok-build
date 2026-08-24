@@ -332,6 +332,7 @@ fn memory_config_defaults_are_correct() {
         assert!((mem.search.source_weights["global"] - 1.0).abs() < f32::EPSILON);
         assert!(mem.initial_injection.enabled);
         assert_eq!(mem.initial_injection.min_score, None);
+        assert!(mem.index_injection.enabled);
         assert!(mem.session.save_on_end);
         assert!(mem.flush.enabled);
         assert_eq!(mem.flush.soft_threshold_tokens, 4000);
@@ -394,6 +395,9 @@ recency_decay = 0.9
 enabled = false
 min_score = 0.8
 
+[memory.index_injection]
+enabled = false
+
 [memory.search.temporal_decay]
 enabled = true
 half_life_days = 14.0
@@ -437,6 +441,7 @@ hard_clear_age_turns = 20
         assert!((mem.search.min_score - 0.5).abs() < f32::EPSILON);
         assert!(!mem.initial_injection.enabled);
         assert_eq!(mem.initial_injection.min_score, Some(0.8));
+        assert!(!mem.index_injection.enabled);
         assert!(mem.search.temporal_decay.enabled);
         assert!((mem.search.temporal_decay.half_life_days - 14.0).abs() < f64::EPSILON);
         assert!((mem.search.source_weights["global"] - 0.5).abs() < f32::EPSILON);
@@ -450,6 +455,28 @@ hard_clear_age_turns = 20
         assert!(!mem.pruning.enabled);
         assert_eq!(mem.pruning.keep_last_n_turns, 5);
         assert_eq!(mem.pruning.hard_clear_age_turns, 20);
+    });
+}
+/// The two injections are separate switches: disabling retrieval must leave
+/// the index in the prefix, and disabling the index must leave retrieval on.
+#[test]
+fn memory_injection_switches_are_independent() {
+    without_grok_memory(|| {
+        let config: toml::Value = toml::from_str(
+            "[memory]\nenabled = true\n\n[memory.initial_injection]\nenabled = false\n",
+        )
+        .unwrap();
+        let mem = MemoryConfig::resolve(false, false, &config, None);
+        assert!(!mem.initial_injection.enabled);
+        assert!(mem.index_injection.enabled);
+
+        let config: toml::Value = toml::from_str(
+            "[memory]\nenabled = true\n\n[memory.index_injection]\nenabled = false\n",
+        )
+        .unwrap();
+        let mem = MemoryConfig::resolve(false, false, &config, None);
+        assert!(!mem.index_injection.enabled);
+        assert!(mem.initial_injection.enabled);
     });
 }
 #[test]
