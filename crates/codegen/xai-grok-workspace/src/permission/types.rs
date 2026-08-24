@@ -279,7 +279,14 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
                 path: g.path.clone(),
                 glob: g.glob.clone(),
             },
+            // Tools that mutate only grok's own state, never the workspace.
+            // `memory_write` is here rather than under `Edit` deliberately:
+            // `Edit` exists so the user can gate access to their files by path,
+            // and this tool has no path to gate — the target is derived from a
+            // slugified name inside `~/.grok/memory/`. Prompting per saved fact
+            // would make "remember this" cost a confirmation every time.
             ToolInput::TodoWrite(_)
+            | ToolInput::MemoryWrite(_)
             | ToolInput::TaskOutput(_)
             | ToolInput::WaitTasks(_)
             | ToolInput::KillTask(_)

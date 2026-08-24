@@ -4,8 +4,9 @@
 //! backend-agnostic. The concrete implementation (`MemoryIndex`) lives in
 //! `xai-grok-shell`.
 //!
-//! All methods are `&self` (read-only). Write operations (record_access,
-//! memory flush writes) go through the session actor directly.
+//! All methods take `&self`. Background writes (record_access, flush, dream)
+//! go through the session actor directly; the one write reachable from here is
+//! [`MemoryBackend::write`], the model-invoked save of a single fact.
 
 /// Tracing target for memory system events.
 ///
@@ -95,6 +96,70 @@ pub struct MemorySearchResult {
     pub created_at: Option<i64>,
 }
 
+/// What kind of fact a written memory records — Claude Code's `metadata.type`.
+///
+/// Also decides the default scope: `user` and `feedback` describe the person and
+/// follow them between repositories, the other two are learned inside one
+/// codebase.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryEntryType {
+    /// A durable fact about the user: preferences, environment, working style.
+    User,
+    /// A correction the user gave, recorded so it is not repeated.
+    Feedback,
+    /// A fact about the codebase currently being worked in.
+    Project,
+    /// Durable technical reference learned while working.
+    Reference,
+}
+
+/// Which store a written memory lands in.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryWriteScope {
+    /// Shared by every workspace.
+    Global,
+    /// Only this project.
+    Project,
+}
+
+/// A model-initiated request to persist one fact.
+#[derive(Debug, Clone)]
+pub struct MemoryWriteRequest {
+    /// Short kebab-case slug; also the file stem, and the update key.
+    pub name: String,
+    /// Human-readable link text for the index. Defaults from `name`.
+    pub title: Option<String>,
+    /// One line, used to judge relevance during recall.
+    pub description: String,
+    /// `metadata.type`.
+    pub entry_type: MemoryEntryType,
+    /// Overrides the default scope implied by `entry_type`.
+    pub scope: Option<MemoryWriteScope>,
+    /// Markdown body: the fact itself.
+    pub content: String,
+}
+
+/// Where a written memory landed.
+#[derive(Debug, Clone)]
+pub struct MemoryWriteOutcome {
+    /// The entry file.
+    pub path: String,
+    /// The index that now points at it.
+    pub index_path: String,
+    /// `"global"` or `"project"`.
+    pub scope: &'static str,
+    /// `false` when an entry of the same name was replaced.
+    pub created: bool,
+    /// Chunks the write added to the search index, if it reindexed inline.
+    pub indexed_chunks: usize,
+}
+
 /// Backend-agnostic interface for memory queries.
 ///
 /// Implementations must be `Send + Sync` to be stored in `Arc<dyn MemoryBackend>`
@@ -115,6 +180,17 @@ pub trait MemoryBackend: Send + Sync {
         max_results: usize,
         min_score: f64,
     ) -> Result<Vec<MemorySearchResult>, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Persist one fact and make it searchable.
+    ///
+    /// Implementations must index the write before returning. A memory saved on
+    /// turn 3 that only becomes searchable after a restart is worse than no
+    /// memory at all — the model is told it stored something, then cannot find
+    /// it for the rest of the session.
+    async fn write(
+        &self,
+        request: MemoryWriteRequest,
+    ) -> Result<MemoryWriteOutcome, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Read a memory file by path, optionally returning a range of lines.
     fn get(

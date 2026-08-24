@@ -186,6 +186,7 @@ pub fn workspace_grok_build_toolset() -> ToolServerConfig {
     tools.push((&grok_build::WebFetchTool).into());
     tools.push((&memory::search_tool::MemorySearchImpl).into());
     tools.push((&memory::get_tool::MemoryGetImpl).into());
+    tools.push((&memory::write_tool::MemoryWriteImpl).into());
     tools.push((&grok_build::LspTool).into());
     ToolServerConfig {
         tools,
@@ -469,6 +470,7 @@ fn orchestrator_toolset() -> ToolServerConfig {
             // Memory
             (&memory::MemorySearchImpl).into(),
             (&memory::MemoryGetImpl).into(),
+            (&memory::MemoryWriteImpl).into(),
             // Intentionally excluded:
             // - SearchReplaceTool (no file editing — delegate to subagents)
             // - OpenCodeWriteTool (no file writing — delegate to subagents)

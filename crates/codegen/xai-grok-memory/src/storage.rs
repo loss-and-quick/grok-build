@@ -129,9 +129,14 @@ impl MemoryStorage {
     /// Classify a file path as a memory source type.
     ///
     /// Returns `"global"`, `"workspace"`, or `"session"` based on location.
+    ///
+    /// Files under `memories/` are curated single facts, not session residue,
+    /// so they classify by scope. Calling them `"session"` would attach a
+    /// staleness warning to every recall (see `format_staleness_note`) — the
+    /// opposite of what a deliberately saved memory should carry.
     pub fn classify_source(&self, path: &Path) -> &'static str {
         if path.starts_with(&self.workspace_dir) {
-            if path.file_name().is_some_and(|f| f == "MEMORY.md") {
+            if path.file_name().is_some_and(|f| f == "MEMORY.md") || self.is_memories_path(path) {
                 "workspace"
             } else {
                 "session"
@@ -317,6 +322,9 @@ impl MemoryStorage {
     /// List all memory files (`.md`) across global and workspace directories.
     ///
     /// Returns paths sorted by scope: global files first, then workspace files.
+    /// Includes each scope's `memories/` entries, so a directory dropped in by
+    /// hand — a Claude Code memory folder, say — is picked up by the startup
+    /// reindex without any import step.
     pub fn list_memory_files(&self) -> std::io::Result<Vec<PathBuf>> {
         let mut files = Vec::new();
 
@@ -325,12 +333,14 @@ impl MemoryStorage {
         if global_file.is_file() {
             files.push(global_file);
         }
+        files.extend(self.list_memories(MemoryScope::Global));
 
         // Workspace MEMORY.md
         let workspace_file = self.workspace_memory_file();
         if workspace_file.is_file() {
             files.push(workspace_file);
         }
+        files.extend(self.list_memories(MemoryScope::Workspace));
 
         // Workspace session logs
         let sessions_dir = self.sessions_dir();

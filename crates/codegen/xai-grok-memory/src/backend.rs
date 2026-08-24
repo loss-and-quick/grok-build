@@ -12,11 +12,37 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use xai_grok_tools::types::memory_backend::{MemoryBackend, MemorySearchResult};
+use xai_grok_tools::types::memory_backend::{
+    MemoryBackend, MemoryEntryType, MemorySearchResult, MemoryWriteOutcome, MemoryWriteRequest,
+    MemoryWriteScope,
+};
 
 use super::embedding::EmbeddingProvider as _;
-use super::storage::MemoryStorage;
+use super::entry::{EntryType, MemoryEntry};
+use super::storage::{MemoryScope, MemoryStorage};
 use super::watcher::MemoryFileWatcher;
+
+/// Translate the tool-facing entry type into the storage-layer one.
+///
+/// The two enums are deliberately separate: the trait lives in `xai-grok-tools`,
+/// which cannot depend on this crate, so neither side can name the other's type.
+fn map_entry_type(t: MemoryEntryType) -> EntryType {
+    match t {
+        MemoryEntryType::User => EntryType::User,
+        MemoryEntryType::Feedback => EntryType::Feedback,
+        MemoryEntryType::Project => EntryType::Project,
+        MemoryEntryType::Reference => EntryType::Reference,
+    }
+}
+
+/// The scope name the model sees back. `Workspace` is reported as `"project"`,
+/// matching the name the tool's own schema offers.
+fn scope_label(scope: MemoryScope) -> &'static str {
+    match scope {
+        MemoryScope::Global => "global",
+        MemoryScope::Workspace => "project",
+    }
+}
 
 /// Embedding-client credentials scoped to a trusted endpoint. Only
 /// [`Self::for_endpoint`] retains a live credential; the empty default fails closed.
@@ -557,6 +583,116 @@ impl MemoryBackend for MemoryBackendImpl {
                 created_at: Some(r.created_at),
             })
             .collect())
+    }
+
+    #[tracing::instrument(name = "memory.write", skip_all, fields(session_id = %self.session_id))]
+    async fn write(
+        &self,
+        request: MemoryWriteRequest,
+    ) -> Result<MemoryWriteOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        let entry_type = map_entry_type(request.entry_type);
+        let scope = match request.scope {
+            Some(MemoryWriteScope::Global) => MemoryScope::Global,
+            Some(MemoryWriteScope::Project) => MemoryScope::Workspace,
+            None => entry_type.default_scope(),
+        };
+
+        let entry = MemoryEntry::new(
+            &request.name,
+            request.title.as_deref(),
+            &request.description,
+            entry_type,
+            &request.content,
+        )?;
+        let written = self.storage.write_entry(scope, &entry)?;
+
+        // Index inline rather than leaving it to the watcher: sync-on-search
+        // only runs when a *later* `memory_search` happens to fire, and the
+        // very next search in this turn is the one most likely to want what was
+        // just saved. `reindex_file` compares chunk hashes, so the watcher's
+        // redundant pass over the same file later is a no-op.
+        //
+        // Same `!Sync` discipline as `search`: no `&index` borrow may be held
+        // across an `.await`, so this is a sync phase followed by an async one.
+        let mut pending_embeddings: Vec<(String, String)> = Vec::new();
+        let mut indexed_chunks = 0usize;
+        let embed_dims = self.embed_config.as_ref().map_or(1024, |ec| ec.dimensions);
+        match super::index::MemoryIndex::open_or_create(
+            &self.db_path,
+            self.storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            embed_dims,
+        ) {
+            Ok(mut index) => {
+                let source = self.storage.classify_source(&written.path);
+                for file in [&written.path, &written.index_path] {
+                    if let Ok(stats) = index.reindex_file(file, source) {
+                        indexed_chunks += stats.added + stats.updated;
+                    }
+                }
+                pending_embeddings = index.chunks_without_embeddings().unwrap_or_default();
+            }
+            Err(e) => {
+                // The file is on disk and the watcher will pick it up; only
+                // same-turn searchability is lost, so this must not fail the write.
+                tracing::warn!(
+                    target: xai_grok_telemetry::memory_log::TARGET,
+                    error = %e,
+                    "MEMORY_WRITE: could not open index, deferring to watcher sync"
+                );
+            }
+        }
+
+        if !pending_embeddings.is_empty()
+            && let Some(provider) = self.make_embedding_provider().await
+        {
+            let mut upserts: Vec<(String, Vec<f32>)> = Vec::new();
+            for batch in pending_embeddings.chunks(32) {
+                let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
+                match provider.embed_batch(&texts).await {
+                    Ok(embeddings) => upserts.extend(
+                        batch
+                            .iter()
+                            .map(|(id, _)| id.clone())
+                            .zip(embeddings.into_iter()),
+                    ),
+                    Err(e) => tracing::warn!(
+                        target: xai_grok_telemetry::memory_log::TARGET,
+                        error = %e,
+                        "MEMORY_WRITE: embedding batch failed, entry stays FTS-searchable"
+                    ),
+                }
+            }
+            if !upserts.is_empty()
+                && let Ok(index) = super::index::MemoryIndex::open_or_create(
+                    &self.db_path,
+                    self.storage.clone(),
+                    xai_grok_config_types::MemoryIndexConfig::default(),
+                    embed_dims,
+                )
+            {
+                for (chunk_id, embedding) in &upserts {
+                    let _ = index.upsert_embedding(chunk_id, embedding);
+                }
+            }
+        }
+
+        tracing::info!(
+            target: xai_grok_telemetry::memory_log::TARGET,
+            name = %entry.name,
+            scope = ?written.scope,
+            created = written.created,
+            indexed_chunks,
+            "MEMORY_WRITE: stored entry"
+        );
+
+        Ok(MemoryWriteOutcome {
+            path: written.path.display().to_string(),
+            index_path: written.index_path.display().to_string(),
+            scope: scope_label(written.scope),
+            created: written.created,
+            indexed_chunks,
+        })
     }
 
     fn get(
@@ -1302,6 +1438,125 @@ mod tests {
     fn test_backend_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<MemoryBackendImpl>();
+    }
+
+    fn write_request(name: &str, description: &str, content: &str) -> MemoryWriteRequest {
+        MemoryWriteRequest {
+            name: name.to_string(),
+            title: None,
+            description: description.to_string(),
+            entry_type: MemoryEntryType::Project,
+            scope: None,
+            content: content.to_string(),
+        }
+    }
+
+    /// The whole point of writing through the backend rather than dropping a
+    /// file on disk: an entry saved mid-turn must be findable in the same turn.
+    /// Leaving it to the watcher would make it searchable only if some later
+    /// `memory_search` happens to fire the sync-on-search path.
+    #[tokio::test]
+    async fn write_is_searchable_without_a_watcher_sync() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let global = tmp.path().join("memory");
+        let workspace = global.join("test_ws");
+        let storage = MemoryStorage::with_paths(global, workspace);
+        let db_path = tmp.path().join("write.sqlite");
+        let backend = MemoryBackendImpl::new(db_path, storage);
+
+        let outcome = backend
+            .write(write_request(
+                "zeppelin-protocol",
+                "How the zeppelin handshake is negotiated.",
+                "The zeppelin handshake retries three times before failing.",
+            ))
+            .await
+            .unwrap();
+        assert!(outcome.created);
+        assert_eq!(outcome.scope, "project");
+        assert!(outcome.indexed_chunks > 0, "the write must index inline");
+
+        // No watcher is attached, so nothing else can have indexed this.
+        let results = backend.search("zeppelin handshake", 10, 0.0).await.unwrap();
+        assert!(
+            results.iter().any(|r| r.snippet.contains("zeppelin")),
+            "entry written this turn must be searchable this turn: {results:?}"
+        );
+    }
+
+    /// A curated entry must not carry the staleness warning that session logs
+    /// get — it is deliberately saved knowledge, not conversational residue.
+    #[tokio::test]
+    async fn written_entries_are_indexed_as_evergreen() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let global = tmp.path().join("memory");
+        let workspace = global.join("test_ws");
+        let storage = MemoryStorage::with_paths(global, workspace);
+        let db_path = tmp.path().join("write.sqlite");
+        let backend = MemoryBackendImpl::new(db_path, storage);
+
+        backend
+            .write(write_request(
+                "zeppelin-protocol",
+                "How the zeppelin handshake is negotiated.",
+                "The zeppelin handshake retries three times before failing.",
+            ))
+            .await
+            .unwrap();
+
+        let results = backend.search("zeppelin handshake", 10, 0.0).await.unwrap();
+        let hit = results
+            .iter()
+            .find(|r| r.snippet.contains("zeppelin"))
+            .expect("entry should be found");
+        assert_eq!(hit.source, "workspace", "must not be classified as session");
+    }
+
+    /// `type` picks the store when the caller does not, and an explicit scope
+    /// overrides it. Getting this backwards silently scatters project facts
+    /// into every future session.
+    #[tokio::test]
+    async fn scope_defaults_from_type_and_yields_to_an_explicit_scope() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let global = tmp.path().join("memory");
+        let workspace = global.join("test_ws");
+        let storage = MemoryStorage::with_paths(global.clone(), workspace.clone());
+        let backend = MemoryBackendImpl::new(tmp.path().join("write.sqlite"), storage);
+
+        let mut req = write_request("a-fact", "hook", "body");
+        req.entry_type = MemoryEntryType::User;
+        let user = backend.write(req).await.unwrap();
+        assert_eq!(user.scope, "global");
+        assert!(user.path.starts_with(&global.display().to_string()));
+
+        let mut req = write_request("b-fact", "hook", "body");
+        req.entry_type = MemoryEntryType::User;
+        req.scope = Some(MemoryWriteScope::Project);
+        let forced = backend.write(req).await.unwrap();
+        assert_eq!(forced.scope, "project");
+        assert!(forced.path.starts_with(&workspace.display().to_string()));
+    }
+
+    /// Validation failures must surface as errors the tool can relay, not as a
+    /// half-written file.
+    #[tokio::test]
+    async fn oversized_write_is_rejected_and_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let global = tmp.path().join("memory");
+        let storage = MemoryStorage::with_paths(global.clone(), global.join("test_ws"));
+        let backend = MemoryBackendImpl::new(tmp.path().join("write.sqlite"), storage);
+
+        let huge = "x".repeat(crate::entry::MAX_BODY_CHARS + 1);
+        let err = backend
+            .write(write_request("too-big", "hook", &huge))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("over the"), "got: {err}");
+        assert!(!global.join("test_ws").join("memories").exists());
     }
 
     /// If credentials approved for one endpoint are used to build against a

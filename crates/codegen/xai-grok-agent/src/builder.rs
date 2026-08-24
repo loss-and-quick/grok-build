@@ -774,6 +774,9 @@ impl AgentBuilder {
                 tool_config
                     .tools
                     .push((&memory::get_tool::MemoryGetImpl).into());
+                tool_config
+                    .tools
+                    .push((&memory::write_tool::MemoryWriteImpl).into());
             }
             if self.web_search_config.is_enabled() {
                 use xai_grok_tools::implementations::grok_build;
@@ -827,9 +830,13 @@ impl AgentBuilder {
                 "{grok_build_ns}:{}",
                 xai_grok_tools::implementations::memory::MEMORY_GET_TOOL_NAME
             );
-            tool_config
-                .tools
-                .retain(|tc| tc.id != mem_search_id && tc.id != mem_get_id);
+            let mem_write_id = format!(
+                "{grok_build_ns}:{}",
+                xai_grok_tools::implementations::memory::MEMORY_WRITE_TOOL_NAME
+            );
+            tool_config.tools.retain(|tc| {
+                tc.id != mem_search_id && tc.id != mem_get_id && tc.id != mem_write_id
+            });
         }
         if !self.ask_user_question_enabled {
             let ask_user_id = format!(

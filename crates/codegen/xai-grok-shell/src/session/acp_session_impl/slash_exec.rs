@@ -783,6 +783,11 @@ impl SessionActor {
                     ) {
                         tracing::debug!("memory_get tool was not registered during unregister");
                     }
+                    if !bridge.unregister_tool_by_name(
+                        xai_grok_tools::implementations::memory::MEMORY_WRITE_TOOL_NAME,
+                    ) {
+                        tracing::debug!("memory_write tool was not registered during unregister");
+                    }
                     *self.memory.storage.borrow_mut() = None;
                     *self.memory.search_counter.borrow_mut() = None;
                     "Memory disabled for this session.".to_owned()

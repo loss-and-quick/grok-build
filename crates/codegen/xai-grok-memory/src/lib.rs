@@ -10,11 +10,19 @@
 //! ```text
 //! ~/.grok/memory/
 //!   ├── MEMORY.md                         # Global curated knowledge
+//!   ├── memories/                         # Single-fact entries (Claude Code format)
+//!   │   ├── MEMORY.md                     # Index: one pointer line per entry
+//!   │   └── {name}.md                     # One fact, frontmatter + body
 //!   └── {workspace_hash}/                 # Per-workspace (blake3(cwd)[..16])
 //!       ├── MEMORY.md                     # Project-level curated knowledge
+//!       ├── memories/                     # As above, workspace-scoped
 //!       └── sessions/
 //!           └── YYYY-MM-DD-{slug}-{sid8}.md  # Session logs
 //! ```
+//!
+//! The two `MEMORY.md` roles are deliberate and distinct: at a scope root it is
+//! curated prose that `dream` rewrites wholesale, inside `memories/` it is an
+//! index that only ever holds pointer lines. See [`entry`].
 //!
 //! ## Feature Flag
 //!
@@ -28,6 +36,7 @@ pub mod chunker;
 pub mod dream;
 pub mod dream_lock;
 pub mod embedding;
+pub mod entry;
 pub mod index;
 pub mod mmr;
 pub mod query_expansion;
@@ -38,6 +47,7 @@ pub mod text_utils;
 pub mod watcher;
 
 pub use backend::{EndpointScopedCredentials, MemoryBackendImpl, MemoryBackendParams};
+pub use entry::{EntryError, EntryType, MemoryEntry, WrittenEntry};
 pub use index::{MemoryIndex, init_sqlite_vec};
 pub use storage::{MemoryScope, MemoryStorage};
 
