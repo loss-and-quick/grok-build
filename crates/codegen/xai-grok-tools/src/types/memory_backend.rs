@@ -145,6 +145,38 @@ pub struct MemoryWriteRequest {
     pub content: String,
 }
 
+/// A model-initiated request to remove one fact.
+#[derive(Debug, Clone)]
+pub struct MemoryDeleteRequest {
+    /// The entry's name, slugified the same way a write slugifies it.
+    pub name: String,
+    /// Which store to remove it from. `None` resolves against both.
+    pub scope: Option<MemoryWriteScope>,
+}
+
+/// What a delete found.
+#[derive(Debug, Clone)]
+pub enum MemoryDeleteOutcome {
+    /// The entry was removed, along with its index line and its chunks.
+    Deleted {
+        /// The entry file that is now gone.
+        path: String,
+        /// `"global"` or `"project"`.
+        scope: &'static str,
+        /// Its index hook, when it had one.
+        description: Option<String>,
+        /// Chunks dropped from the search index.
+        removed_chunks: usize,
+    },
+    /// No entry of that name in the scope that was searched.
+    NotFound,
+    /// Both scopes hold an entry of that name and none was given.
+    ///
+    /// Deliberately not resolved by picking the nearer one: a delete cannot be
+    /// undone, and guessing wrong destroys the entry the caller meant to keep.
+    Ambiguous,
+}
+
 /// Where a written memory landed.
 #[derive(Debug, Clone)]
 pub struct MemoryWriteOutcome {
@@ -191,6 +223,18 @@ pub trait MemoryBackend: Send + Sync {
         &self,
         request: MemoryWriteRequest,
     ) -> Result<MemoryWriteOutcome, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Remove one entry, its index line, and its chunks.
+    ///
+    /// Implementations must drop the entry from the search index before
+    /// returning, for the mirror of the reason [`MemoryBackend::write`] must
+    /// add it: an entry the model just deleted, still coming back from
+    /// `memory_search` for the rest of the session, is exactly the wrong fact
+    /// surviving the correction that was supposed to remove it.
+    async fn delete(
+        &self,
+        request: MemoryDeleteRequest,
+    ) -> Result<MemoryDeleteOutcome, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Read a memory file by path, optionally returning a range of lines.
     fn get(

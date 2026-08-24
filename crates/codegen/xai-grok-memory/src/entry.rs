@@ -271,12 +271,7 @@ impl MemoryEntry {
 
     /// The pointer line this entry contributes to `memories/MEMORY.md`.
     pub fn index_line(&self) -> String {
-        format!(
-            "- [{}]({}) \u{2014} {}",
-            self.title,
-            self.file_name(),
-            self.description
-        )
+        pointer_line(&self.title, &self.file_name(), &self.description)
     }
 }
 
@@ -387,6 +382,95 @@ impl MemoryStorage {
     }
 }
 
+/// An entry that was removed, and what had to be cleaned up with it.
+#[derive(Debug, Clone)]
+pub struct DeletedEntry {
+    /// The entry file, now gone. Kept so the caller can drop its chunks from
+    /// the search index — a memory the model can still find after deleting it
+    /// is worse than one it never deleted.
+    pub path: PathBuf,
+    /// The index the pointer line was removed from.
+    pub index_path: PathBuf,
+    /// Scope the entry lived in.
+    pub scope: MemoryScope,
+    /// The hook from its index line, when it had one, so the caller can say
+    /// *what* it deleted rather than only that something is gone.
+    pub description: Option<String>,
+}
+
+impl MemoryStorage {
+    /// Path an entry of this name would occupy in a scope. The name is
+    /// slugified the same way [`MemoryEntry::new`] slugifies it, so a delete
+    /// and a write agree on what one name means.
+    pub fn entry_path(&self, scope: MemoryScope, name: &str) -> PathBuf {
+        self.memories_dir(scope)
+            .join(format!("{}.md", slugify(name.trim(), MAX_NAME_CHARS)))
+    }
+
+    /// Scopes that currently hold an entry of this name, workspace first.
+    ///
+    /// Workspace first because it is the more specific store, and because a
+    /// caller that resolves an unqualified name wants the nearer one; a caller
+    /// that must not guess uses the length of this instead.
+    pub fn entry_scopes(&self, name: &str) -> Vec<MemoryScope> {
+        [MemoryScope::Workspace, MemoryScope::Global]
+            .into_iter()
+            .filter(|&scope| self.entry_path(scope, name).is_file())
+            .collect()
+    }
+
+    /// Remove one entry and its pointer line. `Ok(None)` when no such entry
+    /// exists in that scope — an absent memory is not an error, it is the
+    /// state the caller asked for.
+    pub fn delete_entry(
+        &self,
+        scope: MemoryScope,
+        name: &str,
+    ) -> Result<Option<DeletedEntry>, EntryError> {
+        let path = self.entry_path(scope, name);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let Some(file_name) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
+            return Ok(None);
+        };
+
+        let index_path = self.memories_index_file(scope);
+        let existing = std::fs::read_to_string(&index_path).unwrap_or_default();
+        let description = existing
+            .lines()
+            .filter_map(parse_pointer_line)
+            .find(|p| p.target == file_name)
+            .map(|p| p.description.to_string())
+            .filter(|d| !d.is_empty());
+
+        // File first: a pointer to a file that is still there is a recoverable
+        // inconsistency, while a file with no pointer is invisible to the index
+        // in the prefix and would have to be found by search to be removed.
+        std::fs::remove_file(&path)?;
+        if index_path.exists() {
+            std::fs::write(&index_path, remove_index_line(&existing, &file_name))?;
+        }
+
+        tracing::debug!(
+            path = %path.display(),
+            scope = ?scope,
+            "deleted memory entry"
+        );
+
+        Ok(Some(DeletedEntry {
+            path,
+            index_path,
+            scope,
+            description,
+        }))
+    }
+}
+
 /// Replace the pointer line for `file_name` in an index, or add one.
 ///
 /// Every other line is preserved byte-for-byte, so headings, grouping and
@@ -427,6 +511,26 @@ pub fn upsert_index_line(existing: &str, file_name: &str, new_line: &str) -> Str
     join_lines(&lines)
 }
 
+/// Drop the pointer line for `file_name` from an index.
+///
+/// The counterpart to [`upsert_index_line`] and bound by the same rule: every
+/// line that is not that one pointer survives byte-for-byte, so headings,
+/// grouping and hand-written notes are not collateral damage of a delete.
+/// Removing the last pointer from an index that held nothing else empties the
+/// file rather than leaving a lone newline behind.
+pub fn remove_index_line(existing: &str, file_name: &str) -> String {
+    let kept: Vec<&str> = existing
+        .lines()
+        .filter(|line| pointer_target(line) != Some(file_name))
+        .collect();
+    if kept.iter().all(|l| l.trim().is_empty()) {
+        return String::new();
+    }
+    let mut out = kept.join("\n");
+    out.push('\n');
+    out
+}
+
 /// The pointer lines of an index file, trimmed, in file order.
 ///
 /// Headings, prose and blank lines are dropped. An index is allowed to carry
@@ -442,13 +546,55 @@ pub fn index_pointer_lines(index: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Extract the link target of a `- [Title](target) — hook` pointer line.
-fn pointer_target(line: &str) -> Option<&str> {
-    let rest = line.trim_start().strip_prefix("- [")?;
+/// The three parts of a `- [Title](target) — hook` pointer line.
+///
+/// Reading a line back is what lets an import keep the title and hook a human
+/// already wrote instead of regenerating both from the slug — Claude Code's
+/// index carries real titles (`Роль оркестратора`) over kebab-case file names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointerLine<'a> {
+    /// Link text.
+    pub title: &'a str,
+    /// Link target: the entry's file name.
+    pub target: &'a str,
+    /// Text after the em dash; empty when the line carries none.
+    pub description: &'a str,
+}
+
+/// Parse a `- [Title](target) — hook` pointer line, or `None` for any other line.
+///
+/// The em dash and hook are optional. A pointer without one is still a pointer,
+/// and treating it as prose would drop the entry out of every index operation.
+pub fn parse_pointer_line(line: &str) -> Option<PointerLine<'_>> {
+    let rest = line.trim().strip_prefix("- [")?;
     let close = rest.find("](")?;
     let after = &rest[close + 2..];
     let end = after.find(')')?;
-    Some(&after[..end])
+    let description = after[end + 1..]
+        .trim_start()
+        .strip_prefix('\u{2014}')
+        .unwrap_or("")
+        .trim();
+    Some(PointerLine {
+        title: &rest[..close],
+        target: &after[..end],
+        description,
+    })
+}
+
+/// Render a pointer line, omitting the em dash when there is no hook to hang
+/// off it.
+pub fn pointer_line(title: &str, file_name: &str, description: &str) -> String {
+    if description.is_empty() {
+        format!("- [{title}]({file_name})")
+    } else {
+        format!("- [{title}]({file_name}) \u{2014} {description}")
+    }
+}
+
+/// Extract the link target of a `- [Title](target) — hook` pointer line.
+fn pointer_target(line: &str) -> Option<&str> {
+    parse_pointer_line(line).map(|p| p.target)
 }
 
 fn join_lines(lines: &[String]) -> String {
@@ -772,6 +918,142 @@ mod tests {
             out,
             "See [the docs](https://example.com) first.\n\n- [a](a.md) — hook\n"
         );
+    }
+
+    // ── index removal ─────────────────────────────────────────────────────
+
+    #[test]
+    fn remove_drops_only_the_matching_pointer() {
+        let existing = "- [a](a.md) — a\n- [b](b.md) — b\n- [c](c.md) — c\n";
+        assert_eq!(
+            remove_index_line(existing, "b.md"),
+            "- [a](a.md) — a\n- [c](c.md) — c\n"
+        );
+    }
+
+    /// The mirror of `upsert_index_line`'s contract: a delete must not be an
+    /// excuse to rewrite the file. Headings, grouping and prose stay.
+    #[test]
+    fn remove_preserves_prose_and_grouping() {
+        let existing = "# Index\n\nSome preamble.\n\n## Build\n- [a](a.md) — a\n- [b](b.md) — b\n\n\
+                        See [the docs](https://example.com).\n";
+        assert_eq!(
+            remove_index_line(existing, "a.md"),
+            "# Index\n\nSome preamble.\n\n## Build\n- [b](b.md) — b\n\n\
+             See [the docs](https://example.com).\n"
+        );
+    }
+
+    #[test]
+    fn removing_an_absent_pointer_changes_nothing() {
+        let existing = "# Index\n\n- [a](a.md) — a\n";
+        assert_eq!(remove_index_line(existing, "zzz.md"), existing);
+    }
+
+    /// Deleting the last entry must not leave a file holding one newline, which
+    /// would render as an empty bullet list.
+    #[test]
+    fn removing_the_last_pointer_empties_the_index() {
+        assert_eq!(remove_index_line("- [a](a.md) — a\n", "a.md"), "");
+    }
+
+    // ── pointer parsing ───────────────────────────────────────────────────
+
+    #[test]
+    fn a_pointer_line_parses_into_its_three_parts() {
+        let p = parse_pointer_line("- [Роль оркестратора](orchestrator-role.md) — код пишут")
+            .expect("parses");
+        assert_eq!(p.title, "Роль оркестратора");
+        assert_eq!(p.target, "orchestrator-role.md");
+        assert_eq!(p.description, "код пишут");
+    }
+
+    /// A pointer with no hook is still a pointer; treating it as prose would
+    /// hide the entry from the index block and from a delete.
+    #[test]
+    fn a_pointer_without_a_hook_still_parses() {
+        let p = parse_pointer_line("- [a](a.md)").expect("parses");
+        assert_eq!(p.target, "a.md");
+        assert!(p.description.is_empty());
+        assert_eq!(pointer_line("a", "a.md", ""), "- [a](a.md)");
+    }
+
+    #[test]
+    fn prose_and_plain_links_are_not_pointers() {
+        assert!(parse_pointer_line("See [the docs](https://example.com).").is_none());
+        assert!(parse_pointer_line("## Group").is_none());
+        assert!(parse_pointer_line("").is_none());
+    }
+
+    // ── deleting ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn delete_removes_the_file_and_its_pointer() {
+        let tmp = TempDir::new().unwrap();
+        let s = storage(&tmp);
+        s.write_entry(MemoryScope::Workspace, &entry("keep-me"))
+            .unwrap();
+        let doomed = s
+            .write_entry(MemoryScope::Workspace, &entry("drop-me"))
+            .unwrap();
+
+        let deleted = s
+            .delete_entry(MemoryScope::Workspace, "drop-me")
+            .unwrap()
+            .expect("entry existed");
+        assert_eq!(deleted.path, doomed.path);
+        assert_eq!(deleted.description.as_deref(), Some("A one line hook."));
+        assert!(!doomed.path.exists());
+
+        let index = std::fs::read_to_string(&doomed.index_path).unwrap();
+        assert!(!index.contains("(drop-me.md)"), "{index}");
+        assert!(index.contains("(keep-me.md)"), "the other entry stays");
+    }
+
+    /// The name is folded the same way a write folds it, so `/memory` and the
+    /// model can both delete `"Prefers Tabs"` by the name they wrote it under.
+    #[test]
+    fn delete_slugifies_the_name_like_a_write() {
+        let tmp = TempDir::new().unwrap();
+        let s = storage(&tmp);
+        s.write_entry(MemoryScope::Global, &entry("Prefers Tabs"))
+            .unwrap();
+        assert!(
+            s.delete_entry(MemoryScope::Global, "Prefers Tabs!")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn deleting_an_absent_entry_is_not_an_error() {
+        let tmp = TempDir::new().unwrap();
+        let s = storage(&tmp);
+        assert!(
+            s.delete_entry(MemoryScope::Workspace, "never-existed")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Scopes are separate stores. A delete in one must not reach into the
+    /// other, and `entry_scopes` is what tells an unqualified caller so.
+    #[test]
+    fn delete_is_scoped_and_ambiguity_is_visible() {
+        let tmp = TempDir::new().unwrap();
+        let s = storage(&tmp);
+        s.write_entry(MemoryScope::Global, &entry("a-fact"))
+            .unwrap();
+        s.write_entry(MemoryScope::Workspace, &entry("a-fact"))
+            .unwrap();
+        assert_eq!(
+            s.entry_scopes("a-fact"),
+            vec![MemoryScope::Workspace, MemoryScope::Global],
+        );
+
+        s.delete_entry(MemoryScope::Workspace, "a-fact").unwrap();
+        assert_eq!(s.entry_scopes("a-fact"), vec![MemoryScope::Global]);
+        assert!(s.entry_path(MemoryScope::Global, "a-fact").exists());
     }
 
     // ── index reading ─────────────────────────────────────────────────────

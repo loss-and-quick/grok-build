@@ -2166,6 +2166,10 @@ Read my workspace MEMORY.md
 
 Search only finds what scores for the query it is given. So that a saved memory is never invisible for want of a matching query, the index of `memories/MEMORY.md` — one line per entry, both scopes, labelled with the directory to read them from — rides in the session prefix, and the model opens whichever entry it wants with `memory_get`. Turn it off with `index_injection.enabled = false`; that is a separate switch from `[memory.initial_injection]`.
 
+### Removing a memory
+
+`memory_delete` takes an entry's `name` and removes the file, its line in `memories/MEMORY.md`, and its chunks from the search index, so it stops being findable at once. Every line that is not that pointer survives the rewrite, so hand-written grouping in the index is not collateral damage. If the same name exists in both scopes the tool asks which one rather than guessing — a delete has no undo. There is no `memory_list`, because the index is already in the prefix.
+
 ### CLI commands
 
 ```bash

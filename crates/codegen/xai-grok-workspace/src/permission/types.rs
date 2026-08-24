@@ -287,6 +287,7 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
             // would make "remember this" cost a confirmation every time.
             ToolInput::TodoWrite(_)
             | ToolInput::MemoryWrite(_)
+            | ToolInput::MemoryDelete(_)
             | ToolInput::TaskOutput(_)
             | ToolInput::WaitTasks(_)
             | ToolInput::KillTask(_)

@@ -87,3 +87,23 @@ pub struct MemoryWriteOutput {
     /// Confirmation of what was stored and where.
     pub result: String,
 }
+
+/// Input for the `memory_delete` tool.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct MemoryDeleteInput {
+    /// Name of the memory to remove — the `name.md` on its line in the memory
+    /// index, without the extension. Spaces and capitals are folded the same
+    /// way `memory_write` folds them.
+    pub name: String,
+    /// Which store to remove it from. Omit unless the same name exists in
+    /// both, in which case you will be told to pick one.
+    #[serde(default)]
+    pub scope: Option<crate::types::memory_backend::MemoryWriteScope>,
+}
+
+/// Output schema for `memory_delete` (used for JSON Schema generation only).
+#[derive(Debug, JsonSchema)]
+pub struct MemoryDeleteOutput {
+    /// Confirmation of what was removed, or why nothing was.
+    pub result: String,
+}

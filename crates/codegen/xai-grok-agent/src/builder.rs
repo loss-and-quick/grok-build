@@ -777,6 +777,9 @@ impl AgentBuilder {
                 tool_config
                     .tools
                     .push((&memory::write_tool::MemoryWriteImpl).into());
+                tool_config
+                    .tools
+                    .push((&memory::delete_tool::MemoryDeleteImpl).into());
             }
             if self.web_search_config.is_enabled() {
                 use xai_grok_tools::implementations::grok_build;
@@ -822,21 +825,17 @@ impl AgentBuilder {
         }
         if self.memory_backend.is_none() {
             let grok_build_ns = xai_grok_tools::types::tool::ToolNamespace::GrokBuild.to_string();
-            let mem_search_id = format!(
-                "{grok_build_ns}:{}",
-                xai_grok_tools::implementations::memory::MEMORY_SEARCH_TOOL_NAME
-            );
-            let mem_get_id = format!(
-                "{grok_build_ns}:{}",
-                xai_grok_tools::implementations::memory::MEMORY_GET_TOOL_NAME
-            );
-            let mem_write_id = format!(
-                "{grok_build_ns}:{}",
-                xai_grok_tools::implementations::memory::MEMORY_WRITE_TOOL_NAME
-            );
-            tool_config.tools.retain(|tc| {
-                tc.id != mem_search_id && tc.id != mem_get_id && tc.id != mem_write_id
-            });
+            use xai_grok_tools::implementations::memory;
+            let memory_ids: Vec<String> = [
+                memory::MEMORY_SEARCH_TOOL_NAME,
+                memory::MEMORY_GET_TOOL_NAME,
+                memory::MEMORY_WRITE_TOOL_NAME,
+                memory::MEMORY_DELETE_TOOL_NAME,
+            ]
+            .iter()
+            .map(|name| format!("{grok_build_ns}:{name}"))
+            .collect();
+            tool_config.tools.retain(|tc| !memory_ids.contains(&tc.id));
         }
         if !self.ask_user_question_enabled {
             let ask_user_id = format!(

@@ -3,12 +3,19 @@
 //! - `memory_search` — search indexed memory for relevant chunks
 //! - `memory_get` — read a specific memory file by path
 //! - `memory_write` — save one fact at the model's own request
+//! - `memory_delete` — remove one saved fact
+//!
+//! There is deliberately no `memory_list`. The index — one pointer line per
+//! entry — rides in the `<user_info>` prefix of every request, so a list tool
+//! would spend a call restating what the model is already looking at.
 
+pub mod delete_tool;
 pub mod get_tool;
 pub mod search_tool;
 pub mod types;
 pub mod write_tool;
 
+pub use delete_tool::MemoryDeleteImpl;
 pub use get_tool::MemoryGetImpl;
 pub use search_tool::MemorySearchImpl;
 pub use write_tool::MemoryWriteImpl;
@@ -25,6 +32,9 @@ pub const MEMORY_GET_TOOL_NAME: &str = "memory_get";
 /// Registered name of the `memory_write` tool.
 pub const MEMORY_WRITE_TOOL_NAME: &str = "memory_write";
 
+/// Registered name of the `memory_delete` tool.
+pub const MEMORY_DELETE_TOOL_NAME: &str = "memory_delete";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,6 +48,11 @@ mod tests {
         assert_eq!(MEMORY_SEARCH_TOOL_NAME, "memory_search");
         assert_eq!(MEMORY_GET_TOOL_NAME, "memory_get");
         assert_eq!(MEMORY_WRITE_TOOL_NAME, "memory_write");
+        assert_eq!(MEMORY_DELETE_TOOL_NAME, "memory_delete");
+        assert_eq!(
+            xai_tool_runtime::Tool::id(&MemoryDeleteImpl).to_string(),
+            MEMORY_DELETE_TOOL_NAME
+        );
         assert_eq!(
             xai_tool_runtime::Tool::id(&MemorySearchImpl).to_string(),
             MEMORY_SEARCH_TOOL_NAME
@@ -52,13 +67,15 @@ mod tests {
         );
     }
 
-    /// `memory_write` mutates; the other two must stay read-only. A regression
-    /// either way changes which capability modes and subagents can call them.
+    /// `memory_write` and `memory_delete` mutate; the other two must stay
+    /// read-only. A regression either way changes which capability modes and
+    /// subagents can call them.
     #[test]
-    fn only_the_write_tool_is_mutating() {
+    fn only_the_mutating_tools_are_mutating() {
         use crate::types::tool::ToolKind;
         assert!(ToolKind::MemorySearch.is_read_only());
         assert!(ToolKind::MemoryGet.is_read_only());
         assert!(!ToolKind::MemoryWrite.is_read_only());
+        assert!(!ToolKind::MemoryDelete.is_read_only());
     }
 }

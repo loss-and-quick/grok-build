@@ -156,7 +156,9 @@ Ask Grok to forget something, and it finds and removes the matching entry:
 > forget the snake_case convention
 ```
 
-Forget is best-effort: the model searches memory and removes entries that match. For guaranteed removal, edit the files under `~/.grok/memory/` directly and delete the entry yourself. To locate a file, open the `/memory` browser and press `y` to copy its path.
+For a single-fact entry -- one of the files under a `memories/` directory, listed in the memory index -- this is exact: Grok removes the file, drops its line from the index, and drops its chunks from the search index, so it stops coming back the moment it is gone. If the same name exists in both the global and the project store, Grok asks which one you meant rather than guessing.
+
+For prose written into a `MEMORY.md` by `/flush` or `/dream`, forgetting stays best-effort: the model searches and rewrites what matches. For guaranteed removal there, edit the file under `~/.grok/memory/` yourself. To locate one, open the `/memory` browser and press `y` to copy its path.
 
 ### Recall
 
@@ -287,9 +289,13 @@ Search memory for "auth middleware patterns"
 Read my workspace MEMORY.md
 ```
 
-The model has access to two memory tools:
+The model has access to four memory tools:
 - `memory_search` -- Hybrid search across all memory (vector + full-text)
 - `memory_get` -- Read a specific memory file by path
+- `memory_write` -- Save one fact as its own entry, and add it to the index
+- `memory_delete` -- Remove one entry, its index line, and its search chunks
+
+There is no `memory_list`: the index of your entries is already in the session prefix (see The Memory Index above), so listing it back would restate what the model is looking at.
 
 ### Hybrid Scoring
 

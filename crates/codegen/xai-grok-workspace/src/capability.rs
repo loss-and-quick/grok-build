@@ -91,6 +91,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::MemorySearch,
     ToolKind::MemoryGet,
     ToolKind::MemoryWrite,
+    ToolKind::MemoryDelete,
     ToolKind::Task,
     ToolKind::EnterPlan,
     ToolKind::ExitPlan,
@@ -151,7 +152,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         // Writes nothing in the workspace, but does persist across sessions, so
         // it sits with the edit class rather than the read class: a read-only
         // agent must not leave state behind for later ones to act on.
-        MemoryWrite => matches!(mode, M::ReadWrite),
+        MemoryWrite | MemoryDelete => matches!(mode, M::ReadWrite),
 
         // Bash / shell.
         Execute => matches!(mode, M::Execute),

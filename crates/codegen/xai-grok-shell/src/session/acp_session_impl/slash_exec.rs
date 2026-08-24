@@ -772,21 +772,17 @@ impl SessionActor {
                         "Memory cannot be enabled (not configured for this session).".to_owned()
                     }
                 } else if !enabled && self.memory.is_enabled() {
+                    use xai_grok_tools::implementations::memory;
                     let bridge = self.agent.borrow().tool_bridge().clone();
-                    if !bridge.unregister_tool_by_name(
-                        xai_grok_tools::implementations::memory::MEMORY_SEARCH_TOOL_NAME,
-                    ) {
-                        tracing::debug!("memory_search tool was not registered during unregister");
-                    }
-                    if !bridge.unregister_tool_by_name(
-                        xai_grok_tools::implementations::memory::MEMORY_GET_TOOL_NAME,
-                    ) {
-                        tracing::debug!("memory_get tool was not registered during unregister");
-                    }
-                    if !bridge.unregister_tool_by_name(
-                        xai_grok_tools::implementations::memory::MEMORY_WRITE_TOOL_NAME,
-                    ) {
-                        tracing::debug!("memory_write tool was not registered during unregister");
+                    for name in [
+                        memory::MEMORY_SEARCH_TOOL_NAME,
+                        memory::MEMORY_GET_TOOL_NAME,
+                        memory::MEMORY_WRITE_TOOL_NAME,
+                        memory::MEMORY_DELETE_TOOL_NAME,
+                    ] {
+                        if !bridge.unregister_tool_by_name(name) {
+                            tracing::debug!("{name} tool was not registered during unregister");
+                        }
                     }
                     *self.memory.storage.borrow_mut() = None;
                     *self.memory.search_counter.borrow_mut() = None;

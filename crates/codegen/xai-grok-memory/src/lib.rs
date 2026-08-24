@@ -47,7 +47,7 @@ pub mod text_utils;
 pub mod watcher;
 
 pub use backend::{EndpointScopedCredentials, MemoryBackendImpl, MemoryBackendParams};
-pub use entry::{EntryError, EntryType, MemoryEntry, WrittenEntry};
+pub use entry::{DeletedEntry, EntryError, EntryType, MemoryEntry, WrittenEntry};
 pub use index::{MemoryIndex, init_sqlite_vec};
 pub use storage::{MemoryScope, MemoryStorage};
 

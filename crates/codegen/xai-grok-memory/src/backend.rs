@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use xai_grok_tools::types::memory_backend::{
-    MemoryBackend, MemoryEntryType, MemorySearchResult, MemoryWriteOutcome, MemoryWriteRequest,
-    MemoryWriteScope,
+    MemoryBackend, MemoryDeleteOutcome, MemoryDeleteRequest, MemoryEntryType, MemorySearchResult,
+    MemoryWriteOutcome, MemoryWriteRequest, MemoryWriteScope,
 };
 
 use super::embedding::EmbeddingProvider as _;
@@ -692,6 +692,74 @@ impl MemoryBackend for MemoryBackendImpl {
             scope: scope_label(written.scope),
             created: written.created,
             indexed_chunks,
+        })
+    }
+
+    #[tracing::instrument(name = "memory.delete", skip_all, fields(session_id = %self.session_id))]
+    async fn delete(
+        &self,
+        request: MemoryDeleteRequest,
+    ) -> Result<MemoryDeleteOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        let scope = match request.scope {
+            Some(MemoryWriteScope::Global) => MemoryScope::Global,
+            Some(MemoryWriteScope::Project) => MemoryScope::Workspace,
+            // Unqualified: resolve only when the answer is unambiguous. A name
+            // in both scopes is two entries, and picking one is a coin flip
+            // with no undo.
+            None => match self.storage.entry_scopes(&request.name).as_slice() {
+                [] => return Ok(MemoryDeleteOutcome::NotFound),
+                [only] => *only,
+                _ => return Ok(MemoryDeleteOutcome::Ambiguous),
+            },
+        };
+
+        let Some(deleted) = self.storage.delete_entry(scope, &request.name)? else {
+            return Ok(MemoryDeleteOutcome::NotFound);
+        };
+
+        // Drop the entry's chunks and refresh the index file's, inline for the
+        // same reason `write` indexes inline: a search later in this turn must
+        // not still be handing back what was just removed.
+        let mut removed_chunks = 0usize;
+        let embed_dims = self.embed_config.as_ref().map_or(1024, |ec| ec.dimensions);
+        match super::index::MemoryIndex::open_or_create(
+            &self.db_path,
+            self.storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            embed_dims,
+        ) {
+            Ok(mut index) => {
+                removed_chunks = index.delete_path(&deleted.path).unwrap_or(0);
+                if deleted.index_path.is_file() {
+                    let source = self.storage.classify_source(&deleted.index_path);
+                    let _ = index.reindex_file(&deleted.index_path, source);
+                } else {
+                    removed_chunks += index.delete_path(&deleted.index_path).unwrap_or(0);
+                }
+            }
+            Err(e) => {
+                // The file is gone; the watcher's delete handling will catch up.
+                // Losing same-turn accuracy must not fail the delete itself.
+                tracing::warn!(
+                    target: xai_grok_telemetry::memory_log::TARGET,
+                    error = %e,
+                    "MEMORY_DELETE: could not open index, deferring to watcher sync"
+                );
+            }
+        }
+
+        tracing::info!(
+            target: xai_grok_telemetry::memory_log::TARGET,
+            scope = ?deleted.scope,
+            removed_chunks,
+            "MEMORY_DELETE: removed entry"
+        );
+
+        Ok(MemoryDeleteOutcome::Deleted {
+            path: deleted.path.display().to_string(),
+            scope: scope_label(deleted.scope),
+            description: deleted.description,
+            removed_chunks,
         })
     }
 
@@ -1557,6 +1625,132 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("over the"), "got: {err}");
         assert!(!global.join("test_ws").join("memories").exists());
+    }
+
+    fn delete_request(name: &str) -> MemoryDeleteRequest {
+        MemoryDeleteRequest {
+            name: name.to_string(),
+            scope: None,
+        }
+    }
+
+    /// The mirror of `write_is_searchable_without_a_watcher_sync`. A memory the
+    /// model was told it deleted, still coming back from search for the rest of
+    /// the session, is the wrong fact surviving its own correction.
+    #[tokio::test]
+    async fn delete_stops_the_entry_being_searchable_in_the_same_turn() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let global = tmp.path().join("memory");
+        let storage = MemoryStorage::with_paths(global.clone(), global.join("test_ws"));
+        let backend = MemoryBackendImpl::new(tmp.path().join("delete.sqlite"), storage);
+
+        backend
+            .write(write_request(
+                "zeppelin-protocol",
+                "How the zeppelin handshake is negotiated.",
+                "The zeppelin handshake retries three times before failing.",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            !backend
+                .search("zeppelin handshake", 10, 0.0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let outcome = backend
+            .delete(delete_request("zeppelin-protocol"))
+            .await
+            .unwrap();
+        let MemoryDeleteOutcome::Deleted {
+            scope,
+            description,
+            removed_chunks,
+            ..
+        } = outcome
+        else {
+            panic!("expected a delete, got {outcome:?}");
+        };
+        assert_eq!(scope, "project");
+        assert_eq!(
+            description.as_deref(),
+            Some("How the zeppelin handshake is negotiated."),
+            "the hook comes back so the caller can say what it removed"
+        );
+        assert!(removed_chunks > 0, "chunks must be dropped inline");
+
+        let results = backend.search("zeppelin handshake", 10, 0.0).await.unwrap();
+        assert!(
+            !results
+                .iter()
+                .any(|r| r.snippet.contains("zeppelin handshake retries")),
+            "deleted entry must not survive in the index: {results:?}"
+        );
+    }
+
+    /// A name in both stores is two entries. Picking one would destroy the
+    /// other half of the time, with no undo.
+    #[tokio::test]
+    async fn an_unqualified_delete_refuses_when_both_scopes_match() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let global = tmp.path().join("memory");
+        let storage = MemoryStorage::with_paths(global.clone(), global.join("test_ws"));
+        let backend = MemoryBackendImpl::new(tmp.path().join("delete.sqlite"), storage);
+
+        let mut req = write_request("a-fact", "hook", "body");
+        req.scope = Some(MemoryWriteScope::Global);
+        backend.write(req).await.unwrap();
+        let mut req = write_request("a-fact", "hook", "body");
+        req.scope = Some(MemoryWriteScope::Project);
+        backend.write(req).await.unwrap();
+
+        assert!(matches!(
+            backend.delete(delete_request("a-fact")).await.unwrap(),
+            MemoryDeleteOutcome::Ambiguous
+        ));
+
+        // An explicit scope resolves it, and leaves the other alone.
+        let outcome = backend
+            .delete(MemoryDeleteRequest {
+                name: "a-fact".into(),
+                scope: Some(MemoryWriteScope::Project),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            MemoryDeleteOutcome::Deleted {
+                scope: "project",
+                ..
+            }
+        ));
+        assert!(matches!(
+            backend.delete(delete_request("a-fact")).await.unwrap(),
+            MemoryDeleteOutcome::Deleted {
+                scope: "global",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn deleting_what_is_not_there_reports_rather_than_errors() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let global = tmp.path().join("memory");
+        let storage = MemoryStorage::with_paths(global.clone(), global.join("test_ws"));
+        let backend = MemoryBackendImpl::new(tmp.path().join("delete.sqlite"), storage);
+        assert!(matches!(
+            backend
+                .delete(delete_request("never-existed"))
+                .await
+                .unwrap(),
+            MemoryDeleteOutcome::NotFound
+        ));
     }
 
     /// If credentials approved for one endpoint are used to build against a
