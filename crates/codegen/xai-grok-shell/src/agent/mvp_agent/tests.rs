@@ -5926,3 +5926,63 @@ mod soft_default_settings_emit {
 }
 #[cfg(feature = "dhat-heap")]
 mod dhat_soak;
+
+/// A signed-in session picking a `[[provider]]` model. The entry carries no
+/// key of its own — a plugin mints its bearer — so `resolve_credentials` falls
+/// through to the session token, which belongs only at the endpoint this
+/// deployment mints against. It must not ride to the provider's host.
+#[tokio::test(flavor = "current_thread")]
+async fn provider_model_without_own_key_takes_no_session_credential() {
+    use crate::agent::config::Config as AgentConfig;
+    use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
+    let temp_dir = tempfile::tempdir().unwrap();
+    let auth_manager = std::sync::Arc::new(AuthManager::new(
+        temp_dir.path(),
+        GrokComConfig::default(),
+    ));
+    auth_manager.hot_swap(GrokAuth {
+        key: "session-token".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt".into()),
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let agent = MvpAgent::new(
+        GatewaySender::new(tx),
+        &AgentConfig::default(),
+        auth_manager,
+        None,
+    )
+    .expect("valid test config");
+    agent.set_auth_method(acp::AuthMethodId::new("cached_token"));
+
+    let raw: toml::Value = toml::from_str(
+        r#"
+        [[provider]]
+        id = "acme"
+        base_url = "https://acme.example/v1"
+        auth_account = "work"
+        models = ["m-one"]
+        "#,
+    )
+    .expect("toml should parse");
+    let cfg = AgentConfig::new_from_toml_cfg(&raw).expect("config should parse");
+    let models = crate::agent::config::resolve_model_list(&cfg, None);
+    let provider_entry = models.get("acme/m-one").expect("provider entry synthesized");
+    let sampling = agent.prepare_sampling_config_for_model(provider_entry, None);
+    assert_eq!(
+        sampling.api_key, None,
+        "the session token must not be attached to a provider endpoint"
+    );
+
+    // Control: a first-party model on the same session still gets it, so the
+    // guard is about the endpoint and not about the missing per-model key.
+    let first_party = crate::agent::config::default_model_entries(&cfg.endpoints);
+    let (_key, entry) = first_party
+        .into_iter()
+        .next()
+        .expect("built-in catalog is non-empty");
+    let sampling = agent.prepare_sampling_config_for_model(&entry, None);
+    assert_eq!(sampling.api_key.as_deref(), Some("session-token"));
+}

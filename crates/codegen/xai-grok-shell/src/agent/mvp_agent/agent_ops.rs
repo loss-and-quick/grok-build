@@ -2257,6 +2257,31 @@ impl MvpAgent {
                 ),
             );
         }
+        // `resolve_credentials` falls through to the session token, and then to
+        // `XAI_API_KEY`, for any entry carrying neither its own key nor an auth
+        // provider — its doc comment says callers must guard that. A
+        // `[[provider]]` whose bearer a credential plugin mints, or a
+        // `[model.*]` table whose `env_key` is unset, is exactly such an entry
+        // on a third-party host, so the fall-through would put a first-party
+        // credential on the wire to it. Drop it instead: the endpoint's own
+        // bearer is attached later, by the custom-provider resolver.
+        if !model.has_own_credentials()
+            && !crate::agent::config::endpoint_takes_session_credential(
+                &self.cfg.borrow().endpoints,
+                &credentials.base_url,
+            )
+        {
+            if credentials.api_key.is_some() {
+                tracing::warn!(
+                    model = model.info().model.as_str(),
+                    base_url = credentials.base_url.as_str(),
+                    "auth: model carries no credential of its own and its endpoint is not one \
+                     the session credential was minted for; sending no first-party credential",
+                );
+            }
+            credentials.api_key = None;
+            credentials.auth_type = xai_chat_state::AuthType::ApiKey;
+        }
         let cfg = self.cfg.borrow();
         let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
         let client_version = cfg.client_version.clone();
