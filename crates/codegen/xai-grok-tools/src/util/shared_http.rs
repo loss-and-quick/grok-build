@@ -81,6 +81,10 @@ fn headers_fingerprint(headers: &reqwest::header::HeaderMap) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "these clients only key the cache; none of them issues a request"
+)]
 mod tests {
     use super::*;
     use reqwest::header::{HeaderMap, HeaderValue};

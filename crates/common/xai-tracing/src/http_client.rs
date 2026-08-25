@@ -73,6 +73,10 @@ impl Middleware for TracingMiddleware {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "wiremock talks to localhost, so the grok TLS policy has nothing to enforce"
+)]
 mod tests {
     use super::*;
     use crate::testing::{OtelTestEnv, otel_span_id_hex, otel_trace_id_hex, parse_traceparent};
