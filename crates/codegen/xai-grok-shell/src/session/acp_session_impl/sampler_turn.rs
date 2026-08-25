@@ -259,31 +259,38 @@ async fn refresh_custom_provider_credential(
 struct SessionTokenAuthGate {
     is_session_based: bool,
     model_byok: crate::agent::auth_method::ModelByok,
-    /// Whether the request targets a first-party host. Lets an `Unknown`
-    /// BYOK status still refresh against cli-chat-proxy / `*.x.ai` without
-    /// risking a session-token leak to a third-party BYOK endpoint.
-    endpoint_is_first_party: bool,
+    /// Whether the session's own credential belongs at the endpoint this
+    /// request targets — a first-party host, or the endpoint this deployment
+    /// mints its session against. Every BYOK status but `Byok` is gated on it,
+    /// so neither an `Unknown` status nor a `[[provider]]` entry's `NotByok`
+    /// can put the session bearer on a third-party host.
+    endpoint_takes_session_credential: bool,
 }
 impl SessionTokenAuthGate {
-    /// Single place `is_session_based` / `endpoint_is_first_party` are derived,
-    /// so all call sites assemble the gate identically.
+    /// Single place the gate inputs are derived, so all call sites assemble it
+    /// identically. `facts` carries the deployment's inference endpoint from
+    /// the same memoized config load that produced `byok`.
     fn new(
         auth_method_id: Option<&acp::AuthMethodId>,
-        model_byok: crate::agent::auth_method::ModelByok,
+        facts: &crate::agent::config::ModelAuthFacts,
         base_url: &str,
     ) -> Self {
         Self {
             is_session_based: auth_method_id
                 .is_some_and(crate::agent::auth_method::is_session_based_method),
-            model_byok,
-            endpoint_is_first_party: crate::util::is_xai_api_url(base_url),
+            model_byok: facts.byok,
+            // `is_xai_api_url`, not the stricter bearer form, for the
+            // first-party half: a loopback cli-chat-proxy is a first-party
+            // route that must keep refreshing.
+            endpoint_takes_session_credential: crate::util::is_xai_api_url(base_url)
+                || facts.session_inference_base_url.as_deref() == Some(base_url),
         }
     }
     fn active(self) -> bool {
         crate::agent::auth_method::session_token_auth_gate(
             self.is_session_based,
             self.model_byok,
-            self.endpoint_is_first_party,
+            self.endpoint_takes_session_credential,
         )
     }
 }
@@ -576,9 +583,9 @@ impl SessionActor {
     /// (`base_url` keeps an `Unknown` BYOK status refreshable only
     /// against first-party xAI hosts).
     fn auth_gate(&self, model_id: &str, base_url: &str) -> SessionTokenAuthGate {
-        let byok = self.model_auth_facts(model_id).byok;
+        let facts = self.model_auth_facts(model_id);
         let auth_method = self.auth_method_id.load();
-        SessionTokenAuthGate::new(auth_method.as_deref(), byok, base_url)
+        SessionTokenAuthGate::new(auth_method.as_deref(), &facts, base_url)
     }
     /// Emit a unified-log breadcrumb whenever the session-token refresh gate is
     /// evaluated with an **`Unknown`** per-model BYOK status on a session-based
@@ -599,7 +606,7 @@ impl SessionActor {
             "site": site,
             "model_byok": gate.model_byok.as_str(),
             "is_session_based": gate.is_session_based,
-            "endpoint_is_first_party": gate.endpoint_is_first_party,
+            "endpoint_takes_session_credential": gate.endpoint_takes_session_credential,
             "refresh_active": refresh_active,
             "base_url": base_url,
         });
@@ -656,8 +663,7 @@ impl SessionActor {
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
         let auth_method = self.auth_method_id.load();
-        let gate =
-            SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
+        let gate = SessionTokenAuthGate::new(auth_method.as_deref(), &model_facts, &cfg.base_url);
         let use_bearer_resolver = gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
@@ -1340,7 +1346,7 @@ impl SessionActor {
                     session_id = %self.session_info.id.0,
                     is_session_based = gate.is_session_based,
                     model_byok = gate.model_byok.as_str(),
-                    endpoint_is_first_party = gate.endpoint_is_first_party,
+                    endpoint_takes_session_credential = gate.endpoint_takes_session_credential,
                     "auth recovery: sampler 401 not refreshable (api-key auth) — surfacing 401",
                 );
                 xai_grok_telemetry::unified_log::warn(
@@ -1351,7 +1357,7 @@ impl SessionActor {
                         "status_code": error.status_code,
                         "is_session_based": gate.is_session_based,
                         "model_byok": gate.model_byok.as_str(),
-                        "endpoint_is_first_party": gate.endpoint_is_first_party,
+                        "endpoint_takes_session_credential": gate.endpoint_takes_session_credential,
                     })),
                 );
             }

@@ -5264,6 +5264,33 @@ pub(crate) struct ModelAuthFacts {
     /// would reach every auxiliary call and miss the main turn — the one that
     /// matters most.
     pub max_concurrent: Option<NonZeroUsize>,
+    /// The endpoint this deployment's session credential was minted against
+    /// ([`EndpointsConfig::resolve_inference_base_url`]). Rides here because
+    /// reading it costs a full config load and the turn path already pays for
+    /// one to fill this struct; `None` when that load failed.
+    ///
+    /// [`crate::agent::auth_method::session_token_auth_gate`] needs it to tell
+    /// a self-hosted deployment on a custom `models_base_url` — where the
+    /// session credential belongs — from a `[[provider]]` endpoint, where it
+    /// does not.
+    pub session_inference_base_url: Option<String>,
+}
+/// Whether the session's own credential may be attached at `base_url`: a
+/// first-party xAI bearer host, or the inference endpoint this deployment's
+/// session was minted against (`[endpoints] models_base_url`, else the
+/// cli-chat-proxy).
+///
+/// This is [`session_credential_covers`]'s provenance question asked about the
+/// session's own bearer, which declares no minting endpoint of its own: a
+/// third-party `[[provider]]` / `[model.*]` endpoint is never covered, while
+/// the deployment's own endpoint still is. Asking only "is this host xAI's"
+/// would strand every self-hosted deployment.
+pub(crate) fn endpoint_takes_session_credential(
+    endpoints: &EndpointsConfig,
+    base_url: &str,
+) -> bool {
+    crate::util::is_xai_api_bearer_url(base_url)
+        || base_url == endpoints.resolve_inference_base_url()
 }
 /// Resolve `model_id` to its auth facts and auth-provider reference from one
 /// effective-config load; both ride the same memo (see
@@ -5283,11 +5310,12 @@ pub(crate) fn resolve_model_auth_facts_and_provider(
                 auth_account: None,
                 thinking: None,
                 max_concurrent: None,
+                session_inference_base_url: None,
             },
             None,
         );
     }
-    with_resolved_model(model_id, |lookup| {
+    with_resolved_model(model_id, |lookup, endpoints| {
         let facts = ModelAuthFacts {
             byok: byok_from_lookup(&lookup),
             auth_scheme: match lookup {
@@ -5310,6 +5338,7 @@ pub(crate) fn resolve_model_auth_facts_and_provider(
                 ModelLookup::Loaded(Some(e)) => e.info().max_concurrent,
                 _ => None,
             },
+            session_inference_base_url: endpoints.map(EndpointsConfig::resolve_inference_base_url),
         };
         let provider = match lookup {
             ModelLookup::Loaded(Some(e)) => e.effective_auth_provider().cloned(),
@@ -5333,21 +5362,31 @@ enum ModelLookup<'a> {
 /// Load + parse the effective config and hand the `model_id` lookup to `f`,
 /// keeping "config unavailable" distinct from "model absent" so callers can
 /// stay conservative on a transient config failure.
-fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T {
+///
+/// `f` also receives the resolved `[endpoints]` table, so a caller can answer
+/// endpoint questions from the same load rather than paying for a second one;
+/// it is `None` exactly when the lookup is `ConfigUnavailable`.
+fn with_resolved_model<T>(
+    model_id: &str,
+    f: impl FnOnce(ModelLookup, Option<&EndpointsConfig>) -> T,
+) -> T {
     let Some(raw) = crate::config::load_effective_config()
         .map_err(|e| tracing::warn!(error = %e, "config load failed for model auth lookup"))
         .ok()
     else {
-        return f(ModelLookup::ConfigUnavailable);
+        return f(ModelLookup::ConfigUnavailable, None);
     };
     let Some(cfg) = Config::new_from_toml_cfg(&raw)
         .map_err(|e| tracing::warn!(error = %e, "config parse failed for model auth lookup"))
         .ok()
     else {
-        return f(ModelLookup::ConfigUnavailable);
+        return f(ModelLookup::ConfigUnavailable, None);
     };
     let models = resolve_model_list(&cfg, None);
-    f(ModelLookup::Loaded(find_model_by_id(&models, model_id)))
+    f(
+        ModelLookup::Loaded(find_model_by_id(&models, model_id)),
+        Some(&cfg.endpoints),
+    )
 }
 /// Whether an aux catalog entry may be handed a credential by
 /// [`resolve_credentials`], which falls through to the session token and then
@@ -8334,6 +8373,49 @@ reasoning_effort = "low"
             byok_from_lookup(&ModelLookup::Loaded(Some(&session))),
             ModelByok::NotByok,
         );
+    }
+    /// `NotByok` does not mean "a model xAI serves"; it means "an entry
+    /// declaring no key of its own". A `[[provider]]` whose bearer a credential
+    /// plugin mints declares only an `auth_account`, so it synthesizes exactly
+    /// that — `NotByok` on a third-party host — which is why the session-token
+    /// gate cannot treat the classification alone as proof of the endpoint.
+    #[test]
+    fn provider_without_api_key_is_not_byok_off_the_session_endpoint() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [[provider]]
+            id = "acme"
+            base_url = "https://acme.example/v1"
+            auth_account = "work"
+            models = ["m-one"]
+            "#,
+        )
+        .expect("toml should parse");
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        let models = resolve_model_list(&cfg, None);
+        let entry = models
+            .get("acme/m-one")
+            .expect("provider entry synthesized");
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::Loaded(Some(entry))),
+            ModelByok::NotByok,
+        );
+        let takes = endpoint_takes_session_credential(&cfg.endpoints, &entry.info.base_url);
+        assert!(
+            !takes,
+            "a provider endpoint is not where the session bearer belongs"
+        );
+        assert!(!crate::agent::auth_method::session_token_auth_gate(
+            true,
+            ModelByok::NotByok,
+            takes,
+        ));
+        // The other half of the predicate: a self-hosted deployment routes its
+        // own models off `*.x.ai` and must still refresh.
+        assert!(endpoint_takes_session_credential(
+            &cfg.endpoints,
+            &cfg.endpoints.resolve_inference_base_url(),
+        ));
     }
     #[test]
     fn resolve_model_auth_facts_empty_model_id_is_unknown() {

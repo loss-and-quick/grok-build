@@ -442,22 +442,28 @@ impl ModelByok {
 /// a live session to non-refreshable api-key mode: that re-sends the stale
 /// buffered token on every turn and 401s with `bad-credentials` until restart
 /// (the stale-token regression this gate addresses; fall back rather than
-/// demote on `Unknown`). It refreshes when `endpoint_is_first_party` — the
-/// request targets a first-party host (cli-chat-proxy / first-party API),
-/// where sending the session token cannot leak to a third-party BYOK
-/// endpoint. A definite `NotByok` always refreshes (it only ever routes to
-/// the session endpoint); a definite `Byok` never does.
+/// demote on `Unknown`). A definite `Byok` never refreshes — those keys are
+/// not refreshable — and every other status is gated on the endpoint.
+///
+/// `endpoint_takes_session_credential` is the endpoint half, and it applies to
+/// `NotByok` too. `NotByok` means only "this entry declares no key of its
+/// own", which is also true of a `[[provider]]` or `[model.*]` entry whose
+/// bearer a credential plugin mints — a third-party host. Treating that as
+/// "always refresh" attached the live session bearer, and a resolver that
+/// re-attaches it every turn, to that host. The right question is the
+/// provenance one — is this credential the one this endpoint expects — so the
+/// caller answers it with
+/// [`crate::agent::config::endpoint_takes_session_credential`], which accepts
+/// a first-party host **or** the deployment's own inference endpoint and
+/// nothing else.
 pub(crate) fn session_token_auth_gate(
     is_session_based_method: bool,
     model_byok: ModelByok,
-    endpoint_is_first_party: bool,
+    endpoint_takes_session_credential: bool,
 ) -> bool {
     is_session_based_method
-        && match model_byok {
-            ModelByok::NotByok => true,
-            ModelByok::Byok => false,
-            ModelByok::Unknown => endpoint_is_first_party,
-        }
+        && endpoint_takes_session_credential
+        && !matches!(model_byok, ModelByok::Byok)
 }
 
 pub const AUTH_ERROR_SESSION_EXPIRED: &str =

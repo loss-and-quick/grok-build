@@ -757,34 +757,40 @@ fn log_subagent_model_resolution(
 /// `AuthManager` (wire-valid only). Without it the subagent runs forever on
 /// the `api_key` frozen at spawn and 401s once the parent rotates the token.
 /// Gated exactly like the parent session's resolver
-/// (`auth_method::session_token_auth_gate`); all three subagent config paths
-/// go through this.
+/// (`auth_method::session_token_auth_gate`), endpoint half included: a child
+/// routed to a `[[provider]]` endpoint must not be handed a resolver that
+/// re-attaches the parent's xAI bearer on every turn.
 fn session_bearer_resolver(
     ctx: &SubagentSpawnContext,
     byok: crate::agent::auth_method::ModelByok,
     base_url: &str,
+    session_inference_base_url: Option<&str>,
 ) -> Option<xai_grok_sampler::SharedBearerResolver> {
     use crate::agent::auth_method;
     auth_method::session_token_auth_gate(
         auth_method::is_session_based_method(&ctx.auth_method_id),
         byok,
-        crate::util::is_xai_api_url(base_url),
+        crate::util::is_xai_api_url(base_url) || session_inference_base_url == Some(base_url),
     )
     .then(|| {
         crate::auth::credential_provider::WireValidBearerResolver::shared(ctx.auth_manager.clone())
     })
 }
-/// [`session_bearer_resolver`] for an inherited config, where only the model
-/// string is known: BYOK comes from the catalog memo.
-fn inherited_bearer_resolver(
+/// [`session_bearer_resolver`] keyed on a model string: BYOK and the
+/// deployment's own inference endpoint both come from the catalog memo, so
+/// every subagent config path asks the same two questions the parent does.
+fn catalog_bearer_resolver(
     ctx: &SubagentSpawnContext,
     model: &str,
     base_url: &str,
 ) -> Option<xai_grok_sampler::SharedBearerResolver> {
-    let byok = crate::agent::config::resolve_model_auth_facts_and_provider(model)
-        .0
-        .byok;
-    session_bearer_resolver(ctx, byok, base_url)
+    let facts = crate::agent::config::resolve_model_auth_facts_and_provider(model).0;
+    session_bearer_resolver(
+        ctx,
+        facts.byok,
+        base_url,
+        facts.session_inference_base_url.as_deref(),
+    )
 }
 /// Read the parent session's actual current sampling config.
 ///
@@ -850,7 +856,7 @@ async fn read_parent_sampling_config(
                 bearer_resolver: if strip_guard {
                     None
                 } else {
-                    inherited_bearer_resolver(ctx, &cfg.model, &inherited_base_url)
+                    catalog_bearer_resolver(ctx, &cfg.model, &inherited_base_url)
                 },
                 supports_backend_search: ctx
                     .models_manager
@@ -902,7 +908,7 @@ async fn read_parent_sampling_config(
     fallback.bearer_resolver = if ctx.would_strip_fallback_key(fallback.api_key.as_deref()) {
         None
     } else {
-        inherited_bearer_resolver(ctx, &fallback.model, &fallback.base_url)
+        catalog_bearer_resolver(ctx, &fallback.model, &fallback.base_url)
     };
     fallback.supports_backend_search = ctx
         .models_manager
@@ -958,15 +964,7 @@ fn resolve_model_override_to_config(
     config.bearer_resolver = if !ctx.would_strip_fallback_key(config.api_key.as_deref())
         && resolved_auth_type == xai_chat_state::AuthType::SessionToken
     {
-        session_bearer_resolver(
-            ctx,
-            if entry.has_own_credentials() {
-                crate::agent::auth_method::ModelByok::Byok
-            } else {
-                crate::agent::auth_method::ModelByok::NotByok
-            },
-            &config.base_url,
-        )
+        catalog_bearer_resolver(ctx, &entry.info.model, &config.base_url)
     } else {
         None
     };

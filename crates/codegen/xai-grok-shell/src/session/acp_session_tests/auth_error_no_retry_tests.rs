@@ -744,21 +744,25 @@ async fn no_legacy_hint_for_oidc_auth() {
 fn session_token_auth_gate_truth_table() {
     use crate::agent::auth_method::{ModelByok, session_token_auth_gate as gate};
     // Non-session methods never refresh, regardless of BYOK status or endpoint.
-    for fp in [false, true] {
-        assert!(!gate(false, ModelByok::NotByok, fp));
-        assert!(!gate(false, ModelByok::Byok, fp));
-        assert!(!gate(false, ModelByok::Unknown, fp));
-        // Session method: a definite classification ignores the endpoint —
-        // NotByok always refreshes (only ever routes to the session endpoint),
-        // a genuine per-model Byok never does.
-        assert!(gate(true, ModelByok::NotByok, fp));
-        assert!(!gate(true, ModelByok::Byok, fp));
+    // A genuine per-model Byok never refreshes either: those keys are static.
+    for takes in [false, true] {
+        assert!(!gate(false, ModelByok::NotByok, takes));
+        assert!(!gate(false, ModelByok::Byok, takes));
+        assert!(!gate(false, ModelByok::Unknown, takes));
+        assert!(!gate(true, ModelByok::Byok, takes));
     }
-    // Session method + Unknown BYOK: refresh only against a first-party xAI
-    // host, so a transiently-unclassifiable config can't demote a live session
-    // (the stale-token 401 regression) yet the session token never leaks to a
-    // third-party BYOK endpoint. This arm was unconditionally `false` pre-fix.
+    // Session method, on the endpoint the session credential was minted for:
+    // both remaining classifications refresh. `Unknown` must not demote a live
+    // session to non-refreshable api-key mode (the stale-token 401 regression).
+    assert!(gate(true, ModelByok::NotByok, true));
     assert!(gate(true, ModelByok::Unknown, true));
+    // Session method, an endpoint that credential was NOT minted for. The
+    // `NotByok` case is the one this table used to miss: it does not mean "a
+    // model xAI serves", only "an entry declaring no key of its own", which is
+    // equally true of a `[[provider]]` whose bearer a plugin mints. Refreshing
+    // there attached the live session bearer — and a resolver re-attaching it
+    // every turn — to a third-party host.
+    assert!(!gate(true, ModelByok::NotByok, false));
     assert!(!gate(true, ModelByok::Unknown, false));
 }
 
@@ -1039,6 +1043,7 @@ async fn model_auth_memo_serves_cached_status_and_keys_on_model() {
                         auth_account: None,
                         thinking: None,
                         max_concurrent: None,
+                        session_inference_base_url: None,
                     },
                     provider: None,
                 }));
@@ -1048,6 +1053,67 @@ async fn model_auth_memo_serves_cached_status_and_keys_on_model() {
 
             // Different model re-resolves rather than serving the stale `Byok`.
             assert_ne!(actor.model_auth_facts("model-b").byok, ModelByok::Byok);
+        })
+        .await;
+}
+
+/// A signed-in session running on a `[[provider]]` endpoint. The entry declares
+/// no key of its own, so it classifies `NotByok` — which used to mean "always
+/// refresh", handing that third-party host the live xAI session bearer plus a
+/// resolver that re-attached it on every turn.
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_full_config_no_session_bearer_on_a_provider_endpoint() {
+    use crate::agent::auth_method::ModelByok;
+    use crate::agent::config::ModelAuthFacts;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_dir, am) = auth_manager_with_valid_token("live-session-token");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "buffered-session-token".to_string(),
+            )
+            .await;
+
+            let mut cfg = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("test actor has sampling config");
+            cfg.base_url = "https://acme.example/v1".to_string();
+            let model = cfg.model.clone();
+            actor.chat_state_handle.update_sampling_config(cfg);
+            actor
+                .model_auth_memo
+                .replace(Some(crate::session::acp_session::ModelAuthMemo {
+                    model_id: model,
+                    facts: ModelAuthFacts {
+                        byok: ModelByok::NotByok,
+                        auth_scheme: Default::default(),
+                        proxy: None,
+                        auth_account: Some("work".to_string()),
+                        thinking: None,
+                        max_concurrent: None,
+                        // The deployment mints its session against its own
+                        // endpoint, which is not the provider's.
+                        session_inference_base_url: Some("https://api.x.ai/v1".to_string()),
+                    },
+                    provider: None,
+                }));
+
+            let cfg = actor.reconstruct_full_config().await;
+
+            assert!(
+                cfg.bearer_resolver.is_none(),
+                "a provider endpoint must not be handed the session bearer resolver"
+            );
+            assert_ne!(
+                cfg.api_key.as_deref(),
+                Some("live-session-token"),
+                "the live session token must not be attached off the session endpoint"
+            );
         })
         .await;
 }
@@ -1087,6 +1153,7 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
                         auth_account: None,
                         thinking: None,
                         max_concurrent: None,
+                        session_inference_base_url: None,
                     },
                     provider: None,
                 }));
@@ -1139,6 +1206,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                         auth_account: None,
                         thinking: None,
                         max_concurrent: None,
+                        session_inference_base_url: None,
                     },
                     provider: None,
                 }));
@@ -1217,6 +1285,7 @@ async fn seed_provider_memo(actor: &Arc<SessionActor>, provider: crate::auth::Au
                 auth_account: None,
                 thinking: None,
                 max_concurrent: None,
+                session_inference_base_url: None,
             },
             provider: Some(provider),
         }));

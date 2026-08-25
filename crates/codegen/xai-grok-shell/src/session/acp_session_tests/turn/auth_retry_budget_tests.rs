@@ -168,8 +168,9 @@ async fn session_token_actor(
     creds.auth_type = xai_chat_state::AuthType::SessionToken;
     actor.chat_state_handle.update_credentials(creds);
 
-    // Definite NotByok: the session-token gate must stay active against the
-    // loopback mock URL (an `Unknown` would demand a first-party host).
+    // Definite NotByok on the endpoint this session mints against: the
+    // session-token gate must stay active against the loopback mock URL, which
+    // is neither an xAI host nor a first-party bearer URL.
     actor
         .model_auth_memo
         .replace(Some(crate::session::acp_session::ModelAuthMemo {
@@ -181,6 +182,7 @@ async fn session_token_actor(
                 auth_account: None,
                 thinking: None,
                 max_concurrent: None,
+                session_inference_base_url: Some(server.url()),
             },
             provider: None,
         }));

@@ -1880,7 +1880,9 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             user_selectable: true,
             id: None,
             model: model_id.to_string(),
-            base_url: String::new(),
+            // A real catalog entry always names an endpoint, and the
+            // session-token gate is keyed on it.
+            base_url: "https://api.x.ai/v1".to_string(),
             name: None,
             description: None,
             max_completion_tokens: None,
