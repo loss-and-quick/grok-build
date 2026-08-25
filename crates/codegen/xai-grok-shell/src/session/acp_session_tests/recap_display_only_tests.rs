@@ -1486,6 +1486,8 @@ async fn messages_side_calls_preserve_completed_reasoning() {
             let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
             cfg.base_url = server.url();
             cfg.api_backend = xai_grok_sampling_types::ApiBackend::Messages;
+            // The fork refuses a Messages call with no declared output ceiling.
+            cfg.max_completion_tokens = Some(4096);
             cfg.reasoning_effort = Some(ReasoningEffort::High);
             actor.chat_state_handle.update_sampling_config(cfg);
 
@@ -1608,6 +1610,8 @@ async fn messages_side_calls_strip_reasoning_without_supported_thinking_effort()
                 let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
                 cfg.base_url = server.url();
                 cfg.api_backend = xai_grok_sampling_types::ApiBackend::Messages;
+                // The fork refuses a Messages call with no declared output ceiling.
+                cfg.max_completion_tokens = Some(4096);
                 cfg.reasoning_effort = reasoning_effort;
                 actor.chat_state_handle.update_sampling_config(cfg);
 

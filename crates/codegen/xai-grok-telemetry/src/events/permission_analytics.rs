@@ -60,7 +60,10 @@ impl TryFrom<&str> for PermissionPromptOutcome {
             "reject_once"
             | "reject_always_bash"
             | "reject_always_mcp_tool"
-            | "reject_always_domain" => Ok(Self::Reject),
+            | "reject_always_domain"
+            // A `permission_ask` plugin denial is a refusal like any other for the
+            // KPI denominator; the detail enum keeps it distinguishable.
+            | "plugin_deny" => Ok(Self::Reject),
             "cancelled" => Ok(Self::Cancel),
             "followup" => Ok(Self::Followup),
             "error" => Ok(Self::Error),
