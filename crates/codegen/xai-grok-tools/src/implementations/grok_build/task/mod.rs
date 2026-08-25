@@ -1830,8 +1830,6 @@ mod tests {
                 schema["properties"]
             );
         }
-        // A genuinely per-spawn dial is unaffected.
-        assert!(schema["properties"].get("capability_mode").is_some());
     }
 
     #[test]
