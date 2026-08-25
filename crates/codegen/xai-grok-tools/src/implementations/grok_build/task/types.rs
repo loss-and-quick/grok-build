@@ -546,9 +546,22 @@ pub enum SubagentSnapshotStatus {
         worktree_path: Option<String>,
     },
     /// Child session failed or crashed.
-    Failed { error: String },
+    Failed {
+        error: String,
+        /// Work the child got through before it died. Both zero for a spawn
+        /// that failed before the child session ever ran, which is what tells
+        /// a reader whether a transcript worth resuming exists.
+        tool_calls: u32,
+        turns: u32,
+    },
     /// Child session was cancelled (by user or model).
-    Cancelled { reason: Option<String> },
+    Cancelled {
+        reason: Option<String>,
+        /// Work the child got through before it was stopped. See
+        /// [`SubagentSnapshotStatus::Failed`].
+        tool_calls: u32,
+        turns: u32,
+    },
 }
 
 impl SubagentSnapshotStatus {
@@ -1431,6 +1444,8 @@ mod tests {
     fn is_terminal_returns_true_for_failed() {
         let status = super::SubagentSnapshotStatus::Failed {
             error: "boom".into(),
+            tool_calls: 0,
+            turns: 0,
         };
         assert!(status.is_terminal());
     }
@@ -1439,6 +1454,8 @@ mod tests {
     fn is_terminal_returns_true_for_cancelled() {
         let status = super::SubagentSnapshotStatus::Cancelled {
             reason: Some("user".into()),
+            tool_calls: 0,
+            turns: 0,
         };
         assert!(status.is_terminal());
     }

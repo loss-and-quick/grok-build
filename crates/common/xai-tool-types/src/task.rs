@@ -471,6 +471,58 @@ pub fn format_resume_footer(
     footer
 }
 
+/// Whether a subagent that ended unsuccessfully is worth resuming.
+///
+/// A resume replays the source child's transcript into a fresh child, so it
+/// only continues anything when a transcript exists. `tool_calls` / `turns`
+/// are the evidence: a child that died mid-flight (provider limit, stall,
+/// transport error, crash, kill, max turns) carries the counts it reached,
+/// while a spawn that failed before the child session ever ran — unknown
+/// subagent type, persona/role resolution, worktree or persistence error, an
+/// unresolvable `resume_from` — leaves both at zero and has nothing on disk to
+/// copy. Offering a handle in that case buys the caller a second, identical
+/// failure, so the gate stays deliberately conservative: no evidence of work,
+/// no offer.
+pub fn subagent_failure_is_resumable(tool_calls: u32, turns: u32) -> bool {
+    tool_calls > 0 || turns > 0
+}
+
+/// Resume footer for a subagent that stopped before finishing, or `None` when
+/// [`subagent_failure_is_resumable`] says there is no transcript to continue.
+///
+/// Deliberately not the `<subagent_result>` tag of [`format_resume_footer`]:
+/// that tag marks a delivered subagent answer and is scraped as such, and this
+/// child produced none.
+pub fn format_failed_resume_footer(
+    subagent_id: &str,
+    subagent_type: &str,
+    persona: Option<&str>,
+    tool_calls: u32,
+    turns: u32,
+) -> Option<String> {
+    if !subagent_failure_is_resumable(tool_calls, turns) {
+        return None;
+    }
+    let mut footer = format!(
+        "<subagent_resumable>\n\
+         subagent_id: {subagent_id}\n\
+         subagent_type: {subagent_type}\n\
+         This subagent stopped before finishing, but its transcript survives \
+         ({turns} turns, {tool_calls} tool calls). To carry on from where it stopped \
+         instead of starting the task over, call the task tool with \
+         resume_from=\"{subagent_id}\", the same subagent_type, and a prompt saying only \
+         what to do next — its original task is already in the transcript.\n\
+         The resumed run reuses the source's model and working directory."
+    );
+    if let Some(persona) = persona {
+        footer.push_str(&format!(
+            "\nThe subagent used persona=\"{persona}\". Pass the same persona when resuming."
+        ));
+    }
+    footer.push_str("\n</subagent_resumable>");
+    Some(footer)
+}
+
 /// Maximum number of task IDs accepted by a single multi-id `get_task_output`
 /// (or legacy `wait_tasks`) call. Shared by the tool schema, the server-side
 /// fan-out, and the toolbox wait path so the cap cannot drift.
@@ -1084,7 +1136,8 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.\n\n\
          Resuming a previous agent (resume_from):\n\
          - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript and tool state, so you only need to describe what changed since the last run — don't re-explain the original task.\n\
-         - The resumed agent must use the same subagent_type as the source.\n\n\
+         - The resumed agent must use the same subagent_type as the source.\n\
+         - A subagent that stopped before finishing can be resumed the same way, and its transcript is intact — when a failure hands you a subagent_id, resuming continues that work instead of starting the task over.\n\n\
          Isolation mode:\n\
          - Use {isolation_param} to control the child's execution environment. With \"worktree\", the child runs in an isolated git worktree whose edits don't affect the parent workspace; the worktree is preserved after completion and its path is returned in the output."
     );
@@ -1287,6 +1340,37 @@ mod tests {
             status: status.into(),
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn failed_resume_footer_withheld_without_evidence_of_work() {
+        assert!(!subagent_failure_is_resumable(0, 0));
+        assert!(
+            format_failed_resume_footer("sub-1", "explore", None, 0, 0).is_none(),
+            "a spawn that never ran a child has no transcript to resume"
+        );
+    }
+
+    #[test]
+    fn failed_resume_footer_offers_the_id_after_work() {
+        assert!(subagent_failure_is_resumable(3, 0));
+        assert!(subagent_failure_is_resumable(0, 1));
+        let footer = format_failed_resume_footer("sub-1", "explore", None, 3, 1)
+            .expect("a child with tool calls is resumable");
+        assert!(footer.contains("subagent_id: sub-1"));
+        assert!(footer.contains(r#"resume_from="sub-1""#));
+        assert!(footer.contains("3 tool calls"));
+        assert!(
+            !footer.contains("<subagent_result>"),
+            "a failure must not carry the delivered-answer tag"
+        );
+    }
+
+    #[test]
+    fn failed_resume_footer_repeats_the_persona() {
+        let footer = format_failed_resume_footer("sub-1", "explore", Some("skeptic"), 1, 1)
+            .expect("resumable");
+        assert!(footer.contains(r#"persona="skeptic""#));
     }
 
     #[test]

@@ -150,7 +150,7 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 | `background`       | Run the subagent in the background and return immediately with a subagent ID. Defaults to `false`. |
 | `capability_mode` | Restrict the subagent's tools: `read-only`, `read-write`, `execute`, or `all`. |
 | `isolation`       | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
-| `resume_from`     | Continue a completed subagent's conversation. Pass its subagent ID. |
+| `resume_from`     | Continue a finished subagent's conversation, including one that stopped early. Pass its subagent ID. |
 | `cwd`             | Working directory for the subagent. Mutually exclusive with `isolation: worktree`; ignored when `resume_from` is set (the resumed child inherits its source's directory). |
 
 When you run a subagent in the background, retrieve its result later with `get_command_or_subagent_output`.
@@ -181,7 +181,9 @@ The `resume_from` parameter lets a new subagent continue where a completed subag
 1. Spawn a research subagent to investigate a problem.
 2. Spawn a second subagent with `resume_from` set to the first subagent's ID, so it picks up with the full research context.
 
-The new subagent inherits the source's transcript, tool state, and model; its system prompt and tools are re-rendered from the current agent definition. The source must be completed (not running), belong to the current session, and use the same agent type.
+The new subagent inherits the source's transcript, tool state, and model; its system prompt and tools are re-rendered from the current agent definition. The source must be finished (not running), belong to the current session, and use the same agent type.
+
+A subagent that stopped early — a provider limit, a stall, a crash, a kill, or its turn cap — is finished in that sense too, and the work already in its transcript is intact. Its failure carries the resume handle so the parent can carry on instead of restarting the task; a spawn that failed before the child ever ran has no transcript, so no handle is offered.
 
 ### MCP inheritance
 

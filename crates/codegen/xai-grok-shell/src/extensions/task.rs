@@ -318,13 +318,25 @@ impl SubagentSnapshotDto {
                 dto.turns = Some(turns);
                 dto.worktree_path = worktree_path;
             }
-            SubagentSnapshotStatus::Failed { error } => {
+            SubagentSnapshotStatus::Failed {
+                error,
+                tool_calls,
+                turns,
+            } => {
                 dto.status = "failed".into();
                 dto.failure_error = Some(error);
+                dto.tool_calls = Some(tool_calls);
+                dto.turns = Some(turns);
             }
-            SubagentSnapshotStatus::Cancelled { reason } => {
+            SubagentSnapshotStatus::Cancelled {
+                reason,
+                tool_calls,
+                turns,
+            } => {
                 dto.status = "cancelled".into();
                 dto.cancel_reason = reason;
+                dto.tool_calls = Some(tool_calls);
+                dto.turns = Some(turns);
             }
         }
         dto
@@ -641,6 +653,8 @@ mod tests {
             persona: None,
             status: SubagentSnapshotStatus::Failed {
                 error: "sampling error".into(),
+                tool_calls: 4,
+                turns: 2,
             },
         };
         let dto =
@@ -661,6 +675,8 @@ mod tests {
             persona: None,
             status: SubagentSnapshotStatus::Cancelled {
                 reason: Some("user cancelled".into()),
+                tool_calls: 1,
+                turns: 1,
             },
         };
         let dto =
@@ -679,7 +695,11 @@ mod tests {
             started_at_epoch_ms: 0,
             duration_ms: 50,
             persona: None,
-            status: SubagentSnapshotStatus::Cancelled { reason: None },
+            status: SubagentSnapshotStatus::Cancelled {
+                reason: None,
+                tool_calls: 0,
+                turns: 0,
+            },
         };
         let dto =
             SubagentSnapshotDto::from_snapshot(snap, "p".into(), "c".into(), Default::default());

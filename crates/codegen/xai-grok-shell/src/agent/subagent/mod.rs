@@ -2720,8 +2720,16 @@ fn completed_finish_from_inspection(inspection: &SubagentInspection) -> Option<S
         SubagentSnapshotStatus::Completed {
             tool_calls, turns, ..
         } => ("completed", None, *tool_calls, *turns),
-        SubagentSnapshotStatus::Failed { error } => ("failed", Some(error.clone()), 0, 0),
-        SubagentSnapshotStatus::Cancelled { reason } => ("cancelled", reason.clone(), 0, 0),
+        SubagentSnapshotStatus::Failed {
+            error,
+            tool_calls,
+            turns,
+        } => ("failed", Some(error.clone()), *tool_calls, *turns),
+        SubagentSnapshotStatus::Cancelled {
+            reason,
+            tool_calls,
+            turns,
+        } => ("cancelled", reason.clone(), *tool_calls, *turns),
         SubagentSnapshotStatus::Initializing | SubagentSnapshotStatus::Running { .. } => {
             return None;
         }

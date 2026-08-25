@@ -437,6 +437,21 @@ pub fn format_subagent_completion(
         task_output_name,
         None,
     );
+    // A background child is the default, so this notification — not the spawn
+    // call — is where the parent usually learns the child died. Hand over the
+    // resume handle here or it is lost with the turn.
+    if !c.success
+        && let Some(footer) = xai_tool_types::format_failed_resume_footer(
+            &c.subagent_id,
+            &c.subagent_type,
+            None,
+            c.tool_calls,
+            c.turns,
+        )
+    {
+        out.push_str("\n\n");
+        out.push_str(&footer);
+    }
     out
 }
 /// Format buffered between-turn subagent completions into a system-reminder
@@ -473,6 +488,17 @@ pub fn format_between_turn_completions(
             task_output_name,
             None,
         );
+        // One line, not the full footer: this surface is an index of what
+        // happened while the parent was idle, and the poll it points at
+        // carries the rest.
+        if !c.success && xai_tool_types::subagent_failure_is_resumable(c.tool_calls, c.turns) {
+            let _ = write!(
+                buf,
+                "\n  It stopped before finishing; resume_from=\"{}\" continues its \
+                 transcript instead of starting the task over.",
+                c.subagent_id,
+            );
+        }
         buf.push('\n');
     }
     buf
@@ -1713,6 +1739,42 @@ mod tests {
         let c = make_subagent_completion("sub-fail", false);
         let msg = format_subagent_completion(&c, Some("get_task_output"));
         assert!(msg.contains("with failure"));
+    }
+    /// Background is the task tool's default, so this notification is where
+    /// most parents learn a child died — the resume handle has to survive it.
+    #[test]
+    fn format_subagent_completion_failure_carries_the_resume_handle() {
+        let c = make_subagent_completion("sub-fail", false);
+        let msg = format_subagent_completion(&c, Some("get_task_output"));
+        assert!(msg.contains(r#"resume_from="sub-fail""#), "{msg}");
+    }
+    #[test]
+    fn format_subagent_completion_success_has_no_failure_footer() {
+        let c = make_subagent_completion("sub-ok", true);
+        let msg = format_subagent_completion(&c, Some("get_task_output"));
+        assert!(!msg.contains("resume_from"), "{msg}");
+    }
+    #[test]
+    fn format_subagent_completion_failure_without_work_withholds_the_handle() {
+        let mut c = make_subagent_completion("sub-stillborn", false);
+        c.tool_calls = 0;
+        c.turns = 0;
+        let msg = format_subagent_completion(&c, Some("get_task_output"));
+        assert!(
+            !msg.contains("resume_from"),
+            "a spawn that never ran has no transcript to resume: {msg}"
+        );
+    }
+    #[test]
+    fn between_turn_completions_point_a_failure_at_resume() {
+        let mut failed = make_subagent_completion("sub-fail", false);
+        failed.turns = 4;
+        let msg = format_between_turn_completions(
+            &[make_subagent_completion("sub-ok", true), failed],
+            Some("get_task_output"),
+        );
+        assert!(msg.contains(r#"resume_from="sub-fail""#), "{msg}");
+        assert!(!msg.contains(r#"resume_from="sub-ok""#), "{msg}");
     }
     #[test]
     fn format_subagent_completion_inlines_output_when_no_poll_tool() {

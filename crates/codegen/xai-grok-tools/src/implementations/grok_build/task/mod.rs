@@ -646,11 +646,23 @@ impl xai_tool_runtime::Tool for TaskTool {
                 persona_hint,
             }))
         } else {
-            Err(xai_tool_runtime::ToolError::invalid_arguments(
-                result
-                    .error
-                    .unwrap_or_else(|| "Unknown subagent error".to_string()),
-            ))
+            // A child that died mid-flight still owns a transcript, and the
+            // parent's only handle on it is this id — dropping it here is what
+            // turns a recoverable stall into a restart from zero.
+            let mut message = result
+                .error
+                .unwrap_or_else(|| "Unknown subagent error".to_string());
+            if let Some(footer) = xai_tool_types::format_failed_resume_footer(
+                &result.subagent_id,
+                &input.subagent_type,
+                None,
+                result.tool_calls,
+                result.turns,
+            ) {
+                message.push_str("\n\n");
+                message.push_str(&footer);
+            }
+            Err(xai_tool_runtime::ToolError::invalid_arguments(message))
         }
     }
 }
@@ -975,6 +987,66 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Child session crashed"), "error: {err}");
+        assert!(
+            !err.contains("resume_from"),
+            "a child that never ran has no transcript to resume: {err}"
+        );
+    }
+
+    /// A child killed mid-flight must hand its id back: that id is the only
+    /// way the parent can continue the work already in the transcript.
+    #[tokio::test]
+    async fn failed_subagent_with_work_done_offers_the_resume_handle() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(0));
+        resources.insert(SessionIdResource("parent-session".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
+
+        let tool = TaskTool;
+        let shared = resources.into_shared();
+
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            request
+                .respond_with(|boxed| SubagentResult {
+                    success: false,
+                    error: Some("Session error: provider rate limit".to_string()),
+                    subagent_id: boxed.id.clone(),
+                    tool_calls: 12,
+                    turns: 3,
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(shared),
+            TaskToolInput {
+                description: "test task".into(),
+                prompt: "do something".into(),
+                subagent_type: "explore".into(),
+                run_in_background: false,
+                capability_mode: None,
+                isolation: None,
+                resume_from: None,
+                cwd: None,
+                model: None,
+                reasoning_effort: None,
+                task_id: None,
+            },
+        )
+        .await;
+
+        handle.await.unwrap();
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("provider rate limit"), "error: {err}");
+        assert!(err.contains("resume_from="), "error: {err}");
+        assert!(err.contains("12 tool calls"), "error: {err}");
+        assert!(err.contains("explore"), "error: {err}");
     }
 
     #[tokio::test]

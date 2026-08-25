@@ -621,6 +621,28 @@ fn render_legacy_task_output_not_found(task_id: &str) -> String {
     format!("Task {} not found", task_id)
 }
 
+/// Append the resume handle to a polled subagent that ended badly, when the
+/// child left a transcript to continue. A backgrounded child is the default,
+/// so this poll — not the spawn call's return value — is where most parents
+/// learn their child died.
+fn append_failed_resume_footer(
+    output: &mut String,
+    snap: &SubagentSnapshot,
+    tool_calls: u32,
+    turns: u32,
+) {
+    if let Some(footer) = xai_tool_types::format_failed_resume_footer(
+        &snap.subagent_id,
+        &snap.subagent_type,
+        snap.persona.as_deref(),
+        tool_calls,
+        turns,
+    ) {
+        output.push_str("\n\n");
+        output.push_str(&footer);
+    }
+}
+
 fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> TaskOutputOutput {
     let started = format_epoch_ms_as_rfc3339(snap.started_at_epoch_ms);
     match &snap.status {
@@ -736,8 +758,14 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
                 raw_output_bytes,
             })
         }
-        SubagentSnapshotStatus::Failed { error } => {
-            let raw_output_bytes = error.len();
+        SubagentSnapshotStatus::Failed {
+            error,
+            tool_calls,
+            turns,
+        } => {
+            let mut output = error.clone();
+            append_failed_resume_footer(&mut output, snap, *tool_calls, *turns);
+            let raw_output_bytes = output.len();
             TaskOutputOutput::Result(TaskOutputResult {
                 task_id: snap.subagent_id.clone(),
                 command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
@@ -748,17 +776,22 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
                     snap.started_at_epoch_ms + snap.duration_ms,
                 )),
                 duration_secs: snap.duration_ms as f64 / 1000.0,
-                output: error.clone(),
+                output,
                 output_file: String::new(),
                 truncated: false,
                 truncation_hint: String::new(),
                 raw_output_bytes,
             })
         }
-        SubagentSnapshotStatus::Cancelled { reason } => {
-            let output = reason
+        SubagentSnapshotStatus::Cancelled {
+            reason,
+            tool_calls,
+            turns,
+        } => {
+            let mut output = reason
                 .clone()
                 .unwrap_or_else(|| "Subagent was cancelled".to_string());
+            append_failed_resume_footer(&mut output, snap, *tool_calls, *turns);
             let raw_output_bytes = output.len();
             TaskOutputOutput::Result(TaskOutputResult {
                 task_id: snap.subagent_id.clone(),
@@ -1876,6 +1909,96 @@ mod tests {
                 assert!(
                     r.output.contains("timeout_ms"),
                     "output should suggest timeout_ms: {}",
+                    r.output
+                );
+            }
+            other => panic!("Expected Result, got {:?}", other),
+        }
+    }
+
+    /// A backgrounded child is the default, so a poll — not the spawn call —
+    /// is where the parent usually learns its child died. The handle it needs
+    /// to continue the transcript has to be here.
+    #[test]
+    fn format_failed_subagent_offers_the_resume_handle() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-dead".to_string(),
+            description: "Migrate the parser".to_string(),
+            subagent_type: "general-purpose".to_string(),
+            persona: Some("skeptic".to_string()),
+            status: SubagentSnapshotStatus::Failed {
+                error: "Session error: provider rate limit".to_string(),
+                tool_calls: 12,
+                turns: 3,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 90_000,
+        };
+        match format_subagent_snapshot(&snap, WaitHint::NotRequested) {
+            TaskOutputOutput::Result(r) => {
+                assert_eq!(r.status, "failed");
+                assert!(r.output.contains("provider rate limit"), "{}", r.output);
+                assert!(
+                    r.output.contains(r#"resume_from="sub-dead""#),
+                    "{}",
+                    r.output
+                );
+                assert!(r.output.contains(r#"persona="skeptic""#), "{}", r.output);
+                assert_eq!(r.raw_output_bytes, r.output.len());
+            }
+            other => panic!("Expected Result, got {:?}", other),
+        }
+    }
+
+    /// A spawn that died before the child session ran has no transcript, and
+    /// resuming it would only buy the parent a second identical failure.
+    #[test]
+    fn format_failed_subagent_withholds_the_handle_without_work() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-stillborn".to_string(),
+            description: "Migrate the parser".to_string(),
+            subagent_type: "general-purpose".to_string(),
+            persona: None,
+            status: SubagentSnapshotStatus::Failed {
+                error: "Failed to spawn child session: no worktree".to_string(),
+                tool_calls: 0,
+                turns: 0,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 40,
+        };
+        match format_subagent_snapshot(&snap, WaitHint::NotRequested) {
+            TaskOutputOutput::Result(r) => {
+                assert!(!r.output.contains("resume_from"), "{}", r.output);
+            }
+            other => panic!("Expected Result, got {:?}", other),
+        }
+    }
+
+    /// A killed or turn-capped child is the same shape as a crashed one: the
+    /// work it already did is on disk.
+    #[test]
+    fn format_cancelled_subagent_offers_the_resume_handle() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-capped".to_string(),
+            description: "Migrate the parser".to_string(),
+            subagent_type: "general-purpose".to_string(),
+            persona: None,
+            status: SubagentSnapshotStatus::Cancelled {
+                reason: Some("max turns reached (limit: 40)".to_string()),
+                tool_calls: 80,
+                turns: 40,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 600_000,
+        };
+        match format_subagent_snapshot(&snap, WaitHint::NotRequested) {
+            TaskOutputOutput::Result(r) => {
+                assert_eq!(r.status, "cancelled");
+                assert!(r.output.contains("max turns reached"), "{}", r.output);
+                assert!(
+                    r.output.contains(r#"resume_from="sub-capped""#),
+                    "{}",
                     r.output
                 );
             }

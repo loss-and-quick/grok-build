@@ -648,6 +648,8 @@ pub(super) fn completed_snapshot(
     let status = if child.result.cancelled {
         SubagentSnapshotStatus::Cancelled {
             reason: child.result.error.clone(),
+            tool_calls: child.result.tool_calls,
+            turns: child.result.turns,
         }
     } else if child.result.success {
         SubagentSnapshotStatus::Completed {
@@ -665,6 +667,8 @@ pub(super) fn completed_snapshot(
                 .error
                 .clone()
                 .unwrap_or_else(|| "Unknown error".to_owned()),
+            tool_calls: child.result.tool_calls,
+            turns: child.result.turns,
         }
     };
     SubagentSnapshot {
