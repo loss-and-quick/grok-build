@@ -1087,6 +1087,146 @@ fn send_prompt_while_running_queues_without_drain() {
     assert_eq!(q[0].text, "queued");
 }
 
+#[test]
+fn send_prompt_while_running_queues_on_server_when_follow_up_steer() {
+    struct ResetFollowUp(crate::appearance::FollowUpBehavior);
+    impl Drop for ResetFollowUp {
+        fn drop(&mut self) {
+            crate::appearance::cache::set_follow_up_behavior(self.0);
+        }
+    }
+    let _reset = ResetFollowUp(crate::appearance::cache::load_follow_up_behavior());
+    crate::appearance::cache::set_follow_up_behavior(crate::appearance::FollowUpBehavior::Steer);
+
+    let mut app = test_app_with_agent();
+    app.leader_mode = false;
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(Action::SendPrompt("steer me".into()), &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::SendPrompt { text, .. }] if text == "steer me"
+        ),
+        "Steer should server-queue, not interject yet, got {effects:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 0);
+}
+
+#[test]
+fn send_prompt_while_running_with_follow_up_queue_stays_local_when_not_leader() {
+    struct ResetFollowUp(crate::appearance::FollowUpBehavior);
+    impl Drop for ResetFollowUp {
+        fn drop(&mut self) {
+            crate::appearance::cache::set_follow_up_behavior(self.0);
+        }
+    }
+    let _reset = ResetFollowUp(crate::appearance::cache::load_follow_up_behavior());
+    crate::appearance::cache::set_follow_up_behavior(crate::appearance::FollowUpBehavior::Queue);
+
+    let mut app = test_app_with_agent();
+    app.leader_mode = false;
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(Action::SendPrompt("later".into()), &mut app);
+    assert!(
+        effects
+            .iter()
+            .all(|e| !matches!(e, Effect::SendInterject { .. })),
+        "Queue must not interject mid-turn, got {effects:?}"
+    );
+    // Non-leader + Queue: local drip-feed path (not server-immediate).
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+}
+
+/// With Steer, an older local drip-feed row still blocks server-immediate
+/// send: newer Enter must not interject or jump the server queue ahead of
+/// the older local prompt.
+#[test]
+fn send_while_running_with_pending_local_and_steer_preserves_fifo() {
+    struct ResetFollowUp(crate::appearance::FollowUpBehavior);
+    impl Drop for ResetFollowUp {
+        fn drop(&mut self) {
+            crate::appearance::cache::set_follow_up_behavior(self.0);
+        }
+    }
+    let _reset = ResetFollowUp(crate::appearance::cache::load_follow_up_behavior());
+    crate::appearance::cache::set_follow_up_behavior(crate::appearance::FollowUpBehavior::Steer);
+
+    let mut app = test_app_with_agent();
+    app.leader_mode = false;
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.enqueue_prompt("two".into());
+        assert_eq!(agent.session.pending_prompts.len(), 1);
+    }
+
+    let effects = dispatch(Action::SendPrompt("three".into()), &mut app);
+    assert!(
+        effects
+            .iter()
+            .all(|e| !matches!(e, Effect::SendInterject { .. } | Effect::SendPrompt { .. })),
+        "Steer must not bypass empty-local-queue gate, got {effects:?}"
+    );
+    let order: Vec<&str> = app.agents[&id]
+        .session
+        .pending_prompts
+        .iter()
+        .map(|p| p.text.as_str())
+        .collect();
+    assert_eq!(order, vec!["two", "three"]);
+}
+
+/// Images never ride server-immediate; with Steer they still join the local
+/// queue (no interject-on-Enter with attachments).
+#[test]
+fn send_prompt_with_images_while_running_and_steer_stays_local() {
+    struct ResetFollowUp(crate::appearance::FollowUpBehavior);
+    impl Drop for ResetFollowUp {
+        fn drop(&mut self) {
+            crate::appearance::cache::set_follow_up_behavior(self.0);
+        }
+    }
+    let _reset = ResetFollowUp(crate::appearance::cache::load_follow_up_behavior());
+    crate::appearance::cache::set_follow_up_behavior(crate::appearance::FollowUpBehavior::Steer);
+
+    let mut app = test_app_with_agent();
+    app.leader_mode = false;
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent
+            .prompt
+            .insert_image(crate::prompt_images::PastedImage {
+                element_id: xai_ratatui_textarea::ElementId::from_raw(0),
+                display_number: 0,
+                mime_type: "image/png".to_owned(),
+                dimensions: Some((8, 8)),
+                byte_len: 1,
+                encoded_bytes: Some(vec![0].into()),
+                source_path: None,
+                staged_temp_path: None,
+                session_image_path: None,
+                preview: crate::prompt_images::PromptImagePreview::default(),
+            })
+            .unwrap();
+    }
+
+    let effects = dispatch(Action::SendPrompt("with image".into()), &mut app);
+    assert!(
+        effects
+            .iter()
+            .all(|e| !matches!(e, Effect::SendInterject { .. } | Effect::SendPrompt { .. })),
+        "images + Steer must not interject or server-send, got {effects:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+}
+
 /// Regression (queue reorder race): a plain prompt typed while a turn is
 /// running must NOT jump onto the server queue when an older prompt is still
 /// waiting in the local drip-feed queue — e.g. prompts queued during
@@ -1773,9 +1913,7 @@ fn prompt_response_request_failed_banner_suppresses_turn_failed_and_toast() {
         dispatch(
             Action::TaskComplete(TaskResult::PromptResponse {
                 agent_id: id,
-                result: Err(
-                    "Server error (500) \u{2014} Something went wrong on our side.".to_string(),
-                ),
+                result: Err("Server error (500): Something went wrong on our side.".to_string()),
                 http_status: Some(500),
                 prompt_id: None,
             }),
@@ -1828,7 +1966,7 @@ fn prompt_response_formatted_401_suppresses_turn_failed_and_stashes_prompt() {
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
             agent_id: id,
-            result: Err("Request failed (401) \u{2014} Invalid or expired credentials".to_string()),
+            result: Err("Request failed (401): Invalid or expired credentials".to_string()),
             http_status: Some(401),
             prompt_id: None,
         }),
@@ -1870,9 +2008,7 @@ fn prompt_response_formatted_402_takes_credit_limit_path() {
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
             agent_id: id,
-            result: Err(
-                "Request failed (402) \u{2014} Grok Build usage balance exhausted".to_string(),
-            ),
+            result: Err("Request failed (402): Grok Build usage balance exhausted".to_string()),
             http_status: None,
             prompt_id: None,
         }),
@@ -2948,7 +3084,7 @@ fn prompt_history_loaded_refreshes_open_history_search_with_current_query() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.prompt_history = vec!["first prompt".into(), "second prompt".into()];
         let history = agent.combined_prompt_history();
-        agent.prompt.history_search.activate(&history, "");
+        assert!(agent.prompt.history_search.activate(&history, ""));
         agent.prompt.set_text("third");
         agent.prompt.history_search.update_query("third");
         for _ in 0..100 {
@@ -3323,7 +3459,7 @@ fn fullscreen_mode_blocks_minimal_only_slash_command() {
     let refusal = last_system_text(&app, AgentId(0));
     assert_eq!(
         refusal,
-        "/expand isn't available in fullscreen mode — press Tab to focus the scrollback, \
+        "/expand isn't available in fullscreen mode: press Tab to focus the scrollback, \
          then → on the block."
     );
 }
@@ -3481,7 +3617,7 @@ fn plain_cancel_still_pushes_cancelled_marker() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     dispatch(Action::SendPrompt("first".into()), &mut app);
-    // Turn already produced output → Ctrl+C takes the standard cancel path, not the pristine rewind.
+    // Turn already produced output → Ctrl+C takes the standard cancel path, not the rewind.
     app.agents.get_mut(&id).unwrap().session.in_flight_prompt = None;
     let _ = dispatch(Action::CancelTurn, &mut app);
     assert!(app.agents[&id].session.state.is_cancelling());
@@ -3806,6 +3942,7 @@ fn queue_interject_shared_arms_expectation_while_running() {
         Some("srv-row-1"),
         "server-row send-now must arm the cancel expectation"
     );
+    assert!(app.agents[&id].is_self_originated_prompt("srv-row-1"));
 }
 
 /// During an active goal the shell promotes a send-now WITHOUT cancelling, so
@@ -3834,6 +3971,7 @@ fn send_now_during_active_goal_does_not_arm_expectation() {
         app.agents[&id].expect_send_now_cancel.is_none(),
         "goal turns promote without cancelling; the expectation must stay unarmed"
     );
+    assert_eq!(app.agents[&id].send_now_painted_blocks.len(), 1);
 
     let effects = dispatch(
         Action::QueueInterjectShared {
@@ -3850,6 +3988,141 @@ fn send_now_during_active_goal_does_not_arm_expectation() {
     assert!(
         app.agents[&id].expect_send_now_cancel.is_none(),
         "server-row send-now during a goal must stay unarmed too"
+    );
+}
+
+/// Bug 1 (Bugbot "Send Now block retired early"): an active-goal Send Now
+/// paints an optimistic user block and relies on the interjection notification
+/// to claim it in place. The prompt's RPC resolves as removed-without-running
+/// (the expected outcome of routing the Send Now as an interjection), taking
+/// the non-running `PromptResponse` path — but that must NOT retire the painted
+/// block before its interjection claim arrives, or the message is dropped and
+/// re-pushed at the scrollback end (flicker / reorder).
+#[test]
+fn goal_send_now_painted_block_survives_removed_from_queue_response() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    dispatch(Action::SendPrompt("first".into()), &mut app);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.front_message_committed = true;
+        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+    }
+
+    let effects = dispatch(
+        Action::SendPromptNow {
+            text: "goal steer".into(),
+            images: vec![],
+        },
+        &mut app,
+    );
+    let painted_pid = match effects.as_slice() {
+        [Effect::SendPromptNow { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("goal send-now takes the immediate server send, got {other:?}"),
+    };
+    let block_entry = {
+        let agent = &app.agents[&id];
+        assert!(agent.is_self_originated_prompt(&painted_pid));
+        assert!(
+            agent.is_send_now_awaiting_interjection_claim(&painted_pid),
+            "the goal Send Now block must be awaiting its interjection claim"
+        );
+        agent.send_now_painted_blocks[&painted_pid].0
+    };
+
+    // The queued prompt's RPC resolves without becoming the running turn.
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn).meta(
+                serde_json::json!({ "promptId": painted_pid })
+                    .as_object()
+                    .cloned(),
+            )),
+            http_status: None,
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert!(
+        agent.send_now_painted_blocks.contains_key(&painted_pid),
+        "the painted block must survive the removed-from-queue response",
+    );
+    assert!(
+        agent.scrollback.index_of_id(block_entry).is_some(),
+        "the block must stay in place (not dropped / re-pushed at the end)",
+    );
+}
+
+/// Bug 1 companion: a `queue/changed` broadcast that no longer lists a
+/// CONFIRMED active-goal Send Now row (the shell converted it into an
+/// interjection and dropped the queue row) must NOT retire its painted block
+/// before the interjection notification claims it.
+#[test]
+fn goal_send_now_painted_block_survives_queue_changed_removal() {
+    use xai_acp_lib::AcpClientMessage;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    dispatch(Action::SendPrompt("first".into()), &mut app);
+    let running_prompt_id = app.agents[&id].session.current_prompt_id.clone();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.front_message_committed = true;
+        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+    }
+
+    let effects = dispatch(
+        Action::SendPromptNow {
+            text: "goal steer".into(),
+            images: vec![],
+        },
+        &mut app,
+    );
+    let painted_pid = match effects.as_slice() {
+        [Effect::SendPromptNow { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("goal send-now takes the immediate server send, got {other:?}"),
+    };
+    let block_entry = app.agents[&id].send_now_painted_blocks[&painted_pid].0;
+    // Model the row as CONFIRMED shell-side: the finding's race is a confirmed
+    // row (optimistic echo already cleared) that then disappears from a later
+    // broadcast when the Send Now is merged as an interjection.
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .optimistic_queue_ids
+        .remove(&painted_pid);
+    assert!(app.agents[&id].is_send_now_awaiting_interjection_claim(&painted_pid));
+
+    // A broadcast that no longer lists the row, still naming the running goal
+    // turn (so no adoption side-effects fire).
+    let params = serde_json::json!({
+        "sessionId": "test-session",
+        "entries": [],
+        "runningPromptId": running_prompt_id,
+    });
+    let (response_tx, _rx) = tokio::sync::oneshot::channel();
+    crate::app::acp_handler::handle(
+        AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {
+            request: acp::ExtNotification::new(
+                "x.ai/queue/changed",
+                std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
+            ),
+            response_tx,
+        }),
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert!(
+        agent.send_now_painted_blocks.contains_key(&painted_pid),
+        "the confirmed goal Send Now block must survive the row's removal",
+    );
+    assert!(
+        agent.scrollback.index_of_id(block_entry).is_some(),
+        "the block must stay in place for handle_interjection to claim",
     );
 }
 
@@ -4482,4 +4755,378 @@ fn suggestion_debounce_routes_by_agent_id_not_active_view() {
         )),
         "expiry must fetch for the arming agent even off-screen: {effects:?}"
     );
+}
+
+mod prompt_history_recording_tests {
+    use super::test_app_with_agent;
+    use crate::app::actions::Action;
+    use crate::app::agent::AgentId;
+    use crate::app::dispatch::router::dispatch;
+
+    fn history(app: &crate::app::app_view::AppView) -> Vec<String> {
+        app.agents[&AgentId(0)].session.prompt_history.clone()
+    }
+
+    #[test]
+    fn a_typed_slash_command_lands_in_the_history() {
+        let mut app = test_app_with_agent();
+
+        dispatch(
+            Action::SendPrompt("/rename payment retries".into()),
+            &mut app,
+        );
+
+        assert_eq!(history(&app), ["/rename payment retries"]);
+    }
+
+    /// The shell returns prompts it was sent, including ones the local list already holds.
+    #[test]
+    fn the_fetch_does_not_reorder_what_the_shell_also_knows() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+
+        dispatch(Action::SendPrompt("hello".into()), &mut app);
+        dispatch(Action::SendBashCommand("ls".into()), &mut app);
+        dispatch(Action::SendPrompt("/asim-skill".into()), &mut app);
+        dispatch(Action::SendPrompt("/session-info".into()), &mut app);
+
+        dispatch(
+            Action::TaskComplete(crate::app::actions::TaskResult::PromptHistoryLoaded {
+                agent_id: id,
+                prompts: vec!["/asim-skill".to_owned(), "hello".to_owned()],
+            }),
+            &mut app,
+        );
+
+        assert_eq!(
+            history(&app),
+            ["/session-info", "/asim-skill", "! ls", "hello"]
+        );
+    }
+
+    #[test]
+    fn an_immediate_repeat_collapses_but_an_interleaved_one_does_not() {
+        let mut app = test_app_with_agent();
+
+        dispatch(Action::SendPrompt("build it".into()), &mut app);
+        dispatch(Action::SendPrompt("build it".into()), &mut app);
+        dispatch(Action::SendPrompt("check it".into()), &mut app);
+        dispatch(Action::SendPrompt("build it".into()), &mut app);
+
+        assert_eq!(history(&app), ["build it", "check it", "build it"]);
+    }
+
+    /// `/notacommand` reaches the command recorder and then the prompt recorder.
+    #[test]
+    fn an_unknown_command_is_recorded_once() {
+        let mut app = test_app_with_agent();
+
+        dispatch(Action::SendPrompt("/notacommand".into()), &mut app);
+
+        assert_eq!(history(&app), ["/notacommand"]);
+    }
+
+    /// Bash, slash and note entries never reach the shell. The local list is their only copy.
+    #[test]
+    fn a_late_history_fetch_keeps_what_only_the_client_knows() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+
+        dispatch(Action::SendBashCommand("git status".into()), &mut app);
+        dispatch(
+            Action::SendPrompt("/rename payment retries".into()),
+            &mut app,
+        );
+
+        dispatch(
+            Action::TaskComplete(crate::app::actions::TaskResult::PromptHistoryLoaded {
+                agent_id: id,
+                prompts: vec!["git status".to_owned(), "fetched from the shell".to_owned()],
+            }),
+            &mut app,
+        );
+
+        let after = history(&app);
+        assert!(
+            after.contains(&"! git status".to_owned()),
+            "the bash command survived the fetch: {after:?}"
+        );
+        assert!(
+            !after.contains(&"git status".to_owned()),
+            "the shell stores bash bare, so its copy must not double the prefixed one: {after:?}"
+        );
+        assert!(
+            after.contains(&"/rename payment retries".to_owned()),
+            "the slash command survived the fetch: {after:?}"
+        );
+        assert!(
+            after.contains(&"fetched from the shell".to_owned()),
+            "the fetched history is still merged in: {after:?}"
+        );
+    }
+
+    /// Storing the `#` would recall a prompt opening `# Context` as a note.
+    #[test]
+    fn a_remember_note_is_recorded_as_plain_text() {
+        let mut app = test_app_with_agent();
+
+        dispatch(
+            Action::SendRememberNote("deploys need the staging flag".into()),
+            &mut app,
+        );
+
+        assert_eq!(history(&app), ["deploys need the staging flag"]);
+    }
+
+    #[test]
+    fn a_refused_remember_note_records_nothing() {
+        let mut app = test_app_with_agent();
+
+        dispatch(Action::SendRememberNote("   ".into()), &mut app);
+
+        assert!(history(&app).is_empty());
+    }
+
+    /// A stashed draft is not history. Only the send that follows puts a row in the recall list.
+    #[test]
+    fn stashing_a_draft_adds_no_history_row() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text("first draft");
+            agent.stash_prompt_draft(crate::app::agent_view::StashCause::ClearedDraft);
+            agent.prompt.set_text("second draft");
+            agent.stash_prompt_draft(crate::app::agent_view::StashCause::ClearedDraft);
+        }
+        assert!(history(&app).is_empty());
+
+        dispatch(Action::SendPrompt("a real send".into()), &mut app);
+
+        assert_eq!(history(&app), ["a real send"]);
+    }
+
+    /// `/remember foo` runs the command recorder and then `SendRememberNote(foo)`.
+    #[test]
+    fn a_slash_remember_records_only_the_typed_command() {
+        let mut app = test_app_with_agent();
+
+        dispatch(
+            Action::SendPrompt("/remember deploys need the staging flag".into()),
+            &mut app,
+        );
+
+        assert_eq!(history(&app), ["/remember deploys need the staging flag"]);
+    }
+}
+
+mod prompt_stash_dispatch_tests {
+    use super::test_app_with_agent;
+    use crate::app::actions::Action;
+    use crate::app::agent::AgentId;
+    use crate::app::agent_view::StashCause;
+    use crate::app::dispatch::router::dispatch;
+
+    /// Esc-Esc clear hands the draft to the stash rather than dropping it. Ranking and restore semantics belong to `agent_view::prompt_stash`.
+    #[test]
+    fn clear_prompt_stashes_the_cleared_draft() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .prompt
+            .set_text("cleared draft");
+
+        let effects = dispatch(Action::ClearPrompt, &mut app);
+
+        assert!(effects.is_empty());
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.prompt.text(), "", "composer must be cleared");
+        let stash = agent.prompt_stash.as_ref().expect("draft was stashed");
+        assert_eq!(stash.prompt.text, "cleared draft");
+        assert_eq!(stash.cause, StashCause::ClearedDraft);
+    }
+
+    /// A cleared `!` draft lands in the slot with its shell mode and nowhere else: it was never sent.
+    #[test]
+    fn clearing_a_shell_draft_stashes_it_and_records_no_history() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt_input_mode = crate::app::agent_view::PromptInputMode::Bash;
+            agent.prompt.set_text("git status");
+        }
+
+        dispatch(Action::ClearPrompt, &mut app);
+
+        let agent = app.agents.get(&id).unwrap();
+        assert!(agent.combined_prompt_history().is_empty());
+        let stash = agent.prompt_stash.as_ref().expect("draft was stashed");
+        assert_eq!(stash.prompt.text, "git status");
+        assert_eq!(
+            stash.input_mode,
+            crate::app::agent_view::PromptInputMode::Bash
+        );
+    }
+
+    #[test]
+    fn clear_prompt_on_empty_composer_stashes_nothing() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+
+        dispatch(Action::ClearPrompt, &mut app);
+
+        assert!(app.agents.get(&id).unwrap().prompt_stash.is_none());
+    }
+
+    #[test]
+    fn chord_stashed_draft_auto_restores_after_next_send() {
+        // Both sends consume the composer, so both hand the draft back.
+        let sends = [
+            Action::SendPrompt("quick side question".into()),
+            Action::SendBashCommand("git status".into()),
+        ];
+
+        for send in sends {
+            let label = format!("{send:?}");
+            let mut app = test_app_with_agent();
+            let id = AgentId(0);
+            {
+                let agent = app.agents.get_mut(&id).unwrap();
+                agent.prompt.set_text("stashed thought");
+                agent.stash_prompt_draft(StashCause::Chord);
+            }
+
+            dispatch(send, &mut app);
+
+            let agent = app.agents.get(&id).unwrap();
+            assert_eq!(
+                agent.prompt.text(),
+                "stashed thought",
+                "{label} must restore the stash"
+            );
+            assert!(agent.prompt_stash.is_none(), "{label} left the slot full");
+        }
+    }
+
+    /// `SendPromptNow` also force-sends a queued row, which never touched the composer.
+    /// Only the caller that consumed the draft reports it, so the queued-row case must leave the stash alone.
+    #[test]
+    fn a_queued_row_send_now_leaves_the_stash_alone() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text("stashed thought");
+            agent.stash_prompt_draft(StashCause::Chord);
+        }
+
+        dispatch(
+            Action::SendPromptNow {
+                text: "a queued row".into(),
+                images: vec![],
+            },
+            &mut app,
+        );
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.prompt.text(), "", "the composer was never the source");
+        assert!(agent.prompt_stash.is_some(), "the stash must stay put");
+    }
+
+    /// A `#` note with no text is refused, so it never consumed a draft and must not hand the
+    /// stash back. The marker has to sit after the guard, not before it.
+    #[test]
+    fn a_rejected_remember_note_does_not_restore_the_stash() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text("stashed thought");
+            agent.stash_prompt_draft(StashCause::Chord);
+        }
+
+        dispatch(Action::SendRememberNote("   ".into()), &mut app);
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.prompt.text(), "", "the refused note restores nothing");
+        assert!(agent.prompt_stash.is_some(), "the stash must stay put");
+    }
+
+    /// A handler that rejects the action never consumed the draft, so the stash must stay put.
+    #[test]
+    fn a_rejected_send_does_not_restore_the_stash() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text("stashed thought");
+            agent.stash_prompt_draft(StashCause::Chord);
+            agent.prompt.set_text("never sent");
+        }
+        app.reconnect_pending = true;
+
+        dispatch(Action::SendPrompt("never sent".into()), &mut app);
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(
+            agent.prompt.text(),
+            "never sent",
+            "the draft is still unsent"
+        );
+        assert!(
+            agent.prompt_stash.is_some(),
+            "a refused send must not hand the stash back"
+        );
+    }
+
+    /// An Esc-Esc-cleared draft is a discard: it must NOT bounce back after the next send. Chord pop and history browse remain its recovery paths.
+    #[test]
+    fn esc_cleared_draft_does_not_auto_restore_after_send() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .prompt
+            .set_text("discarded draft");
+
+        dispatch(Action::ClearPrompt, &mut app);
+        dispatch(Action::SendPrompt("next prompt".into()), &mut app);
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.prompt.text(), "", "discarded draft must stay stashed");
+        assert!(agent.prompt_stash.is_some());
+    }
+
+    /// Auto-restore never overwrites composer state the user already touched.
+    #[test]
+    fn auto_restore_declines_on_a_non_empty_or_moded_composer() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.set_text("stashed thought");
+        agent.stash_prompt_draft(StashCause::Chord);
+
+        agent.prompt.set_text("already typing");
+
+        agent.auto_restore_stash_after_send();
+
+        assert_eq!(agent.prompt.text(), "already typing");
+        assert!(agent.prompt_stash.is_some());
+
+        agent.prompt.set_text("");
+        agent.prompt_input_mode = crate::app::agent_view::PromptInputMode::Bash;
+
+        agent.auto_restore_stash_after_send();
+
+        assert_eq!(
+            agent.prompt.text(),
+            "",
+            "moded composer must not be overwritten"
+        );
+        assert!(agent.prompt_stash.is_some());
+    }
 }

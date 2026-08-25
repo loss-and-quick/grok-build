@@ -11,6 +11,10 @@ mod common;
 
 #[path = "pty_e2e/auto_wake_cancel_preserves_queued_user_prompt.rs"]
 mod auto_wake_cancel_preserves_queued_user_prompt;
+#[path = "pty_e2e/auto_wake_cancel_via_esc_preserves_queued_user_prompt.rs"]
+mod auto_wake_cancel_via_esc_preserves_queued_user_prompt;
+#[path = "pty_e2e/auto_wake_cancel_via_stop_click_preserves_queued_user_prompt.rs"]
+mod auto_wake_cancel_via_stop_click_preserves_queued_user_prompt;
 #[path = "pty_e2e/bash_queued_mid_turn_drains_as_bash.rs"]
 mod bash_queued_mid_turn_drains_as_bash;
 #[path = "pty_e2e/cancel_discards_buffered_interjection.rs"]
@@ -33,8 +37,8 @@ mod empty_enter_sends_top_not_last_of_two;
 mod esc_cancels_running_turn_from_prompt_preserves_draft;
 #[path = "pty_e2e/esc_cancels_running_turn_from_scrollback.rs"]
 mod esc_cancels_running_turn_from_scrollback;
-#[path = "pty_e2e/esc_esc_clears_idle_prompt_and_records_history.rs"]
-mod esc_esc_clears_idle_prompt_and_records_history;
+#[path = "pty_e2e/esc_esc_clears_idle_prompt_into_the_stash.rs"]
+mod esc_esc_clears_idle_prompt_into_the_stash;
 #[path = "pty_e2e/esc_esc_opens_rewind_picker_silent_first_press.rs"]
 mod esc_esc_opens_rewind_picker_silent_first_press;
 #[path = "pty_e2e/esc_idle_empty_no_messages_is_swallowed_noop.rs"]
@@ -65,6 +69,8 @@ mod send_now_tip_after_mid_turn_queue;
 mod send_then_ctrlc_rewinds_to_composer_no_history_dup;
 #[path = "pty_e2e/shift_tab_plan_nudge_from_always_approve_enters_plan.rs"]
 mod shift_tab_plan_nudge_from_always_approve_enters_plan;
+#[path = "pty_e2e/up_focuses_queue_bottom_row.rs"]
+mod up_focuses_queue_bottom_row;
 #[path = "pty_e2e/verify_bashq_claim2_force_interject.rs"]
 mod verify_bashq_claim2_force_interject;
 #[path = "pty_e2e/verify_bashq_claim3_edit_keeps_bash.rs"]

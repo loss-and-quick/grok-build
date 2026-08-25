@@ -202,6 +202,8 @@ fn saturated(key: &str, max: NonZeroUsize, waited: Duration) -> SamplingError {
         // Retrying would re-enter the same queue and wait the same deadline
         // again; the caller should surface this rather than spend its budget.
         should_retry: Some(false),
+        // Synthesised locally: no provider envelope to read a code from.
+        error_code: None,
     }
 }
 

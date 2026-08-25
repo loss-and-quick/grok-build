@@ -1,6 +1,13 @@
 /// Truncation threshold, matching the shell's large-prompt limit.
 pub const LARGE_PROMPT_THRESHOLD: usize = 25_000;
 
+pub const INTERJECTION_NOTE: &str = "The user sent a message while you were working:";
+pub const INTERRUPT_NOTE: &str = "The user interrupted the previous turn:";
+
+/// Trailing reminder so a mid-turn steer or post-cancel follow-up does not drop in-flight work.
+const UNFINISHED_TASKS_REMINDER: &str =
+    "Make sure to complete any unfinished tasks from previous turns.";
+
 /// Wrap a user message in the canonical `<user_query>` envelope.
 pub fn user_query(user_message: &str) -> String {
     format!(
@@ -26,16 +33,26 @@ pub fn truncate_large_prompt(text: String) -> String {
     format!("{}... [truncated]", &text[..end])
 }
 
-/// Wrap interjection text as a synthetic user message with a mid-turn note.
-/// No deferral instruction: the model decides how to weigh it against
-/// in-flight work. Output is byte-identical to the shell's historical format.
-pub fn format_interjection(text: String) -> String {
-    let truncated = truncate_large_prompt(text);
+/// Prefix `note` and the unfinished-task trailer around an already-assembled
+/// user turn (a `<user_query>` block, optionally with skill/context tails).
+pub fn frame_user_turn(note: &str, assembled: &str) -> String {
+    format!("{note}\n{assembled}\n{UNFINISHED_TASKS_REMINDER}")
+}
 
-    format!(
-        "The user sent a message while you were working:\n{}",
-        user_query(&truncated)
-    )
+fn format_steered_query(note: &str, text: String) -> String {
+    frame_user_turn(note, &user_query(&truncate_large_prompt(text)))
+}
+
+/// Wrap interjection text as a synthetic user message with a mid-turn note
+/// and a reminder to finish in-flight work from earlier turns.
+pub fn format_interjection(text: String) -> String {
+    format_steered_query(INTERJECTION_NOTE, text)
+}
+
+/// Same envelope as [`format_interjection`], for the next real user query
+/// after a text-only mid-turn abort.
+pub fn format_interrupt(text: String) -> String {
+    format_steered_query(INTERRUPT_NOTE, text)
 }
 
 #[cfg(test)]
@@ -45,9 +62,23 @@ mod tests {
     #[test]
     fn wraps_in_user_query_with_midturn_note() {
         let out = format_interjection("stop and fix the test first".into());
-        assert!(out.starts_with("The user sent a message while you were working:\n<user_query>\n"));
-        assert!(out.ends_with("\n</user_query>"));
+        assert!(out.starts_with(&format!("{INTERJECTION_NOTE}\n<user_query>\n")));
         assert!(out.contains("stop and fix the test first"));
+        assert!(
+            out.ends_with(&format!("</user_query>\n{UNFINISHED_TASKS_REMINDER}")),
+            "unfinished-task reminder must follow the wrapped query, got: {out}"
+        );
+    }
+
+    #[test]
+    fn interrupt_shares_envelope_with_different_note() {
+        let out = format_interrupt("do the other thing".into());
+        assert_eq!(
+            out,
+            format!(
+                "{INTERRUPT_NOTE}\n<user_query>\ndo the other thing\n</user_query>\n{UNFINISHED_TASKS_REMINDER}"
+            )
+        );
     }
 
     #[test]
@@ -62,5 +93,11 @@ mod tests {
     fn short_text_untouched() {
         let out = format_interjection("hi".into());
         assert!(!out.contains("[truncated]"));
+        assert_eq!(
+            out,
+            format!(
+                "{INTERJECTION_NOTE}\n<user_query>\nhi\n</user_query>\n{UNFINISHED_TASKS_REMINDER}"
+            )
+        );
     }
 }

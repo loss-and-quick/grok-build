@@ -1,5 +1,6 @@
 use super::support::*;
 use super::*;
+use crate::session::memory::MemorySearchSource;
 use crate::terminal::AsyncTerminalRunner;
 use crate::terminal::runner::{TerminalError, TerminalRunRequest, TerminalRunResult};
 use tokio::sync::mpsc;
@@ -37,7 +38,7 @@ async fn create_test_actor(
     let state = TokioMutex::new(State {
         running_task: None,
         pending_inputs: VecDeque::new(),
-        combine_edit_holds: std::collections::HashSet::new(),
+        edit_holds: HashMap::new(),
         pending_notifications: Vec::new(),
         notifications_suppressed: false,
         rewindable: false,
@@ -68,6 +69,7 @@ async fn create_test_actor(
     );
     chat_state_handle.record_token_usage(total_tokens);
     SessionActor {
+        status_wake: Default::default(),
         session_info: SessionInfo {
             id: acp::SessionId::new("test-auto-compact"),
             cwd: cwd.as_str().to_string(),
@@ -89,7 +91,9 @@ async fn create_test_actor(
         tool_context,
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
-        mcp_strategy: McpInitStrategy::Blocking,
+        mcp_strategy: std::cell::Cell::new(McpInitStrategy::Blocking),
+        delivery_tools: std::cell::RefCell::new(Vec::new()),
+        attach_non_interactive: std::rc::Rc::new(std::cell::Cell::new(false)),
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -151,6 +155,7 @@ async fn create_test_actor(
         session_start: std::time::Instant::now(),
         inference_idle_timeout: Duration::from_secs(300),
         max_retries: 3,
+        rate_limit_waits: crate::session::acp_session::RateLimitWaitConfig::default(),
         max_turns: None,
         pending_interjections: InterjectionBuffer::new(),
         pending_steering: Default::default(),
@@ -171,6 +176,7 @@ async fn create_test_actor(
         agent: std::cell::RefCell::new(test_agent_default().await),
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,
+        status_line_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         models_manager: Default::default(),
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
@@ -210,7 +216,6 @@ async fn create_test_actor(
         pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle: Default::default(),
-        managed_mcp_expires_at: std::sync::Mutex::new(None),
         initial_client_mcp_servers: vec![],
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announced_servers: Mutex::new(HashMap::new()),
@@ -220,6 +225,7 @@ async fn create_test_actor(
         mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: None,
+        last_live_orphan_reconcile: std::cell::Cell::new(None),
         deferred_prefix: TaskSlot::new(),
         extension_registry: xai_agent_lifecycle::LocalExtensionRegistry::default(),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
@@ -227,6 +233,9 @@ async fn create_test_actor(
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
+        turn_report: Default::default(),
+        turn_abort: Default::default(),
+        turn_end_tx: Default::default(),
         client_hooks: Default::default(),
         hook_resolved_workspace_root: String::new(),
         vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
@@ -243,12 +252,18 @@ async fn create_test_actor(
         recap_epoch: std::cell::Cell::new(0),
         turn_summary_task: std::cell::RefCell::new(None),
         turn_summary_generation: std::cell::Cell::new(0),
+        title_refresh_task: std::cell::RefCell::new(None),
+        title_refresh_generation: std::cell::Cell::new(0),
+        next_title_refresh_idx: std::cell::Cell::new(0),
         turn_summary_enabled: false,
+        title_refresh_enabled: false,
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
         provider_fallback_cooldowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+        sampling_gate: None,
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
@@ -419,7 +434,8 @@ fn initial_injection_backend_params_use_override_min_score() {
         },
         watcher: None,
         stale_claim_secs: 60,
-        search_source: "tool",
+        search_source: MemorySearchSource::Tool,
+        observation_sink: crate::session::memory::noop_memory_observation_sink(),
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
     };
     let initial_injection = crate::config::MemoryInitialInjectionConfig {
@@ -428,11 +444,11 @@ fn initial_injection_backend_params_use_override_min_score() {
     };
     let (adjusted, effective_min_score) =
         build_initial_injection_backend_params(&params, &initial_injection);
-    assert_eq!("injection", adjusted.search_source);
+    assert_eq!(MemorySearchSource::Injection, adjusted.search_source);
     assert!((0.72 - adjusted.search_config.min_score).abs() < f32::EPSILON);
     assert!((0.72 - effective_min_score as f32).abs() < f32::EPSILON);
     assert!((0.35 - params.search_config.min_score).abs() < f32::EPSILON);
-    assert_eq!("tool", params.search_source);
+    assert_eq!(MemorySearchSource::Tool, params.search_source);
 }
 #[test]
 fn initial_injection_backend_params_preserve_default_zero_min_score() {
@@ -447,14 +463,17 @@ fn initial_injection_backend_params_preserve_default_zero_min_score() {
         },
         watcher: None,
         stale_claim_secs: 60,
-        search_source: "tool",
+        search_source: MemorySearchSource::Tool,
+        observation_sink: crate::session::memory::noop_memory_observation_sink(),
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
     };
-    let (adjusted, effective_min_score) = build_initial_injection_backend_params(
-        &params,
-        &crate::config::MemoryInitialInjectionConfig::default(),
-    );
-    assert_eq!("injection", adjusted.search_source);
+    let initial_injection = crate::config::MemoryInitialInjectionConfig {
+        enabled: true,
+        min_score: None,
+    };
+    let (adjusted, effective_min_score) =
+        build_initial_injection_backend_params(&params, &initial_injection);
+    assert_eq!(MemorySearchSource::Injection, adjusted.search_source);
     assert!((0.41 - adjusted.search_config.min_score).abs() < f32::EPSILON);
     assert!((0.0 - effective_min_score as f32).abs() < f32::EPSILON);
 }
@@ -488,7 +507,7 @@ async fn create_test_actor_with_memory(
     let state = TokioMutex::new(State {
         running_task: None,
         pending_inputs: VecDeque::new(),
-        combine_edit_holds: std::collections::HashSet::new(),
+        edit_holds: HashMap::new(),
         pending_notifications: Vec::new(),
         notifications_suppressed: false,
         rewindable: false,
@@ -523,6 +542,7 @@ async fn create_test_actor_with_memory(
         .as_ref()
         .map_or_else(Default::default, |mc| mc.initial_injection.clone());
     SessionActor {
+        status_wake: Default::default(),
         session_info: SessionInfo {
             id: acp::SessionId::new("test-memory"),
             cwd: cwd.as_str().to_string(),
@@ -544,7 +564,9 @@ async fn create_test_actor_with_memory(
         tool_context,
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
-        mcp_strategy: McpInitStrategy::Blocking,
+        mcp_strategy: std::cell::Cell::new(McpInitStrategy::Blocking),
+        delivery_tools: std::cell::RefCell::new(Vec::new()),
+        attach_non_interactive: std::rc::Rc::new(std::cell::Cell::new(false)),
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -605,6 +627,7 @@ async fn create_test_actor_with_memory(
         session_start: std::time::Instant::now(),
         inference_idle_timeout: Duration::from_secs(300),
         max_retries: 3,
+        rate_limit_waits: crate::session::acp_session::RateLimitWaitConfig::default(),
         max_turns: None,
         pending_interjections: InterjectionBuffer::new(),
         pending_steering: Default::default(),
@@ -633,6 +656,7 @@ async fn create_test_actor_with_memory(
         agent: std::cell::RefCell::new(test_agent_default().await),
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,
+        status_line_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         models_manager: Default::default(),
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
@@ -675,7 +699,6 @@ async fn create_test_actor_with_memory(
         pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle: Default::default(),
-        managed_mcp_expires_at: std::sync::Mutex::new(None),
         initial_client_mcp_servers: vec![],
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announced_servers: Mutex::new(HashMap::new()),
@@ -685,6 +708,7 @@ async fn create_test_actor_with_memory(
         mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: None,
+        last_live_orphan_reconcile: std::cell::Cell::new(None),
         deferred_prefix: TaskSlot::new(),
         extension_registry: xai_agent_lifecycle::LocalExtensionRegistry::default(),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
@@ -692,6 +716,9 @@ async fn create_test_actor_with_memory(
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
+        turn_report: Default::default(),
+        turn_abort: Default::default(),
+        turn_end_tx: Default::default(),
         client_hooks: Default::default(),
         hook_resolved_workspace_root: String::new(),
         vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
@@ -708,12 +735,18 @@ async fn create_test_actor_with_memory(
         recap_epoch: std::cell::Cell::new(0),
         turn_summary_task: std::cell::RefCell::new(None),
         turn_summary_generation: std::cell::Cell::new(0),
+        title_refresh_task: std::cell::RefCell::new(None),
+        title_refresh_generation: std::cell::Cell::new(0),
+        next_title_refresh_idx: std::cell::Cell::new(0),
         turn_summary_enabled: false,
+        title_refresh_enabled: false,
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
         provider_fallback_cooldowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+        sampling_gate: None,
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
@@ -1173,6 +1206,7 @@ fn api_error_with_context_window(context_window: u64) -> xai_grok_sampler::Sampl
         is_retryable: false,
         retry_after_secs: None,
         should_retry: None,
+        error_code: None,
         model_metadata: Some(crate::sampling::ResponseModelMetadata {
             context_window: Some(context_window),
             max_completion_tokens: None,
@@ -1267,7 +1301,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             let state = TokioMutex::new(State {
                 running_task: None,
                 pending_inputs: VecDeque::new(),
-                combine_edit_holds: std::collections::HashSet::new(),
+                edit_holds: HashMap::new(),
                 pending_notifications: Vec::new(),
                 notifications_suppressed: false,
                 rewindable: false,
@@ -1303,6 +1337,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let actor = SessionActor {
+                status_wake: Default::default(),
                 session_info: SessionInfo {
                     id: acp::SessionId::new("test-idle-resume"),
                     cwd: cwd.as_str().to_string(),
@@ -1337,7 +1372,9 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 tool_context,
                 deny_read_globs: Vec::new(),
                 mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
-                mcp_strategy: McpInitStrategy::Blocking,
+                mcp_strategy: std::cell::Cell::new(McpInitStrategy::Blocking),
+                delivery_tools: std::cell::RefCell::new(Vec::new()),
+                attach_non_interactive: std::rc::Rc::new(std::cell::Cell::new(false)),
                 chat_state_handle,
                 unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
                 current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -1399,6 +1436,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 session_start: std::time::Instant::now(),
                 inference_idle_timeout: Duration::from_secs(300),
                 max_retries: 3,
+                rate_limit_waits: crate::session::acp_session::RateLimitWaitConfig::default(),
                 max_turns: None,
                 pending_interjections: InterjectionBuffer::new(),
                 pending_steering: Default::default(),
@@ -1419,6 +1457,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 agent: std::cell::RefCell::new(test_agent_default().await),
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
                 git_head_enabled: false,
+                status_line_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 models_manager: Default::default(),
                 display_cwd: std::sync::OnceLock::new(),
                 active_agent_type: parking_lot::Mutex::new(None),
@@ -1464,7 +1503,6 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
                 managed_mcp_handle: Default::default(),
-                managed_mcp_expires_at: std::sync::Mutex::new(None),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
                 mcp_announced_servers: Mutex::new(HashMap::new()),
@@ -1474,6 +1512,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
                 user_input_generation: std::sync::atomic::AtomicU64::new(0),
                 laziness_debug_log: None,
+                last_live_orphan_reconcile: std::cell::Cell::new(None),
                 deferred_prefix: TaskSlot::new(),
                 extension_registry: xai_agent_lifecycle::LocalExtensionRegistry::default(),
                 last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
@@ -1481,6 +1520,9 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
                 last_api_request_at: std::sync::atomic::AtomicI64::new(0),
                 hook_registry: std::cell::RefCell::new(None),
+                turn_report: Default::default(),
+                turn_abort: Default::default(),
+                turn_end_tx: Default::default(),
                 client_hooks: Default::default(),
                 hook_resolved_workspace_root: String::new(),
                 vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
@@ -1497,13 +1539,21 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 recap_epoch: std::cell::Cell::new(0),
                 turn_summary_task: std::cell::RefCell::new(None),
                 turn_summary_generation: std::cell::Cell::new(0),
+                title_refresh_task: std::cell::RefCell::new(None),
+                title_refresh_generation: std::cell::Cell::new(0),
+                next_title_refresh_idx: std::cell::Cell::new(0),
                 turn_summary_enabled: false,
+                title_refresh_enabled: false,
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
-                provider_fallback_cooldowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
+                provider_fallback_cooldowns: parking_lot::Mutex::new(
+                    std::collections::HashMap::new(),
+                ),
+                pending_image_strip: parking_lot::Mutex::new(None),
                 attribution_callback: None,
                 sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+                sampling_gate: None,
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
@@ -1578,6 +1628,7 @@ async fn test_compact_on_error_noop_without_model_metadata() {
                 is_retryable: false,
                 retry_after_secs: None,
                 should_retry: None,
+                error_code: None,
                 model_metadata: None,
                 empty_response_context: None,
                 doom_loop_triggers: None,

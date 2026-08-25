@@ -683,6 +683,7 @@ mod tests {
     fn fully_populated_override() -> ConfigModelOverride {
         ConfigModelOverride {
             model: Some("m".into()),
+            model_family: None,
             base_url: Some("https://example.com".into()),
             name: Some("Model M".into()),
             description: Some("desc".into()),
@@ -711,6 +712,7 @@ mod tests {
             agent_type: Some("agent".into()),
             inference_idle_timeout_secs: Some(60),
             max_retries: Some(3),
+            subagent_rate_limit_max_attempts: Some(8),
             hidden: Some(false),
             supported_in_api: Some(true),
             reasoning_effort: Some(ReasoningEffort::High),

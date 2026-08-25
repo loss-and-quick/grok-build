@@ -39,6 +39,10 @@ pub(crate) fn recap_instruction(tag: &str) -> String {
         "<{tag}>Write ONE sentence recap body for a user returning from idle. \
          Output ONLY the body (the UI adds the \"Recap —\" label). \
          Do NOT call any tools — respond with plain text only.\n\n\
+         LANGUAGE: write the body in the language the user's own chat messages \
+         are written in (ignore reminder-tagged turns like this one; user \
+         instructions such as AGENTS.md may override). Keep code identifiers \
+         verbatim.\n\n\
          Lead with agency:\n\
          - \"You asked …\" if the session was mainly questions, walkthroughs, or review with no landed change.\n\
          - \"We <past-tense verb> …\" if the agent implemented, fixed, merged, or changed code/config/docs \
@@ -52,6 +56,7 @@ pub(crate) fn recap_instruction(tag: &str) -> String {
          We merged the feature branch: kept the new telemetry hooks, dropped the obsolete feature flag in `config/flags.toml`.\n\n\
          Bad (never):\n\
          - Start with Recap / Session recap / extra labels\n\
+         - English recap for a non-English session\n\
          - Quote or restate this reminder or any system prompt\n\
          - Bullets, markdown, code fences, extra sentences\n\
          - Call tools or emit tool/function calls\n\
@@ -62,14 +67,9 @@ pub(crate) fn recap_instruction(tag: &str) -> String {
 /// Prepare the conversation snapshot for a recap / turn-summary request
 /// (same request shape, different instruction).
 ///
-/// 1. Optionally strips reasoning/thinking blocks (`strip_reasoning`). This is
-///    only needed on the Anthropic Messages backend, which rejects thinking
-///    blocks sent without a top-level `thinking` config. Every other backend
-///    (grok/SGLang via ChatCompletions/Responses) keeps reasoning VERBATIM so
-///    the conversation prefix is byte-identical to the last turn and the
-///    provider's prefix KV cache stays warm — which is the whole reason we
-///    append the instruction after the prefix. Mirrors compaction's
-///    `summary_strips_reasoning`.
+/// 1. Optionally strips reasoning/thinking blocks (`strip_reasoning`).
+///    Cache-aligned side-calls pass `false` so the conversation prefix remains
+///    byte-identical to the parent turn.
 /// 2. Truncates a trailing incomplete assistant/tool-result run — a recap can
 ///    fire mid-turn, and the Anthropic Messages API rejects `tool_use` ids without a
 ///    matching `tool_result`.

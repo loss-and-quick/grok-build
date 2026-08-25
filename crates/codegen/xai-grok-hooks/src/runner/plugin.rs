@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::config::HookSpec;
 use crate::event::HookEventEnvelope;
 use crate::invoker::{PluginHookRequest, PluginHookResponse};
-use crate::result::{HookDecision, StopHookOutcome};
+use crate::result::StopHookOutcome;
 
 use super::{GateKind, HookRunnerResult, RunContext};
 
@@ -146,35 +146,35 @@ fn response_to_result(
             PluginHookResponse::Decision {
                 allow: false,
                 reason,
-            } => HookRunnerResult::Decision(HookDecision::Deny {
+            } => HookRunnerResult::Deny {
                 reason: reason.unwrap_or_else(|| format!("denied by plugin hook '{hook_name}'")),
                 hook_name: hook_name.to_string(),
-            }),
+            },
             PluginHookResponse::Decision { allow: true, .. } => {
-                HookRunnerResult::Decision(HookDecision::Allow)
+                HookRunnerResult::Allow { updated_input: None }
             }
             // Observe/Stop/Replace replies to a Tool gate carry no allow/deny
             // signal: fail open (allow), warning on the clear gate mismatch.
-            PluginHookResponse::Observed { .. } => HookRunnerResult::Decision(HookDecision::Allow),
+            PluginHookResponse::Observed { .. } => HookRunnerResult::Allow { updated_input: None },
             PluginHookResponse::Stop { .. } => {
                 tracing::warn!(
                     hook_name,
                     "plugin returned a stop decision for a tool gate; allowing"
                 );
-                HookRunnerResult::Decision(HookDecision::Allow)
+                HookRunnerResult::Allow { updated_input: None }
             }
             PluginHookResponse::Replace { .. } => {
                 tracing::warn!(
                     hook_name,
                     "plugin returned a replace payload for a tool gate; allowing"
                 );
-                HookRunnerResult::Decision(HookDecision::Allow)
+                HookRunnerResult::Allow { updated_input: None }
             }
             // Unreachable: the early return above answers `NotSubscribed` for
             // every gate. Spelled as the gate's own fail-open rather than a
             // panic so a future refactor that moves the short-circuit degrades
             // to today's behaviour instead of killing the turn.
-            PluginHookResponse::NotSubscribed => HookRunnerResult::Decision(HookDecision::Allow),
+            PluginHookResponse::NotSubscribed => HookRunnerResult::Allow { updated_input: None },
         },
         GateKind::Stop => match response {
             PluginHookResponse::Stop {
@@ -354,7 +354,7 @@ mod tests {
         )
         .await;
         match result {
-            HookRunnerResult::Decision(HookDecision::Deny { reason, hook_name }) => {
+            HookRunnerResult::Deny { reason, hook_name } => {
                 assert_eq!(reason, "blocked by policy");
                 assert_eq!(hook_name, "test-plugin-hook");
             }
@@ -379,7 +379,7 @@ mod tests {
         )
         .await;
         match result {
-            HookRunnerResult::Decision(HookDecision::Deny { reason, .. }) => {
+            HookRunnerResult::Deny { reason, .. } => {
                 assert!(reason.contains("test-plugin-hook"), "got {reason}");
             }
             other => panic!("expected Deny, got {other:?}"),
@@ -404,7 +404,7 @@ mod tests {
         .await;
         assert!(matches!(
             result,
-            HookRunnerResult::Decision(HookDecision::Allow)
+            HookRunnerResult::Allow { updated_input: None }
         ));
     }
 

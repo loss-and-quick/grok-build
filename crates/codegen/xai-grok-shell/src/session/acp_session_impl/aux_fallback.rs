@@ -172,7 +172,8 @@ impl SessionActor {
         catalog_key: &str,
         background: bool,
     ) -> Option<AuxRoute> {
-        let (client, wire_model) = self.resolve_aux_sampler_client(catalog_key).await?;
+        let (client, wire_model, _context_window) =
+            self.resolve_aux_sampler_client(catalog_key).await?;
         Some(AuxRoute {
             client: if background {
                 client.as_background()
@@ -394,6 +395,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: Some(false),
+            error_code: None,
         };
         assert_eq!(xai_grok_sampler::classify_error_class(&saturated), "5xx");
     }

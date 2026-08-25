@@ -303,6 +303,10 @@ pub struct SessionEndPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(type = "number | null", optional = nullable)]
     pub tool_call_count: Option<u64>,
+    /// Lets a host settling on `session_end` tell a child's teardown from its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "string | null", optional = nullable)]
+    pub subagent_type: Option<String>,
 }
 
 /// `stop` payload.
@@ -330,6 +334,48 @@ pub struct StopFailurePayload {
     pub error_details: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_assistant_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
+}
+
+/// Mirror of `xai-grok-hooks::event::StopCancelledReason`. snake_case wire.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub enum StopCancelledReasonDto {
+    UserInterrupt,
+    PermissionRejected,
+    PermissionCancelled,
+    MaxTurns,
+    NoProgress,
+    Unknown,
+}
+
+/// Mirror of `xai-grok-hooks::event::CancelledBy`. snake_case wire.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub enum CancelledByDto {
+    User,
+    Runtime,
+    Unknown,
+}
+
+/// `stop_cancelled` payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct StopCancelledPayload {
+    pub reason: StopCancelledReasonDto,
+    pub cancelled_by: CancelledByDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_details: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_assistant_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
 }
 
 /// `pre_tool_use` payload.
@@ -401,6 +447,8 @@ pub struct PermissionDeniedPayload {
 pub struct UserPromptSubmitPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
 }
 
 /// `notification` payload.
@@ -1392,6 +1440,8 @@ mod bindings_export {
             SubagentStopPhaseDto,
             BackgroundTaskTypeDto,
             StopFailureKindDto,
+            StopCancelledReasonDto,
+            CancelledByDto,
             StopBackgroundTaskDto,
             StopSessionCronDto,
             ProviderResponseToolCallDto,
@@ -1399,6 +1449,7 @@ mod bindings_export {
             SessionEndPayload,
             StopPayload,
             StopFailurePayload,
+            StopCancelledPayload,
             PreToolUsePayload,
             PostToolUsePayload,
             PostToolUseFailurePayload,
@@ -2529,6 +2580,7 @@ mod tests {
                 error: StopFailureKindDto::RateLimit,
                 error_details: Some("429".into()),
                 last_assistant_message: None,
+                subagent_type: None,
             },
             json!({
                 "error": "rate_limit",

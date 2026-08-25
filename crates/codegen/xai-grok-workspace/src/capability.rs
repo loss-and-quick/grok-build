@@ -102,6 +102,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::ImageToVideo,
     ToolKind::ReferenceToVideo,
     ToolKind::DeployApp,
+    ToolKind::InitOrUpdateApp,
     ToolKind::SearchTool,
     ToolKind::UseTool,
     ToolKind::Monitor,
@@ -148,7 +149,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
 
         // Edit class.
         Edit | Write | Delete | Move | ImageGen | VideoGen | ImageToVideo | ReferenceToVideo
-        | DeployApp => matches!(mode, M::ReadWrite),
+        | DeployApp | InitOrUpdateApp => matches!(mode, M::ReadWrite),
 
         // Writes nothing in the workspace, but does persist across sessions, so
         // it sits with the edit class rather than the read class: a read-only

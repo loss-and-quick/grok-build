@@ -107,6 +107,9 @@ pub struct ClientFeedbackInput {
     #[serde(default)]
     pub feedback_text: Option<String>,
 
+    #[serde(default)]
+    pub images: Vec<prod_mc_cli_chat_proxy_types::feedback_types::FeedbackImage>,
+
     /// Feedback categories (e.g., ["accuracy", "speed", "helpfulness"])
     #[serde(default)]
     pub feedback_categories: Vec<String>,
@@ -169,8 +172,10 @@ impl ClientFeedbackInput {
     /// - `user_id`: Will be extracted from auth token by the backend
     ///
     /// Rating values are clamped to valid ranges based on rating_type.
-    pub(crate) fn to_submission(
-        &self,
+    /// `&mut self`: drains `images` into the submission instead of cloning
+    /// megabytes of base64; the input is not read for images afterwards.
+    pub(crate) fn take_submission(
+        &mut self,
         model_id: Option<String>,
         resolved_model_id: Option<String>,
         model_fingerprint: Option<String>,
@@ -205,6 +210,7 @@ impl ClientFeedbackInput {
             content,
         );
         s.turn_number = turn_number;
+        s.images = std::mem::take(&mut self.images);
         s.feedback_categories = self.feedback_categories.clone();
         s.model_id = model_id;
         s.resolved_model_id = resolved_model_id;
@@ -421,6 +427,16 @@ impl TokenUsageCategory {
         }
     }
 
+    /// Row for the workflow listing. `text` is the canonical model-facing
+    /// catalog render.
+    pub fn workflows_listing(text: &str, workflow_count: usize) -> Self {
+        Self {
+            label: "Workflows".to_string(),
+            tokens: xai_token_estimation::estimate_tokens(text),
+            detail: Some(count_detail(workflow_count as u64, "workflow")),
+        }
+    }
+
     /// Row for the MCP server announcement. `text` is the full reminder
     /// body for the current server set.
     pub fn mcp_servers(text: &str, server_count: usize) -> Self {
@@ -595,9 +611,12 @@ pub struct FeedbackContext {
 
 // ── Startup hints ───────────────────────────────────────────────────────
 
+// `pub` (not `pub(crate)`): carried by the public `SessionCommand` enum
+// (`UpdateAttachPolicy`), whose fields are reachable at `pub` — a
+// `pub(crate)` field type there trips the `private_interfaces` lint.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StartupHints {
+pub struct StartupHints {
     #[serde(default)]
     pub non_interactive: bool,
     #[serde(default)]
@@ -625,6 +644,30 @@ pub(crate) struct StartupHints {
     /// holds the parent's System and overwriting it would bust the cache prefix.
     #[serde(default)]
     pub preserve_inherited_system: bool,
+    /// Tool names (as the model sees them, e.g. `server__tool`) through which
+    /// this session delivers user-visible output. Declared by headless
+    /// surfaces whose users never see the model's plain-text responses —
+    /// output only reaches them via these tools. Opt-in: when empty (the
+    /// default), no behavior changes. Currently steers the MCP
+    /// connecting-reminder wording (`format_mcp_connecting_reminder`);
+    /// intended to also drive a turn-end delivery gate later.
+    #[serde(default)]
+    pub delivery_tools: Vec<String>,
+}
+
+impl StartupHints {
+    /// Resolve the MCP init strategy for an attachment carrying these hints:
+    /// `MCP_INIT_STRATEGY` env override, else `Blocking` for non-interactive
+    /// sessions, else `Progressive`. Shared by the spawn path and the
+    /// resident re-attach path so both resolve identically.
+    pub(crate) fn resolve_mcp_strategy(&self) -> xai_grok_telemetry::enums::McpInitStrategy {
+        use xai_grok_telemetry::enums::McpInitStrategy;
+        match std::env::var("MCP_INIT_STRATEGY") {
+            Ok(v) if !v.trim().is_empty() => McpInitStrategy::from(v),
+            _ if self.non_interactive => McpInitStrategy::Blocking,
+            _ => McpInitStrategy::Progressive,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -644,7 +687,7 @@ mod tests {
 
     /// Verify that the JSON payload Desktop sends (with `client_type: "desktop"`)
     /// deserializes correctly into `ClientFeedbackInput` and round-trips through
-    /// `to_submission()` preserving `ClientType::Desktop`.
+    /// `take_submission()` preserving `ClientType::Desktop`.
     #[test]
     fn desktop_client_type_deserializes_and_round_trips() {
         let json = r#"{
@@ -656,14 +699,14 @@ mod tests {
             "feedback_categories": ["accuracy"]
         }"#;
 
-        let input: ClientFeedbackInput = serde_json::from_str(json).unwrap();
+        let mut input: ClientFeedbackInput = serde_json::from_str(json).unwrap();
         assert_eq!(
             input.client_type,
             prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Desktop
         );
         assert_eq!(input.session_id, "sess-1");
 
-        let submission = input.to_submission(Some("grok-3".into()), None, None, Some(5));
+        let submission = input.take_submission(Some("grok-3".into()), None, None, Some(5));
         assert_eq!(
             submission.client_type,
             prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Desktop

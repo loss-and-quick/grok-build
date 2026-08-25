@@ -19,8 +19,10 @@
 //! - 429 (rate limited) — waits the full `Retry-After`, so the attempt
 //!   count is what bounds the total wait
 //!
-//! **Special handling** (not counted against retry budget):
-//! - 413 / image processing errors → strip images and retry once
+//! **Special handling**:
+//! - 413 / image processing errors → strip images and retry. Debits the
+//!   retry budget but is never blocked by it; a repeat with nothing left to
+//!   strip is fatal, so at most one strip cycle per request.
 //!
 //! **Not retried** (Fatal immediately):
 //! - 400, 401, 403, 404, 408, 422 (client errors)
@@ -47,6 +49,9 @@ use xai_grok_sampling_types::{SamplingError, is_retryable_api_status};
 /// instead of waiting again. Rate-limit waits can be long and there is
 /// no point burning a long backoff just to be rate-limited again.
 pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 2;
+
+/// `rate_limit_retry_threshold` that disables the sampler's own 429 retry; `1`, not `0` (which means unset).
+pub const RATE_LIMIT_RETRY_DISABLED: u32 = 1;
 
 /// Default retry budget when no env or model override is set: at most 14
 /// retries (the attempt reaching this count is fatal). With the 30s cap:
@@ -104,12 +109,11 @@ pub fn retry_backoff_with_jitter(retry_count: u32) -> Duration {
         .checked_shl(shift)
         .unwrap_or(u64::MAX)
         .min(MAX_RETRY_BACKOFF.as_millis() as u64);
-    jittered(Duration::from_millis(base_ms))
+    jitter_backoff(Duration::from_millis(base_ms))
 }
 
-/// +/-20% jitter around `base`, de-syncing clients that failed at the
-/// same instant (e.g. a mass Cloudflare 52x event during an origin outage).
-fn jittered(base: Duration) -> Duration {
+/// +/-20% jitter around `base`, de-syncing clients that failed at the same instant.
+pub fn jitter_backoff(base: Duration) -> Duration {
     use std::hash::{Hash, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -122,6 +126,13 @@ fn jittered(base: Duration) -> Duration {
     std::thread::current().id().hash(&mut hasher);
     let jitter = hasher.finish() % (jitter_range * 2 + 1);
     Duration::from_millis(base_ms - jitter_range + jitter)
+}
+
+pub fn retry_after_or_backoff(attempt: u32, retry_after_secs: Option<u64>) -> Duration {
+    match retry_after_secs.filter(|secs| *secs > 0) {
+        Some(secs) => jitter_backoff(Duration::from_secs(secs).min(MAX_RETRY_BACKOFF)),
+        None => retry_backoff_with_jitter(attempt),
+    }
 }
 
 /// What the actor should do next given a sampling error and retry context.
@@ -192,8 +203,8 @@ pub fn classify_error(
         return RetryDecision::RetryWithImageStrip;
     }
 
-    // Image processing errors (direct 400 or proxy-wrapped 500): strip
-    // images and retry, same recovery as 413.
+    // Image processing errors (direct 400, proxy-wrapped 500, or mid-stream
+    // SSE error): strip images and retry, same recovery as 413.
     if err.is_image_processing_error() {
         return RetryDecision::RetryWithImageStrip;
     }
@@ -255,10 +266,7 @@ pub fn classify_error(
         if next_attempt >= max_retries {
             return RetryDecision::Fatal(clone_error(err));
         }
-        let backoff = err
-            .retry_after()
-            .map(|secs| jittered(Duration::from_secs(secs).min(MAX_RETRY_BACKOFF)))
-            .unwrap_or_else(|| retry_backoff_with_jitter(next_attempt));
+        let backoff = retry_after_or_backoff(next_attempt, err.retry_after());
         if next_attempt == 1 {
             return RetryDecision::RetryWithClientRebuild { backoff };
         }
@@ -317,6 +325,7 @@ fn is_overloaded(err: &SamplingError) -> bool {
         SamplingError::StreamError {
             error_type,
             message,
+            ..
         } => {
             error_type.to_ascii_lowercase().contains("overloaded")
                 || message.to_ascii_lowercase().contains("overloaded")
@@ -415,6 +424,7 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
         SamplingError::StreamError {
             error_type,
             message,
+            ..
         } => {
             format!(
                 "{}Server stream error ({}): {}. The server encountered an error while streaming the response.",
@@ -489,20 +499,24 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             model_metadata,
             retry_after_secs,
             should_retry,
+            error_code,
         } => SamplingError::Api {
             status: *status,
             message: message.clone(),
             model_metadata: model_metadata.clone(),
             retry_after_secs: *retry_after_secs,
             should_retry: *should_retry,
+            error_code: error_code.clone(),
         },
         SamplingError::EventStreamError(msg) => SamplingError::EventStreamError(msg.clone()),
         SamplingError::StreamError {
             error_type,
             message,
+            code,
         } => SamplingError::StreamError {
             error_type: error_type.clone(),
             message: message.clone(),
+            code: code.clone(),
         },
         SamplingError::IdleTimeout { elapsed_secs } => SamplingError::IdleTimeout {
             elapsed_secs: *elapsed_secs,
@@ -525,6 +539,7 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+    use xai_grok_sampling_types::ApiErrorCode;
 
     fn api_err(status: StatusCode, message: &str) -> SamplingError {
         SamplingError::Api {
@@ -533,6 +548,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         }
     }
 
@@ -543,6 +559,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(retry_after),
             should_retry: None,
+            error_code: None,
         }
     }
 
@@ -680,6 +697,50 @@ mod tests {
     }
 
     #[test]
+    fn classify_image_400_strips_even_with_should_retry_false() {
+        // The server stamps invalid-image 400s with `x-should-retry: false`;
+        // that verdict only covers resending the SAME payload, and the strip
+        // retry sends a different one — the code must beat the header veto.
+        let err = SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "some future wording without the legacy phrase".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: Some(false),
+            error_code: Some(ApiErrorCode::InvalidImage),
+        };
+        assert!(matches!(
+            classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::RetryWithImageStrip
+        ));
+    }
+
+    #[test]
+    fn classify_image_stream_error_strips_instead_of_blind_retry() {
+        // Coded mid-stream image rejections must strip immediately; a
+        // code-less stream error keeps the ordinary retry path.
+        let err = SamplingError::StreamError {
+            error_type: "invalid_request_error".into(),
+            message: "Base64 string of provided image cannot be decoded.".into(),
+            code: Some(ApiErrorCode::InvalidImage),
+        };
+        assert!(matches!(
+            classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::RetryWithImageStrip
+        ));
+
+        let unrelated = SamplingError::StreamError {
+            error_type: "overloaded_error".into(),
+            message: "The server is overloaded.".into(),
+            code: None,
+        };
+        assert!(!matches!(
+            classify_error(&unrelated, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::RetryWithImageStrip
+        ));
+    }
+
+    #[test]
     fn classify_rate_limited_uses_retry_after() {
         let err = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 7);
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
@@ -692,6 +753,28 @@ mod tests {
             }
             other => panic!("expected RetryWithBackoff, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rate_limit_retry_layer_splits_by_threshold() {
+        let err = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 5);
+        assert!(
+            matches!(
+                classify_error(&err, 0, 15, RATE_LIMIT_RETRY_DISABLED),
+                RetryDecision::Fatal(_)
+            ),
+            "disabled threshold must surface the first 429, not wait internally"
+        );
+        assert!(
+            matches!(
+                classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
+                RetryDecision::RetryWithBackoff {
+                    is_rate_limited: true,
+                    ..
+                }
+            ),
+            "default threshold keeps the sampler's own 429 retry"
+        );
     }
 
     #[test]
@@ -772,6 +855,7 @@ mod tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry,
+                error_code: None,
             };
             match classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
                 RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
@@ -842,6 +926,7 @@ mod tests {
         let err = SamplingError::StreamError {
             error_type: "transient".into(),
             message: "x".into(),
+            code: None,
         };
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
             RetryDecision::RetryWithClientRebuild { .. } => {}
@@ -897,6 +982,22 @@ mod tests {
         );
     }
 
+    /// The tee cell captures mid-stream errors via `clone_error`; dropping
+    /// the code there would silently disable mid-stream strip recovery.
+    #[test]
+    fn clone_error_preserves_stream_error_code() {
+        let cloned = clone_error(&SamplingError::StreamError {
+            error_type: "invalid_request_error".into(),
+            message: "bad image".into(),
+            code: Some(ApiErrorCode::InvalidImage),
+        });
+        let SamplingError::StreamError { code, .. } = &cloned else {
+            panic!("expected StreamError, got {cloned:?}");
+        };
+        assert_eq!(*code, Some(ApiErrorCode::InvalidImage));
+        assert!(cloned.is_image_processing_error());
+    }
+
     #[test]
     fn classify_serialization_is_fatal_on_first_attempt() {
         match classify_error(&serialization_err(), 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
@@ -943,6 +1044,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: Some(false),
+            error_code: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -960,6 +1062,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -975,6 +1078,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: Some(true),
+            error_code: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -990,6 +1094,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -1041,6 +1146,7 @@ mod tests {
             classify_error_class(&SamplingError::StreamError {
                 error_type: "transient".into(),
                 message: "x".into(),
+                code: None,
             }),
             "stream"
         );
@@ -1059,12 +1165,14 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert_eq!(classify_error_class(&err), "overloaded");
         // Overloaded surfaced mid-stream.
         let err = SamplingError::StreamError {
             error_type: "overloaded_error".into(),
             message: "server overloaded".into(),
+            code: None,
         };
         assert_eq!(classify_error_class(&err), "overloaded");
         // Overloaded wins over the plain 5xx bucket.
@@ -1082,6 +1190,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(10),
             should_retry: Some(false),
+            error_code: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),

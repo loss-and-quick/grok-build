@@ -21,8 +21,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use xai_grok_hooks::event::{
-    BackgroundTaskType, HookEventEnvelope, HookEventName, HookPayload, ProviderResponseToolCall,
-    StopBackgroundTask, StopFailureKind, StopSessionCron, SubagentStopPhase,
+    BackgroundTaskType, CancelledBy, HookEventEnvelope, HookEventName, HookPayload,
+    ProviderResponseToolCall, StopBackgroundTask, StopCancelledReason, StopFailureKind,
+    StopSessionCron, SubagentStopPhase,
 };
 use xai_grok_plugin_protocol as proto;
 
@@ -49,6 +50,7 @@ fn all_payload_samples() -> Vec<HookPayload> {
             reason: "logout".into(),
             turn_count: Some(12),
             tool_call_count: Some(34),
+            subagent_type: Some("explore".into()),
         },
         HookPayload::Stop {
             reason: "end_turn".into(),
@@ -83,6 +85,15 @@ fn all_payload_samples() -> Vec<HookPayload> {
             error: StopFailureKind::RateLimit,
             error_details: Some("429 slow down".into()),
             last_assistant_message: Some("rate limited".into()),
+            subagent_type: Some("explore".into()),
+        },
+        HookPayload::StopCancelled {
+            reason: StopCancelledReason::UserInterrupt,
+            cancelled_by: CancelledBy::User,
+            cancel_trigger: Some("esc".into()),
+            reason_details: Some("user pressed escape".into()),
+            last_assistant_message: Some("stopping".into()),
+            subagent_type: Some("explore".into()),
         },
         HookPayload::PreToolUse {
             tool_name: "bash".into(),
@@ -118,6 +129,7 @@ fn all_payload_samples() -> Vec<HookPayload> {
         },
         HookPayload::UserPromptSubmit {
             prompt: Some("hello".into()),
+            subagent_type: Some("explore".into()),
         },
         HookPayload::Notification {
             notification_type: "info".into(),
@@ -217,6 +229,7 @@ fn payload_via_dto(payload: &HookPayload, source: &Value) -> Value {
         HookPayload::SessionEnd { .. } => reround::<proto::SessionEndPayload>(source),
         HookPayload::Stop { .. } => reround::<proto::StopPayload>(source),
         HookPayload::StopFailure { .. } => reround::<proto::StopFailurePayload>(source),
+        HookPayload::StopCancelled { .. } => reround::<proto::StopCancelledPayload>(source),
         HookPayload::PreToolUse { .. } => reround::<proto::PreToolUsePayload>(source),
         HookPayload::PostToolUse { .. } => reround::<proto::PostToolUsePayload>(source),
         HookPayload::PostToolUseFailure { .. } => {

@@ -111,6 +111,14 @@ See ~/.grok/README.md for more information.
         /// Switch to the enterprise release channel.
         #[arg(long, conflicts_with_all = ["alpha", "stable"], hide = true)]
         enterprise: bool,
+        /// Internal: what spawned this `grok update` (`user_command`,
+        /// `auto_background`, `leader_converge`). Hidden.
+        #[arg(long, hide = true)]
+        trigger: Option<String>,
+        /// Internal compat alias for `--trigger=auto_background` (older
+        /// parents still spawn children with it).
+        #[arg(long, hide = true)]
+        auto: bool,
     },
     /// Print version information
     #[command(visible_alias = "v")]
@@ -127,6 +135,9 @@ See ~/.grok/README.md for more information.
     },
     /// Manage git worktrees
     Worktree(crate::worktree_cmd::WorktreeArgs),
+    /// Show what the grok home (~/.grok) uses on disk
+    #[command(name = "du", visible_alias = "disk-usage")]
+    DiskUsage(crate::disk_usage_cmd::DiskUsageArgs),
     /// Expose this workspace to the Computer Hub (via the leader).
     ///
     /// Disabled by default and enabled server-side per account; set
@@ -277,7 +288,7 @@ pub struct AgentArgs {
     #[arg(long = "agent-profile", value_name = "PATH")]
     pub agent_profile: Option<PathBuf>,
     /// Load a plugin from this directory for this process only (repeatable).
-    /// Highest-priority plugin scope; always trusted — hooks and MCP servers
+    /// Highest-priority plugin scope; always trusted: hooks and MCP servers
     /// activate without a prompt. Used by the Agent SDKs to inject
     /// per-connection plugins.
     #[arg(long = "plugin-dir", value_name = "DIR", value_hint = ValueHint::DirPath)]
@@ -383,7 +394,7 @@ pub struct LeaderArgs {
     pub no_exit_on_disconnect: bool,
     /// Defer the grok.com relay WebSocket until the first headless IPC client
     /// registers. Without this flag the leader connects the relay eagerly at
-    /// startup — required for bare leaders (headless remote env / systemd) that
+    /// startup, required for bare leaders (headless remote env / systemd) that
     /// receive remote prompts *through* the relay. Passed by leaders auto-spawned
     /// from interactive clients (TUI/IDE), which only need the relay if a
     /// headless client appears.
@@ -399,7 +410,7 @@ pub struct LeaderArgs {
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "grok",
-    version = env!("VERSION_WITH_COMMIT"),
+    version = xai_grok_version::full_version(),
     about = "Grok Build TUI",
     disable_version_flag = true,
     next_display_order = None,
@@ -585,7 +596,7 @@ pub struct PagerArgs {
     /// Use a specific session UUID for a **new** conversation (must be a valid
     /// UUID and must not already exist under the target session directory).
     /// With `--resume`/`--continue`, only valid together with `--fork-session`
-    /// (names the forked session). Does not resume existing sessions — use
+    /// (names the forked session). Does not resume existing sessions, use
     /// `--resume` / `--continue` instead.
     #[arg(short = 's', long = "session-id", value_name = "SESSION_ID")]
     pub session_id: Option<String>,
@@ -643,11 +654,19 @@ pub struct PagerArgs {
     /// Disable structured question prompts from the agent.
     #[arg(long = "no-ask-user", hide = true)]
     pub no_ask_user: bool,
-    /// Enable cross-session memory.
-    #[arg(long = "experimental-memory", conflicts_with = "no_memory")]
+    /// Legacy compatibility flag for enabling cross-session memory.
+    #[arg(
+        long = "experimental-memory",
+        conflicts_with = "no_memory",
+        hide = true
+    )]
     pub experimental_memory: bool,
-    /// Disable cross-session memory for this session.
-    #[arg(long = "no-memory", conflicts_with = "experimental_memory")]
+    /// Legacy compatibility flag for disabling cross-session memory.
+    #[arg(
+        long = "no-memory",
+        conflicts_with = "experimental_memory",
+        hide = true
+    )]
     pub no_memory: bool,
     /// Agent name or definition file path.
     #[arg(long = "agent", value_name = "NAME")]
@@ -744,12 +763,12 @@ pub struct PagerArgs {
     /// Experimental: scrollback-native rendering. Finalized blocks are printed
     /// into the terminal's native scrollback (use the terminal's own scroll /
     /// selection); a small pinned region holds the prompt + running turn.
-    /// Session-scoped only — does not write config. To default plain `grok` to
+    /// Session-scoped only, does not write config. To default plain `grok` to
     /// minimal, set `[ui] screen_mode = "minimal"` in ~/.grok/config.toml.
     #[arg(long = "minimal")]
     pub minimal: bool,
     /// Open in the standard fullscreen TUI for this session, overriding a
-    /// config `[ui] screen_mode = "minimal"` preference. Session-scoped only —
+    /// config `[ui] screen_mode = "minimal"` preference. Session-scoped only,
     /// does not write config. Fullscreen-vs-inline still follows the alt-screen
     /// policy (--no-alt-screen, [terminal] alt_screen, terminal auto-detection).
     #[arg(long = "fullscreen", conflicts_with = "minimal")]
@@ -817,6 +836,24 @@ fn strip_cur_dir(path: PathBuf) -> PathBuf {
         .collect()
 }
 impl PagerArgs {
+    pub(crate) fn memory_enabled_override(&self) -> Option<bool> {
+        if self.experimental_memory {
+            Some(true)
+        } else if self.no_memory {
+            Some(false)
+        } else {
+            None
+        }
+    }
+    pub(crate) fn memory_override_flag(&self) -> Option<&'static str> {
+        if self.experimental_memory {
+            Some("--experimental-memory")
+        } else if self.no_memory {
+            Some("--no-memory")
+        } else {
+            None
+        }
+    }
     /// Parse CLI arguments without applying side effects.
     pub fn parse_cli() -> Self {
         let bin_name = std::env::args()

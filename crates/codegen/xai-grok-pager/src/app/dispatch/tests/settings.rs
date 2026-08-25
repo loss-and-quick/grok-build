@@ -165,7 +165,7 @@ fn plugin_cta_catalog_reload_empty_candidates_resets_matched_phase() {
     let id = AgentId(0);
     {
         let cta = &mut app.agents.get_mut(&id).unwrap().plugin_cta;
-        cta.official_source_present = true;
+        cta.source_url_or_path = Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         cta.candidates = vec![cta_entry("figma", "not_installed")];
         cta.phase = CtaPhase::Matched {
             plugin_relative_path: "plugins/figma".into(),
@@ -592,6 +592,27 @@ fn set_timeline_toggles_displayed_state_when_current_ui_diverges() {
     assert_eq!(effects.len(), 1, "toggle must persist, not silently no-op");
     assert!(!app.appearance.show_timeline, "the rail is now hidden");
     assert_eq!(app.current_ui.show_timeline, Some(false));
+}
+#[test]
+fn set_confirm_before_rewind_emits_persist_setting_with_correct_payload() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    let default_on = app.current_ui.confirm_before_rewind_enabled();
+    let effects = dispatch(Action::SetConfirmBeforeRewind(!default_on), &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "confirm_before_rewind");
+            assert_eq!(value, &SettingValue::Bool(!default_on));
+            assert_eq!(rollback_value, &SettingValue::Bool(default_on));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    assert_eq!(app.current_ui.confirm_before_rewind, Some(!default_on));
 }
 #[test]
 fn set_page_flip_on_send_emits_persist_setting_with_correct_payload() {
@@ -1526,9 +1547,24 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let away = !crate::appearance::cache::load_page_flip_on_send();
             let _ = dispatch(Action::SetPageFlipOnSend(away), app);
         }
+        "confirm_before_rewind" => {
+            let away = !app.current_ui.confirm_before_rewind_enabled();
+            let _ = dispatch(Action::SetConfirmBeforeRewind(away), app);
+        }
         "combine_queued_prompts" => {
             let away = !crate::appearance::cache::load_combine_queued_prompts();
             let _ = dispatch(Action::SetCombineQueuedPrompts(away), app);
+        }
+        "follow_up_behavior" => {
+            let away = match crate::appearance::cache::load_follow_up_behavior() {
+                crate::appearance::FollowUpBehavior::Queue => {
+                    crate::appearance::FollowUpBehavior::Steer
+                }
+                crate::appearance::FollowUpBehavior::Steer => {
+                    crate::appearance::FollowUpBehavior::Queue
+                }
+            };
+            let _ = dispatch(Action::SetFollowUpBehavior(away), app);
         }
         "simple_mode" => {
             let _ = dispatch(Action::SetSimpleMode(false), app);
@@ -1609,7 +1645,7 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let _ = dispatch(Action::SetVimMode(true), app);
         }
         "remember_tool_approvals" => {
-            let _ = dispatch(Action::SetRememberToolApprovals(true), app);
+            let _ = dispatch(Action::SetRememberToolApprovals(false), app);
         }
         "toolset.ask_user_question.timeout_enabled" => {
             let _ = dispatch(Action::SetAskUserQuestionTimeoutEnabled(false), app);

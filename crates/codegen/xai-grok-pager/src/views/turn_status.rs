@@ -5,7 +5,7 @@
 //! - Spinner (left, slowed to ~7.5fps)
 //! - Activity label (colored per activity type, truncates if needed)
 //! - Phase timer `Xs` (gray, never truncates)
-//! - Queued-send hint `· N queued — Enter to send now` (gray, sendable waits only)
+//! - Queued-send hint `· N queued, Enter to send now` (gray, sendable waits only)
 //! - Fill space
 //! - Turn timer `Xm Ys` and optional token count `⇣Nk` (right-aligned, gray)
 //! - Cancel button `[stop]` (right-aligned, red on hover)
@@ -70,7 +70,7 @@ pub(crate) fn pending_diamond_color(theme: &Theme, accent: Color, tick: u64) -> 
 #[derive(Debug, Default)]
 pub struct TurnStatusOutput {
     /// Hit area for the cancel button, if rendered.
-    /// `None` when the button is not shown (idle, cancelling, drain-blocked).
+    /// `None` when the button is not shown (idle, parked, drain-blocked).
     pub cancel_button: Option<Rect>,
     /// Hit area for the background-demote button, if rendered.
     pub bg_button: Option<Rect>,
@@ -188,7 +188,7 @@ pub fn is_sendable_wait(activity: &Option<TurnActivity>) -> bool {
             WaitingReason::TaskOutput { waits: true, .. }
                 | WaitingReason::TasksComplete
                 | WaitingReason::Sleep
-                | WaitingReason::Subagent
+                | WaitingReason::Subagent { .. }
         ))
     )
 }
@@ -304,7 +304,7 @@ pub fn render_turn_status(
         // story (Enter acts on the queue immediately), so it replaces the
         // generic interrupt copy.
         let parked_suffix = if held_queue > 0 && held_queue_top_sendable {
-            format!(" \u{00b7} {held_queue} queued — Enter to send now")
+            format!(" \u{00b7} {held_queue} queued, Enter to send now")
         } else if held_queue > 0 {
             format!(" \u{00b7} {held_queue} queued")
         } else {
@@ -346,14 +346,15 @@ pub fn render_turn_status(
         return TurnStatusOutput::default();
     }
 
-    // Determine if cancel button should be shown.
-    // Show when: TurnRunning or CommandRunning.
-    // Hide when: Idle, Cancelling (already cancelling), or a keyboard-only host
-    // (no clickable buttons — see `buttons`).
+    // Shown while running AND while cancelling (the click routes to the
+    // cancel-retry path); hidden when idle or on a keyboard-only host.
     let show_cancel = show_buttons
         && matches!(
             state,
-            AgentState::TurnRunning | AgentState::CommandRunning { .. }
+            AgentState::TurnRunning
+                | AgentState::CommandRunning { .. }
+                | AgentState::TurnCancelling
+                | AgentState::CommandCancelling { .. }
         );
 
     // ── Compute activity style and label ──
@@ -381,9 +382,14 @@ pub fn render_turn_status(
     };
     let turn_timer_width = turn_timer_str.width();
 
-    // Bg button: [↓] normally, [send to bg] when hovered (only for running execute
-    // tools). `show_cancel` already implies a mouse host, so no extra check.
-    let show_bg = show_cancel && has_running_execute;
+    // Bg button: [↓] normally, [send to bg] when hovered. Running execute
+    // tools only, and never while cancelling (demote no-ops there).
+    let show_bg = show_cancel
+        && has_running_execute
+        && matches!(
+            state,
+            AgentState::TurnRunning | AgentState::CommandRunning { .. }
+        );
     let bg_str = if show_bg {
         if bg_hovered {
             " [send to bg]"
@@ -559,7 +565,7 @@ pub fn render_turn_status(
         // toast — see `AgentView::held_queue_top_sendable`).
         let suffix = if held_queue > 0 && is_sendable_wait(activity) {
             if held_queue_top_sendable {
-                format!(" · {held_queue} queued — Enter to send now")
+                format!(" · {held_queue} queued, Enter to send now")
             } else {
                 format!(" · {held_queue} queued")
             }
@@ -707,6 +713,11 @@ fn compute_activity(
         (AgentState::TurnRunning, Some(TurnActivity::Retrying { attempt, .. })) => (
             Style::default().fg(theme.warning),
             format!("Retrying (attempt {attempt})…"),
+            false,
+        ),
+        (AgentState::TurnRunning, Some(TurnActivity::WritingToolCall(writing))) => (
+            Style::default().fg(theme.text_secondary),
+            writing.label(),
             false,
         ),
         (AgentState::TurnRunning, Some(TurnActivity::Waiting(reason))) => (
@@ -895,7 +906,7 @@ mod tests {
             WaitingReason::Model
         ))));
         assert!(
-            is_sendable_wait(&Some(TurnActivity::Waiting(WaitingReason::Subagent))),
+            is_sendable_wait(&Some(TurnActivity::Waiting(WaitingReason::subagent()))),
             "the shell aborts a blocked foreground subagent await on send-now, \
              so Enter during it must read as sendable"
         );
@@ -968,7 +979,13 @@ mod tests {
         let theme = Theme::current();
         let cases = [
             (WaitingReason::Model, "Waiting for response…"),
-            (WaitingReason::Subagent, "Waiting on subagent…"),
+            (WaitingReason::subagent(), "Waiting on subagent…"),
+            (
+                WaitingReason::Subagent {
+                    display: Some("fix flaky test: Running: cargo test".into()),
+                },
+                "fix flaky test: Running: cargo test…",
+            ),
             (WaitingReason::task_output(), "Waiting on task output…"),
             (
                 WaitingReason::TaskOutput {
@@ -1032,6 +1049,46 @@ mod tests {
             Watchers::default(),
             false
         ));
+    }
+
+    /// Cancelling keeps `[stop]` clickable (the retry affordance for a lost
+    /// cancel); a revert to the running-only gate strands mouse users.
+    #[test]
+    fn cancelling_keeps_stop_button_clickable() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 1));
+        let output = render_turn_status(
+            &mut buf,
+            Rect::new(0, 0, 80, 1),
+            TurnStatusArgs {
+                state: &AgentState::TurnCancelling,
+                activity: &None,
+                turn_elapsed: Some(Duration::from_secs(3)),
+                activity_started_at: None,
+                tick: 0,
+                drain_blocked: false,
+                buttons: Some(MouseButtons::default()),
+                has_running_execute: false,
+                total_tokens: None,
+                mcp_init_progress: None,
+                is_bash_turn: false,
+                is_pending_user_input: false,
+                goal_verifying: false,
+                watchers: Watchers::default(),
+                parked: false,
+                flat_background: false,
+                held_queue: 0,
+                held_queue_top_sendable: false,
+            },
+        );
+        assert!(
+            output.cancel_button.is_some(),
+            "cancelling must keep a clickable [stop] (cancel-retry affordance)"
+        );
+        let text = buffer_text(&buf, Rect::new(0, 0, 80, 1));
+        assert!(
+            text.contains("Cancelling") && text.contains("[stop]"),
+            "got: {text:?}"
+        );
     }
 
     #[test]
@@ -1489,7 +1546,7 @@ mod tests {
         args.held_queue_top_sendable = true;
         let text = render_row_text(args, 80);
         assert!(
-            text.contains("1 queued — Enter to send now"),
+            text.contains("1 queued, Enter to send now"),
             "parked with a held row must advertise the queued hint, got: {text:?}"
         );
         assert!(
@@ -1509,7 +1566,7 @@ mod tests {
 
     #[test]
     fn queued_hint_renders_after_phase_timer() {
-        let activity = Some(TurnActivity::Waiting(WaitingReason::Subagent));
+        let activity = Some(TurnActivity::Waiting(WaitingReason::subagent()));
         let mut args = idle_args(Watchers::default());
         args.state = &AgentState::TurnRunning;
         args.activity = &activity;
@@ -1518,7 +1575,7 @@ mod tests {
         args.held_queue_top_sendable = true;
         let text = render_row_text(args, 80);
         assert!(
-            text.contains("Waiting on subagent… 5m59s · 1 queued — Enter to send now"),
+            text.contains("Waiting on subagent… 5m59s · 1 queued, Enter to send now"),
             "phase timer must sit between the wait label and the queued hint, got: {text:?}"
         );
     }

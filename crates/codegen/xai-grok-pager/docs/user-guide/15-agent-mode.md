@@ -26,7 +26,7 @@ You can also set always-approve per session on `session/new`:
 }
 ```
 
-Interactive TUI users typically leave the default ask mode (or use auto). See [Permissions and safety](22-permissions-and-safety.md).
+Interactive TUI users typically keep the default mode (or pick ask or auto explicitly). See [Permissions and safety](22-permissions-and-safety.md).
 
 ---
 
@@ -78,6 +78,8 @@ grok agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ```
 
 Clients connect over WebSocket and authenticate with the secret token. If you omit `--secret`, the agent prints a generated token at startup, or set `GROK_AGENT_SECRET`. The process keeps state across client reconnects. Permissions match other entry points; see [Permissions and safety](22-permissions-and-safety.md).
+
+This is a server you run yourself — Grok's hosted cloud sandboxes do not run `grok agent serve`.
 
 ---
 

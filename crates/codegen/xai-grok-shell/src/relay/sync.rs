@@ -122,8 +122,7 @@ impl RelaySyncState {
     /// Writes to a temporary file then renames to avoid corruption on crash.
     /// Creates the session directory if it doesn't exist.
     pub fn save(&self, session_dir: &std::path::Path) -> std::io::Result<()> {
-        // Ensure session directory exists
-        std::fs::create_dir_all(session_dir)?;
+        crate::util::grok_home::create_dir_all_owner_only(session_dir)?;
 
         let path = Self::state_path(session_dir);
         let tmp_path = path.with_extension("json.tmp");
@@ -798,6 +797,17 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_relay_sync_state_save_creates_owner_only_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let session_dir = temp_dir.path().join("session-abc");
+
+        RelaySyncState::default().save(&session_dir).unwrap();
+
+        assert_eq!(crate::test_support::unix_mode(&session_dir), 0o700);
+    }
+
+    #[test]
     fn test_relay_sync_state_load_missing_file() {
         let temp_dir = tempfile::tempdir().unwrap();
         let dir_path = temp_dir.path().join("nonexistent");
@@ -955,10 +965,7 @@ mod tests {
         let notification = make_notification("sess-abc", None);
         let id = resolve_event_id(&notification);
         // Must match {sessionId}-{counter} format, NOT a UUID
-        assert!(
-            id.starts_with("sess-abc-"),
-            "expected id to start with 'sess-abc-', got: {id}"
-        );
+        assert!(id.starts_with("sess-abc-"));
         let counter_part = id.strip_prefix("sess-abc-").unwrap();
         counter_part
             .parse::<u64>()
@@ -971,10 +978,7 @@ mod tests {
         let notification =
             make_notification("sess-xyz", Some(serde_json::json!({ "other": "value" })));
         let id = resolve_event_id(&notification);
-        assert!(
-            id.starts_with("sess-xyz-"),
-            "expected id to start with 'sess-xyz-', got: {id}"
-        );
+        assert!(id.starts_with("sess-xyz-"));
         let counter_part = id.strip_prefix("sess-xyz-").unwrap();
         counter_part
             .parse::<u64>()

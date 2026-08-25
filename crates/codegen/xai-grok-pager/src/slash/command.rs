@@ -99,6 +99,69 @@ pub struct ArgItem {
     pub description: String,
 }
 
+/// A saved or built-in workflow the `/workflow` picker can launch, sourced
+/// from ACP commands that carry `_meta.workflowSource`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowChoice {
+    pub name: String,
+    pub description: String,
+}
+
+/// A session workflow run the `/workflow` manage verbs can target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowRunChoice {
+    pub name: String,
+    pub status: String,
+    pub builtin: bool,
+}
+
+impl WorkflowRunChoice {
+    pub fn can_pause(&self) -> bool {
+        self.status == "active"
+    }
+
+    pub fn can_resume(&self) -> bool {
+        // Picker: only runs the user stopped (`/workflow stop`) or paused
+        // (`/workflow pause`). System pauses (blocked / back-off / budget)
+        // stay off this list; they are still resumable if typed by name.
+        matches!(self.status.as_str(), "user_paused" | "cancelled")
+    }
+
+    pub fn can_stop(&self) -> bool {
+        !matches!(
+            self.status.as_str(),
+            "interrupted" | "complete" | "failed" | "cancelled"
+        )
+    }
+
+    pub fn can_save(&self, definitions: &[WorkflowChoice]) -> bool {
+        // Shell save requires display name == script `meta.name`. First
+        // runs keep the catalog name; uniquified copies (`review-pr-2`)
+        // do not. A definition literally named `sprint-2` is still
+        // savable because that name is in the catalog.
+        !self.builtin
+            && definitions
+                .iter()
+                .any(|workflow| workflow.name == self.name)
+    }
+}
+
+impl WorkflowChoice {
+    /// `None` when the command is not a workflow definition.
+    pub fn from_acp(cmd: &acp::AvailableCommand) -> Option<Self> {
+        cmd.meta.as_ref()?.get("workflowSource")?;
+        let description = cmd
+            .description
+            .strip_prefix("Workflow: ")
+            .unwrap_or(&cmd.description)
+            .to_string();
+        Some(Self {
+            name: cmd.name.clone(),
+            description,
+        })
+    }
+}
+
 /// Read-only context for generating suggestions.
 ///
 /// Passed to `SlashCommand::suggest_args()` and `SlashCommand::visible()`.
@@ -115,11 +178,20 @@ pub struct AppCtx<'a> {
     /// deployments with no grok.com billing session.
     pub usage_command_visible: bool,
     pub workflows_available: bool,
+    /// Saved / built-in workflow definitions advertised by the shell
+    /// (`_meta.workflowSource`). Backs `/workflow` argument suggestions.
+    pub saved_workflows: &'a [WorkflowChoice],
+    /// Live session runs. Backs `/workflow pause|resume|stop|save` name
+    /// suggestions so a manage verb never auto-picks a run.
+    pub workflow_runs: &'a [WorkflowRunChoice],
     /// Effective render mode of this process (gates `/minimal` and
     /// `/fullscreen` visibility). Same source of truth as
     /// [`CommandExecCtx::screen_mode`], carried by the owning
     /// [`SlashController`](crate::slash::SlashController).
     pub(crate) screen_mode: crate::app::ScreenMode,
+    /// Current session title for `/rename` ghost-prefill (`display_name`,
+    /// else `generated_session_title`). `None` when there is no title yet.
+    pub current_title: Option<&'a str>,
 }
 
 /// Mutable execution context for `SlashCommand::run()`.
@@ -144,6 +216,31 @@ pub struct CommandExecCtx<'a> {
     pub(crate) pager_state: crate::settings::PagerLocalSnapshot,
 }
 
+/// Origin of a slash command. The dropdown renderer turns this into badge
+/// text via [`CommandProvenance::badge`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandProvenance {
+    Builtin,
+    /// Non-skill ACP command (e.g. `/flush`).
+    Shell,
+    /// Skill; `source` is the plugin install name or scope.
+    Skill {
+        source: String,
+    },
+}
+
+impl CommandProvenance {
+    /// Right-aligned slash-menu badge. Shell commands render as `built-in`
+    /// too — the badge only has to separate a skill from whoever kept the
+    /// bare name.
+    pub fn badge(&self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Builtin | Self::Shell => std::borrow::Cow::Borrowed("built-in"),
+            Self::Skill { source } => std::borrow::Cow::Owned(format!("skill · {source}")),
+        }
+    }
+}
+
 /// A slash command.
 ///
 /// Implementors define command metadata (name, description, args) and
@@ -161,6 +258,11 @@ pub trait SlashCommand: Send + Sync {
 
     /// Short human-readable description shown in the dropdown.
     fn description(&self) -> &str;
+
+    /// Origin for the slash-menu provenance badge. Defaults to builtin.
+    fn provenance(&self) -> CommandProvenance {
+        CommandProvenance::Builtin
+    }
 
     /// Usage string shown in help. E.g., `"/model <name>"`.
     fn usage(&self) -> &str;
