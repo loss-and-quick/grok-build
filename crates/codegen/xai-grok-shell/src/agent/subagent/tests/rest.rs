@@ -1837,12 +1837,16 @@ async fn live_reconcile_persists_failed_and_cancelled_inspection() {
         (
             SubagentSnapshotStatus::Failed {
                 error: "boom".to_string(),
+                tool_calls: 0,
+                turns: 0,
             },
             "failed",
         ),
         (
             SubagentSnapshotStatus::Cancelled {
                 reason: Some("stop".to_string()),
+                tool_calls: 0,
+                turns: 0,
             },
             "cancelled",
         ),

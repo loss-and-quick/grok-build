@@ -187,8 +187,9 @@ async fn hop_to_a_narrower_menu_sends_the_targets_default_not_the_origins_level(
             .await;
             point_session_at(&actor, "origin-model", &dead_url());
 
+            let mut budget = actor.rate_limit_wait_budget();
             let outcome = actor
-                .run_turn_via_sampler(probe_request(Some(ReasoningEffort::High)))
+                .run_turn_via_sampler(probe_request(Some(ReasoningEffort::High)), &mut budget)
                 .await
                 .expect("the chain target answers after the origin's dead endpoint fails");
             assert!(matches!(outcome, SamplerTurnOutcome::Response(..)));
@@ -236,8 +237,9 @@ async fn hop_to_a_target_with_no_effort_dial_omits_the_parameter() {
             .await;
             point_session_at(&actor, "origin-model", &dead_url());
 
+            let mut budget = actor.rate_limit_wait_budget();
             let outcome = actor
-                .run_turn_via_sampler(probe_request(Some(ReasoningEffort::High)))
+                .run_turn_via_sampler(probe_request(Some(ReasoningEffort::High)), &mut budget)
                 .await
                 .expect("the chain target answers after the origin's dead endpoint fails");
             assert!(matches!(outcome, SamplerTurnOutcome::Response(..)));

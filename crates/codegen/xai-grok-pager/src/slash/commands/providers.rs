@@ -76,6 +76,9 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: false,
+            saved_workflows: &[],
+            workflow_runs: &[],
+            current_title: None,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
         assert!(ProvidersCommand.visible(&ctx));

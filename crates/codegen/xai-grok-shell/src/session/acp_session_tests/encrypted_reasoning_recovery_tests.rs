@@ -20,6 +20,7 @@ fn encrypted_content_error() -> xai_grok_sampler::SamplingErrorInfo {
         is_retryable: false,
         retry_after_secs: None,
         should_retry: None,
+        error_code: None,
         model_metadata: None,
         empty_response_context: None,
         doom_loop_triggers: None,
@@ -67,7 +68,7 @@ async fn encrypted_content_rejection_strips_the_reasoning_and_resubmits() {
             .await;
 
             let recovery = actor
-                .handle_sampling_failure(encrypted_content_error())
+                .handle_sampling_failure(encrypted_content_error(), 0)
                 .await;
 
             assert!(
@@ -109,7 +110,7 @@ async fn encrypted_content_rejection_is_terminal_with_nothing_left_to_drop() {
             .await;
 
             let recovery = actor
-                .handle_sampling_failure(encrypted_content_error())
+                .handle_sampling_failure(encrypted_content_error(), 0)
                 .await;
 
             assert!(

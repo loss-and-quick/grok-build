@@ -1684,7 +1684,7 @@ async fn sampler_error_lists_catalog_keys_for_a_shared_slug() {
             actor.chat_state_handle.update_sampling_config(cfg);
 
             let actor = Arc::new(actor);
-            let result = actor.handle_sampling_failure(model_not_found_error()).await;
+            let result = actor.handle_sampling_failure(model_not_found_error(), 0).await;
             let err = match result {
                 Err(e) => e,
                 Ok(_) => panic!("expected Err from handle_sampling_failure"),

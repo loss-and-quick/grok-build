@@ -78,8 +78,9 @@ fn assert_messages_rides_parent_prefix(
         reasoning_effort: Some(xai_grok_sampling_types::ReasoningEffort::High),
         ..Default::default()
     };
-    let expected = serde_json::to_value(xai_grok_sampling_types::build_messages_request(&request))
-        .expect("main Messages request serializes");
+    let expected =
+        serde_json::to_value(xai_grok_sampling_types::build_messages_request(&request, None))
+            .expect("main Messages request serializes");
     let expected_messages = without_cache_control(expected["messages"].clone());
     let actual_messages = without_cache_control(body["messages"].clone());
     let expected = expected_messages

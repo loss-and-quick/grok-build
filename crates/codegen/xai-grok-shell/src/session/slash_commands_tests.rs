@@ -584,6 +584,35 @@ fn available_commands_orders_builtins_first() {
     );
 }
 
+/// `/memory`'s verbs share one command, so the resolver has to keep the
+/// toggle, the browser and the importer apart — and must not lowercase the
+/// path argument, which is case-sensitive on every filesystem that matters.
+#[test]
+fn memory_subcommands_resolve_separately() {
+    let resolve_memory = |args: &str| {
+        (BUILTIN_COMMANDS
+            .iter()
+            .find(|c| c.name == "memory")
+            .expect("the /memory command exists")
+            .resolve)(args)
+    };
+    assert!(matches!(
+        resolve_memory("on"),
+        BuiltinAction::MemoryToggle { enabled: true }
+    ));
+    assert!(matches!(resolve_memory(""), BuiltinAction::MemoryBrowse));
+    assert!(matches!(
+        resolve_memory("import"),
+        BuiltinAction::MemoryImport { source: None }
+    ));
+    match resolve_memory("  Import   /Some/Path/Memory  ") {
+        BuiltinAction::MemoryImport { source } => {
+            assert_eq!(source.as_deref(), Some("/Some/Path/Memory"));
+        }
+        other => panic!("expected MemoryImport, got {other:?}"),
+    }
+}
+
 fn advertised_names(availability: CommandAvailability) -> Vec<String> {
     available_commands(&[], availability, &[])
         .into_iter()
@@ -762,7 +791,7 @@ fn loop_prompt_matches_pager_wording() {
     use xai_grok_tools::implementations::grok_build::{
         loop_schedule_instruction, loop_usage_message,
     };
-    assert_eq!(loop_text("", LoopFireMode::Detached), loop_usage_message());
+    assert_eq!(loop_text("", LoopFireMode::Detached), loop_usage_message(LoopFireMode::Detached));
     for mode in [LoopFireMode::Detached, LoopFireMode::InSession] {
         assert_eq!(
             loop_text("2h run tests", mode),

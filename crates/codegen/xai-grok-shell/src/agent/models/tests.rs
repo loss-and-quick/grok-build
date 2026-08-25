@@ -607,6 +607,7 @@ fn reasoning_effort_helpers_resolve_wire_name_to_catalog_key() {
         env_key: None,
         auth_provider: None,
         api_base_url: None,
+        proxy: None,
     };
     custom.info.supports_reasoning_effort = true;
     custom.info.reasoning_effort = Some(ReasoningEffort::High);

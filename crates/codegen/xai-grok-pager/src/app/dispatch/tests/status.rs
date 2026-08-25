@@ -1490,6 +1490,7 @@ fn context_info_response() -> xai_grok_shell::session::SessionInfoResponse {
     xai_grok_shell::session::SessionInfoResponse {
         session_id: "test-session".to_string(),
         cwd: "/tmp/test".to_string(),
+        syncs_to_backend: false,
         data: SessionInfoData {
             agent_name: None,
             model: Some("grok-build".to_string()),
