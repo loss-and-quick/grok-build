@@ -4,4 +4,4 @@ import type { StopFailureKindDto } from "./StopFailureKindDto";
 /**
  * `stop_failure` payload.
  */
-export type StopFailurePayload = { error: StopFailureKindDto, errorDetails?: string | null, lastAssistantMessage?: string | null, };
+export type StopFailurePayload = { error: StopFailureKindDto, errorDetails?: string | null, lastAssistantMessage?: string | null, subagentType?: string | null, };

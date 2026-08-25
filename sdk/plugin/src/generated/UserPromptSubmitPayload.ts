@@ -3,4 +3,4 @@
 /**
  * `user_prompt_submit` payload.
  */
-export type UserPromptSubmitPayload = { prompt?: string | null, };
+export type UserPromptSubmitPayload = { prompt?: string | null, subagentType?: string | null, };

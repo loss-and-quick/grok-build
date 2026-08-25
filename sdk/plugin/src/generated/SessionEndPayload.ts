@@ -3,4 +3,8 @@
 /**
  * `session_end` payload.
  */
-export type SessionEndPayload = { reason: string, turnCount?: number | null, toolCallCount?: number | null, };
+export type SessionEndPayload = { reason: string, turnCount?: number | null, toolCallCount?: number | null, 
+/**
+ * Lets a host settling on `session_end` tell a child's teardown from its own.
+ */
+subagentType?: string | null, };
