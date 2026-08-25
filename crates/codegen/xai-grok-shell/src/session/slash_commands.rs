@@ -90,14 +90,25 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
         name: "memory",
         description: "Browse, view, and manage your memories",
-        argument_hint: Some("on|off"),
+        argument_hint: Some("on|off|import [dir]"),
         aliases: &["mem"],
         gate: BuiltinGate::MemoryConfigured,
         resolve: |args| {
-            let trimmed = args.trim().to_lowercase();
-            match trimmed.as_str() {
+            let trimmed = args.trim();
+            // Only the leading verb is lowercased: the optional argument to
+            // `import` is a path, and a path is case-sensitive.
+            let (verb, rest) = trimmed
+                .split_once(char::is_whitespace)
+                .unwrap_or((trimmed, ""));
+            match verb.to_lowercase().as_str() {
                 "on" | "enable" => BuiltinAction::MemoryToggle { enabled: true },
                 "off" | "disable" => BuiltinAction::MemoryToggle { enabled: false },
+                "import" => BuiltinAction::MemoryImport {
+                    source: {
+                        let rest = rest.trim();
+                        (!rest.is_empty()).then(|| rest.to_string())
+                    },
+                },
                 _ => BuiltinAction::MemoryBrowse,
             }
         },
@@ -1146,6 +1157,11 @@ pub(super) enum BuiltinAction {
     MemoryToggle {
         enabled: bool,
     },
+    MemoryImport {
+        /// Directory to read. `None` resolves this project's Claude Code
+        /// memory directory from the session cwd.
+        source: Option<String>,
+    },
     GoalSet {
         objective: String,
         token_budget: Option<i64>,
@@ -1191,6 +1207,7 @@ impl BuiltinAction {
             BuiltinAction::Feedback { .. } => "feedback",
             BuiltinAction::MemoryBrowse => "memory",
             BuiltinAction::MemoryToggle { .. } => "memory",
+            BuiltinAction::MemoryImport { .. } => "memory",
             BuiltinAction::GoalSet { .. }
             | BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
@@ -1225,6 +1242,7 @@ impl BuiltinAction {
             BuiltinAction::Feedback { text } => !text.is_empty(),
             BuiltinAction::MemoryBrowse => false,
             BuiltinAction::MemoryToggle { .. } => true,
+            BuiltinAction::MemoryImport { .. } => true,
             BuiltinAction::GoalSet { .. } => true,
             BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
@@ -2063,6 +2081,35 @@ mod tests {
             ]
         );
     }
+    /// `/memory`'s verbs share one command, so the resolver has to keep the
+    /// toggle, the browser and the importer apart — and must not lowercase the
+    /// path argument, which is case-sensitive on every filesystem that matters.
+    #[test]
+    fn memory_subcommands_resolve_separately() {
+        let resolve_memory = |args: &str| {
+            (BUILTIN_COMMANDS
+                .iter()
+                .find(|c| c.name == "memory")
+                .expect("the /memory command exists")
+                .resolve)(args)
+        };
+        assert!(matches!(
+            resolve_memory("on"),
+            BuiltinAction::MemoryToggle { enabled: true }
+        ));
+        assert!(matches!(resolve_memory(""), BuiltinAction::MemoryBrowse));
+        assert!(matches!(
+            resolve_memory("import"),
+            BuiltinAction::MemoryImport { source: None }
+        ));
+        match resolve_memory("  Import   /Some/Path/Memory  ") {
+            BuiltinAction::MemoryImport { source } => {
+                assert_eq!(source.as_deref(), Some("/Some/Path/Memory"));
+            }
+            other => panic!("expected MemoryImport, got {other:?}"),
+        }
+    }
+
     fn advertised_names(availability: CommandAvailability) -> Vec<String> {
         available_commands(&[], availability, &[])
             .into_iter()

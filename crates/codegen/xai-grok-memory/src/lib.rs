@@ -37,6 +37,7 @@ pub mod dream;
 pub mod dream_lock;
 pub mod embedding;
 pub mod entry;
+pub mod import;
 pub mod index;
 pub mod mmr;
 pub mod query_expansion;
@@ -48,6 +49,7 @@ pub mod watcher;
 
 pub use backend::{EndpointScopedCredentials, MemoryBackendImpl, MemoryBackendParams};
 pub use entry::{DeletedEntry, EntryError, EntryType, MemoryEntry, WrittenEntry};
+pub use import::{ImportReport, claude_memory_dir_for, import_claude_memories};
 pub use index::{MemoryIndex, init_sqlite_vec};
 pub use storage::{MemoryScope, MemoryStorage};
 

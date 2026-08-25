@@ -2170,6 +2170,12 @@ Search only finds what scores for the query it is given. So that a saved memory 
 
 `memory_delete` takes an entry's `name` and removes the file, its line in `memories/MEMORY.md`, and its chunks from the search index, so it stops being findable at once. Every line that is not that pointer survives the rewrite, so hand-written grouping in the index is not collateral damage. If the same name exists in both scopes the tool asks which one rather than guessing — a delete has no undo. There is no `memory_list`, because the index is already in the prefix.
 
+### Importing Claude Code memory
+
+Entries take Claude Code's format, so `/memory import` copies this project's `~/.claude/projects/<encoded-cwd>/memory/` in as-is; pass a directory to import from somewhere else. Files are copied byte for byte, routed by `metadata.type` the same way a save is (`user`/`feedback` global, `project`/`reference` here), and titles are taken from the source index. A name you already have is skipped and reported, never overwritten — which is also what makes a second run a no-op. The source is only ever read.
+
+Grok does not do this on startup: it is a one-time migration of another program's data into the store that rides in every prompt, so it is a command you run rather than something that happens to you.
+
 ### CLI commands
 
 ```bash

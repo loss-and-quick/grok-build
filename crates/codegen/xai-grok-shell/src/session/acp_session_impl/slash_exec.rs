@@ -795,6 +795,19 @@ impl SessionActor {
                 self.refresh_goal_harness_enabled().await;
                 ok_end_turn(0, None)
             }
+            // Import is a user action, not a model one, so it is a command and
+            // not a tool. Pulling another program's memory into the store that
+            // now rides in every prompt is not something to do behind the
+            // user's back on startup, it is a one-time migration rather than a
+            // sync worth re-running every session, and the model has no basis
+            // for deciding to do it — but it does need a report of what landed
+            // where and what was left alone, which a tool result buried in a
+            // transcript is a poor place for.
+            BuiltinAction::MemoryImport { source } => {
+                let msg = self.run_memory_import(source).await;
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
             // GoalSet is handled directly in handle_prompt (before this
             // function is called) so the turn flows through to model inference
             // instead of ending immediately.

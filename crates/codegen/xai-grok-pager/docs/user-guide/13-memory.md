@@ -212,6 +212,25 @@ You can also open `/memory` from the command palette.
 
 ---
 
+## Importing Claude Code Memory
+
+Single-fact entries use Claude Code's format, so a memory directory it wrote drops in as-is. `/memory import` finds this project's directory (`~/.claude/projects/<encoded-cwd>/memory/`) and copies what it holds:
+
+```
+/memory import
+/memory import ~/some/other/memory   # a repo that has since moved
+```
+
+Each entry is copied byte for byte and routed by its `type`: `user` and `feedback` follow you into global memory, `project` and `reference` stay with this project — the same rule Grok applies to its own saves. Titles and hooks are taken from the source index, so a curated title survives the move.
+
+An entry name you already have is never overwritten. It is skipped, and the command names it, so you can compare the two and decide. That also makes the import idempotent: run it again and nothing is written. To take the Claude Code version of an entry, delete yours first and import again.
+
+Nothing is ever written to the Claude Code directory. Imported entries are searchable immediately, and join the memory index in the prefix at the next compaction or model switch.
+
+Import is a command rather than something Grok does on startup: it copies another program's data into the store that rides in every prompt, and that should be your decision, taken once. If you would rather not use the command at all, copying the folder into `~/.grok/memory/memories/` by hand also works — the startup reindex picks it up — you just do the scope routing and collision checking yourself.
+
+---
+
 ## Memory Notifications
 
 When you save a note with `/remember`, Grok confirms in the scrollback:
