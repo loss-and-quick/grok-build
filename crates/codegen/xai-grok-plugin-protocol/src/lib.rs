@@ -1077,6 +1077,13 @@ pub struct AgentCancelResult {
 /// conversation as a system reminder before its next inference request, so the
 /// child changes course mid-task.
 ///
+/// The model has this same capability as the `message_subagent` tool: one
+/// coordinator, one set of outcomes, one injection point in the child. A plugin
+/// and the parent model may both steer the same child — the texts are drained in
+/// the order the coordinator took them. The surfaces differ only in shape: a
+/// plugin branches on the enum below, while the tool spends a sentence per
+/// outcome naming the call the model should make next.
+///
 /// Not to be confused with [`AgentSendParams`]: `agent_send` applies only to a
 /// subagent that has already *finished*, and answers with a NEW subagent id.
 /// Reach for `agent_message` for a mid-flight correction, `agent_send` for a
@@ -1142,6 +1149,11 @@ pub struct AgentMessageResult {
 /// and the reply carries a *new* id — the returned child is the one to key
 /// subsequent calls on. To correct a subagent that is still working, use
 /// [`AgentMessageParams`], which delivers into the live child and keeps its id.
+///
+/// The model's counterpart to this RPC is `task`'s `resume_from` argument, not
+/// the `message_subagent` tool — the same split under different names on the two
+/// surfaces, and the one worth stating twice: `agent_send` / `resume_from` mint
+/// a new id, `agent_message` / `message_subagent` keep the old one.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
 pub struct AgentSendParams {

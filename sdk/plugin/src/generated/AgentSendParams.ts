@@ -13,6 +13,11 @@
  * and the reply carries a *new* id — the returned child is the one to key
  * subsequent calls on. To correct a subagent that is still working, use
  * [`AgentMessageParams`], which delivers into the live child and keeps its id.
+ *
+ * The model's counterpart to this RPC is `task`'s `resume_from` argument, not
+ * the `message_subagent` tool — the same split under different names on the two
+ * surfaces, and the one worth stating twice: `agent_send` / `resume_from` mint
+ * a new id, `agent_message` / `message_subagent` keep the old one.
  */
 export type AgentSendParams = { 
 /**

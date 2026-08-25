@@ -171,6 +171,13 @@ you get `"not_delivered"` and nothing was added to its conversation, so
 re-send if the correction still matters. It is text only — no attachments,
 and no slash-command expansion.
 
+The model reaches the same mechanism from the other side, through the
+`message_subagent` tool: same coordinator, same six outcomes, same injection
+point in the child. A plugin and the parent model can both steer the same
+child; the messages arrive in the order the coordinator took them. What the
+model does *not* have is an equivalent of `send` — it continues a terminal
+subagent with `task`'s `resume_from`, which likewise mints a new id.
+
 Progress is delivered by **cursor-based polling rather than host→plugin
 notifications**: the capability server is plain request/reply and keeps
 this state host-side, so a poll cursor survives a sidecar crash-restart
