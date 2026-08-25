@@ -535,6 +535,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "preferences",
     "prefs",
     "privacy",
+    "providers",
     "queue",
     "quit",
     "recap",

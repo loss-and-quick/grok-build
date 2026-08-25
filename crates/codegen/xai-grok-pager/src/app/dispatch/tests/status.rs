@@ -1552,7 +1552,10 @@ fn session_usage_page_flips_info_to_top() {
     sb.prepare_layout(80, 8);
     assert!(sb.is_follow_preserve_scroll());
     let pinned = sb.scroll_offset();
-    sb.scroll_to_entry_top(sb.len() - 1);
+    // The page flip pins the usage block, which the fork no longer leaves last:
+    // with no billing data it appends a note saying so, so target the flipped
+    // block rather than the tail.
+    sb.scroll_to_entry_top(sb.len() - 2);
     assert_eq!(sb.scroll_offset(), pinned);
 }
 
