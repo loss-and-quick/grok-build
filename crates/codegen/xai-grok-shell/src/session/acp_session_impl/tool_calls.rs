@@ -1890,6 +1890,16 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
+            // Deliberately not routed through `is_bg_plumbing_tool`: polling
+            // and killing are plumbing the task pane already shows, but a
+            // steer is the parent changing what a child is doing, and hiding
+            // it would leave the child's turn in the transcript unexplained.
+            ToolInput::MessageSubagent(ref m) => (
+                format!("Message subagent: {}", m.subagent_id),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
             ToolInput::Skill(skill) => {
                 xai_grok_telemetry::session_ctx::log_event(
                     xai_grok_telemetry::events::SkillDispatched {

@@ -83,6 +83,7 @@ pub enum ToolKind {
     BackgroundTaskAction,
     WaitTasksAction,
     KillTaskAction,
+    MessageSubagentAction,
     List,
     Skill,
     MemorySearch,

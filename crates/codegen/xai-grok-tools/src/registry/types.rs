@@ -695,6 +695,7 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::GetTerminalCommandOutputTool>();
         b.register::<grok_build::WaitTasksTool>();
         b.register::<grok_build::TaskTool>();
+        b.register::<grok_build::MessageSubagentTool>();
         b.register::<grok_build::WebSearchTool>();
         b.register_with_params::<grok_build::WebFetchTool, grok_build::web_fetch::WebFetchParams>();
         b.register::<grok_build::LspTool>();
@@ -2006,6 +2007,18 @@ fn explain_requirement_failure(
                 .with_expected("include get_task_output and kill_task")
                 .with_category("requirements")
         }
+        // Narrower than the other task-lifecycle tools: a background-capable
+        // bash satisfies those, but only `task` mints a subagent id, and this
+        // tool reaches nothing else.
+        "GrokBuild:message_subagent" => RequirementError::new(
+            fq_tool_id,
+            "message_subagent requires GrokBuild:task — only a spawned subagent can be messaged, \
+             and nothing else in a toolset produces a subagent id"
+                .to_string(),
+        )
+        .with_field_path("tools")
+        .with_expected("include task, or drop message_subagent")
+        .with_category("requirements"),
         // `wait_tasks` and `kill_task` share `get_task_output`'s requirement, so they
         // share its explanation — without this they fall through to the bare
         // "unsatisfied requirements" arm and say nothing about how to fix it.
@@ -2325,8 +2338,8 @@ mod tests {
     #[tokio::test]
     async fn full_toolset_descriptions_render_cleanly() {
         use crate::implementations::grok_build::{
-            IMAGE_GEN_TOOL_NAME, IMAGE_TO_VIDEO_TOOL_NAME, REFERENCE_TO_VIDEO_TOOL_NAME,
-            SCHEDULER_CREATE_TOOL_NAME, SCHEDULER_DELETE_TOOL_NAME,
+            IMAGE_GEN_TOOL_NAME, IMAGE_TO_VIDEO_TOOL_NAME, MESSAGE_SUBAGENT_TOOL_NAME,
+            REFERENCE_TO_VIDEO_TOOL_NAME, SCHEDULER_CREATE_TOOL_NAME, SCHEDULER_DELETE_TOOL_NAME,
         };
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
@@ -2343,6 +2356,7 @@ mod tests {
                 "exit_plan_mode",
                 "todo_write",
                 "task",
+                MESSAGE_SUBAGENT_TOOL_NAME,
                 "web_search",
                 "web_fetch",
                 "lsp",
@@ -3152,6 +3166,64 @@ mod tests {
             Ok("ok".into())
         }
     }
+    /// `message_subagent` is unreachable without a spawner, so the registry
+    /// refuses it and says which tool is missing. The agent builder drops it
+    /// before this point; this arm is what a hand-written `toolConfig` hits.
+    #[tokio::test]
+    async fn message_subagent_without_task_is_rejected_by_name() {
+        use crate::implementations::grok_build::MESSAGE_SUBAGENT_TOOL_NAME;
+        let tmp = TempDir::new().unwrap();
+        let config = ToolServerConfig {
+            tools: ["read_file", "run_terminal_cmd", MESSAGE_SUBAGENT_TOOL_NAME]
+                .into_iter()
+                .map(|id| ToolConfig::from_id(format!("GrokBuild:{id}")))
+                .collect(),
+            behavior_preset: None,
+        };
+        let errors = ToolRegistryBuilder::new()
+            .finalize(config, test_session_context(&tmp))
+            .err()
+            .expect("message_subagent without task must not finalize");
+        assert!(
+            errors.iter().any(|e| e
+                .message
+                .contains("message_subagent requires GrokBuild:task")),
+            "the error must name the missing producer: {errors:?}"
+        );
+    }
+
+    /// The same toolset with `task` (and the tools `task` itself requires)
+    /// finalizes, so the requirement is a real pairing rather than a tool that
+    /// can never be registered.
+    #[tokio::test]
+    async fn message_subagent_finalizes_alongside_task() {
+        use crate::implementations::grok_build::MESSAGE_SUBAGENT_TOOL_NAME;
+        let tmp = TempDir::new().unwrap();
+        let config = ToolServerConfig {
+            tools: [
+                "read_file",
+                "task",
+                "get_task_output",
+                "kill_task",
+                MESSAGE_SUBAGENT_TOOL_NAME,
+            ]
+            .into_iter()
+            .map(|id| ToolConfig::from_id(format!("GrokBuild:{id}")))
+            .collect(),
+            behavior_preset: None,
+        };
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(config, test_session_context(&tmp))
+            .expect("task + message_subagent must finalize");
+        assert!(
+            toolset
+                .tool_definitions()
+                .iter()
+                .any(|d| d.function.name == MESSAGE_SUBAGENT_TOOL_NAME),
+            "the tool must reach the model"
+        );
+    }
+
     #[tokio::test]
     async fn call_sets_effective_tool_name_for_use_tool_dispatch() {
         let tmp = TempDir::new().unwrap();

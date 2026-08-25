@@ -579,6 +579,7 @@ pub(crate) const BUILTIN_TOOL_NAMES: &[&str] = &[
     "kill_task",
     "kill_command_or_subagent",
     "kill_terminal_command",
+    "message_subagent",
     "wait_commands_or_subagents",
     "grep",
     "glob",

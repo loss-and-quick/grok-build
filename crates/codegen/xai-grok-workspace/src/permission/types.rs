@@ -291,6 +291,7 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
             | ToolInput::TaskOutput(_)
             | ToolInput::WaitTasks(_)
             | ToolInput::KillTask(_)
+            | ToolInput::MessageSubagent(_)
             | ToolInput::Skill(_) => AccessKind::Read(None),
             ToolInput::WebSearch(ws) => AccessKind::WebSearch(ws.query.clone()),
             ToolInput::SearchReplace(search_replace) => {

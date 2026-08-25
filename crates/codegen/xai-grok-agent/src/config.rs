@@ -275,6 +275,7 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             task_output_tool_config(),
             wait_tasks_tool_config(),
             task_tool_config(),
+            (&grok_build::MessageSubagentTool).into(),
             (&grok_build::SchedulerCreateTool).into(),
             (&grok_build::SchedulerDeleteTool).into(),
             (&grok_build::SchedulerListTool).into(),
@@ -325,6 +326,7 @@ pub fn grok_build_hashline_toolset(
         task_output_tool_config(),
         wait_tasks_tool_config(),
         task_tool_config(),
+        (&grok_build::MessageSubagentTool).into(),
         (&grok_build::WebSearchTool).into(),
         (&grok_build::SchedulerCreateTool).into(),
         (&grok_build::SchedulerDeleteTool).into(),
@@ -411,6 +413,7 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
             (&grok_build::TodoWriteTool).into(),
             task_output_tool_config(),
             task_tool_config(),
+            (&grok_build::MessageSubagentTool).into(),
             (&grok_build::SchedulerCreateTool).into(),
             (&grok_build::SchedulerDeleteTool).into(),
             (&grok_build::SchedulerListTool).into(),
@@ -443,6 +446,7 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&grok_build::GrepTool).into(),
             // Subagent orchestration
             task_tool_config(),
+            (&grok_build::MessageSubagentTool).into(),
             task_output_tool_config(),
             wait_tasks_tool_config(),
             kill_task_tool_config(),
@@ -531,6 +535,7 @@ fn grok_build_ask_user_toolset() -> ToolServerConfig {
             task_output_tool_config(),
             wait_tasks_tool_config(),
             task_tool_config(),
+            (&grok_build::MessageSubagentTool).into(),
             (&grok_build::SchedulerCreateTool).into(),
             (&grok_build::SchedulerDeleteTool).into(),
             (&grok_build::SchedulerListTool).into(),
@@ -1727,6 +1732,31 @@ mod tests {
             );
         }
         assert!(toolset_for_preset("does-not-exist").is_none());
+    }
+    /// `message_subagent` requires `task` at the registry, so a preset carrying
+    /// one without the other would abort session init for anyone selecting it.
+    /// Pairing them here is also the reason it needs no opt-in: an agent that can
+    /// spawn can steer, and one that cannot never sees the tool.
+    #[test]
+    fn every_preset_pairs_message_subagent_with_task() {
+        let task_id = ToolConfig::from(&grok_build::TaskTool).id;
+        let message_id = ToolConfig::from(&grok_build::MessageSubagentTool).id;
+        let mut paired = 0;
+        for (name, cfg) in all_toolset_presets() {
+            let ids: std::collections::HashSet<&str> =
+                cfg.tools.iter().map(|t| t.id.as_str()).collect();
+            let has_task = ids.contains(task_id.as_str());
+            let has_message = ids.contains(message_id.as_str());
+            assert_eq!(
+                has_task, has_message,
+                "preset `{name}`: task={has_task} but message_subagent={has_message}"
+            );
+            paired += usize::from(has_task);
+        }
+        assert!(
+            paired > 0,
+            "no preset spawns subagents — test proves nothing"
+        );
     }
     #[test]
     fn presets_select_distinct_toolsets_by_size() {

@@ -52,6 +52,7 @@ impl ToolKind {
             ToolKind::BackgroundTaskAction => "Background Task",
             ToolKind::WaitTasksAction => "Wait for Tasks",
             ToolKind::KillTaskAction => "Kill Task",
+            ToolKind::MessageSubagentAction => "Message Subagent",
             ToolKind::Skill => "Skill",
             ToolKind::MemorySearch => "Memory Search",
             ToolKind::MemoryGet => "Memory Read",
@@ -103,6 +104,7 @@ impl ToolKind {
             | ToolKind::BackgroundTaskAction
             | ToolKind::WaitTasksAction
             | ToolKind::KillTaskAction
+            | ToolKind::MessageSubagentAction
             | ToolKind::Skill
             | ToolKind::Task
             | ToolKind::ImageGen

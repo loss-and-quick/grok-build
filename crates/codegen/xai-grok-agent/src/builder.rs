@@ -178,14 +178,17 @@ fn merge_tool_params(
 }
 /// The tools that observe and cancel already-started tasks.
 const TASK_LIFECYCLE_TOOLS: [&str; 3] = ["get_task_output", "wait_tasks", "kill_task"];
+/// The lifecycle tool that acts on subagent ids only, never on bash task ids.
+const MESSAGE_SUBAGENT_TOOL: &str = "message_subagent";
 /// Drop task-lifecycle tools that nothing in the toolset can ever feed.
 ///
 /// `get_task_output` / `wait_tasks` / `kill_task` only ever act on ids minted by
-/// `task` or by a background-capable bash. With neither producer in the toolset
-/// they are unreachable, and the registry rejects them outright — which would
-/// abort the whole session over tools the agent could not have called. Dropping
-/// them costs nothing and keeps the agent alive, so the warning (not the error)
-/// is what surfaces the config mistake.
+/// `task` or by a background-capable bash; `message_subagent` only on ids minted
+/// by `task`. With no producer in the toolset they are unreachable, and the
+/// registry rejects them outright — which would abort the whole session over
+/// tools the agent could not have called. Dropping them costs nothing and keeps
+/// the agent alive, so the warning (not the error) is what surfaces the config
+/// mistake.
 ///
 /// Must run last: earlier stages (the `tools:` allowlist, the session clamp,
 /// `disallowedTools`) can remove `task` or bash after the lifecycle tools have
@@ -195,25 +198,48 @@ fn drop_orphaned_task_lifecycle_tools(
     agent_name: &str,
 ) {
     use xai_grok_tools::types::tool::ToolNamespace;
-    let has_satisfier = |ns: ToolNamespace, id: &str, needs_bg: bool| {
-        let fq = format!("{ns}:{id}");
-        tool_config.tools.iter().any(|tc| {
-            tc.id == fq
-                && (!needs_bg
-                    || tc
-                        .params
-                        .as_ref()
-                        .and_then(|p| p.get("enabled_background"))
-                        .and_then(|v| v.as_bool())
-                        // Absent means the tool's own default, which is `true`.
-                        .unwrap_or(true))
-        })
+    let (has_task, has_any_producer) = {
+        let has_satisfier = |ns: ToolNamespace, id: &str, needs_bg: bool| {
+            let fq = format!("{ns}:{id}");
+            tool_config.tools.iter().any(|tc| {
+                tc.id == fq
+                    && (!needs_bg
+                        || tc
+                            .params
+                            .as_ref()
+                            .and_then(|p| p.get("enabled_background"))
+                            .and_then(|v| v.as_bool())
+                            // Absent means the tool's own default, which is `true`.
+                            .unwrap_or(true))
+            })
+        };
+        let has_task = has_satisfier(ToolNamespace::GrokBuild, "task", false);
+        let has_any_producer = has_task
+            || has_satisfier(ToolNamespace::GrokBuild, "run_terminal_cmd", true)
+            || has_satisfier(ToolNamespace::GrokBuildConcise, "run_terminal_cmd", true)
+            || has_satisfier(ToolNamespace::OpenCode, "bash", false);
+        (has_task, has_any_producer)
     };
-    if has_satisfier(ToolNamespace::GrokBuild, "task", false)
-        || has_satisfier(ToolNamespace::GrokBuild, "run_terminal_cmd", true)
-        || has_satisfier(ToolNamespace::GrokBuildConcise, "run_terminal_cmd", true)
-        || has_satisfier(ToolNamespace::OpenCode, "bash", false)
+    // `message_subagent` is dropped on a stricter rule than the other three: a
+    // background bash mints task ids, which the other three accept and it does
+    // not. Only `task` produces something it can be pointed at, so an agent
+    // that cannot spawn cannot steer, however much bash it has.
+    if !has_task
+        && tool_config
+            .tools
+            .iter()
+            .any(|tc| short_tool_name(&tc.id) == MESSAGE_SUBAGENT_TOOL)
     {
+        tracing::warn!(
+            agent = %agent_name,
+            "agent '{agent_name}': dropping {MESSAGE_SUBAGENT_TOOL} — nothing in its toolset \
+             spawns a subagent. Add `task` to its tools.",
+        );
+        tool_config
+            .tools
+            .retain(|tc| short_tool_name(&tc.id) != MESSAGE_SUBAGENT_TOOL);
+    }
+    if has_any_producer {
         return;
     }
     let dropped: Vec<&str> = tool_config
@@ -1955,6 +1981,7 @@ mod tests {
             "get_command_or_subagent_output",
             "wait_commands_or_subagents",
             "kill_command_or_subagent",
+            "message_subagent",
         ] {
             assert!(
                 !names.contains(&orphan.to_string()),
@@ -1988,6 +2015,10 @@ mod tests {
                 "`{kept}` still manages background bash and must be kept: {names:?}"
             );
         }
+        assert!(
+            !names.contains(&"message_subagent".to_string()),
+            "bash mints task ids, not subagent ids, so this one still has no producer: {names:?}"
+        );
     }
     /// What survives the degradation must still read as a config problem: the
     /// message names the agent and the remedy, not Debug-formatted structs.
