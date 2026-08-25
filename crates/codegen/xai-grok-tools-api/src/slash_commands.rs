@@ -7,27 +7,58 @@
 /// keys `/loop` availability on this name.
 pub const SCHEDULER_CREATE_TOOL_NAME: &str = "scheduler_create";
 
+/// Body of [`loop_usage_message`]; `$note` is the one mode-dependent line.
+macro_rules! loop_usage {
+    ($note:expr) => {
+        concat!(
+            "Usage: /loop [interval] <prompt>\n\
+             Example: /loop 30m check deploy status\n\
+             Example: /loop check deploy status every hour\n\n",
+            $note,
+            "Tell me how often it should run (e.g. 30m, 1 hour, every 2 days)."
+        )
+    };
+}
+
 /// Usage hint shown when `/loop` is invoked with no arguments.
-pub fn loop_usage_message() -> &'static str {
-    "Usage: /loop [interval] <prompt>\n\
-     Example: /loop 30m check deploy status\n\
-     Example: /loop check deploy status every hour\n\n\
-     Tell me how often it should run (e.g. 30m, 1 hour, every 2 days)."
+///
+/// Mode-aware for one line: where a fire lands cannot be read off the syntax,
+/// and it is the one thing a user redirects from the request itself instead of
+/// reaching past `/loop` for `scheduler_create`.
+pub fn loop_usage_message(mode: LoopFireMode) -> &'static str {
+    match mode {
+        LoopFireMode::Detached => loop_usage!(""),
+        LoopFireMode::InSession => loop_usage!(
+            "Each fire runs as a turn here, so the prompt can pick up what we're doing.\n\n"
+        ),
+        LoopFireMode::InSessionDetachable => loop_usage!(
+            "Each fire runs as a turn here, so the prompt can pick up what we're doing.\n\
+             Say \"in the background\" for a loop that should run detached instead.\n\n"
+        ),
+    }
 }
 
 /// Where a scheduled fire runs, which decides what the stored prompt can rely on.
 ///
-/// Resolved from `[scheduler] background_loops` (env, config, managed policy and
-/// remote settings all feed it), so `/loop` describes the runtime the user
-/// actually has rather than hedging across both.
+/// Two inputs pick it. `[scheduler] background_loops` (env, config, managed
+/// policy and remote settings all feed it) says whether detaching is available
+/// at all; the host says whether it can run a fire as a turn itself, which only
+/// a front-end that handles `x.ai/scheduled_task_inject_prompt` can do. A host
+/// that cannot must keep asking for detached fires, or its loops would fire into
+/// a notification nobody acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopFireMode {
     /// Each fire runs in a detached background subagent that cannot see this
-    /// conversation. The default.
+    /// conversation.
     Detached,
     /// Each fire runs as a turn in this conversation, where earlier results from
-    /// the same task may still be visible.
+    /// the same task may still be visible. Background loops are off for this
+    /// runtime, so detaching is not on offer.
     InSession,
+    /// Each fire runs as a turn in this conversation because `/loop` asks for it
+    /// with `foreground: true`; a loop that does not need the conversation can
+    /// still be detached.
+    InSessionDetachable,
 }
 
 /// Build the model instruction that `/loop` expands into for `args`.
@@ -36,29 +67,56 @@ pub enum LoopFireMode {
 /// `scheduler_create` interval, accepting every natural phrasing and erroring
 /// on bad input rather than silently defaulting. See [`loop_usage_message`].
 ///
-/// Only the framing differs by `mode`; the stop condition and length guidance
-/// are identical, because both hold wherever the fire runs.
+/// Only the framing and the `scheduler_create` flags differ by `mode`; the stop
+/// condition and length guidance are identical, because both hold wherever the
+/// fire runs.
 pub fn loop_schedule_instruction(args: &str, mode: LoopFireMode) -> String {
+    // The in-session modes must ASK for what they describe: `foreground`
+    // defaults to false, so a promise of turns in this conversation without the
+    // flag would be a promise the created task does not keep.
+    let create_flags = match mode {
+        LoopFireMode::Detached => "the interval, the prompt, and fire_immediately: true",
+        LoopFireMode::InSession | LoopFireMode::InSessionDetachable => {
+            "the interval, the prompt, fire_immediately: true, and foreground: true"
+        }
+    };
+    const DETACHED_CONTEXT: &str = "Each fire runs in a detached background subagent, not in this conversation,\n\
+         so the prompt you store must stand on its own.\n\n\
+         ## Writing a prompt that survives a fresh fire\n\
+         - Inline the state a fire needs: paths, job/PR/branch ids, the command that checks\n\
+           status, and what \"healthy\" looks like. A fire cannot see this conversation, and\n\
+           a long-running task restarts from a short summary every few iterations.\n\
+         - Only a short status comes back here, so say what that status must contain.";
+    const IN_SESSION_CONTEXT: &str = "Each fire arrives as a new turn in this conversation, so a prompt that carries on\n\
+         from what is already here -- \"keep going\", \"check on it\" -- has its referent.\n\
+         The stored prompt is re-sent verbatim every time, so write a standing order\n\
+         rather than a one-off request.\n\n\
+         ## Writing a prompt that reads well on every fire\n\
+         - Name the state that must not be guessed: paths, job/PR/branch ids, the command\n\
+           that checks status, and what \"healthy\" looks like. This conversation is\n\
+           compacted as it grows, so do not rely on details staying visible.\n\
+         - Earlier fires may be above you: continue from them instead of restarting.\n\
+         - A fire waits for the turn in progress and spends this conversation's context,\n\
+           so keep the work per fire small and the cadence no tighter than the job needs.";
+    // Offered only where background loops are actually available; promising a
+    // detached run the runtime would silently inline is worse than not offering.
+    const DETACH_OPT_OUT: &str = "\n- A loop that only watches something and needs nothing from here -- \"every 20\n\
+           minutes check CI\" -- is better detached: pass foreground: false instead, write\n\
+           the prompt to stand on its own, and say what the short status back must contain.";
     let fire_context = match mode {
-        LoopFireMode::Detached => {
-            "Each fire runs in a detached background subagent, not in this conversation,\n\
-             so the prompt you store must stand on its own.\n\n\
-             ## Writing a prompt that survives a fresh fire\n\
-             - Inline the state a fire needs: paths, job/PR/branch ids, the command that checks\n\
-               status, and what \"healthy\" looks like. A fire cannot see this conversation, and\n\
-               a long-running task restarts from a short summary every few iterations.\n\
-             - Only a short status comes back here, so say what that status must contain."
+        LoopFireMode::Detached => DETACHED_CONTEXT.to_string(),
+        LoopFireMode::InSession => IN_SESSION_CONTEXT.to_string(),
+        LoopFireMode::InSessionDetachable => format!("{IN_SESSION_CONTEXT}{DETACH_OPT_OUT}"),
+    };
+    // `foreground` is create-only: an update carrying it is dropped, so a model
+    // told only about in-place updates would report a move that never happened.
+    let update_caveat = match mode {
+        LoopFireMode::InSessionDetachable => {
+            " Where a fire runs is fixed when the task is created: to move a loop\n\
+             between this conversation and the background, scheduler_delete it and\n\
+             create a new one."
         }
-        LoopFireMode::InSession => {
-            "Each fire arrives as a new turn in this conversation, and earlier results from\n\
-             the same task may still be above it. The stored prompt is re-sent verbatim every\n\
-             time, so write a standing order rather than a one-off request.\n\n\
-             ## Writing a prompt that reads well on every fire\n\
-             - Name the state that must not be guessed: paths, job/PR/branch ids, the command\n\
-               that checks status, and what \"healthy\" looks like. This conversation is\n\
-               compacted as it grows, so do not rely on details staying visible.\n\
-             - Earlier fires may be above you: continue from them instead of restarting."
-        }
+        LoopFireMode::Detached | LoopFireMode::InSession => "",
     };
     format!(
         "# /loop -- schedule a recurring prompt\n\n\
@@ -76,7 +134,7 @@ pub fn loop_schedule_instruction(args: &str, mode: LoopFireMode) -> String {
          ## Action\n\
          Schedule from what the user already gave you \u{2014} do not explore the workspace or run\n\
          checks before scheduling; the first fire does that.\n\
-         1. Call scheduler_create with the interval, the prompt, and fire_immediately: true.\n\
+         1. Call scheduler_create with {create_flags}.\n\
             If the interval is rejected, fix the string rather than guessing.\n\
          2. Confirm what's scheduled, the cadence, its stop condition, that it auto-expires\n\
             after 7 days, and the task_id to cancel with scheduler_delete.\n\
@@ -89,7 +147,7 @@ pub fn loop_schedule_instruction(args: &str, mode: LoopFireMode) -> String {
          ## Changing an existing loop\n\
          Call scheduler_create with its task_id and only the changed fields; do not\n\
          delete and recreate. If later work changes what a loop should do, update its\n\
-         prompt the same way.\n\n\
+         prompt the same way.{update_caveat}\n\n\
          ## Input\n\
          {args}"
     )
@@ -239,9 +297,15 @@ mod tests {
         assert!(text.contains("FFmpeg"));
     }
 
+    const ALL_FIRE_MODES: [LoopFireMode; 3] = [
+        LoopFireMode::Detached,
+        LoopFireMode::InSession,
+        LoopFireMode::InSessionDetachable,
+    ];
+
     #[test]
     fn instruction_carries_args_and_contract_tokens() {
-        for mode in [LoopFireMode::Detached, LoopFireMode::InSession] {
+        for mode in ALL_FIRE_MODES {
             let text = loop_schedule_instruction("every 30 minutes do x", mode);
             assert!(text.contains("every 30 minutes do x"), "{mode:?}");
             assert!(text.contains("<number><unit>"), "{mode:?}");
@@ -273,18 +337,53 @@ mod tests {
     fn each_fire_mode_describes_its_own_runtime() {
         let detached = loop_schedule_instruction("5m check ci", LoopFireMode::Detached);
         let in_session = loop_schedule_instruction("5m check ci", LoopFireMode::InSession);
+        let detachable =
+            loop_schedule_instruction("5m check ci", LoopFireMode::InSessionDetachable);
 
         assert!(detached.contains("cannot see this conversation"));
         assert!(!detached.contains("arrives as a new turn in this conversation"));
 
-        assert!(in_session.contains("arrives as a new turn in this conversation"));
-        assert!(!in_session.contains("cannot see this conversation"));
+        for text in [&in_session, &detachable] {
+            assert!(text.contains("arrives as a new turn in this conversation"));
+            assert!(!text.contains("cannot see this conversation"));
+        }
 
         // The two levers the A/B showed carry the behavior are mode-independent.
-        for text in [&detached, &in_session] {
+        for text in [&detached, &in_session, &detachable] {
             assert!(text.contains("report it and call"));
             assert!(text.contains("Keep it short and concrete"));
         }
+    }
+
+    /// A mode that promises turns in this conversation must also ASK for them:
+    /// `foreground` defaults to false, so the wording alone would create a
+    /// detached task and describe it as an in-session one.
+    #[test]
+    fn in_session_modes_request_the_foreground_flag() {
+        for mode in [LoopFireMode::InSession, LoopFireMode::InSessionDetachable] {
+            let text = loop_schedule_instruction("5m check ci", mode);
+            assert!(text.contains("foreground: true"), "{mode:?}");
+        }
+        let detached = loop_schedule_instruction("5m check ci", LoopFireMode::Detached);
+        assert!(!detached.contains("foreground"));
+    }
+
+    /// Detaching is offered only where background loops exist to detach into,
+    /// and only alongside the reason it cannot be an in-place update.
+    #[test]
+    fn only_the_detachable_mode_offers_the_opt_out() {
+        let detachable =
+            loop_schedule_instruction("5m check ci", LoopFireMode::InSessionDetachable);
+        assert!(detachable.contains("foreground: false"));
+        assert!(
+            detachable.contains("fixed when the task is created"),
+            "the opt-out must say it cannot be patched in later: {detachable}"
+        );
+        assert!(
+            !loop_schedule_instruction("5m check ci", LoopFireMode::InSession)
+                .contains("foreground: false"),
+            "a runtime with background loops off must not advertise detaching"
+        );
     }
 
     #[test]
@@ -303,7 +402,28 @@ mod tests {
 
     #[test]
     fn usage_message_has_no_default_claim() {
-        assert!(loop_usage_message().contains("Usage: /loop"));
-        assert!(!loop_usage_message().contains("10m"));
+        for mode in ALL_FIRE_MODES {
+            assert!(
+                loop_usage_message(mode).contains("Usage: /loop"),
+                "{mode:?}"
+            );
+            assert!(!loop_usage_message(mode).contains("10m"), "{mode:?}");
+        }
+    }
+
+    /// The usage hint is the only place a user learns where fires land before
+    /// scheduling one, so it must track the mode rather than the syntax alone.
+    #[test]
+    fn usage_message_names_the_fire_destination() {
+        assert!(!loop_usage_message(LoopFireMode::Detached).contains("as a turn here"));
+        assert!(loop_usage_message(LoopFireMode::InSession).contains("as a turn here"));
+        assert!(
+            !loop_usage_message(LoopFireMode::InSession).contains("in the background"),
+            "no opt-out where background loops are off"
+        );
+
+        let detachable = loop_usage_message(LoopFireMode::InSessionDetachable);
+        assert!(detachable.contains("as a turn here"));
+        assert!(detachable.contains("in the background"));
     }
 }

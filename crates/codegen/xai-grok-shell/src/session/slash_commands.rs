@@ -1537,7 +1537,7 @@ fn build_loop_prompt_blocks(args: &str, mode: LoopFireMode) -> Vec<acp::ContentB
         loop_schedule_instruction, loop_usage_message,
     };
     let text = if args.trim().is_empty() {
-        loop_usage_message().to_string()
+        loop_usage_message(mode).to_string()
     } else {
         loop_schedule_instruction(args, mode)
     };
@@ -2267,8 +2267,12 @@ mod tests {
         use xai_grok_tools::implementations::grok_build::{
             loop_schedule_instruction, loop_usage_message,
         };
-        assert_eq!(loop_text("", LoopFireMode::Detached), loop_usage_message());
-        for mode in [LoopFireMode::Detached, LoopFireMode::InSession] {
+        for mode in [
+            LoopFireMode::Detached,
+            LoopFireMode::InSession,
+            LoopFireMode::InSessionDetachable,
+        ] {
+            assert_eq!(loop_text("", mode), loop_usage_message(mode));
             assert_eq!(
                 loop_text("2h run tests", mode),
                 loop_schedule_instruction("2h run tests", mode)

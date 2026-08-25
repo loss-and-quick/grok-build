@@ -55,10 +55,15 @@ pub struct SchedulerCreateInput {
         default,
         deserialize_with = "crate::types::schema::deserialize_lenient_option_bool"
     )]
+    // The wording tracks what the prompt needs rather than rationing the flag:
+    // `/loop` asks for foreground fires by default, and an "only when" here
+    // would push the model to drop the flag on exactly the continuing prompts
+    // that need it.
     #[schemars(
         description = "Run each fire as a main-conversation turn instead of a background \
-                       subagent; set true only when runs need the conversation's context. \
-                       Default: false. Create-only: ignored with task_id"
+                       subagent: true when the prompt continues this conversation, false \
+                       when it stands on its own. Default: false. Create-only: ignored \
+                       with task_id"
     )]
     pub foreground: Option<bool>,
 
@@ -464,12 +469,43 @@ mod tests {
 
     #[test]
     fn loop_usage_message_has_no_host_default() {
-        let usage = loop_usage_message();
-        assert!(usage.contains("Usage: /loop"));
-        assert!(
-            !usage.contains("10m"),
-            "usage must not claim a default: {usage}"
-        );
+        for mode in [
+            LoopFireMode::Detached,
+            LoopFireMode::InSession,
+            LoopFireMode::InSessionDetachable,
+        ] {
+            let usage = loop_usage_message(mode);
+            assert!(usage.contains("Usage: /loop"));
+            assert!(
+                !usage.contains("10m"),
+                "usage must not claim a default: {usage}"
+            );
+        }
+    }
+
+    /// `/loop`'s in-session default and this tool's default must stay opposite:
+    /// a caller that says nothing gets a detached fire, and `/loop` gets an
+    /// in-session one only because it asks with `foreground: true`.
+    #[tokio::test]
+    async fn foreground_defaults_off_when_unspecified() {
+        let (resources, cancel) = scheduler_resources();
+
+        SchedulerCreateTool
+            .run(
+                test_ctx(resources.clone()),
+                input(serde_json::json!({"interval": "5m", "prompt": "check deploy"})),
+            )
+            .await
+            .expect("create succeeds");
+
+        let res = resources.lock().await;
+        let task = res
+            .get::<State<super::super::types::SchedulerState>>()
+            .and_then(|s| s.tasks.first())
+            .expect("one task");
+        assert!(!task.foreground, "omitted foreground must stay detached");
+        drop(res);
+        cancel.cancel();
     }
 
     #[test]

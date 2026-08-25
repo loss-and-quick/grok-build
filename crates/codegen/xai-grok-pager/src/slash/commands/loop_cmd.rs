@@ -42,6 +42,26 @@ fn is_interval_token(s: &str) -> bool {
         && digits.parse::<u64>().is_ok_and(|n| n > 0)
 }
 
+/// Where this pager's `/loop` fires land.
+///
+/// `/loop` is nearly always given a continuing prompt -- "keep going", "check on
+/// it" -- whose referent is this conversation, so it asks for in-session fires
+/// and leaves detachment to the loops that say they want it. That is safe to
+/// default here and only here: the pager is the front-end that actually acts on
+/// `x.ai/scheduled_task_inject_prompt`, so a foreground fire it schedules really
+/// does become a turn. `scheduler_create` keeps its detached default for callers
+/// with no such guarantee.
+///
+/// With `[scheduler] background_loops` off the runtime inlines every fire
+/// anyway, so the mode only drops the offer to detach.
+fn fire_mode(ctx: &CommandExecCtx) -> LoopFireMode {
+    if ctx.pager_state.scheduler_background_loops {
+        LoopFireMode::InSessionDetachable
+    } else {
+        LoopFireMode::InSession
+    }
+}
+
 /// Convert an interval token like "5m" to a human string like "every 5 minutes".
 fn interval_to_human(token: &str) -> String {
     let (digits, suffix) = token.split_at(token.len() - 1);
@@ -109,16 +129,12 @@ impl SlashCommand for LoopCommand {
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+        let fire_mode = fire_mode(ctx);
         if args.trim().is_empty() {
-            return CommandResult::Message(loop_usage_message().to_string());
+            return CommandResult::Message(loop_usage_message(fire_mode).to_string());
         }
 
         let (interval_token, prompt) = parse_loop_args(args);
-        let fire_mode = if ctx.pager_state.scheduler_background_loops {
-            LoopFireMode::Detached
-        } else {
-            LoopFireMode::InSession
-        };
 
         // Show a concrete cadence only for an unambiguous leading token;
         // otherwise a neutral placeholder, since the authoritative schedule
@@ -367,7 +383,7 @@ mod tests {
     fn run_instruction_matches_shared_helper() {
         let args = "2h run tests";
         for (background_loops, mode) in [
-            (true, LoopFireMode::Detached),
+            (true, LoopFireMode::InSessionDetachable),
             (false, LoopFireMode::InSession),
         ] {
             match run_loop_with_background_loops(args, background_loops) {
@@ -384,9 +400,38 @@ mod tests {
 
     #[test]
     fn run_usage_matches_shared_helper() {
-        match run_loop("   ") {
-            CommandResult::Message(msg) => assert_eq!(msg, loop_usage_message()),
-            other => panic!("expected usage Message, got {other:?}"),
+        for (background_loops, mode) in [
+            (true, LoopFireMode::InSessionDetachable),
+            (false, LoopFireMode::InSession),
+        ] {
+            match run_loop_with_background_loops("   ", background_loops) {
+                CommandResult::Message(msg) => assert_eq!(msg, loop_usage_message(mode)),
+                other => panic!("expected usage Message, got {other:?}"),
+            }
+        }
+    }
+
+    /// The pager runs fires as turns itself, so `/loop` asks for that rather
+    /// than describing whatever `scheduler_create` would have defaulted to.
+    #[test]
+    fn run_asks_for_foreground_fires_by_default() {
+        match run_loop("30m keep going on the refactor") {
+            CommandResult::InjectSkill { prompt_blocks, .. } => {
+                let acp::ContentBlock::Text(text) = &prompt_blocks[0] else {
+                    panic!("expected a text prompt block");
+                };
+                assert!(
+                    text.text.contains("foreground: true"),
+                    "the default must request an in-session fire: {}",
+                    text.text
+                );
+                assert!(
+                    text.text.contains("foreground: false"),
+                    "and must keep detaching reachable: {}",
+                    text.text
+                );
+            }
+            other => panic!("expected InjectSkill, got {other:?}"),
         }
     }
 }

@@ -183,9 +183,9 @@
 
     /// `/loop`'s wording must describe THIS session's fires. The shell pins the
     /// fire mode when a session's actor spawns, so a mid-session settings push
-    /// carrying the opposite value must not change the instruction: describing
-    /// detached fires as in-session drops the self-contained state those fires
-    /// need.
+    /// carrying the opposite value must not change the instruction: offering a
+    /// detached fire the session's own runtime would inline anyway makes the
+    /// model report a background loop the user never gets.
     #[test]
     fn loop_fire_mode_follows_session_not_later_settings_push() {
         use crate::app::actions::{Action, TaskResult};
@@ -215,7 +215,7 @@
         assert_eq!(
             loop_instruction(&mut app, "5m check ci"),
             loop_schedule_instruction("5m check ci", LoopFireMode::InSession),
-            "a pushed flip must not re-describe fires this session already pinned"
+            "a pushed flip must not re-offer detaching this session cannot do"
         );
     }
 
@@ -230,7 +230,7 @@
 
         let mut app = make_app_with_agent("sess-loop-load");
         // Opposite of both the seed and the pre-resume value, so only the load
-        // response can produce the detached wording asserted below.
+        // response can produce the detachable wording asserted below.
         app.scheduler_background_loops_seed = false;
         crate::app::dispatch::dispatch(
             Action::TaskComplete(TaskResult::SessionCreated {
@@ -257,7 +257,7 @@
 
         assert_eq!(
             loop_instruction(&mut app, "5m check ci"),
-            loop_schedule_instruction("5m check ci", LoopFireMode::Detached),
+            loop_schedule_instruction("5m check ci", LoopFireMode::InSessionDetachable),
             "resume must adopt the value its own spawn pinned"
         );
     }
