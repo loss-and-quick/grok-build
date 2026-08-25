@@ -23,6 +23,92 @@ use crate::util::format_duration;
 /// Shared text-selection range id for recap body lines (header is excluded).
 const RECAP_BODY_RANGE: u16 = 0;
 
+/// Whose credential a rejected request carried, as far as the client can tell.
+///
+/// This client routes to third-party `[[provider]]` endpoints and to bearers a
+/// plugin mints, so "the request was refused as unauthenticated" does **not**
+/// imply the xAI session is the credential at fault. Naming the wrong one is
+/// not merely unhelpful: it sends the user to `/login`, which cannot touch a
+/// provider key or a plugin's OAuth grant, and — when the real fault is
+/// routing — hides that the turn went somewhere the user never chose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReAuthCredential {
+    /// A first-party xAI account login — grok.com or an enterprise SSO issuer.
+    /// The one case `/login` actually repairs.
+    XaiSession,
+    /// A plain xAI API key from the environment or `config.toml`. `/login`
+    /// would sign in to a *different* credential rather than fix this one.
+    XaiApiKey,
+    /// A bearer minted by a plugin, whose advertised label this is. Repaired
+    /// by re-authorizing that plugin's own entry, not the xAI session.
+    Plugin {
+        /// The `/login` entry's display name, e.g. "Acme OAuth".
+        label: String,
+    },
+    /// The credential configured for a custom endpoint: a `[[provider]]` key,
+    /// a `[model."…"]` key, or whatever the entry's `auth_env` resolves to.
+    Provider {
+        /// `[[provider]]` id, when the model came from one. `None` for a
+        /// per-model table, which has no provider section to point at.
+        name: Option<String>,
+        /// Display name of the model whose endpoint refused the request.
+        model: Option<String>,
+    },
+    /// Nothing the client holds names the credential — no catalog entry for
+    /// the current model, and no owning login method reported. Says so instead
+    /// of guessing, and offers both places to look.
+    Unknown,
+}
+
+impl ReAuthCredential {
+    /// The whole banner line for this credential: what failed, and the one
+    /// thing that repairs it.
+    fn message(&self) -> String {
+        match self {
+            Self::XaiSession => "Authentication required \u{2014} your xAI session has expired \
+                                 or was rejected. Run /login to sign in again, then resend your \
+                                 message."
+                .to_string(),
+            Self::XaiApiKey => "Authentication required \u{2014} your xAI API key was rejected. \
+                                Check XAI_API_KEY or the `api_key` in ~/.grok/config.toml; \
+                                /login signs in to an account instead, which is a different \
+                                credential."
+                .to_string(),
+            Self::Plugin { label } => format!(
+                "Authentication required \u{2014} the credential minted by \"{label}\" was \
+                 rejected. Re-authorize it from /login (pick its entry; signing in to xAI \
+                 leaves this credential untouched), then resend your message."
+            ),
+            Self::Provider { name, model } => {
+                let what = match model {
+                    Some(model) => format!("The endpoint serving \"{model}\""),
+                    None => "This model's endpoint".to_string(),
+                };
+                let where_to_look = match name {
+                    Some(name) => format!(
+                        "its credential comes from the [[provider]] \"{name}\" entry in \
+                         ~/.grok/config.toml (its `api_key` / key env var)"
+                    ),
+                    None => "its credential comes from that model's own entry in \
+                             ~/.grok/config.toml (its `api_key` / key env var)"
+                        .to_string(),
+                };
+                format!(
+                    "Authentication required \u{2014} {what} rejected the credential. This is \
+                     not your xAI sign-in, so /login will not fix it: {where_to_look}. \
+                     /providers shows the endpoint this model resolves to."
+                )
+            }
+            Self::Unknown => "Authentication required \u{2014} the credential for this request \
+                              was rejected, and this client cannot tell which one. /providers \
+                              shows the endpoint and credential the current model resolves to; \
+                              /login re-authenticates the xAI session, which is the right fix \
+                              only if that endpoint is xAI's."
+                .to_string(),
+        }
+    }
+}
+
 /// A session-level event with structured data.
 ///
 /// Each variant carries the information needed to render a concise,
@@ -98,10 +184,15 @@ pub enum SessionEvent {
         detail: String,
     },
     /// The server rejected the credentials (401 / auth error) and automatic
-    /// recovery was exhausted. Rendered as a prominent call-to-action that
-    /// points the user at `/login` to re-authenticate, replacing the raw
-    /// "Retry failed: Unauthorized (401) …" dump.
-    ReAuthRequired,
+    /// recovery was exhausted. Rendered as a prominent call-to-action,
+    /// replacing the raw "Retry failed: Unauthorized (401) …" dump.
+    ///
+    /// The call-to-action is picked from `credential`, because `/login` fixes
+    /// exactly one of the credentials that can produce this event.
+    ReAuthRequired {
+        /// Whose credential the rejected request carried.
+        credential: ReAuthCredential,
+    },
     /// Terminal context overflow — ideally unreachable, since auto-compaction should
     /// shrink the conversation first; a safeguard for when it didn't (estimate drift
     /// vs the server's max_prompt_length, or compaction suppressed/failed). One actionable
@@ -233,12 +324,7 @@ impl SessionEvent {
             SessionEvent::RequestFailed {
                 headline, detail, ..
             } => crate::app::error_display::banner_message(headline, detail),
-            SessionEvent::ReAuthRequired => {
-                "Authentication required \u{2014} your session has expired or your \
-                 credentials were rejected. Run /login to re-authenticate, then resend \
-                 your message."
-                    .to_string()
-            }
+            SessionEvent::ReAuthRequired { credential } => credential.message(),
             SessionEvent::ContextTooLarge => {
                 "This conversation is too large for the model's context window. \
                  Use /new to start a new session."
@@ -296,7 +382,7 @@ impl SessionEvent {
     fn is_warning_banner(&self) -> bool {
         matches!(
             self,
-            SessionEvent::ReAuthRequired
+            SessionEvent::ReAuthRequired { .. }
                 | SessionEvent::ContextTooLarge
                 | SessionEvent::DiskFull
                 | SessionEvent::CompactionFailed { .. }
@@ -790,9 +876,15 @@ mod tests {
         assert_eq!(event.message(), "Retry failed: bad request");
     }
 
+    fn reauth(credential: ReAuthCredential) -> String {
+        SessionEvent::ReAuthRequired { credential }.message()
+    }
+
+    /// The xAI session is the one credential `/login` repairs, so it is the
+    /// only banner allowed to send the user there without qualification.
     #[test]
-    fn reauth_required_message_points_at_login() {
-        let msg = SessionEvent::ReAuthRequired.message();
+    fn reauth_required_message_points_at_login_for_an_xai_session() {
+        let msg = reauth(ReAuthCredential::XaiSession);
         assert!(msg.contains("/login"), "must tell the user to run /login");
         assert!(
             msg.to_lowercase().contains("authentication")
@@ -801,9 +893,78 @@ mod tests {
         );
     }
 
+    /// A third-party endpoint's refusal must name the model and the config
+    /// entry that holds its credential, and must say outright that `/login`
+    /// is not the fix — the failure mode this whole enum exists for.
+    #[test]
+    fn reauth_required_message_for_a_provider_names_it_and_disowns_login() {
+        let msg = reauth(ReAuthCredential::Provider {
+            name: Some("llama-local".into()),
+            model: Some("llama-local/qwen3".into()),
+        });
+        assert!(msg.contains("llama-local"), "must name the provider: {msg}");
+        assert!(
+            msg.contains("qwen3"),
+            "must name the model whose endpoint refused: {msg}"
+        );
+        assert!(
+            msg.contains("/login will not fix it"),
+            "must not leave the user thinking /login helps: {msg}"
+        );
+        assert!(
+            msg.contains("/providers"),
+            "must offer a way to look: {msg}"
+        );
+    }
+
+    /// A per-model table has no `[[provider]]` section, so the banner must
+    /// point at the model's own entry rather than invent a provider name.
+    #[test]
+    fn reauth_required_message_for_an_unnamed_provider_points_at_the_model_entry() {
+        let msg = reauth(ReAuthCredential::Provider {
+            name: None,
+            model: Some("gateway-model".into()),
+        });
+        assert!(msg.contains("gateway-model"));
+        assert!(!msg.contains("[[provider]]"), "no provider to name: {msg}");
+    }
+
+    /// The plugin's own label is what the user picks in `/login`; the message
+    /// must say the xAI sign-in leaves this credential alone.
+    #[test]
+    fn reauth_required_message_for_a_plugin_names_the_plugin() {
+        let msg = reauth(ReAuthCredential::Plugin {
+            label: "Acme OAuth".into(),
+        });
+        assert!(msg.contains("Acme OAuth"), "must name the plugin: {msg}");
+        assert!(msg.contains("/login"), "its entry lives in /login: {msg}");
+    }
+
+    /// Unknown provenance must admit it rather than assert the xAI session,
+    /// while still naming both places the user can look.
+    #[test]
+    fn reauth_required_message_for_unknown_admits_it() {
+        let msg = reauth(ReAuthCredential::Unknown);
+        assert!(
+            msg.contains("cannot tell which one"),
+            "must not pretend to know: {msg}"
+        );
+        assert!(msg.contains("/providers") && msg.contains("/login"));
+    }
+
+    /// An API key is not an account: `/login` would mint a different
+    /// credential rather than repair the rejected one.
+    #[test]
+    fn reauth_required_message_for_an_api_key_points_at_the_key() {
+        let msg = reauth(ReAuthCredential::XaiApiKey);
+        assert!(msg.contains("XAI_API_KEY"), "must name the key: {msg}");
+    }
+
     #[test]
     fn reauth_required_has_warning_accent() {
-        let block = SessionEventBlock::new(SessionEvent::ReAuthRequired);
+        let block = SessionEventBlock::new(SessionEvent::ReAuthRequired {
+            credential: ReAuthCredential::XaiSession,
+        });
         let theme = Theme::current();
         let accent = block.accent(&ctx());
         assert_eq!(

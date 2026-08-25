@@ -116,8 +116,15 @@ impl RefreshTokenFailedReason {
         }
     }
 
-    /// User-facing copy for a terminal refresh failure; the raw IdP code stays
-    /// in logs.
+    /// Copy for a terminal refresh failure; the raw IdP code stays in logs.
+    ///
+    /// Despite the name, this reaches no user: its only readers are this
+    /// error's `Display` (which every caller of `AuthManager::auth` logs
+    /// rather than surfaces) and one telemetry field. What a user is actually
+    /// shown for these same conditions is `AuthRemedy::advice`, which is also
+    /// the only path that carries the operator's `auth_provider_label` — the
+    /// [`provider_login_message`] call below can only ever pass `None`.
+    /// Change the copy a user reads there, not here.
     pub(crate) fn user_message(self) -> Cow<'static, str> {
         match self {
             Self::RefreshTokenRejected => {

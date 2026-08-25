@@ -266,7 +266,8 @@ pub(super) fn dispatch_close_auth_method_picker(app: &mut AppView) -> Vec<Effect
 pub(super) fn scrollback_has_recent_reauth_prompt(
     scrollback: &crate::scrollback::state::ScrollbackState,
 ) -> bool {
-    trailing_session_events(scrollback).any(|(_, ev)| matches!(ev, SessionEvent::ReAuthRequired))
+    trailing_session_events(scrollback)
+        .any(|(_, ev)| matches!(ev, SessionEvent::ReAuthRequired { .. }))
 }
 
 /// True if the trailing run of session/system blocks contains a terminal
@@ -300,7 +301,7 @@ pub(in crate::app) fn scrollback_has_recent_error_banner(
     trailing_session_events(scrollback).any(|(_, ev)| {
         matches!(
             ev,
-            SessionEvent::ReAuthRequired
+            SessionEvent::ReAuthRequired { .. }
                 | SessionEvent::ContextTooLarge
                 | SessionEvent::DiskFull
                 | SessionEvent::RequestFailed { .. }
@@ -353,7 +354,7 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
         .filter(|(_, ev)| {
             matches!(
                 ev,
-                SessionEvent::ReAuthRequired
+                SessionEvent::ReAuthRequired { .. }
                     | SessionEvent::RequestFailed { .. }
                     | SessionEvent::RetryFailed { .. }
                     | SessionEvent::TurnFailed { .. }

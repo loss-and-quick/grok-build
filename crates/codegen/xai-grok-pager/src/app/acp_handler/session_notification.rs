@@ -1,7 +1,93 @@
 use super::*;
+use crate::scrollback::blocks::ReAuthCredential;
 use xai_grok_shell::sampling::error::{
     format_provider_rate_limited_user_message, format_rate_limited_user_message,
 };
+/// What the client knows about the credential the session is running on,
+/// snapshotted before the agent is borrowed mutably.
+///
+/// Carried alongside the notification because two of its arms answer questions
+/// the notification itself cannot: a 429's copy may only name a grok.com plan
+/// when the endpoint is xAI's, and a 401's call-to-action may only name
+/// `/login` when the rejected credential is the xAI session.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionAuthContext {
+    /// The session runs on a plain xAI API key rather than an account login.
+    pub is_api_key: bool,
+    /// The interactive login method that owns the session's credential, from
+    /// [`xai_grok_shell::auth::AuthMeta::auth_method_id`]. `None` when the
+    /// agent could name none — absent, never guessed.
+    pub method_id: Option<acp::AuthMethodId>,
+    /// Display name of that method as `/login` lists it, so a message can name
+    /// the credential the way the user picked it.
+    pub method_label: Option<String>,
+}
+impl SessionAuthContext {
+    /// Snapshot from the app's live auth state.
+    pub(super) fn of(app: &AppView) -> Self {
+        let method_id = app.current_auth_method_id.clone();
+        let method_label = method_id.as_ref().and_then(|id| {
+            app.auth_methods
+                .iter()
+                .find(|method| method.id() == id)
+                .map(|method| method.name().to_string())
+        });
+        Self {
+            is_api_key: app.is_api_key_auth,
+            method_id,
+            method_label,
+        }
+    }
+}
+/// Whose credential a 401 on this turn rejected.
+///
+/// The endpoint decides first, and it decides most of the cases: a turn that
+/// went to a custom `[[provider]]` was authenticated by that provider's
+/// credential, whatever the session is otherwise signed in as, so the xAI
+/// session is not the thing that failed even when one exists. The exception is
+/// a bearer a plugin mints for that provider — the session is running on it,
+/// and it is the plugin's entry, not the config file, that repairs it.
+///
+/// On an xAI endpoint the session's own credential is what went out, and
+/// `AuthMeta::auth_method_id` names it. When it names nothing and the session
+/// is not on an API key either, the honest answer is
+/// [`ReAuthCredential::Unknown`] rather than the default login row.
+fn reauth_credential(session: &AgentSession, auth: &SessionAuthContext) -> ReAuthCredential {
+    use xai_grok_shell::agent::auth_method::{AuthMethodKind, parse_plugin_oauth_id};
+    let plugin = auth.method_id.as_ref().and_then(|id| {
+        (AuthMethodKind::from_id(id) == AuthMethodKind::PluginOauth).then(|| {
+            auth.method_label.clone().unwrap_or_else(|| {
+                parse_plugin_oauth_id(id).map_or_else(
+                    || id.0.to_string(),
+                    |(plugin, account)| match account {
+                        Some(account) => format!("{plugin} ({account})"),
+                        None => plugin.to_string(),
+                    },
+                )
+            })
+        })
+    });
+    if !session.models.current_model_is_first_party() {
+        return match plugin {
+            Some(label) => ReAuthCredential::Plugin { label },
+            None => ReAuthCredential::Provider {
+                name: session.models.current_model_provider().map(str::to_owned),
+                // The catalog key, not the display name: it is what `/model`
+                // selects and what the config entry is declared under, so it
+                // is the string the user can act on.
+                model: session.models.current_model_id_str().map(str::to_owned),
+            },
+        };
+    }
+    if let Some(label) = plugin {
+        return ReAuthCredential::Plugin { label };
+    }
+    match auth.method_id.as_ref().map(AuthMethodKind::from_id) {
+        Some(AuthMethodKind::GrokCom | AuthMethodKind::Oidc) => ReAuthCredential::XaiSession,
+        _ if auth.is_api_key => ReAuthCredential::XaiApiKey,
+        _ => ReAuthCredential::Unknown,
+    }
+}
 /// Stash a live stop/stop_failure batch under `stash_pid` for the turn marker
 /// to fold. `merge_same_name` merges a same-name repeat instead of standalone.
 pub(super) fn stash_live_stop_batch(
@@ -128,7 +214,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         }
         _ => {}
     }
-    let is_api_key_auth = app.is_api_key_auth;
+    let auth = SessionAuthContext::of(app);
     let matched = match find_session_match(app, &session_notif.session_id) {
         Some(m) => m,
         None => {
@@ -148,12 +234,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         .expect("find_session_match returned an existing AgentId");
     if matches!(matched, SessionMatch::Child(_)) {
         let child_sid: &str = session_notif.session_id.0.as_ref();
-        let changed = handle_child_session_notification(
-            session_notif.update,
-            child_sid,
-            agent,
-            is_api_key_auth,
-        );
+        let changed =
+            handle_child_session_notification(session_notif.update, child_sid, agent, &auth);
         return changed && is_active;
     }
     let meta = NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
@@ -198,12 +280,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         | XaiSessionUpdate::MemoryFlushCompleted { .. }
         | XaiSessionUpdate::MemoryDreamCompleted { .. }
         | XaiSessionUpdate::MemorySessionSaved { .. }) => {
-            let changed = apply_session_event(
-                update,
-                &mut agent.session,
-                &mut agent.scrollback,
-                is_api_key_auth,
-            );
+            let changed =
+                apply_session_event(update, &mut agent.session, &mut agent.scrollback, &auth);
             if let XaiSessionUpdate::AutoCompactCompleted { tokens_after, .. } = update {
                 refresh_context_used(agent, *tokens_after);
                 agent.todo.update_todos(Vec::new());
@@ -1135,7 +1213,7 @@ pub(super) fn handle_child_session_notification(
     update: XaiSessionUpdate,
     child_sid: &str,
     agent: &mut AgentView,
-    is_api_key_auth: bool,
+    auth: &SessionAuthContext,
 ) -> bool {
     match update {
         XaiSessionUpdate::AutoCompactStarted { .. }
@@ -1153,7 +1231,7 @@ pub(super) fn handle_child_session_notification(
                     &update,
                     &mut child_view.session,
                     &mut child_view.scrollback,
-                    is_api_key_auth,
+                    auth,
                 );
                 if let Some(tokens_after) = compact_tokens {
                     refresh_context_used(child_view, tokens_after);
@@ -1178,7 +1256,7 @@ pub(super) fn handle_child_session_notification(
                     update,
                     &mut child_view.session,
                     &mut child_view.scrollback,
-                    is_api_key_auth,
+                    auth,
                 )
             } else {
                 false
@@ -1200,13 +1278,13 @@ pub(crate) fn apply_session_event_for_test(
     session: &mut AgentSession,
     scrollback: &mut crate::scrollback::state::ScrollbackState,
 ) -> bool {
-    apply_session_event(update, session, scrollback, false)
+    apply_session_event(update, session, scrollback, &SessionAuthContext::default())
 }
 pub(super) fn apply_session_event(
     update: &XaiSessionUpdate,
     session: &mut AgentSession,
     scrollback: &mut crate::scrollback::state::ScrollbackState,
-    is_api_key_auth: bool,
+    auth: &SessionAuthContext,
 ) -> bool {
     match update {
         XaiSessionUpdate::AutoCompactStarted { percentage, .. } => {
@@ -1273,7 +1351,7 @@ pub(super) fn apply_session_event(
         }
         XaiSessionUpdate::RetryState(retry) => {
             tracing::debug!("Retry state: {retry:?}");
-            apply_retry_state(retry, session, scrollback, is_api_key_auth);
+            apply_retry_state(retry, session, scrollback, auth);
             true
         }
         XaiSessionUpdate::ImageDropped { notes } => {
@@ -1330,7 +1408,7 @@ pub(super) fn apply_retry_state(
     retry: &xai_grok_shell::extensions::notification::RetryState,
     session: &mut AgentSession,
     scrollback: &mut crate::scrollback::state::ScrollbackState,
-    is_api_key_auth: bool,
+    auth: &SessionAuthContext,
 ) {
     let mut is_credit_limit = false;
     let mut is_reauth = false;
@@ -1391,13 +1469,15 @@ pub(super) fn apply_retry_state(
                 session.free_usage_blocked = true;
             } else if !*rate_limited && is_reauthable_failure(None, reason) {
                 is_reauth = true;
-                scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+                scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired {
+                    credential: reauth_credential(session, auth),
+                }));
             } else if *rate_limited {
                 // The rate-limit copy is picked from status + body text, which
                 // cannot tell whose endpoint answered; only the first-party
                 // rewrite may name a grok.com plan.
                 let copy = if first_party_endpoint {
-                    format_rate_limited_user_message(Some(reason.as_str()), is_api_key_auth)
+                    format_rate_limited_user_message(Some(reason.as_str()), auth.is_api_key)
                 } else {
                     format_provider_rate_limited_user_message(Some(reason.as_str()))
                 };
@@ -1427,7 +1507,9 @@ pub(super) fn apply_retry_state(
                 session.credit_limit_blocked = true;
             } else if is_reauthable_failure(Some(error_type.as_str()), message) {
                 is_reauth = true;
-                scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+                scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired {
+                    credential: reauth_credential(session, auth),
+                }));
             } else if wire == crate::app::error_display::WireErrorType::DiskFull {
                 if !crate::app::dispatch::scrollback_has_recent_disk_full(scrollback) {
                     scrollback.push_block(RenderBlock::session_event(SessionEvent::DiskFull));

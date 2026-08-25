@@ -374,7 +374,7 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
             matches!(
                 agent.scrollback.entry(i).map(|e| &e.block),
                 Some(RenderBlock::SessionEvent(ev))
-                    if matches!(ev.event, SessionEvent::ReAuthRequired)
+                    if matches!(ev.event, SessionEvent::ReAuthRequired { .. })
             )
         });
         assert!(has_reauth, "RetryState auth must show ReAuthRequired");
@@ -438,7 +438,9 @@ fn pre_fix_compact_start_without_hold_cannot_stash_for_reauth() {
         agent.session.compact_held_prompt = None;
         agent
             .scrollback
-            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired {
+                credential: crate::scrollback::blocks::ReAuthCredential::XaiSession,
+            }));
     }
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
@@ -474,7 +476,9 @@ fn second_auth_failure_does_not_clobber_reauth_stash() {
         });
         agent
             .scrollback
-            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired {
+                credential: crate::scrollback::blocks::ReAuthCredential::XaiSession,
+            }));
         agent.session.state = AgentState::TurnRunning;
         agent.turn_started_at = Some(std::time::Instant::now());
         agent.session.in_flight_prompt = None;
@@ -543,7 +547,9 @@ fn cancel_login_strips_reauth_prompt_from_scrollback() {
         });
         agent
             .scrollback
-            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired {
+                credential: crate::scrollback::blocks::ReAuthCredential::XaiSession,
+            }));
     }
 
     dispatch(Action::Login, &mut app);
@@ -553,7 +559,7 @@ fn cancel_login_strips_reauth_prompt_from_scrollback() {
     let has_reauth = (0..sb.len()).any(|i| {
         matches!(
             sb.entry(i).map(|e| &e.block),
-            Some(RenderBlock::SessionEvent(ev)) if matches!(ev.event, SessionEvent::ReAuthRequired)
+            Some(RenderBlock::SessionEvent(ev)) if matches!(ev.event, SessionEvent::ReAuthRequired { .. })
         )
     });
     assert!(

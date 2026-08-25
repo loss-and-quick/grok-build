@@ -186,6 +186,8 @@ pub use aux_bridge::AuxInferenceBridge;
 #[path = "acp_session_impl/stop_gate.rs"]
 mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
+#[path = "acp_session_impl/memory_import.rs"]
+mod memory_import;
 #[path = "acp_session_impl/memory_index.rs"]
 mod memory_index;
 #[path = "acp_session_impl/recap.rs"]

@@ -1582,7 +1582,9 @@ fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
         .get_mut(&id)
         .unwrap()
         .scrollback
-        .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+        .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired {
+            credential: crate::scrollback::blocks::ReAuthCredential::XaiSession,
+        }));
     dispatch(Action::Login, &mut app);
     let seq = authenticating_seq(&app);
     dispatch(
@@ -1597,7 +1599,7 @@ fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
     let has_reauth = (0..sb.len()).any(|i| {
         matches!(
             sb.entry(i).map(|e| &e.block),
-            Some(RenderBlock::SessionEvent(ev)) if matches!(ev.event, SessionEvent::ReAuthRequired)
+            Some(RenderBlock::SessionEvent(ev)) if matches!(ev.event, SessionEvent::ReAuthRequired { .. })
         )
     });
     assert!(
@@ -1616,7 +1618,9 @@ fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent
             .scrollback
-            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired {
+                credential: crate::scrollback::blocks::ReAuthCredential::XaiSession,
+            }));
         agent.reauth_stashed_prompt = Some(crate::app::agent::InFlightPrompt {
             text: "retry me".into(),
             images: Vec::new(),

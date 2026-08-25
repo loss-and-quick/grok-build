@@ -1,6 +1,23 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
+    /// A session on a first-party account login: the default context, and what
+    /// every case that is not specifically about credential provenance wants.
+    fn oauth_auth() -> SessionAuthContext {
+        SessionAuthContext {
+            method_id: Some(acp::AuthMethodId::new("grok.com")),
+            ..SessionAuthContext::default()
+        }
+    }
+
+    /// A session on a plain xAI API key.
+    fn api_key_auth() -> SessionAuthContext {
+        SessionAuthContext {
+            is_api_key: true,
+            ..SessionAuthContext::default()
+        }
+    }
+
     // ── apply_session_event ────────────────────────────────────────────
 
     #[test]
@@ -20,7 +37,7 @@
             percentage: 85,
             reason: "threshold".into(),
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
         assert!(
             session.in_flight_prompt.is_none(),
             "compaction start implies server activity — cancel must not rewind prompt"
@@ -51,7 +68,7 @@
             let update = XaiSessionUpdate::AutoCompactFailed {
                 error: error.into(),
             };
-            assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+            assert!(apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
             assert_eq!(
                 session.compact_held_prompt.as_ref().map(|p| p.text.as_str()),
                 Some("retry after login"),
@@ -74,7 +91,7 @@
         let update = XaiSessionUpdate::ImageDropped {
             notes: notes.clone(),
         };
-        let changed = apply_session_event(&update, &mut session, &mut scrollback, false);
+        let changed = apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth());
         assert!(changed);
         assert_eq!(scrollback.len(), before + 1);
         let entry = scrollback.entries_mut().last().expect("entry pushed");
@@ -141,7 +158,7 @@
             max_retries: 3,
             reason: "rate limited".into(),
         };
-        apply_retry_state(&retry, &mut session, &mut scrollback, false);
+        apply_retry_state(&retry, &mut session, &mut scrollback, &oauth_auth());
         assert!(
             session.in_flight_prompt.is_none(),
             "RetryState bypasses session/update in_flight hook"
@@ -161,7 +178,7 @@
                 is_rate_limited: true,
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             session.rate_limited,
             "rate_limited flag must be set when is_rate_limited is true"
@@ -180,7 +197,7 @@
 
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
-        apply_retry_state(&empty, &mut session, &mut scrollback, false);
+        apply_retry_state(&empty, &mut session, &mut scrollback, &oauth_auth());
         match last_session_event(&scrollback) {
             Some(SessionEvent::RetryFailed { error, .. }) => {
                 assert_eq!(error, RATE_LIMITED_USER_MESSAGE_OAUTH);
@@ -203,7 +220,7 @@
 
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
-        apply_retry_state(&exhausted, &mut session, &mut scrollback, false);
+        apply_retry_state(&exhausted, &mut session, &mut scrollback, &oauth_auth());
         match last_session_event(&scrollback) {
             Some(SessionEvent::RetryFailed { error, .. }) => {
                 assert_eq!(error, body);
@@ -229,7 +246,7 @@
 
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
-        apply_retry_state(&rpm, &mut session, &mut scrollback, true);
+        apply_retry_state(&rpm, &mut session, &mut scrollback, &api_key_auth());
         match last_session_event(&scrollback) {
             Some(SessionEvent::RetryFailed { error, .. }) => {
                 assert_eq!(error, RATE_LIMITED_USER_MESSAGE_API_KEY);
@@ -251,7 +268,7 @@
                 is_rate_limited: false,
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             !session.rate_limited,
             "rate_limited flag must not be set when is_rate_limited is false"
@@ -283,7 +300,7 @@
                 is_rate_limited: true,
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             session.rate_limited,
             "free-usage keeps rate_limited (TurnFailed/toast suppression)"
@@ -346,7 +363,8 @@
             apply_retry_state(
                 &exhausted_rate_limit(""),
                 &mut session,
-                &mut scrollback, is_api_key_auth);
+                &mut scrollback,
+                &SessionAuthContext { is_api_key: is_api_key_auth, ..SessionAuthContext::default() });
             match last_session_event(&scrollback) {
                 Some(SessionEvent::RetryFailed { error, .. }) => {
                     assert_eq!(error, RATE_LIMITED_USER_MESSAGE_PROVIDER);
@@ -369,7 +387,7 @@
         apply_retry_state(
             &exhausted_rate_limit(&format!("API error (status 429 Too Many Requests): {body}")),
             &mut session,
-            &mut scrollback, true);
+            &mut scrollback, &api_key_auth());
         match last_session_event(&scrollback) {
             Some(SessionEvent::RetryFailed { error, .. }) => {
                 assert_eq!(error, body);
@@ -393,7 +411,7 @@
                  subscription:free-usage-exhausted: You have used all your free usage.",
             ),
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             !session.free_usage_blocked,
             "a custom provider's 429 must not arm the grok.com paywall"
@@ -421,7 +439,7 @@
             },
             &mut session,
             &mut scrollback,
-            false,
+            &oauth_auth(),
         );
         match scrollback.last().map(|e| &e.block) {
             Some(RenderBlock::SessionEvent(ev)) => {
@@ -450,7 +468,7 @@
                 is_rate_limited: false,
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             session.credit_limit_blocked,
             "credit_limit_blocked must be set for credit-limit 403"
@@ -479,7 +497,7 @@
                 message: "status 403: run out of credits".into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             session.credit_limit_blocked,
             "credit_limit_blocked must be set for credit-limit 403"
@@ -510,7 +528,7 @@
                         .into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             session.credit_limit_blocked,
             "credit_limit_blocked must be set for pool 402 balance exhausted"
@@ -535,7 +553,7 @@
                 message: "internal server error".into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             !session.credit_limit_blocked,
             "credit_limit_blocked must NOT be set for non-credit-limit errors"
@@ -588,11 +606,11 @@
                     .into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             matches!(
                 last_session_event(&scrollback),
-                Some(SessionEvent::ReAuthRequired)
+                Some(SessionEvent::ReAuthRequired { .. })
             ),
             "auth 401 must surface the actionable re-auth prompt"
         );
@@ -618,7 +636,7 @@
                 message: "Unauthorized (401) from https://proxy/v1/messages".into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             session.in_flight_prompt.is_some(),
             "in_flight_prompt must be preserved on a recoverable auth failure"
@@ -639,11 +657,126 @@
                     .into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(matches!(
             last_session_event(&scrollback),
-            Some(SessionEvent::ReAuthRequired)
+            Some(SessionEvent::ReAuthRequired { .. })
         ));
+    }
+
+    // ── A 401 must name the credential that failed ─────────────────────
+    //
+    // This client routes to third-party endpoints and to plugin-minted
+    // bearers, so "run /login" is the right instruction for exactly one of
+    // the credentials a 401 can be about. Naming the wrong one sent a real
+    // user hunting through auth for what was a routing bug.
+
+    fn auth_failure() -> RetryState {
+        RetryState::Failed {
+            error_type: "auth".into(),
+            message: "Unauthorized (401) from https://acme.example/v1/messages".into(),
+        }
+    }
+
+    fn reauth_message(session: &mut AgentSession, auth: &SessionAuthContext) -> String {
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(&auth_failure(), session, &mut scrollback, auth);
+        match last_session_event(&scrollback) {
+            Some(event @ SessionEvent::ReAuthRequired { .. }) => event.message(),
+            other => panic!("expected a re-auth banner, got {other:?}"),
+        }
+    }
+
+    /// The endpoint decides, not the session: an xAI login is irrelevant to a
+    /// turn a custom `[[provider]]` refused, so the banner must name that
+    /// provider and disown `/login` rather than send the user to sign in.
+    #[test]
+    fn reauth_banner_on_a_custom_provider_names_it_instead_of_the_xai_session() {
+        let mut session = custom_provider_session();
+        let id = session.models.current.clone().expect("a current model");
+        session.models.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id, "Acme Fast".to_string()).meta(
+                serde_json::json!({ "firstParty": false, "provider": "acme" })
+                    .as_object()
+                    .cloned(),
+            ),
+        );
+        let msg = reauth_message(&mut session, &oauth_auth());
+        assert!(msg.contains("acme"), "must name the provider: {msg}");
+        assert!(msg.contains("acme/fast"), "must name the model: {msg}");
+        assert!(
+            !msg.contains("your xAI session"),
+            "the xAI session is not what this endpoint rejected: {msg}"
+        );
+        assert!(
+            msg.contains("/login will not fix it"),
+            "must not leave /login looking like the fix: {msg}"
+        );
+    }
+
+    /// A `[model."…"]` entry with a custom base URL carries no `[[provider]]`
+    /// prefix, so there is no provider to name — the banner points at the
+    /// model's own entry rather than inventing one.
+    #[test]
+    fn reauth_banner_on_a_provider_less_custom_model_points_at_its_own_entry() {
+        let msg = reauth_message(&mut custom_provider_session(), &oauth_auth());
+        assert!(msg.contains("acme/fast"));
+        assert!(!msg.contains("[[provider]]"), "none to name: {msg}");
+    }
+
+    /// A bearer a plugin mints is the credential a provider-backed session
+    /// actually sends, and only that plugin's `/login` entry renews it. The
+    /// advertised label is what the user picked, so it is what we name.
+    #[test]
+    fn reauth_banner_names_the_plugin_that_minted_the_credential() {
+        let auth = SessionAuthContext {
+            method_id: Some(acp::AuthMethodId::new("plugin-oauth:acme-auth#work")),
+            method_label: Some("Acme OAuth".into()),
+            ..SessionAuthContext::default()
+        };
+        let msg = reauth_message(&mut custom_provider_session(), &auth);
+        assert!(msg.contains("Acme OAuth"), "must name the plugin: {msg}");
+    }
+
+    /// With no advertised entry to read a label from, the id still carries
+    /// plugin and account — enough to name the credential without guessing.
+    #[test]
+    fn reauth_banner_falls_back_to_the_plugin_id_when_no_label_is_advertised() {
+        let auth = SessionAuthContext {
+            method_id: Some(acp::AuthMethodId::new("plugin-oauth:acme-auth#work")),
+            ..SessionAuthContext::default()
+        };
+        let msg = reauth_message(&mut custom_provider_session(), &auth);
+        assert!(msg.contains("acme-auth (work)"), "{msg}");
+    }
+
+    /// The xAI session is the one credential `/login` renews, so it keeps the
+    /// unqualified instruction.
+    #[test]
+    fn reauth_banner_on_a_first_party_session_still_points_at_login() {
+        let msg = reauth_message(&mut make_session(Some("s1")), &oauth_auth());
+        assert!(msg.contains("xAI session"), "{msg}");
+        assert!(msg.contains("Run /login"), "{msg}");
+    }
+
+    /// An API key is not an account: `/login` would mint a different
+    /// credential, so the banner sends the user to the key instead.
+    #[test]
+    fn reauth_banner_on_an_api_key_session_points_at_the_key() {
+        let msg = reauth_message(&mut make_session(Some("s1")), &api_key_auth());
+        assert!(msg.contains("XAI_API_KEY"), "{msg}");
+    }
+
+    /// The agent named no owning login method and the session is not on an
+    /// API key — the exact shape a misrouted turn produces, since the model
+    /// it fell through from has no catalog entry either. Say so; a confident
+    /// "your session expired" here is what cost the debugging time.
+    #[test]
+    fn reauth_banner_admits_it_when_nothing_names_the_credential() {
+        let msg = reauth_message(&mut make_session(Some("s1")), &SessionAuthContext::default());
+        assert!(msg.contains("cannot tell which one"), "{msg}");
+        assert!(msg.contains("/providers"), "must offer a way to look: {msg}");
     }
 
     /// Legacy WebLogin auth keeps its verbose message (with `grok logout` /
@@ -660,7 +793,7 @@
                     .into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(matches!(
             last_session_event(&scrollback),
             Some(SessionEvent::RetryFailed { .. })
@@ -679,7 +812,7 @@
                 message: r#"API error (status 500 Internal Server Error): {"error":"upstream exploded"}"#.into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         match last_session_event(&scrollback) {
             Some(SessionEvent::RequestFailed {
                 status,
@@ -709,7 +842,7 @@
             },
             &mut session,
             &mut scrollback,
-            false,
+            &oauth_auth(),
         );
         match last_session_event(&scrollback) {
             Some(SessionEvent::RequestFailed {
@@ -739,7 +872,7 @@
                     .into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             matches!(
                 last_session_event(&scrollback),
@@ -764,7 +897,7 @@
             },
             &mut session,
             &mut scrollback,
-            false,
+            &oauth_auth(),
         );
         assert!(
             matches!(
@@ -790,7 +923,7 @@
                 message: "the prompt is too long for this model's context window".into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             matches!(
                 last_session_event(&scrollback),
@@ -811,7 +944,7 @@
             elapsed_ms: Some(500),
             summary_preview: None,
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
         assert_eq!(
             scrollback.len(),
             0,
@@ -848,7 +981,7 @@
             elapsed_ms: Some(500),
             summary_preview: None,
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
         session.finish_turn(&mut scrollback,
         );
         match last_session_event(&scrollback) {
@@ -873,7 +1006,7 @@
             elapsed_ms: Some(500),
             summary_preview: None,
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
         match last_session_event(&scrollback) {
             Some(SessionEvent::CompactionCompleted { tokens_after, .. }) => {
                 assert_eq!(
@@ -901,7 +1034,7 @@
         assert!(apply_session_event(
             &update,
             &mut agent.session,
-            &mut agent.scrollback, false));
+            &mut agent.scrollback, &oauth_auth()));
 
         refresh_context_used(&mut agent, 66_000);
         confirm_context_used(&mut agent, 43_000);
@@ -935,7 +1068,7 @@
             elapsed_ms: Some(500),
             summary_preview: Some("refactored the parser".to_string()),
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
         assert!(
             session.compaction_history().is_empty(),
             "a deferred compaction is not history until the turn confirms it"
@@ -972,7 +1105,7 @@
                 elapsed_ms: None,
                 summary_preview: None,
             };
-            assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+            assert!(apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
             session.finish_turn(&mut scrollback);
         }
 
@@ -998,7 +1131,7 @@
             elapsed_ms: Some(500),
             summary_preview: None,
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
         assert_eq!(
             session.compaction_history().len(),
             1,
@@ -1022,7 +1155,7 @@
             elapsed_ms: None,
             summary_preview: None,
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
         session.finish_turn(&mut scrollback);
 
         let history = session.compaction_history();
@@ -1039,7 +1172,7 @@
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         let update = XaiSessionUpdate::MemoryFlushStarted;
-        assert!(!apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(!apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
     }
 
     // ── handle_child_session_notification ──────────────────────────────
@@ -1062,7 +1195,7 @@
             elapsed_ms: Some(300),
             summary_preview: None,
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let changed = handle_child_session_notification(update, child_sid, &mut agent, &oauth_auth());
         assert!(changed);
 
         let info = agent.subagent_sessions.get(child_sid).unwrap();
@@ -1102,7 +1235,7 @@
             percentage: 72,
             reason: "threshold".into(),
         };
-        let _ = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let _ = handle_child_session_notification(update, child_sid, &mut agent, &oauth_auth());
 
         let child_view = agent.subagent_views.get(child_sid).unwrap();
         assert_eq!(
@@ -1121,7 +1254,7 @@
             percentage: 85,
             reason: "threshold".into(),
         };
-        let changed = handle_child_session_notification(update, "unknown-child", &mut agent, false);
+        let changed = handle_child_session_notification(update, "unknown-child", &mut agent, &oauth_auth());
         assert!(!changed);
     }
 
@@ -1140,7 +1273,7 @@
             elapsed_ms: Some(300),
             summary_preview: None,
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let changed = handle_child_session_notification(update, child_sid, &mut agent, &oauth_auth());
         // No child_view means nothing visible changed — must not trigger redraw.
         assert!(!changed);
         // SubagentInfo should still be updated (data correctness).
@@ -1153,7 +1286,7 @@
     fn child_unknown_event_returns_false() {
         let mut agent = make_agent(Some("root-sess"));
         let update = XaiSessionUpdate::MemoryFlushStarted;
-        let changed = handle_child_session_notification(update, "child-1", &mut agent, false);
+        let changed = handle_child_session_notification(update, "child-1", &mut agent, &oauth_auth());
         assert!(!changed);
     }
 
@@ -1238,7 +1371,7 @@
                 message: "incompatible history".into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             session.model_incompatible,
             "encrypted_content_mismatch should set model_incompatible flag"
@@ -1257,7 +1390,7 @@
                 message: "bad request".into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback, &oauth_auth());
         assert!(
             !session.model_incompatible,
             "non-encrypted_content error types must not set model_incompatible"

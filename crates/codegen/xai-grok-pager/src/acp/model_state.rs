@@ -105,6 +105,22 @@ impl ModelState {
             .unwrap_or(true)
     }
 
+    /// The `[[provider]]` id that declared the current model, read from ACP
+    /// model `meta["provider"]` — the structured twin of the "(provider)"
+    /// suffix the picker appends when one slug is served by several providers.
+    ///
+    /// `None` for a built-in or server-catalog entry, and for a `[model."…"]`
+    /// table that carries no provider prefix: those have no `[[provider]]`
+    /// section to send anyone to, so a caller must say so rather than name one.
+    pub fn current_model_provider(&self) -> Option<&str> {
+        self.current
+            .as_ref()
+            .and_then(|id| self.available.get(id))
+            .and_then(|info| info.meta.as_ref())
+            .and_then(|meta| meta.get("provider"))
+            .and_then(|value| value.as_str())
+    }
+
     /// Whether the current model accepts image input, read from the model's
     /// `meta` (the ACP extension point — same source as `totalContextTokens`).
     ///

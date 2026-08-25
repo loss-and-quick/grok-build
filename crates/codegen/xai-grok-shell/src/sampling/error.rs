@@ -113,6 +113,36 @@ pub fn format_provider_rate_limited_user_message(server_detail: Option<&str>) ->
         .to_string()
 }
 
+/// What to tell the user when an endpoint that is **not** xAI's rejected the
+/// credential (401).
+///
+/// The counterpart to the first-party auth copy, and the reason it cannot be
+/// reused: `grok login` / `/login` sign in to an xAI account, and an xAI
+/// account is not a credential for someone else's gateway. Telling the user to
+/// run it is not merely unhelpful — it sends them to the one place that cannot
+/// contain the fault, and hides the case where the turn reached this endpoint
+/// by a routing mistake rather than by their choice.
+///
+/// So: name the model and the host that refused it (host only — a base URL may
+/// carry a key in its query string), then name the two things that actually
+/// hold that endpoint's credential: the entry's own `api_key` / key env var,
+/// and the plugin that mints its bearer.
+pub fn provider_auth_failed_advice(model: &str, base_url: &str) -> String {
+    let endpoint = url::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned));
+    let served_by = match endpoint {
+        Some(host) => format!("served by {host}, which is not xAI"),
+        None => "not served by xAI".to_string(),
+    };
+    format!(
+        "\"{model}\" is {served_by} — that endpoint rejected the credential it was sent. \
+         Signing in to xAI does not give it one: check the `api_key` (or key env var) on \
+         that model's entry in ~/.grok/config.toml, or re-authorize the plugin that mints \
+         its credential."
+    )
+}
+
 /// Drop `SamplingError::Api`'s Display prefix so users see the IC body, not
 /// `API error (status 429 Too Many Requests): …`.
 fn strip_sampling_api_error_prefix(detail: &str) -> &str {
@@ -919,5 +949,44 @@ mod tests {
             agent_result,
             serde_json::Value::String("model not found".into())
         );
+    }
+
+    // ── A 401 from a custom provider is not an xAI sign-in problem ──────
+    //
+    // The first-party auth copy tells the user to run `grok login` / `/login`,
+    // which signs in to an xAI account. That account is not a credential for
+    // anyone else's gateway, so on a third-party endpoint the instruction is
+    // not merely useless — it points at the one place the fault cannot be.
+
+    #[test]
+    fn provider_auth_advice_names_the_model_and_the_host_that_refused() {
+        let advice =
+            provider_auth_failed_advice("acme/fast", "https://gateway.acme.example/v1?key=secret");
+        assert!(advice.contains("acme/fast"), "{advice}");
+        assert!(advice.contains("gateway.acme.example"), "{advice}");
+        assert!(
+            !advice.contains("secret"),
+            "only the host may be echoed — a base URL can carry a key: {advice}"
+        );
+    }
+
+    #[test]
+    fn provider_auth_advice_never_sends_the_user_to_an_xai_sign_in() {
+        let advice = provider_auth_failed_advice("acme/fast", "https://gateway.acme.example/v1");
+        assert!(!advice.contains("grok login"), "{advice}");
+        assert!(!advice.contains("/login"), "{advice}");
+        assert!(
+            advice.contains("api_key"),
+            "must name what does hold the credential: {advice}"
+        );
+    }
+
+    /// An unparseable base URL still gets advice about the right credential;
+    /// it just cannot name the host.
+    #[test]
+    fn provider_auth_advice_survives_an_unparseable_base_url() {
+        let advice = provider_auth_failed_advice("acme/fast", "not a url");
+        assert!(advice.contains("acme/fast"), "{advice}");
+        assert!(advice.contains("not served by xAI"), "{advice}");
     }
 }

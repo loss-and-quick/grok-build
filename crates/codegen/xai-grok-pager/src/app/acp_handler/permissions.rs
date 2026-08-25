@@ -500,7 +500,7 @@ fn session_event_settles_turn(event: &crate::scrollback::blocks::SessionEvent) -
     event.is_turn_terminal()
         || matches!(
             event,
-            SessionEvent::ReAuthRequired
+            SessionEvent::ReAuthRequired { .. }
                 | SessionEvent::ContextTooLarge
                 | SessionEvent::DiskFull
                 | SessionEvent::CompactionFailed { .. }

@@ -1026,8 +1026,13 @@ impl SessionActor {
         self.refresh_token_if_expired().await;
         let mut full_config = self.reconstruct_full_config().await;
         full_config.force_http1 = force_http1;
-        let sampling_client =
-            xai_grok_sampler::SamplingClient::new(full_config).map_err(|e| self.to_acp_error(e))?;
+        // Captured before the config is consumed: an auth failure's message has
+        // to name the credential the *endpoint this client would call* checks,
+        // which is not the session's credential when the model is a custom
+        // provider's.
+        let (model, base_url) = (full_config.model.clone(), full_config.base_url.clone());
+        let sampling_client = xai_grok_sampler::SamplingClient::new(full_config)
+            .map_err(|e| self.to_acp_error(e, &model, &base_url))?;
         Ok(sampling_client)
     }
     /// Push a fresh `SamplerConfig` into the per-session sampler actor
@@ -1051,6 +1056,50 @@ impl SessionActor {
         }
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
         self.sampler_handle.update_config(sampler_config);
+    }
+    /// Classify a terminal auth failure and give it its call-to-action.
+    ///
+    /// Which credential failed is decided by the endpoint, not by the code
+    /// path that noticed. [`AuthRemedy`](crate::auth::AuthRemedy) speaks only
+    /// for the `AuthManager`'s credential — the xAI session or the operator's
+    /// auth provider — so on a third-party endpoint every one of its arms is
+    /// about a credential the request never carried. `SelfHealing` is the
+    /// worst of them there: it downgrades the failure to `auth_transient`,
+    /// suppressing the client's re-auth banner entirely, and promises a
+    /// recovery that a wrong provider key will never make.
+    ///
+    /// `remedy` is `None` for a session with no `AuthManager` at all, which
+    /// has no first-party credential to speak for either. An unreadable
+    /// sampling config falls back to the first-party path: that is both the
+    /// pre-existing behavior and the default the ACP `meta.firstParty` flag
+    /// already takes, and it beats a provider message naming no provider.
+    async fn classify_auth_failure(
+        &self,
+        remedy: Option<crate::auth::AuthRemedy>,
+        message: String,
+        status_code: Option<u16>,
+    ) -> (&'static str, String) {
+        let endpoint = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .filter(|cfg| !crate::util::is_xai_api_bearer_url(&cfg.base_url));
+        let Some(cfg) = endpoint else {
+            return match remedy {
+                Some(remedy) => self.apply_auth_remedy(&remedy, message, status_code),
+                None => ("auth", message),
+            };
+        };
+        let advice = crate::sampling::error::provider_auth_failed_advice(&cfg.model, &cfg.base_url);
+        xai_grok_telemetry::unified_log::info(
+            "auth: turn failure on a third-party endpoint",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "status_code": status_code,
+                "model": cfg.model,
+            })),
+        );
+        ("auth", format!("{message}\n\n{advice}"))
     }
     /// Fold an auth remedy into a turn failure: its advice becomes the tail of
     /// the message, and its `turn_error_type` the classification the client
@@ -1084,14 +1133,11 @@ impl SessionActor {
     /// repeated 401s ended in silence.
     pub(crate) async fn fail_turn_auth_budget_exhausted(&self, message: String) -> acp::Error {
         const STATUS: Option<u16> = Some(401);
-        let (error_type, message) = match self.auth_manager.as_ref() {
-            Some(auth_manager) => self.apply_auth_remedy(
-                &auth_manager.auth_remedy().after_retries_exhausted(),
-                message,
-                STATUS,
-            ),
-            None => ("auth", message),
-        };
+        let remedy = self
+            .auth_manager
+            .as_ref()
+            .map(|am| am.auth_remedy().after_retries_exhausted());
+        let (error_type, message) = self.classify_auth_failure(remedy, message, STATUS).await;
         self.log_terminal_failure(error_type, STATUS, &message);
         self.send_xai_notification(XaiSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {
@@ -1503,13 +1549,12 @@ impl SessionActor {
         } else {
             error.kind.as_str()
         };
-        let (error_type, detailed_message) = match self.auth_manager.as_ref() {
-            Some(auth_manager) if error_type == "auth" => self.apply_auth_remedy(
-                &auth_manager.auth_remedy(),
-                detailed_message,
-                error.status_code,
-            ),
-            _ => (error_type, detailed_message),
+        let (error_type, detailed_message) = if error_type == "auth" {
+            let remedy = self.auth_manager.as_ref().map(|am| am.auth_remedy());
+            self.classify_auth_failure(remedy, detailed_message, error.status_code)
+                .await
+        } else {
+            (error_type, detailed_message)
         };
         self.log_terminal_failure(error_type, error.status_code, &detailed_message);
         self.send_xai_notification(XaiSessionUpdate::RetryState(

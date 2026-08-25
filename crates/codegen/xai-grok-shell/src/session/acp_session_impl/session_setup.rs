@@ -35,24 +35,43 @@ impl SessionActor {
             .as_deref()
             .is_some_and(crate::agent::auth_method::is_session_based_method)
     }
-    pub(super) fn to_acp_error(&self, err: SamplingError) -> acp::Error {
+    /// Map a sampling error to ACP, naming the credential an auth failure is
+    /// actually about.
+    ///
+    /// `model` / `base_url` are the endpoint the failing client was built for.
+    /// Both stock messages here — "run `grok login`" and "set XAI_API_KEY" —
+    /// name an xAI credential, and neither is the credential a custom
+    /// `[[provider]]` endpoint checks, so the session's auth method may only
+    /// pick between them once the endpoint is known to be xAI's.
+    pub(super) fn to_acp_error(
+        &self,
+        err: SamplingError,
+        model: &str,
+        base_url: &str,
+    ) -> acp::Error {
         if err.is_auth_error() {
             let method_guard = self.auth_method_id.load();
             let method = method_guard.as_deref();
-            let msg = if method.is_some_and(crate::agent::auth_method::is_session_based_method) {
-                crate::agent::auth_method::AUTH_ERROR_SESSION_EXPIRED
+            let first_party = crate::util::is_xai_api_bearer_url(base_url);
+            let msg = if !first_party {
+                std::borrow::Cow::Owned(crate::sampling::error::provider_auth_failed_advice(
+                    model, base_url,
+                ))
+            } else if method.is_some_and(crate::agent::auth_method::is_session_based_method) {
+                std::borrow::Cow::Borrowed(crate::agent::auth_method::AUTH_ERROR_SESSION_EXPIRED)
             } else {
-                crate::agent::auth_method::AUTH_ERROR_API_KEY
+                std::borrow::Cow::Borrowed(crate::agent::auth_method::AUTH_ERROR_API_KEY)
             };
             xai_grok_telemetry::unified_log::error(
                 "sampling auth error",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
                     "method": method.map(|id| id.0.as_ref()),
+                    "first_party_endpoint": first_party,
                     "error": format!("{err}"),
                 })),
             );
-            return acp::Error::auth_required().data(msg);
+            return acp::Error::auth_required().data(msg.into_owned());
         }
         map_sampling_err_to_acp(err)
     }

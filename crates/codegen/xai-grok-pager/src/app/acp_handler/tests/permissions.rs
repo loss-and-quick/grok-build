@@ -322,7 +322,9 @@
         );
         failed.scrollback.push_block(
             crate::scrollback::block::RenderBlock::session_event(
-                crate::scrollback::blocks::SessionEvent::ReAuthRequired,
+                crate::scrollback::blocks::SessionEvent::ReAuthRequired {
+                    credential: crate::scrollback::blocks::ReAuthCredential::XaiSession,
+                },
             ),
         );
         assert!(
