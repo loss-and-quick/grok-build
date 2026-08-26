@@ -13,6 +13,7 @@
 //! - `SubagentDepthCounter` — current nesting depth
 //! - `MaxSubagentDepth` — configured max nesting depth
 //! - `SessionIdResource` — carries the current session ID for parent scoping
+//! - `AgentTypeResource` — the agent definition name this session was built from
 //! - `TaskModelValidator` — catalog check for an explicit model slug; no
 //!   current reader, since the `task` tool takes no `model` argument
 //!
@@ -1072,6 +1073,16 @@ register_resource!("grok_build", "TaskModelValidator", TaskModelValidator);
 pub struct SessionIdResource(pub String);
 
 register_resource!("grok_build", "SessionIdResource", SessionIdResource);
+
+/// Name of the agent definition this session was built from
+/// (`general-purpose`, `explore`, a `.grok/agents/*.md` name, ...).
+///
+/// Absent for embedders that never name their agent; readers must degrade to
+/// the depth counter rather than assume a name is available.
+#[derive(Debug, Clone)]
+pub struct AgentTypeResource(pub String);
+
+register_resource!("grok_build", "AgentTypeResource", AgentTypeResource);
 
 /// Host-owned RAII token for an interruptible foreground wait.
 pub trait ForegroundWaitGuard: Send {}

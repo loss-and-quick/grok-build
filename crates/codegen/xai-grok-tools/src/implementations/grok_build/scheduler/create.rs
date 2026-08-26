@@ -3,7 +3,7 @@ use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 use super::interval::{interval_to_human, parse_interval};
-use super::types::{ScheduledTask, SchedulerCommand, SchedulerHandle, scheduler_tool_error};
+use super::types::{ScheduledTask, SchedulerCommand, TaskCreator, scheduler_tool_error};
 
 // Canonical /loop wording lives in the light API crate so other consumers can
 // link it without the tools implementation crate; re-exported to keep paths stable.
@@ -121,7 +121,8 @@ To change an existing task, pass its task_id: provided fields replace old values
 
 Usage notes:
 - Interval format: "5m" (minutes), "2h" (hours), "1d" (days), "60s" (seconds, min 60)
-- Maximum 50 scheduled tasks at once
+- Maximum 50 scheduled tasks at once, shared with every subagent that inherits this scheduler
+- From a subagent: foreground is unavailable (that fire would be a turn in the root conversation, not yours), and only tasks you created yourself can be updated or cancelled
 - Tasks auto-expire after {} days
 - For one-time delayed work, run a background terminal command (e.g. `sleep 1800 && <command>`) instead; its completion notifies you"#,
                 super::types::RECURRING_TASK_TTL_DAYS
@@ -188,15 +189,26 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
             .transpose()
             .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
 
-        let sender = {
-            let res = resources.lock().await;
-            res.get::<SchedulerHandle>()
-                .ok_or_else(|| {
-                    xai_tool_runtime::ToolError::custom("missing_resource", "SchedulerHandle")
-                })?
-                .0
-                .clone()
-        };
+        let sender = super::provenance::scheduler_sender(&resources).await?;
+        let caller = super::provenance::caller(&resources).await;
+
+        if let Some(task_id) = input.task_id.as_deref() {
+            super::provenance::ensure_caller_may_modify(&sender, caller.as_ref(), task_id).await?;
+        }
+
+        // A foreground fire is a turn in the session that owns the scheduler
+        // actor, which for a subagent is never its own: it would surface in the
+        // root conversation, long after this subagent is gone, as a prompt the
+        // user never wrote and the root agent never scheduled. Refuse it where
+        // the flag is asked for rather than papering over it at fire time.
+        if input.foreground == Some(true) && caller.as_ref().is_some_and(TaskCreator::is_subagent) {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                "foreground fires run as a turn in the root conversation, not in this subagent's, \
+                 and this subagent will have exited before the first one; create the task without \
+                 foreground, or report the schedule to whoever spawned you so they can create it \
+                 in the conversation it would interrupt",
+            ));
+        }
 
         let send_and_wait = |cmd: SchedulerCommand,
                              reply_rx: tokio::sync::oneshot::Receiver<
@@ -268,6 +280,7 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
             input.fire_immediately,
         );
         task.foreground = input.foreground.unwrap_or(false);
+        task.created_by = caller;
 
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let created = send_and_wait(
@@ -289,6 +302,8 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::provenance::test_support::SharedScheduler;
+    use super::super::types::SchedulerHandle;
     use super::*;
     use crate::implementations::grok_build::scheduler::actor::SchedulerActor;
     use crate::notification::types::ToolNotificationHandle;
@@ -530,5 +545,147 @@ mod tests {
         assert!(instr.contains("Do NOT execute the prompt inline"));
         // Raw request forwarded verbatim for the model to parse.
         assert!(instr.contains(args));
+    }
+
+
+    /// The scheduler actor belongs to the root session, so a foreground fire is
+    /// a turn in the ROOT conversation. A subagent asking for one is asking for
+    /// a prompt to appear in a conversation that is not its own, after it has
+    /// exited — the flag is refused where it is asked for.
+    #[tokio::test]
+    async fn subagent_cannot_create_a_foreground_task() {
+        let scheduler = SharedScheduler::start("root");
+        let child = scheduler.subagent("child", "general-purpose", 1);
+
+        let err = SchedulerCreateTool
+            .run(
+                test_ctx(child),
+                input(serde_json::json!({
+                    "interval": "5m", "prompt": "check deploy", "foreground": true
+                })),
+            )
+            .await
+            .expect_err("a subagent must not schedule a root-conversation turn");
+        let message = err.to_string();
+        assert!(message.contains("root conversation"), "{message}");
+        assert!(scheduler.tasks().await.is_empty(), "nothing was created");
+        scheduler.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn root_may_still_create_a_foreground_task() {
+        let scheduler = SharedScheduler::start("root");
+
+        SchedulerCreateTool
+            .run(
+                test_ctx(scheduler.root.clone()),
+                input(serde_json::json!({
+                    "interval": "5m", "prompt": "keep going", "foreground": true
+                })),
+            )
+            .await
+            .expect("the session that would be interrupted may schedule the turn");
+        assert!(scheduler.tasks().await[0].foreground);
+        scheduler.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_detached_task_records_the_subagent_that_scheduled_it() {
+        let scheduler = SharedScheduler::start("root");
+        let child = scheduler.subagent("child", "general-purpose", 2);
+
+        SchedulerCreateTool
+            .run(
+                test_ctx(child),
+                input(serde_json::json!({"interval": "5m", "prompt": "poll the build"})),
+            )
+            .await
+            .expect("detached scheduling from a subagent is allowed");
+
+        let creator = scheduler.tasks().await[0]
+            .created_by
+            .clone()
+            .expect("creator recorded");
+        assert_eq!(creator.session_id, "child");
+        assert_eq!(creator.agent.as_deref(), Some("general-purpose"));
+        assert_eq!(creator.depth, 2);
+        assert!(creator.is_subagent());
+        scheduler.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_root_task_records_the_root_session() {
+        let scheduler = SharedScheduler::start("root");
+
+        SchedulerCreateTool
+            .run(
+                test_ctx(scheduler.root.clone()),
+                input(serde_json::json!({"interval": "5m", "prompt": "poll the build"})),
+            )
+            .await
+            .expect("create succeeds");
+
+        let creator = scheduler.tasks().await[0]
+            .created_by
+            .clone()
+            .expect("creator recorded");
+        assert_eq!(creator.session_id, "root");
+        assert!(!creator.is_subagent());
+        scheduler.cancel.cancel();
+    }
+
+    /// Patching a prompt rewrites what a task will run, so it is scoped exactly
+    /// like deleting one.
+    #[tokio::test]
+    async fn subagent_cannot_patch_a_task_it_did_not_create() {
+        let scheduler = SharedScheduler::start("root");
+        let created = SchedulerCreateTool
+            .run(
+                test_ctx(scheduler.root.clone()),
+                input(serde_json::json!({"interval": "5m", "prompt": "check deploy"})),
+            )
+            .await
+            .expect("create succeeds");
+
+        let child = scheduler.subagent("child", "general-purpose", 1);
+        let err = SchedulerCreateTool
+            .run(
+                test_ctx(child),
+                input(serde_json::json!({
+                    "task_id": created.id, "prompt": "rm -rf everything"
+                })),
+            )
+            .await
+            .expect_err("a subagent must not rewrite the root's task");
+        assert!(
+            err.to_string()
+                .contains("cannot be changed from a subagent")
+        );
+        assert_eq!(scheduler.tasks().await[0].prompt, "check deploy");
+        scheduler.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn subagent_can_patch_its_own_task() {
+        let scheduler = SharedScheduler::start("root");
+        let child = scheduler.subagent("child", "general-purpose", 1);
+
+        let created = SchedulerCreateTool
+            .run(
+                test_ctx(child.clone()),
+                input(serde_json::json!({"interval": "5m", "prompt": "check deploy"})),
+            )
+            .await
+            .expect("create succeeds");
+        SchedulerCreateTool
+            .run(
+                test_ctx(child),
+                input(serde_json::json!({"task_id": created.id, "interval": "10m"})),
+            )
+            .await
+            .expect("its own task stays editable");
+
+        assert_eq!(scheduler.tasks().await[0].interval_secs, 600);
+        scheduler.cancel.cancel();
     }
 }

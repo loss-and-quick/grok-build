@@ -3,7 +3,7 @@ use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 use super::interval::interval_to_human;
-use super::types::{SchedulerCommand, SchedulerHandle};
+use super::types::{SchedulerCommand, describe_creator};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct SchedulerListInput {}
@@ -17,6 +17,12 @@ pub struct ScheduledTaskSummary {
     pub next_fire_at: String,
     pub created_at: String,
     pub recurring: bool,
+    /// Who scheduled it, relative to whoever is reading — the list is shared
+    /// across every agent that reuses this scheduler actor.
+    pub created_by: String,
+    /// Whether this session created it. Only tasks it created are a subagent's
+    /// to update or delete; anything else it should report upwards instead.
+    pub created_here: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -39,7 +45,10 @@ impl crate::types::tool_metadata::ToolMetadata for SchedulerListTool {
     }
 
     fn description_template(&self) -> &str {
-        "List all active scheduled tasks with their IDs, prompts, intervals, and next fire times."
+        "List all active scheduled tasks with their IDs, prompts, intervals, next fire times, \
+         and who created them. Subagents share the scheduler with the session that spawned \
+         them, so this list spans all of them: `createdHere` marks the tasks this session \
+         created, and only those are a subagent's to update or delete."
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -88,18 +97,9 @@ impl xai_tool_runtime::Tool for SchedulerListTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let sender = {
-            let res = resources.lock().await;
-            res.get::<SchedulerHandle>()
-                .ok_or_else(|| {
-                    xai_tool_runtime::ToolError::custom(
-                        "missing_dependency",
-                        "missing dependency: SchedulerHandle",
-                    )
-                })?
-                .0
-                .clone()
-        };
+        let sender = super::provenance::scheduler_sender(&resources).await?;
+        let caller = super::provenance::caller(&resources).await;
+        let caller_session = caller.as_ref().map(|caller| caller.session_id.clone());
 
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         sender
@@ -124,6 +124,12 @@ impl xai_tool_runtime::Tool for SchedulerListTool {
             .map(|t| {
                 let next_fire = t.next_fire_at().to_rfc3339();
                 let created = t.created_at.to_rfc3339();
+                let created_by = describe_creator(t.created_by.as_ref(), caller_session.as_deref());
+                let created_here = t
+                    .created_by
+                    .as_ref()
+                    .zip(caller_session.as_deref())
+                    .is_some_and(|(creator, session)| creator.session_id == session);
                 let prompt = if t.prompt.len() > 80 {
                     let cut = crate::util::floor_char_boundary(&t.prompt, 80);
                     format!("{}...", &t.prompt[..cut])
@@ -137,10 +143,90 @@ impl xai_tool_runtime::Tool for SchedulerListTool {
                     next_fire_at: next_fire,
                     created_at: created,
                     recurring: t.recurring,
+                    created_by,
+                    created_here,
                 }
             })
             .collect();
 
         Ok(SchedulerListOutput { tasks: summaries })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::create::{SchedulerCreateInput, SchedulerCreateTool};
+    use super::super::provenance::test_support::SharedScheduler;
+    use super::*;
+    use crate::types::resources::SharedResources;
+    use crate::types::tool_metadata::test_ctx;
+    use xai_tool_runtime::Tool;
+
+    async fn schedule(resources: SharedResources, prompt: &str) {
+        let input: SchedulerCreateInput =
+            serde_json::from_value(serde_json::json!({"interval": "5m", "prompt": prompt}))
+                .expect("valid input json");
+        SchedulerCreateTool
+            .run(test_ctx(resources), input)
+            .await
+            .expect("create succeeds");
+    }
+
+    async fn list(resources: SharedResources) -> Vec<ScheduledTaskSummary> {
+        SchedulerListTool
+            .run(test_ctx(resources), SchedulerListInput {})
+            .await
+            .expect("list succeeds")
+            .tasks
+    }
+
+    /// The list is shared, so every row is named from the reader's own vantage
+    /// point: a bare session id would tell neither the user nor the model
+    /// anything, and the model never sees its own id to compare against.
+    #[tokio::test]
+    async fn every_row_names_its_creator_relative_to_the_reader() {
+        let scheduler = SharedScheduler::start("root");
+        let child = scheduler.subagent("child", "general-purpose", 1);
+        schedule(scheduler.root.clone(), "the root's task").await;
+        schedule(child.clone(), "the subagent's task").await;
+
+        let from_root = list(scheduler.root.clone()).await;
+        assert_eq!(from_root[0].created_by, "this session");
+        assert!(from_root[0].created_here);
+        assert_eq!(
+            from_root[1].created_by,
+            "a general-purpose subagent (depth 1)"
+        );
+        assert!(!from_root[1].created_here);
+
+        let from_child = list(child).await;
+        assert_eq!(from_child[0].created_by, "the main session");
+        assert!(!from_child[0].created_here);
+        assert_eq!(from_child[1].created_by, "this session");
+        assert!(from_child[1].created_here);
+
+        scheduler.cancel.cancel();
+    }
+
+    /// Tasks restored from state written before creators were recorded stay
+    /// listable; they simply say so.
+    #[tokio::test]
+    async fn a_task_without_a_recorded_creator_says_so() {
+        let scheduler = SharedScheduler::start("root");
+        schedule(scheduler.root.clone(), "legacy").await;
+        {
+            let mut res = scheduler.root.lock().await;
+            res.get_or_default::<crate::types::resources::State<super::super::types::SchedulerState>>()
+                .tasks[0]
+                .created_by = None;
+        }
+
+        let listed = list(scheduler.root.clone()).await;
+        assert_eq!(
+            listed[0].created_by,
+            super::super::types::UNRECORDED_CREATOR
+        );
+        assert!(!listed[0].created_here);
+        scheduler.cancel.cancel();
     }
 }

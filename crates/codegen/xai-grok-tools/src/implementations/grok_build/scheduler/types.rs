@@ -225,8 +225,67 @@ pub struct ScheduledTask {
     /// iteration.
     #[serde(default)]
     pub chain_reset_pending: bool,
+    /// Who scheduled this task. `None` for state written before creators were
+    /// recorded; a task with no creator is treated as the main session's.
+    #[serde(default)]
+    pub created_by: Option<TaskCreator>,
 }
 
+/// Who ran `scheduler_create` for a task.
+///
+/// Recorded at create time because the creator is routinely gone by the time
+/// the task fires: a subagent shares its parent's scheduler actor, so anything
+/// it schedules outlives it and would otherwise carry no record of where it
+/// came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskCreator {
+    /// Session that ran `scheduler_create` — the identity ownership is decided
+    /// on, since agent names are not unique across concurrent subagents.
+    pub session_id: String,
+    /// Agent definition name, when the host names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Subagent nesting depth at create time; 0 is the session that owns the
+    /// scheduler actor.
+    #[serde(default)]
+    pub depth: u32,
+}
+
+impl TaskCreator {
+    /// Whether the creator was a subagent rather than the session that owns
+    /// the scheduler actor.
+    pub fn is_subagent(&self) -> bool {
+        self.depth > 0
+    }
+
+    /// One line naming the creator, phrased for whoever is reading the list.
+    /// A bare session id means nothing to a user or to a model that never sees
+    /// its own, so the relationship is spelled out instead.
+    pub fn describe(&self, viewer_session_id: Option<&str>) -> String {
+        if viewer_session_id == Some(self.session_id.as_str()) {
+            return "this session".to_string();
+        }
+        if !self.is_subagent() {
+            return "the main session".to_string();
+        }
+        match &self.agent {
+            Some(agent) => format!("a {agent} subagent (depth {})", self.depth),
+            None => format!("a subagent (depth {})", self.depth),
+        }
+    }
+}
+
+/// Wording for a task whose state predates provenance.
+pub const UNRECORDED_CREATOR: &str = "unrecorded (created before creators were tracked)";
+
+/// Names the creator of a task that may not have one.
+pub fn describe_creator(creator: Option<&TaskCreator>, viewer_session_id: Option<&str>) -> String {
+    creator.map_or_else(
+        || UNRECORDED_CREATOR.to_string(),
+        |creator| creator.describe(viewer_session_id),
+    )
+}
 pub const LOOP_FRESH_CHAIN_EVERY: u32 = 10;
 
 pub const LOOP_COMPLETION_OUTPUT_CAP: usize = 4_000;
@@ -279,6 +338,7 @@ impl ScheduledTask {
             last_subagent_id: None,
             iterations_since_fresh: 0,
             chain_reset_pending: false,
+            created_by: None,
         }
     }
 
@@ -422,6 +482,10 @@ mod tests {
                        "lastFiredAt":null,"expiresAt":null}"#;
         let task: ScheduledTask = serde_json::from_str(json).unwrap();
         assert!(task.recurring && !task.durable);
+        assert!(
+            task.created_by.is_none(),
+            "state written before creators were recorded must still load"
+        );
     }
 
     #[test]

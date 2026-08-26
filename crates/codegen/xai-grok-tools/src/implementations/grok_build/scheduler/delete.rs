@@ -2,7 +2,7 @@ use crate::types::requirements::{Expr, ToolRequirement};
 
 use crate::types::tool::{ToolKind, ToolNamespace};
 
-use super::types::{SchedulerCommand, SchedulerHandle, scheduler_tool_error};
+use super::types::{SchedulerCommand, scheduler_tool_error};
 
 /// Canonical tool name advertised by `SchedulerDeleteTool::id()`.
 /// See note on `SCHEDULER_CREATE_TOOL_NAME`.
@@ -38,7 +38,9 @@ impl crate::types::tool_metadata::ToolMetadata for SchedulerDeleteTool {
     fn description_template(&self) -> &str {
         r#"Cancel a scheduled task by ID.
 
-Returns success: true if the task was found and removed, false if no task with that ID exists."#
+Returns success: true if the task was found and removed, false if no task with that ID exists.
+
+The scheduler is shared with the session that spawned you: from a subagent, only tasks you created yourself can be cancelled (`createdHere` in scheduler_list). Report anything else upwards instead."#
     }
 
     fn emitted_notifications(&self) -> &'static [&'static str] {
@@ -95,15 +97,9 @@ impl xai_tool_runtime::Tool for SchedulerDeleteTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let sender = {
-            let res = resources.lock().await;
-            res.get::<SchedulerHandle>()
-                .ok_or_else(|| {
-                    xai_tool_runtime::ToolError::custom("missing_resource", "SchedulerHandle")
-                })?
-                .0
-                .clone()
-        };
+        let sender = super::provenance::scheduler_sender(&resources).await?;
+        let caller = super::provenance::caller(&resources).await;
+        super::provenance::ensure_caller_may_modify(&sender, caller.as_ref(), &input.id).await?;
 
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         sender
@@ -139,5 +135,103 @@ impl xai_tool_runtime::Tool for SchedulerDeleteTool {
                 ),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::create::{SchedulerCreateInput, SchedulerCreateTool};
+    use super::super::provenance::test_support::SharedScheduler;
+    use super::*;
+    use crate::types::tool_metadata::test_ctx;
+    use xai_tool_runtime::Tool;
+
+    fn create(json: serde_json::Value) -> SchedulerCreateInput {
+        serde_json::from_value(json).expect("valid input json")
+    }
+
+    async fn task_created_by(resources: crate::types::resources::SharedResources) -> String {
+        SchedulerCreateTool
+            .run(
+                test_ctx(resources),
+                create(serde_json::json!({"interval": "5m", "prompt": "check deploy"})),
+            )
+            .await
+            .expect("create succeeds")
+            .id
+    }
+
+    #[tokio::test]
+    async fn subagent_cannot_delete_a_task_it_did_not_create() {
+        let scheduler = SharedScheduler::start("root");
+        let id = task_created_by(scheduler.root.clone()).await;
+
+        let child = scheduler.subagent("child", "general-purpose", 1);
+        let err = SchedulerDeleteTool
+            .run(test_ctx(child), SchedulerDeleteInput { id: id.clone() })
+            .await
+            .expect_err("a subagent must not cancel the root's task");
+        assert!(
+            err.to_string()
+                .contains("cannot be changed from a subagent")
+        );
+        assert_eq!(scheduler.tasks().await.len(), 1, "task survives");
+        scheduler.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn subagent_can_delete_its_own_task() {
+        let scheduler = SharedScheduler::start("root");
+        let child = scheduler.subagent("child", "general-purpose", 1);
+        let id = task_created_by(child.clone()).await;
+
+        let result = SchedulerDeleteTool
+            .run(test_ctx(child), SchedulerDeleteInput { id })
+            .await
+            .expect("its own task stays cancellable");
+        assert!(result.success);
+        scheduler.cancel.cancel();
+    }
+
+    /// The reason ownership is not symmetric: a subagent that scheduled
+    /// something and exited can never clean up after itself, so the session
+    /// that owns the actor has to be able to.
+    #[tokio::test]
+    async fn root_can_delete_a_task_left_behind_by_a_subagent() {
+        let scheduler = SharedScheduler::start("root");
+        let child = scheduler.subagent("child", "general-purpose", 1);
+        let id = task_created_by(child).await;
+
+        let result = SchedulerDeleteTool
+            .run(
+                test_ctx(scheduler.root.clone()),
+                SchedulerDeleteInput { id },
+            )
+            .await
+            .expect("the root session is the janitor of record");
+        assert!(result.success);
+        assert!(scheduler.tasks().await.is_empty());
+        scheduler.cancel.cancel();
+    }
+
+    /// An unknown id must keep reporting as not-found rather than as a
+    /// permission problem, so the actor stays the single source of that wording.
+    #[tokio::test]
+    async fn unknown_id_still_reports_not_found_to_a_subagent() {
+        let scheduler = SharedScheduler::start("root");
+        let child = scheduler.subagent("child", "general-purpose", 1);
+
+        let result = SchedulerDeleteTool
+            .run(
+                test_ctx(child),
+                SchedulerDeleteInput {
+                    id: "nonexistent".to_string(),
+                },
+            )
+            .await
+            .expect("no task, no error");
+        assert!(!result.success);
+        assert!(result.message.contains("No scheduled task"));
+        scheduler.cancel.cancel();
     }
 }
