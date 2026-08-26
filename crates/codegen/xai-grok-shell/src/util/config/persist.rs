@@ -105,7 +105,22 @@ pub(crate) fn read_to_string_or_empty(path: &std::path::Path) -> std::io::Result
 }
 /// Atomic write via temp file + `rename` (mirrors [`save_config`]) so a crash
 /// mid-write can't truncate `config.toml`. Preserves the dest mode on unix.
+///
+/// Refuses when the destination denies its owner a write. `rename` is checked
+/// against the directory, so without this the swap replaces a read-only file
+/// and then stamps the old mode back onto the replacement — the mode looks
+/// untouched while the content is not. Restoring the `EACCES` a plain write
+/// would have raised matters most for the writers nobody asked for: the
+/// official-marketplace auto-register and the `default_skills_installs_purged`
+/// flag both rewrite `config.toml` at startup, so a generated config was being
+/// replaced on every launch with no user action at all.
 pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    if let Some(source) = super::readonly::config_readonly_at(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            super::readonly::readonly_config_refusal(path, source),
+        ));
+    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

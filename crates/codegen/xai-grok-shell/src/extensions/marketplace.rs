@@ -803,6 +803,20 @@ async fn handle_add_source(url: &str) -> xai_hooks_plugins_types::ActionOutcome 
         };
     }
 
+    // Refused before the network probe: the source list lives in the same
+    // `config.toml` a config manager generates, so adding one here would be
+    // reverted at its next run anyway. `Unsupported`, not an error — the add
+    // was declined, nothing broke.
+    if let Some(notice) = crate::util::config::readonly_config_notice("The marketplace source list")
+    {
+        return ActionOutcome {
+            status: OutcomeStatus::Unsupported,
+            message: notice,
+            requires_reload: false,
+            requires_restart: false,
+        };
+    }
+
     let cwd = std::env::current_dir().unwrap_or_default();
     let input = plugin::classify_marketplace_add_input(url, &cwd);
 
@@ -1036,6 +1050,18 @@ fn add_marketplace_source(
 /// Remove a marketplace source from `~/.grok/config.toml` and uninstall all
 /// plugins that were installed from it.
 async fn handle_remove_source(source_url_or_path: &str) -> xai_hooks_plugins_types::ActionOutcome {
+    // Ahead of `remove_source_locked`, which uninstalls the source's plugins
+    // before it edits the config: refusing any later would leave the plugins
+    // gone and the source still listed.
+    if let Some(notice) = crate::util::config::readonly_config_notice("The marketplace source list")
+    {
+        return xai_hooks_plugins_types::ActionOutcome {
+            status: xai_hooks_plugins_types::OutcomeStatus::Unsupported,
+            message: notice,
+            requires_reload: false,
+            requires_restart: false,
+        };
+    }
     let src = source_url_or_path.to_string();
     // Lock + run the blocking FS work off the reactor.
     let _save_guard = crate::util::config::lock_config_writes().await;

@@ -19,8 +19,7 @@ fn owner_write_bit_decides() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
-            .expect("chmod 444");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("chmod 444");
         assert!(path_denies_owner_write(&path));
     }
 }
@@ -83,10 +82,56 @@ fn env_override_parses_both_directions() {
 /// anything over 120 bytes with "server error (see logs for details)" — the
 /// exact opposite of what this message is for.
 #[test]
-fn reason_fits_a_toast() {
+fn notice_fits_a_toast() {
+    let subject = "Follow-up behavior";
     for source in [ConfigReadOnly::FileMode, ConfigReadOnly::Env] {
-        let subject_len = "Follow-up behavior".len();
-        let len = readonly_config_reason(source).len() + subject_len + " is set in ".len();
-        assert!(len <= 120, "{source:?} message is {len} bytes: {}", readonly_config_reason(source));
+        let notice = format!(
+            "{subject} is set in {} — change it there",
+            readonly_config_clause(source)
+        );
+        assert!(
+            notice.len() <= 120,
+            "{source:?} notice is {} bytes: {notice}",
+            notice.len()
+        );
     }
+}
+
+/// `atomic_write_string` is the primitive whose `rename` loses the file's own
+/// mode, and its callers include two startup writers nobody asked for (the
+/// official-marketplace auto-register and the default-skills purge flag). It
+/// has to refuse on its own, path-scoped, or a generated config is rewritten
+/// on every launch.
+#[cfg(unix)]
+#[test]
+fn atomic_write_string_refuses_a_read_only_destination() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[marketplace]\n").expect("write");
+
+    super::super::persist::atomic_write_string(&path, "[marketplace]\nflag = true\n")
+        .expect("a writable destination must still be written");
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("chmod 444");
+    let err = super::super::persist::atomic_write_string(&path, "[marketplace]\nflag = false\n")
+        .expect_err("a read-only destination must be refused");
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(
+        err.to_string().contains("read-only"),
+        "the refusal must say why, got: {err}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read back"),
+        "[marketplace]\nflag = true\n",
+        "the refused write must not have landed"
+    );
+    assert!(
+        std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .all(|e| !e.file_name().to_string_lossy().contains("toml.tmp")),
+        "a refused write must not leave a temp file behind"
+    );
 }

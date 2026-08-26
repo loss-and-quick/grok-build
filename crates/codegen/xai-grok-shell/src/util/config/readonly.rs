@@ -80,12 +80,24 @@ fn config_path() -> PathBuf {
 /// so a config that becomes managed while grok runs is honored on the next
 /// write instead of at the next launch.
 pub fn user_config_readonly() -> Option<ConfigReadOnly> {
-    match readonly_from_env_value(std::env::var(CONFIG_READONLY_ENV).ok().as_deref()) {
-        Some(true) => return Some(ConfigReadOnly::Env),
-        Some(false) => return None,
-        None => {}
+    config_readonly_at(&config_path())
+}
+
+/// [`user_config_readonly`] for one config file by path.
+///
+/// Path-scoped so a project `.grok/config.toml` answers for itself and a test
+/// fixture is never judged by the developer's own home config. Only the user
+/// config honors [`CONFIG_READONLY_ENV`]: the env var is about the file grok
+/// installs into `$GROK_HOME`, not about every TOML it ever writes.
+pub fn config_readonly_at(path: &Path) -> Option<ConfigReadOnly> {
+    if path == config_path() {
+        match readonly_from_env_value(std::env::var(CONFIG_READONLY_ENV).ok().as_deref()) {
+            Some(true) => return Some(ConfigReadOnly::Env),
+            Some(false) => return None,
+            None => {}
+        }
     }
-    path_denies_owner_write(&config_path()).then_some(ConfigReadOnly::FileMode)
+    path_denies_owner_write(path).then_some(ConfigReadOnly::FileMode)
 }
 
 /// [`user_config_readonly`] resolved once per process.
@@ -107,37 +119,66 @@ fn display_path(path: &Path) -> String {
     }
 }
 
-/// Why a write was declined, phrased for a user who did not ask for a failure.
-/// Kept under the 120-byte toast budget for a realistic `~`-relative path.
-pub fn readonly_config_reason(source: ConfigReadOnly) -> String {
+/// The file and why it is off-limits, as a sentence fragment the callers
+/// below build on.
+fn readonly_config_clause(source: ConfigReadOnly) -> String {
     let path = display_path(&config_path());
     match source {
-        ConfigReadOnly::FileMode => format!("{path} is read-only; change it there"),
+        ConfigReadOnly::FileMode => format!("{path}, which is read-only"),
+        ConfigReadOnly::Env => format!("{path}, held read-only by {CONFIG_READONLY_ENV}"),
+    }
+}
+
+/// What a surface that knows its subject tells the user: where the value
+/// actually lives, and that grok declined rather than failed.
+///
+/// `None` when the config is writable. Sized to survive the pager's 120-byte
+/// toast scrub — past that the message is replaced with a generic error, which
+/// is exactly the "something broke" reading this wording exists to avoid.
+pub fn readonly_config_notice(subject: &str) -> Option<String> {
+    let source = user_config_readonly()?;
+    Some(format!(
+        "{subject} is set in {} — change it there",
+        readonly_config_clause(source)
+    ))
+}
+
+/// [`readonly_config_notice`] against the process-wide cached probe, for
+/// render paths that ask per row per frame.
+pub fn readonly_config_notice_cached(subject: &str) -> Option<String> {
+    let source = user_config_readonly_cached()?;
+    Some(format!(
+        "{subject} is set in {} — change it there",
+        readonly_config_clause(source)
+    ))
+}
+
+/// Why a file-level write was refused, naming the file it was aimed at
+/// (which is not always the user config).
+pub fn readonly_config_refusal(path: &Path, source: ConfigReadOnly) -> String {
+    let path = display_path(path);
+    match source {
+        ConfigReadOnly::FileMode => format!("refusing to rewrite {path}: it is read-only"),
         ConfigReadOnly::Env => {
-            format!("{path} is held read-only by {CONFIG_READONLY_ENV}")
+            format!("refusing to rewrite {path}: {CONFIG_READONLY_ENV} holds it read-only")
         }
     }
 }
 
-/// [`readonly_config_reason`] with the subject named, for surfaces that know
-/// what the user was trying to change.
-pub fn readonly_config_notice(subject: &str) -> Option<String> {
-    let source = user_config_readonly()?;
-    Some(format!("{subject} is set in {}", readonly_config_reason(source)))
-}
-
 /// `Err` when the user `config.toml` is not grok's to rewrite.
 ///
-/// The subject is left out because the sole chokepoint
+/// The subject is left out because the sole settings chokepoint
 /// ([`super::persist::update_config`]) serves settings, consent answers,
 /// skills and the model pick alike; surfaces that know their subject use
 /// [`readonly_config_notice`].
 pub fn refuse_readonly_config() -> anyhow::Result<()> {
-    match user_config_readonly() {
-        Some(source) => Err(anyhow::anyhow!(
-            "{}, so grok left it unchanged",
-            readonly_config_reason(source)
-        )),
+    refuse_readonly_config_for("This value")
+}
+
+/// [`refuse_readonly_config`] naming what the caller was asked to change.
+pub fn refuse_readonly_config_for(subject: &str) -> anyhow::Result<()> {
+    match readonly_config_notice(subject) {
+        Some(notice) => Err(anyhow::anyhow!("{notice}")),
         None => Ok(()),
     }
 }
