@@ -46,16 +46,22 @@ a TypeScript plugin system.
 Upstream grok-build has a strong Rust core — a hooks dispatcher, a subagent
 system, an OS-level sandbox (Landlock on Linux, Seatbelt on macOS), and a
 mature ratatui TUI — but no extensibility short of recompiling the whole
-workspace. This fork adds a TypeScript plugin system on top of that core
-without changing it: plugins run as sidecar processes and talk to the core
-over a versioned JSON-RPC wire contract. A plugin never sees core internals,
-and a plugin crash doesn't take the core down with it.
+workspace. This fork adds a plugin system on top of that core without changing
+it: a plugin is an executable that talks to the core over a versioned JSON-RPC
+wire contract, supervised as a sidecar process. A plugin never sees core
+internals, and a plugin crash doesn't take the core down with it. TypeScript is
+the first SDK, not the boundary.
 
 ### What's here now
 
 - `plugin.json` gains a `"plugin": "./index.ts"` sidecar entry. The runtime is
   auto-discovered in preference order **bun → node (>=22) → deno**, or pinned
   explicitly via a `"runtime"` field. No vendoring, no embedded JS engine.
+- Or `"exec"`, for a plugin in any language: `"exec": "./plugin"` runs a
+  program that ships with the plugin, `"exec": ["python3",
+  "${GROK_PLUGIN_ROOT}/plugin.py"]` runs it under an interpreter found on
+  `PATH`. Same wire contract, same supervision, same confinement — only the
+  argv differs.
 - All 15 hook events bridged from the core's hook dispatcher are available to
   TS plugins, each with its typed gate semantics: **Observe** (acknowledged,
   no control), **Tool** (allow/deny a tool call, with a reason), or **Stop**
@@ -69,8 +75,10 @@ and a plugin crash doesn't take the core down with it.
   after too many consecutive crashes.
 - Network is denied by default (`"network": false` in `plugin.json`). On
   Linux this is enforced with a per-child seccomp filter installed on the
-  sidecar unless the plugin opts in; this enforcement is not yet wired up on
-  non-Linux hosts.
+  sidecar unless the plugin opts in — a syscall filter, so it covers an
+  `exec` plugin exactly as it covers a TypeScript one. This enforcement is
+  not yet wired up on non-Linux hosts, where a `network: false` plugin is
+  warned about at load.
 - `@grok-build/plugin` ([`sdk/plugin/`](sdk/plugin/)) — the TypeScript SDK:
   `definePlugin()`, wire types generated from the Rust side, and a typed
   `ctx` (log/storage/config). No build step: Bun and Deno run the source
