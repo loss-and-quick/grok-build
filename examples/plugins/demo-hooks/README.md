@@ -42,8 +42,10 @@ demo-hooks/
   a TS sidecar plugin).
 - `"runtime": "auto"` — the host probes `bun → node (>=22) → deno` and runs the
   first found. No build step; the runtime executes the `.ts` source directly.
-- `"network": false` — the sidecar child is spawned under the per-child seccomp
-  network filter on Linux (the host applies the shell-injected spawn hardener).
+- `"network": false` — the sidecar child is denied the network by whatever this
+  platform provides (a seccomp filter on Linux, a `sandbox-exec` Seatbelt
+  profile on macOS), applied by the shell-injected spawn hardener. Nothing
+  enforces it on Windows; see the README for what happens there.
 - `"tools": [{ "name": "echo", ... }]` — the model-visible tool catalog entry
   (name, description, JSON input schema; optional `timeoutMs` per tool).
 

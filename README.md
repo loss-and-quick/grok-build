@@ -73,12 +73,22 @@ the first SDK, not the boundary.
   doesn't block the hook it's gating — the host falls back to "no gate
   applied" and restarts the sidecar with exponential backoff, disabling it
   after too many consecutive crashes.
-- Network is denied by default (`"network": false` in `plugin.json`). On
-  Linux this is enforced with a per-child seccomp filter installed on the
-  sidecar unless the plugin opts in — a syscall filter, so it covers an
-  `exec` plugin exactly as it covers a TypeScript one. This enforcement is
-  not yet wired up on non-Linux hosts, where a `network: false` plugin is
-  warned about at load.
+- Network is denied by default (`"network": false` in `plugin.json`), and what
+  that denial is worth depends on the host:
+  - **Linux** — a per-child seccomp filter fails `connect`, `bind`, `sendto`,
+    `sendmsg`, `listen` and `accept` for every address family, `AF_UNIX`
+    included.
+  - **macOS** — the sidecar is re-exec'd through `sandbox-exec` under a
+    `(deny network*)` Seatbelt profile, which denies the same set (a
+    Unix-socket `connect` counts as network there) and takes DNS with it.
+  - **Windows and everything else** — not enforced. There is no per-process
+    network confinement to reach for, so the sidecar is warned about at load
+    and started anyway; selecting a sandbox profile turns that warning into a
+    refusal to start it.
+
+  Both mechanisms are keyed on the manifest flag alone and are inherited across
+  `exec`, so an `exec` plugin is confined exactly as a TypeScript one is and
+  neither can be shed by spawning a child.
 - `@grok-build/plugin` ([`sdk/plugin/`](sdk/plugin/)) — the TypeScript SDK:
   `definePlugin()`, wire types generated from the Rust side, and a typed
   `ctx` (log/storage/config). No build step: Bun and Deno run the source

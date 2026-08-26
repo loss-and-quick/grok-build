@@ -274,10 +274,23 @@ pub struct PluginManifest {
     /// Defaults to `false`; see [`PluginManifest::network_enabled`].
     ///
     /// Enforcement is a property of the *child process*, not of the launch
-    /// form: on Linux the shell installs a per-child seccomp filter denying the
-    /// connect/bind/send/listen/accept syscalls, keyed on this flag alone, so a
-    /// `plugin` and an `exec` sidecar are confined identically. A deno sidecar
-    /// additionally has `--allow-net` withheld.
+    /// form, and it is keyed on this flag alone — a `plugin` and an `exec`
+    /// sidecar are confined identically. What `false` is worth depends on the
+    /// host:
+    ///
+    /// - **Linux**: a per-child seccomp filter denies
+    ///   `connect`/`bind`/`sendto`/`sendmsg`/`listen`/`accept` for every
+    ///   address family, `AF_UNIX` included.
+    /// - **macOS**: the child is re-exec'd through `sandbox-exec` with a
+    ///   `(deny network*)` Seatbelt profile, which denies the same set (a
+    ///   Unix-socket `connect` counts as network there) and takes DNS with it.
+    /// - **Windows and other platforms**: nothing enforces it. The sidecar is
+    ///   warned about at load and started anyway, unless a sandbox profile was
+    ///   requested, in which case it refuses to start.
+    ///
+    /// A deno sidecar additionally has `--allow-net` withheld. That is defence
+    /// in depth and nothing decides anything from it: a guarantee that held
+    /// only under one runtime would be a guarantee about the launch form.
     #[serde(default)]
     pub network: Option<bool>,
     /// Model-visible tools the sidecar serves via `tool_invoke`. The manifest
