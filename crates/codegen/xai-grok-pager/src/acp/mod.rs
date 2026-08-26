@@ -236,6 +236,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         cancel_rewind_enabled,
         session_recap_available,
         feedback_trace_offer,
+        restored_auth_meta,
     ) = initialize(&tx, &flags).await?;
 
     // Determine whether interactive login is needed.
@@ -248,6 +249,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
             &tx,
             &auth_methods,
             default_auth_method_id.as_ref(),
+            restored_auth_meta,
             needs_login,
             login_label,
             login_method_id,
@@ -359,6 +361,7 @@ pub async fn connect_via_leader(
         cancel_rewind_enabled,
         session_recap_available,
         feedback_trace_offer,
+        restored_auth_meta,
     ) = initialize(&tx, &flags).await?;
 
     let (needs_login, login_label, login_method_id, auth_start_mode) =
@@ -370,6 +373,7 @@ pub async fn connect_via_leader(
             &tx,
             &auth_methods,
             default_auth_method_id.as_ref(),
+            restored_auth_meta,
             needs_login,
             login_label,
             login_method_id,
@@ -528,6 +532,24 @@ pub fn parse_default_auth_method_id(meta: Option<&acp::Meta>) -> Option<acp::Aut
         .map(|s| acp::AuthMethodId::new(s.to_owned()))
 }
 
+/// Parse [`RESTORED_AUTH_META_KEY`] from `InitializeResponse.meta`: the
+/// `AuthMeta` of a sign-in the agent restored from a previous launch.
+///
+/// Present only for a plugin sign-in, whose credential lives behind the
+/// plugin's own seam and which no first-party path can re-derive. Its presence
+/// means the agent is already authenticated on that method, so the startup
+/// login is skipped and this meta is adopted in place of the one an eager
+/// `authenticate` would have returned — authenticating on a plugin method
+/// re-drives its interactive flow, which is exactly what a restored sign-in
+/// exists to avoid.
+///
+/// [`RESTORED_AUTH_META_KEY`]: xai_grok_shell::agent::auth_method::RESTORED_AUTH_META_KEY
+pub fn parse_restored_auth_meta(meta: Option<&acp::Meta>) -> Option<serde_json::Value> {
+    meta.and_then(|m| m.get(xai_grok_shell::agent::auth_method::RESTORED_AUTH_META_KEY))
+        .filter(|v| v.is_object())
+        .cloned()
+}
+
 /// Send InitializeRequest and parse the response.
 async fn initialize(
     tx: &AcpAgentTx,
@@ -541,6 +563,7 @@ async fn initialize(
     bool,
     bool,
     bool,
+    Option<serde_json::Value>,
 )> {
     let req = acp::InitializeRequest::new(acp::ProtocolVersion::V1)
         .client_capabilities(
@@ -585,6 +608,7 @@ async fn initialize(
     let session_recap_available = parse_session_recap_available(resp.meta.as_ref());
     let feedback_trace_offer = parse_feedback_trace_offer(resp.meta.as_ref());
     let default_auth_method_id = parse_default_auth_method_id(resp.meta.as_ref());
+    let restored_auth_meta = parse_restored_auth_meta(resp.meta.as_ref());
 
     Ok((
         models,
@@ -595,6 +619,7 @@ async fn initialize(
         cancel_rewind_enabled,
         session_recap_available,
         feedback_trace_offer,
+        restored_auth_meta,
     ))
 }
 
@@ -718,6 +743,7 @@ async fn eager_auth_or_login_fallback(
     tx: &AcpAgentTx,
     auth_methods: &[acp::AuthMethod],
     default_auth_method_id: Option<&acp::AuthMethodId>,
+    restored_auth_meta: Option<serde_json::Value>,
     needs_login: bool,
     login_label: Option<String>,
     login_method_id: Option<acp::AuthMethodId>,
@@ -732,6 +758,15 @@ async fn eager_auth_or_login_fallback(
     if auth_methods.is_empty() {
         // preferred_method pin unavailable — fail closed, no invented method.
         return (true, None, None, AuthStartMode::Pending, None);
+    }
+    // A sign-in the agent restored from a previous launch: it is already
+    // authenticated on that method, so adopt its meta and take the same shape
+    // an eagerly authenticated startup takes. Not by authenticating on it —
+    // the restored method is a plugin's, and authenticating on one re-drives
+    // the plugin's interactive flow, which is the login this exists to spare
+    // the user.
+    if let Some(meta) = restored_auth_meta {
+        return (false, None, None, AuthStartMode::Pending, Some(meta));
     }
     if needs_login {
         return (
@@ -772,6 +807,7 @@ async fn bounded_eager_auth(
     tx: &AcpAgentTx,
     auth_methods: &[acp::AuthMethod],
     default_auth_method_id: Option<&acp::AuthMethodId>,
+    restored_auth_meta: Option<serde_json::Value>,
     needs_login: bool,
     login_label: Option<String>,
     login_method_id: Option<acp::AuthMethodId>,
@@ -789,6 +825,7 @@ async fn bounded_eager_auth(
             tx,
             auth_methods,
             default_auth_method_id,
+            restored_auth_meta,
             needs_login,
             login_label.clone(),
             login_method_id.clone(),
@@ -942,6 +979,42 @@ mod tests {
     fn parse_session_recap_available_non_bool_defaults_off() {
         let meta = serde_json::json!({ "sessionRecap": "yes" });
         assert!(!parse_session_recap_available(meta.as_object()));
+    }
+
+    // ── parse_restored_auth_meta ───────────────────────────────────
+
+    /// A restored plugin sign-in arrives as the same `AuthMeta` object
+    /// `authenticate` returns, so the client can adopt it unchanged.
+    #[test]
+    fn parse_restored_auth_meta_reads_the_agents_auth_meta() {
+        let meta = serde_json::json!({
+            xai_grok_shell::agent::auth_method::RESTORED_AUTH_META_KEY: {
+                "auth_method_id": "plugin-oauth:acme#work",
+                "is_first_party_account": false,
+            },
+        });
+        let restored = parse_restored_auth_meta(meta.as_object()).expect("restored meta");
+        assert_eq!(
+            restored["auth_method_id"].as_str(),
+            Some("plugin-oauth:acme#work")
+        );
+    }
+
+    /// Absent is the ordinary case — every launch that did not restore a
+    /// plugin sign-in — and must not read as authenticated.
+    #[test]
+    fn parse_restored_auth_meta_absent_or_unusable_is_none() {
+        assert_eq!(parse_restored_auth_meta(None), None);
+        let meta = serde_json::json!({ "grokShell": true });
+        assert_eq!(parse_restored_auth_meta(meta.as_object()), None);
+        let null = serde_json::json!({
+            xai_grok_shell::agent::auth_method::RESTORED_AUTH_META_KEY: serde_json::Value::Null,
+        });
+        assert_eq!(parse_restored_auth_meta(null.as_object()), None);
+        let wrong_shape = serde_json::json!({
+            xai_grok_shell::agent::auth_method::RESTORED_AUTH_META_KEY: "plugin-oauth:acme",
+        });
+        assert_eq!(parse_restored_auth_meta(wrong_shape.as_object()), None);
     }
 
     // ── startup_auth_metadata ──────────────────────────────────────
