@@ -435,7 +435,7 @@ async fn a_turn_announces_its_abort_once() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_subagent_session_end_names_the_child() {
+async fn a_subagent_announces_neither_end_of_a_session_it_never_opened() {
     run(async {
         let events = [HookEventName::SessionEnd, HookEventName::Stop];
 
@@ -444,17 +444,22 @@ async fn a_subagent_session_end_names_the_child() {
         super::run_loop::fire_session_end_hooks(&parent.actor, "shutdown").await;
         assert_eq!(parent.fired(), vec!["session_end", "stop"]);
 
+        // Nothing fires `session_start` for a child — that command is sent only
+        // by a top-level session's own registration — so a child reporting its
+        // end would close a lifecycle no subscriber was told had opened, once
+        // per child in a fan-out. The pair a subscriber does get is
+        // `subagent_start` / `subagent_stop`. Upstream instead fires the event
+        // and stamps `subagentType` to tell a child's teardown apart; that
+        // answers how to distinguish it, not why an unpaired event is owed.
+        // The payload here already carries that stamp if the suppression in
+        // `dispatch_session_end_hook` is ever lifted.
         let mut child = Harness::subagent().await;
         child.listen(&events);
         super::run_loop::fire_session_end_hooks(&child.actor, "shutdown").await;
-        let fired = child.fired_payloads();
-        assert_eq!(
-            fired.len(),
-            1,
-            "the session-end `Stop` stays subagent-guarded"
+        assert!(
+            child.fired_payloads().is_empty(),
+            "a child announces its own lifecycle through subagent_start/stop"
         );
-        assert_eq!(fired[0]["hookEventName"], "session_end");
-        assert_eq!(fired[0]["subagentType"], "explore");
     })
     .await;
 }
