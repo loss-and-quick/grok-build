@@ -306,8 +306,81 @@ Web-standard APIs (`TextEncoder`/`TextDecoder`, `Uint8Array`) plus
 No npm dependencies at runtime. `typescript` (plus `@types/node`/`@types/bun`
 for editor/typecheck support) are devDependencies only.
 
+## Launcher (`_sdk/run`)
+
+A plugin manifest launches a sidecar either as `plugin` + `runtime` (the host
+finds a JS runtime and builds the argv for a TypeScript entry) or as `exec` (the
+host runs a program verbatim). `src/run` lets a TypeScript plugin use the
+generic `exec` form: it is the runtime-finding step, moved to the SDK.
+
+```json
+{ "exec": ["${GROK_PLUGIN_ROOT}/_sdk/run", "index.ts"] }
+```
+
+It is a POSIX `sh` script — the job is to *find* a JavaScript runtime, so it
+cannot be written in JavaScript. It needs no build step, no `node_modules`, and
+no external command: `command -v`, `cd` and `pwd` are shell builtins, so it runs
+under whatever `PATH` the host has. Ship it wherever the SDK lands in a deployed
+plugin (`<plugin>/_sdk/` for a `cp -R` of `src/`), with the executable bit set —
+the manifest layer rejects a non-executable `exec` program.
+
+```
+run [--runtime=auto|bun|node|deno] [--net] [--] <entry.ts> [args...]
+```
+
+- **Discovery** is `bun → node (>=22) → deno`, first found wins, matching the
+  host. For node it probes `node --version` to decide whether
+  `--experimental-strip-types` is needed (unflagged from 23.6) and to reject a
+  node too old to strip types at all; in the `auto` chain a too-old node is
+  skipped so deno still gets a turn, and only an explicit `--runtime=node` makes
+  it fatal. An unparseable or failed probe keeps the flag, which is safe on the
+  22 line.
+- **`--runtime=`** pins a runtime, standing in for the manifest's `runtime`
+  field, which the `exec` form has no room for. `$GROK_PLUGIN_RUNTIME` is the
+  fallback; the flag wins.
+- **The entry is resolved against the plugin root**, i.e. the parent of the
+  launcher's own directory — *not* the working directory. A sidecar's cwd is the
+  workspace root, so a bare `index.ts` would otherwise be looked up in the
+  user's project. Absolute entries pass through. Everything after the entry is
+  forwarded to it.
+- **Deno** gets `--no-prompt` and `--allow-read=`/`--allow-write=` scoped to the
+  workspace root, which the launcher reads from its own working directory —
+  that is the one place the host's `workspace_root` reaches this side of `exec`.
+  `--allow-net` is added only for `--net`.
+- **Failure is loud**: no usable runtime, or a missing entry, exits 127 with a
+  diagnostic on stderr naming what was looked for and the `PATH` it searched.
+  A usage error exits 2. Nothing is ever written to stdout, which is the
+  JSON-RPC channel.
+- **`exec`, not fork**: the runtime replaces the launcher process, so the host
+  supervises and signals the plugin's own pid with no shell in between.
+
+### `--net` is a second declaration, unavoidably
+
+Whether a plugin may reach the network is a manifest field the host reads, and
+it reaches the child in no form at all — not argv, not the environment, and not
+the `initialize` handshake, which happens long after argv is fixed. A launcher
+on this side of `exec` therefore cannot know it, and deno's `--allow-net` has to
+be restated with `--net` alongside the manifest's `"network": true`. Without the
+flag it fails closed, matching the manifest default. On Linux the enforcement
+that actually matters for `"network": false` is the host's per-child seccomp
+filter, which applies to the launcher and every descendant regardless of what
+deno was told.
+
+### Cost
+
+No discovery cache. `command -v` walks `PATH` in-process, so the bun and deno
+paths fork nothing extra and only node costs one `node --version` per spawn
+(~20 ms, against node's own ~50 ms startup). The host caches process-wide
+because it outlives a spawn; a launcher process does not, and the only writable
+places to persist to are the user's workspace or state directory — not
+somewhere a launcher should be writing, and a cache stale after a toolchain
+upgrade fails worse than the probe costs. `--runtime=` skips discovery for
+anyone who disagrees.
+
 ## Layout
 
+- `src/run` — the launcher above: finds a JS runtime, `exec`s the entry under
+  it. POSIX `sh`, not TypeScript, and not part of the module graph.
 - `src/stdio.ts` — newline-delimited JSON-RPC 2.0 endpoint over injectable
   `ByteReader`/`ByteWriter` (defaults to real stdin/stdout). Handles both
   directions on one stream: serves incoming requests/notifications and
@@ -332,7 +405,9 @@ for editor/typecheck support) are devDependencies only.
 - `test/` — `bun test` suite exercising the frame codec, request/response
   correlation (including out-of-order ids and concurrent-dispatch
   deadlock avoidance), the `definePlugin` handshake/dispatch/shutdown paths,
-  and the `PluginContext`/`HostClient` RPCs.
+  and the `PluginContext`/`HostClient` RPCs. `test/run.test.ts` drives
+  `src/run` against a fabricated `PATH` of fake bun/node/deno, so its
+  assertions hold on a machine with none of them installed.
 - `test/smoke.node.ts` — not part of `bun test`; run directly with
   `node --experimental-strip-types test/smoke.node.ts` to verify the module
   graph resolves and loads under Node's type-stripping (explicit `.ts`

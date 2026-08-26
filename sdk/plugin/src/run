@@ -1,0 +1,282 @@
+#!/bin/sh
+# Plugin launcher: find a JavaScript runtime and exec a TypeScript entry under
+# it, so a manifest can use the generic `exec` form for a TS plugin:
+#
+#   { "exec": ["${GROK_PLUGIN_ROOT}/_sdk/run", "index.ts"] }
+#
+# This is the SDK-side twin of the host's built-in `plugin` + `runtime` path
+# (xai-grok-plugin-host/src/runtime.rs): the same discovery order
+# bun -> node (>=22) -> deno, the same `--experimental-strip-types` decision,
+# the same deno permission scoping. Knowledge about *running TypeScript* lives
+# here, next to the TypeScript authors, rather than in the host.
+#
+# Written in POSIX sh on purpose. The job is to find a JS runtime, so it cannot
+# be written in JS; and it must run from a deployed plugin directory with no
+# `node_modules`, no build step and no dependency beyond /bin/sh.
+#
+# Usage:
+#   run [--runtime=auto|bun|node|deno] [--net] [--] <entry.ts> [args...]
+#
+#   --runtime=  Pin a runtime instead of probing. Mirrors the manifest's
+#               `runtime` field, which the `exec` form has no room for.
+#               Falls back to $GROK_PLUGIN_RUNTIME, then `auto`.
+#   --net       Declare that this plugin is allowed outbound network. Affects
+#               deno only (adds --allow-net); see "Network" below.
+#
+# <entry.ts> is resolved against the PLUGIN ROOT (the parent of this script's
+# directory), not against the working directory: the host runs a sidecar with
+# its cwd set to the *workspace* root, so a bare `index.ts` would otherwise be
+# looked up in the user's project. An absolute entry is used as given.
+#
+# Network: whether a plugin may reach the network is a manifest field the host
+# reads, and it is not passed to the child in any form -- not in argv, not in
+# the environment, and not in the `initialize` handshake, which by then is far
+# too late to shape argv anyway. So a launcher on this side of `exec` cannot
+# know it, and `--net` has to be stated a second time here. Without the flag we
+# fail closed, matching the manifest default. On Linux the real enforcement for
+# `network: false` is the host's per-child seccomp filter, which applies to this
+# process and every descendant regardless of what deno was told.
+#
+# Diagnostics: stdout is the JSON-RPC channel and this script never writes to
+# it. Everything goes to stderr, and a failure to find a runtime exits 127
+# rather than dying quietly.
+#
+# Cost: no discovery cache. `command -v` is a shell builtin, so the bun and deno
+# paths fork nothing extra; only node costs one `node --version` per spawn
+# (~20ms, against node's own ~50ms startup). The host caches process-wide
+# because it survives across spawns; a launcher process does not, and the only
+# writable places to persist a cache to are the user's workspace or state dir --
+# not somewhere a launcher should be scribbling, and a cache stale after a
+# toolchain upgrade fails worse than the probe costs. `--runtime=` skips
+# discovery for anyone who cares.
+
+set -u
+
+PROG=grok-plugin-run
+
+warn() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+# Exit 127 ("command not found") for every no-usable-runtime failure: the
+# sidecar cannot start, and the host's supervisor sees a non-zero exit with a
+# reason already on stderr.
+die() {
+	printf '%s: %s\n' "$PROG" "$*" >&2
+	exit 127
+}
+
+usage_error() {
+	printf '%s: %s\n' "$PROG" "$*" >&2
+	printf 'usage: run [--runtime=auto|bun|node|deno] [--net] [--] <entry.ts> [args...]\n' >&2
+	exit 2
+}
+
+# A which(1)-style PATH search. `command -v` performs the PATH walk in-process;
+# the guards reject the things it can also report and `which` would not (shell
+# builtins, keywords, functions) and anything not actually executable.
+find_on_path() {
+	_found=$(command -v "$1" 2>/dev/null) || return 1
+	case $_found in
+	/*) ;;
+	*) return 1 ;;
+	esac
+	[ -x "$_found" ] && [ ! -d "$_found" ] || return 1
+	printf '%s\n' "$_found"
+}
+
+# Probe `node --version` to decide on --experimental-strip-types and to reject
+# a node too old to strip types at all. Sets NODE_STRIP; returns 1 when the
+# node is unsupported. A probe that fails or is unparseable is non-fatal: keep
+# the flag (safe on the 22 line, our floor) and let the spawn surface the real
+# error -- same call the host makes.
+probe_node() {
+	NODE_STRIP=1
+	if ! _raw=$("$1" --version 2>/dev/null); then
+		warn "node --version failed; assuming --experimental-strip-types"
+		return 0
+	fi
+
+	# Trim, then drop the leading `v` of `v23.6.1`. Command substitution has
+	# already eaten the trailing newline.
+	_v=$_raw
+	while :; do
+		case $_v in
+		' '* | '	'*) _v=${_v#?} ;;
+		*' ' | *'	') _v=${_v%?} ;;
+		*) break ;;
+		esac
+	done
+	_v=${_v#v}
+
+	_major=${_v%%.*}
+	case $_major in
+	'' | *[!0-9]*)
+		warn "unparseable node --version ($_raw); assuming --experimental-strip-types"
+		return 0
+		;;
+	esac
+
+	_minor=0
+	if [ "${_v#*.}" != "$_v" ]; then
+		_minor=${_v#*.}
+		_minor=${_minor%%.*}
+		case $_minor in
+		'' | *[!0-9]*) _minor=0 ;;
+		esac
+	fi
+
+	# Type-stripping is unflagged from 23.6.0; 22.x and 23.0-23.5 need the flag.
+	if [ "$_major" -gt 23 ] || { [ "$_major" -eq 23 ] && [ "$_minor" -ge 6 ]; }; then
+		NODE_STRIP=0
+	fi
+
+	if [ "$_major" -lt 22 ]; then
+		NODE_DETAIL="node $1 is v$_major, older than v22, which cannot run TS plugins"
+		return 1
+	fi
+	return 0
+}
+
+try_bun() {
+	RUNTIME_BIN=$(find_on_path bun) || return 1
+	RUNTIME_KIND=bun
+}
+
+try_deno() {
+	RUNTIME_BIN=$(find_on_path deno) || return 1
+	RUNTIME_KIND=deno
+}
+
+try_node() {
+	_node=$(find_on_path node) || return 1
+	probe_node "$_node" || return 1
+	RUNTIME_BIN=$_node
+	RUNTIME_KIND=node
+}
+
+# ── argv ──────────────────────────────────────────────────────────────────────
+
+runtime=${GROK_PLUGIN_RUNTIME:-auto}
+net=0
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	--runtime=*)
+		runtime=${1#--runtime=}
+		shift
+		;;
+	--runtime)
+		shift
+		[ $# -gt 0 ] || usage_error "--runtime needs a value"
+		runtime=$1
+		shift
+		;;
+	--net)
+		net=1
+		shift
+		;;
+	--)
+		shift
+		break
+		;;
+	-?*) usage_error "unknown option: $1" ;;
+	*) break ;;
+	esac
+done
+
+case $runtime in
+auto | bun | node | deno) ;;
+*) usage_error "unknown runtime '$runtime' (want auto, bun, node or deno)" ;;
+esac
+
+[ $# -gt 0 ] || usage_error "missing plugin entry file"
+entry=$1
+shift
+
+# ── plugin root ───────────────────────────────────────────────────────────────
+
+# This script lives at <plugin root>/_sdk/run once deployed. `pwd` is logical on
+# purpose: in a dev checkout `_sdk` is a symlink into the SDK source tree, and
+# resolving it would put the plugin root inside the SDK instead.
+self=$0
+case $self in
+*/*) ;;
+*) self=$(find_on_path "$self") || die "cannot locate myself from argv[0] '$0'" ;;
+esac
+sdk_dir=${self%/*}
+[ -n "$sdk_dir" ] || sdk_dir=/
+# `cd` + `pwd` only to absolutise a relative argv[0]; both are builtins, so the
+# launcher needs no external command at all -- it must work under whatever PATH
+# the host happens to have, including one holding nothing but a runtime.
+sdk_dir=$(CDPATH= cd -- "$sdk_dir" && pwd) ||
+	die "cannot resolve my own directory from '$self'"
+plugin_root=${sdk_dir%/*}
+[ -n "$plugin_root" ] || plugin_root=/
+
+case $entry in
+/*) ;;
+*) entry=$plugin_root/$entry ;;
+esac
+[ -f "$entry" ] || die "plugin entry not found: $entry"
+
+# ── discovery ─────────────────────────────────────────────────────────────────
+
+RUNTIME_BIN=
+RUNTIME_KIND=
+NODE_STRIP=1
+NODE_DETAIL=
+
+case $runtime in
+bun) try_bun || die "bun not on PATH" ;;
+deno) try_deno || die "deno not on PATH" ;;
+node) try_node || die "${NODE_DETAIL:-node not on PATH}" ;;
+auto)
+	# An unsupported node is skipped rather than fatal, exactly as the host's
+	# auto chain does: the next candidate still gets a turn.
+	try_bun || try_node || try_deno
+	found=$?
+	# Unlike the host, say so when a node was rejected: a plugin quietly
+	# running under a different runtime than its author expected is worth a
+	# line of stderr, and this one only prints when node was actually reached.
+	[ -n "$NODE_DETAIL" ] && warn "$NODE_DETAIL"
+	[ "$found" -eq 0 ] ||
+		die "no JavaScript runtime for this plugin: none of bun, node (>=22) or deno were found on PATH
+  PATH=$PATH
+  install bun (https://bun.sh), node >= 22, or deno; or pin one with --runtime="
+	;;
+esac
+
+# ── exec ──────────────────────────────────────────────────────────────────────
+
+# `exec` and not a subshell: the host supervises this PID, signals it on
+# shutdown and speaks the protocol over its stdio. A forking wrapper would
+# leave a shell between the host and the plugin for all three.
+case $RUNTIME_KIND in
+bun)
+	exec "$RUNTIME_BIN" "$entry" "$@"
+	;;
+node)
+	if [ "$NODE_STRIP" -eq 1 ]; then
+		exec "$RUNTIME_BIN" --experimental-strip-types "$entry" "$@"
+	fi
+	exec "$RUNTIME_BIN" "$entry" "$@"
+	;;
+deno)
+	# The host spawns a sidecar with cwd = workspace root, which is the only
+	# way that path reaches this side of `exec`. Prefer the logical $PWD (it is
+	# the spelling the host itself hands deno) but only after confirming it
+	# names the current directory -- a stale inherited PWD must never widen or
+	# misdirect the allow-list.
+	ws=$(pwd -P)
+	if [ -n "${PWD-}" ] && [ "$(CDPATH= cd -- "$PWD" 2>/dev/null && pwd -P)" = "$ws" ]; then
+		ws=$PWD
+	fi
+	if [ "$net" -eq 1 ]; then
+		exec "$RUNTIME_BIN" run --no-prompt "--allow-read=$ws" "--allow-write=$ws" \
+			--allow-net "$entry" "$@"
+	fi
+	exec "$RUNTIME_BIN" run --no-prompt "--allow-read=$ws" "--allow-write=$ws" "$entry" "$@"
+	;;
+*)
+	die "internal error: no runtime resolved"
+	;;
+esac
