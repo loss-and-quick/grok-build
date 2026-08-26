@@ -3116,6 +3116,16 @@ pub enum TaskResult {
         rollback_value: crate::settings::SettingValue,
         error: String,
     },
+    /// Setting write declined, not failed: the user `config.toml` is
+    /// read-only, so grok never started the write. `rollback_value` is
+    /// `Some` where the caller wanted the in-memory value reverted and
+    /// `None` where the change stands for this session only.
+    SettingPersistRefused {
+        key: crate::settings::SettingKey,
+        rollback_value: Option<crate::settings::SettingValue>,
+        /// Where the value actually lives, ready to show.
+        reason: String,
+    },
     /// Best-effort persist failed (cycle_mode path). Logs + toasts but
     /// does NOT roll back in-memory state.
     SettingPersistFailedBestEffort {

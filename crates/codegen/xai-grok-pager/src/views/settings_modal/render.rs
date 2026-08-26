@@ -13,8 +13,8 @@ use super::state::{
 };
 use crate::render::line_utils::truncate_str;
 use crate::settings::{
-    CodingDataSharingLock, OwnedEnumChoice, SettingKey, SettingKind, SettingMeta, SettingValue,
-    StringValidator, dynamic_enum_choices,
+    OwnedEnumChoice, RowLock, SettingKey, SettingKind, SettingMeta, SettingValue, StringValidator,
+    dynamic_enum_choices,
 };
 use crate::theme::Theme;
 use crate::views::modal_window::{
@@ -724,7 +724,7 @@ pub(super) fn render_rows(
                         width: area.width,
                         height: desc_height.min(8), // cap at 8 lines per row to keep scroll sane
                     };
-                    let lock_reason = lock.map(CodingDataSharingLock::reason);
+                    let lock_reason = lock.map(RowLock::reason);
                     render_expanded_description(buf, desc_rect, meta, lock_reason, theme);
                     // Re-measure how many lines the wrapped description
                     // actually consumed, so y_cursor advances precisely.
@@ -839,7 +839,7 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
                     // 2040 (`desc_rect.height = ... .min(8)`).
                     h = h.saturating_add(wrapped_description_height(
                         meta,
-                        lock.map(CodingDataSharingLock::reason),
+                        lock.map(RowLock::reason),
                         area_width,
                         8,
                     ));
@@ -2230,14 +2230,19 @@ const ROW_RESTART_PILL_W: u16 = 10; // " · restart" — used for layout budgeti
 pub(super) const ROW_ADMIN_MANAGED_SUFFIX: &str = " \u{00B7} Admin Managed";
 /// Value column for ZDR-locked rows — replaces the opt-in/out value entirely.
 pub(super) const ROW_ZDR_VALUE: &str = "ZDR";
+/// Appended to the value column of a row whose value comes from a config file
+/// grok will not rewrite. Says the row is showing a real value it will not
+/// take a change to, which the muted styling alone cannot (a `false` bool is
+/// muted too).
+pub(super) const ROW_FROM_CONFIG_SUFFIX: &str = " \u{00B7} from config";
 
 /// Value-column text, shared by layout, scroll math, and paint.
 pub(super) fn value_display(
     meta: &SettingMeta,
     value: &SettingValue,
-    lock: Option<CodingDataSharingLock>,
+    lock: Option<RowLock>,
 ) -> String {
-    if lock == Some(CodingDataSharingLock::Zdr) {
+    if lock.is_some_and(RowLock::hides_value) {
         return ROW_ZDR_VALUE.to_string();
     }
     let mut display = match value {
@@ -2252,8 +2257,11 @@ pub(super) fn value_display(
         SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e).to_string(),
         SettingValue::Int(i) => i.to_string(),
     };
-    if lock == Some(CodingDataSharingLock::TeamManaged) {
+    if lock.is_some_and(RowLock::is_admin_managed) {
         display.push_str(ROW_ADMIN_MANAGED_SUFFIX);
+    }
+    if lock.is_some_and(RowLock::is_read_only_config) {
+        display.push_str(ROW_FROM_CONFIG_SUFFIX);
     }
     display
 }
@@ -2336,7 +2344,7 @@ pub(super) fn render_setting_row(
     theme: &Theme,
     is_expanded: bool,
     is_hovered: bool,
-    lock: Option<CodingDataSharingLock>,
+    lock: Option<RowLock>,
 ) -> Rect {
     let bg = settings_list_row_bg(theme, is_selected, is_hovered);
     // Paint the row bg across the full area (1 or 2 lines).

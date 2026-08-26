@@ -1547,6 +1547,21 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             rollback_effects
         }
+        TaskResult::SettingPersistRefused {
+            key,
+            rollback_value,
+            reason,
+        } => {
+            let rollback_effects = rollback_value
+                .as_ref()
+                .map(|value| apply_setting_rollback(app, key, value))
+                .unwrap_or_default();
+            tracing::info!(target: "settings", ?key, %reason, "setting write declined: the config is read-only");
+            // "⊘", not the "✗ Could not save" of a failure: nothing broke, and
+            // the message says where the value is actually set.
+            app.show_toast(&format!("\u{2298} {}", scrub_error_for_toast(&reason)));
+            rollback_effects
+        }
         TaskResult::SettingPersistFailedBestEffort { key, error } => {
             tracing::warn!(
                 target: "settings",

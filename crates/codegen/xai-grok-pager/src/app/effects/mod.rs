@@ -2110,6 +2110,9 @@ pub(crate) fn execute(
         }
         Effect::PersistPermissionMode { canonical, session_id, persist } => {
             let tx = acp_tx.clone();
+            let readonly_notice = xai_grok_shell::util::config::readonly_config_notice(
+                "permission_mode",
+            );
             tasks
                 .spawn(
                     persist_permission_mode_and_notify(
@@ -2117,12 +2120,26 @@ pub(crate) fn execute(
                         session_id,
                         persist,
                         tx,
+                        readonly_notice,
                     ),
                 );
         }
         Effect::PersistSetting { key, value, rollback_value } => {
             tasks
                 .spawn(async move {
+                    // The settings modal already renders these rows locked, so
+                    // this catches the other ways in (slash commands, a config
+                    // that turned read-only while the modal was open) and says
+                    // where the value lives instead of "could not save".
+                    if let Some(reason)
+                        = xai_grok_shell::util::config::readonly_config_notice(key)
+                    {
+                        return TaskResult::SettingPersistRefused {
+                            key,
+                            rollback_value: Some(rollback_value),
+                            reason,
+                        };
+                    }
                     match persist_setting(key, value.clone()).await {
                         Ok(()) => {
                             TaskResult::SettingPersisted {

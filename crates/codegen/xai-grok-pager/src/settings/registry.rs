@@ -244,6 +244,66 @@ impl CodingDataSharingLock {
     }
 }
 
+/// Why a settings row cannot be changed here (`None` = editable).
+/// Consulted by both render and input via `SettingsModalState::row_lock`.
+///
+/// [`CodingDataSharingLock`] is per-setting and comes from the account;
+/// `ReadOnlyConfig` is per-*file* — a `config.toml` grok will not rewrite
+/// locks every row that would have been written to it, because the file, not
+/// the key, is what a config manager generates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowLock {
+    CodingDataSharing(CodingDataSharingLock),
+    /// The user `config.toml` is read-only.
+    ReadOnlyConfig,
+}
+
+impl RowLock {
+    /// Replaces the row's description while the row is expanded.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::CodingDataSharing(lock) => lock.reason(),
+            Self::ReadOnlyConfig => read_only_config_reason(),
+        }
+    }
+
+    /// ZDR replaces the value column outright.
+    pub fn hides_value(self) -> bool {
+        matches!(self, Self::CodingDataSharing(CodingDataSharingLock::Zdr))
+    }
+
+    /// The row's value is real but set elsewhere by an administrator.
+    pub fn is_admin_managed(self) -> bool {
+        matches!(
+            self,
+            Self::CodingDataSharing(CodingDataSharingLock::TeamManaged)
+        )
+    }
+
+    /// The row's value is real but comes from a config file grok will not
+    /// rewrite.
+    pub fn is_read_only_config(self) -> bool {
+        matches!(self, Self::ReadOnlyConfig)
+    }
+}
+
+/// Row description for a read-only config, resolved once — the render path
+/// wants a `'static` description it can swap in per frame, and the config
+/// path does not move within a process.
+///
+/// Deliberately says only *where* the value lives, not *why* grok will not
+/// write it: the "why" varies (file mode, env override) and belongs in the
+/// refusal message, while the row's job is to point at the file to edit.
+fn read_only_config_reason() -> &'static str {
+    static REASON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    REASON.get_or_init(|| {
+        format!(
+            "Set in {} — change it there.",
+            xai_grok_shell::util::config::user_config_display_path()
+        )
+    })
+}
+
 /// Snapshot of pager-local state captured when the modal opens.
 /// Used by `current_value_for` to render against LIVE state rather
 /// than the on-disk `UiConfig`. Refreshed by
@@ -272,6 +332,10 @@ pub struct PagerLocalSnapshot {
     pub coding_data_sharing_opt_out: bool,
     /// Why `coding_data_sharing` cannot be changed here (`None` = editable).
     pub coding_data_sharing_lock: Option<CodingDataSharingLock>,
+    /// Whether the user `config.toml` is read-only, in which case every row
+    /// that would be written to it renders locked. Snapshotted rather than
+    /// probed per row so the modal is a pure function of its inputs.
+    pub config_read_only: bool,
     /// Whether plan mode is active. Uses effective state
     /// (`pending.unwrap_or(active)`) so rapid toggles don't double-send.
     /// Refreshed on all mutation paths including ACP `CurrentModeUpdate`.
@@ -317,6 +381,7 @@ impl Default for PagerLocalSnapshot {
             available_models: Vec::new(),
             coding_data_sharing_opt_out: true,
             coding_data_sharing_lock: None,
+            config_read_only: false,
             plan_mode_active: false,
             show_tips: None,
             auto_update: None,

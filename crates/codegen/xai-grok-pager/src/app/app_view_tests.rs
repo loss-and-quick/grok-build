@@ -191,6 +191,7 @@ pub(crate) fn test_app() -> AppView {
         privacy_banner_opt_in_inflight: false,
         coding_data_write_seq: 0,
         show_tips: None,
+        config_read_only: false,
         auto_update: None,
         ask_user_question_timeout_enabled: None,
         zdr_access_enabled: false,
@@ -4153,8 +4154,7 @@ fn welcome_pending_exit_key_dispatches_the_entry_it_advertises() {
             app.welcome_prompt_focused = true;
 
             let outcome = app.handle_input(&key);
-            let dispatched_cancel =
-                matches!(outcome, InputOutcome::Action(Action::CancelLogin));
+            let dispatched_cancel = matches!(outcome, InputOutcome::Action(Action::CancelLogin));
             let advertises_cancel = matches!(entry.action, Action::CancelLogin);
             assert_eq!(
                 dispatched_cancel, advertises_cancel,

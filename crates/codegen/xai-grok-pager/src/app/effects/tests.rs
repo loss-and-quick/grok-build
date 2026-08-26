@@ -984,6 +984,7 @@ async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
             session_id,
             PermissionModePersist::BestEffort,
             tx,
+            None,
         )
         .await;
     tokio::task::yield_now().await;
@@ -1018,6 +1019,7 @@ async fn persist_permission_mode_acp_notification_gated_on_disk_for_with_rollbac
             session_id,
             PermissionModePersist::WithRollback("ask"),
             tx,
+            None,
         )
         .await;
     tokio::task::yield_now().await;
@@ -1053,6 +1055,7 @@ async fn persist_permission_mode_no_session_id_suppresses_acp() {
             None,
             PermissionModePersist::BestEffort,
             tx,
+            None,
         )
         .await;
     tokio::task::yield_now().await;
@@ -1075,6 +1078,7 @@ async fn persist_permission_mode_best_effort_failure_returns_dedicated_variant()
             None,
             PermissionModePersist::BestEffort,
             tx,
+            None,
         )
         .await;
     match result {
@@ -2682,4 +2686,74 @@ fn rewind_execute_params_sends_conversation_only_with_force() {
     assert_eq!(params["force"], true);
     assert_eq!(params["mode"], REWIND_MODE_WIRE);
     assert_eq!(params["mode"], "conversation_only");
+}
+
+/// A read-only config declines the permission-mode write without touching
+/// disk. Shift+Tab (`BestEffort`) still cycles the mode for this session, so
+/// the agent must hear about it and nothing rolls back; the modal's path
+/// (`WithRollback`) reverts and stays quiet, exactly as it does for a write
+/// that failed.
+#[tokio::test]
+async fn persist_permission_mode_declines_on_a_read_only_config() {
+    use agent_client_protocol as acp;
+    let _guard = setup_grok_home_in_tempdir();
+    let notice = "permission_mode is set in ~/.grok/config.toml, which is read-only";
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let counter = spawn_fake_acp_agent(rx);
+    let result = persist_permission_mode_and_notify(
+        "always-approve",
+        Some(acp::SessionId::new(Arc::from("test-session"))),
+        PermissionModePersist::BestEffort,
+        tx,
+        Some(notice.to_string()),
+    )
+    .await;
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "the session's mode still changed, so the agent must be told",
+    );
+    match result {
+        TaskResult::SettingPersistRefused {
+            key,
+            rollback_value,
+            reason,
+        } => {
+            assert_eq!(key, "permission_mode");
+            assert_eq!(rollback_value, None, "BestEffort keeps the session value");
+            assert_eq!(reason, notice);
+        }
+        other => panic!("a declined write must not report a failure, got {other:?}"),
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let counter = spawn_fake_acp_agent(rx);
+    let result = persist_permission_mode_and_notify(
+        "always-approve",
+        Some(acp::SessionId::new(Arc::from("test-session"))),
+        PermissionModePersist::WithRollback("ask"),
+        tx,
+        Some(notice.to_string()),
+    )
+    .await;
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "a rolled-back mode must not reach the agent",
+    );
+    assert!(
+        matches!(
+            result,
+            TaskResult::SettingPersistRefused {
+                rollback_value: Some(crate::settings::SettingValue::Enum("ask")),
+                ..
+            }
+        ),
+        "WithRollback must revert to the previous mode, got {result:?}"
+    );
 }

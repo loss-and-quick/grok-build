@@ -1166,6 +1166,11 @@ pub struct AppView {
     pub coding_data_write_seq: u64,
     /// Persisted `[cli].show_tips` mirror. `None` = no override (default `true`).
     pub show_tips: Option<bool>,
+    /// Whether the user `config.toml` is read-only, resolved once at startup.
+    /// Settings rows backed by that file render locked instead of snapping
+    /// back from a write grok declines. Default `false`, so a view built
+    /// outside the launch path never inherits the developer machine.
+    pub config_read_only: bool,
     /// Persisted `[cli].auto_update` mirror. `None` = no override (default `true`).
     pub auto_update: Option<bool>,
     /// Persisted `[toolset.ask_user_question].timeout_enabled` mirror, seeded
@@ -1729,6 +1734,7 @@ impl AppView {
             privacy_banner_opt_in_inflight: false,
             coding_data_write_seq: 0,
             show_tips: None,
+            config_read_only: false,
             auto_update: None,
             ask_user_question_timeout_enabled: None,
             zdr_access_enabled: false,

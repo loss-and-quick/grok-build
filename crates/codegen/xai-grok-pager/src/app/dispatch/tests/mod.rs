@@ -181,6 +181,7 @@ fn test_app() -> AppView {
         privacy_banner_opt_in_inflight: false,
         coding_data_write_seq: 0,
         show_tips: None,
+        config_read_only: false,
         auto_update: None,
         ask_user_question_timeout_enabled: None,
         zdr_access_enabled: false,

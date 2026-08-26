@@ -7,8 +7,8 @@ use ratatui::layout::Rect;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    CodingDataSharingLock, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
-    SettingKey, SettingKind, SettingMeta, SettingValue, SettingsRegistry, StringValidator,
+    EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, RowLock, SettingCategory, SettingKey,
+    SettingKind, SettingMeta, SettingOwner, SettingValue, SettingsRegistry, StringValidator,
     current_value_for, dynamic_enum_choices,
 };
 use crate::views::modal_window::ModalWindowState;
@@ -260,12 +260,27 @@ impl SettingsModalState {
 
     /// Why a Browse row cannot be edited (`None` = editable). Consulted by
     /// both render and input.
-    pub fn row_lock(&self, key: SettingKey) -> Option<CodingDataSharingLock> {
+    pub fn row_lock(&self, key: SettingKey) -> Option<RowLock> {
         if key == "coding_data_sharing" {
-            self.pager_snapshot.coding_data_sharing_lock
-        } else {
-            None
+            // Persisted in auth metadata, not `config.toml` — a read-only
+            // config has no say over it, in either direction.
+            return self
+                .pager_snapshot
+                .coding_data_sharing_lock
+                .map(RowLock::CodingDataSharing);
         }
+        if !self.pager_snapshot.config_read_only {
+            return None;
+        }
+        let meta = self.registry.find(key)?;
+        // PAGER-owned settings never reach disk, and a Group row carries no
+        // value of its own — locking it would only block the sub-sheet.
+        if matches!(meta.owner, SettingOwner::Pager)
+            || matches!(meta.kind, SettingKind::Group { .. })
+        {
+            return None;
+        }
+        Some(RowLock::ReadOnlyConfig)
     }
 
     /// The currently-focused setting row, if any.

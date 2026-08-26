@@ -1773,6 +1773,7 @@ pub(crate) async fn run(
     );
     let config_session_bools = load_initial_config_session_bools();
     app.show_tips = config_session_bools.show_tips;
+    app.config_read_only = xai_grok_shell::util::config::user_config_readonly_cached().is_some();
     app.auto_update = config_session_bools.auto_update;
     app.ask_user_question_timeout_enabled = config_session_bools.ask_user_question_timeout_enabled;
     // Prime thread-local caches so first render doesn't hit disk.

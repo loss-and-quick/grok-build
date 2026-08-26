@@ -1465,15 +1465,39 @@ pub(crate) async fn persist_setting(
 /// 2. Fire ACP `x.ai/yolo_mode_changed` (gated on disk success for
 ///    `WithRollback`; always for `BestEffort`).
 /// 3. Return the matching `TaskResult`.
+///
+/// `readonly_notice` is resolved by the caller rather than probed here, so a
+/// test exercising the disk-outcome routing is not answered by the developer's
+/// own `~/.grok/config.toml`.
 pub(crate) async fn persist_permission_mode_and_notify(
     canonical: &'static str,
     session_id: Option<acp::SessionId>,
     persist: PermissionModePersist,
     tx: AcpAgentTx,
+    readonly_notice: Option<String>,
 ) -> TaskResult {
-    let enabled = canonical == "always-approve";
-    let auto_mode = canonical == "auto";
     let config_str: &'static str = canonical;
+    // A read-only config declines the write rather than failing it. Shift+Tab
+    // still cycles the mode for this session, so the notification/rollback
+    // split is the one a failed write already makes: BestEffort keeps the new
+    // mode and tells the agent, WithRollback reverts and stays quiet.
+    if let Some(reason) = readonly_notice {
+        let declined: Result<(), String> = Err(reason.clone());
+        if should_send_yolo_acp_notification(&declined, persist) && session_id.is_some()
+        {
+            send_yolo_mode_changed(config_str, &tx).await;
+        }
+        return TaskResult::SettingPersistRefused {
+            key: "permission_mode",
+            rollback_value: match persist {
+                PermissionModePersist::WithRollback(prev) => {
+                    Some(crate::settings::SettingValue::Enum(prev))
+                }
+                PermissionModePersist::BestEffort => None,
+            },
+            reason,
+        };
+    }
     let disk_result = xai_grok_shell::util::config::update_config(|cfg| {
             cfg.ui.permission_mode = Some(config_str.to_string());
         })
@@ -1481,22 +1505,26 @@ pub(crate) async fn persist_permission_mode_and_notify(
     let disk_outcome: Result<(), String> = disk_result.map_err(|e| e.to_string());
     if should_send_yolo_acp_notification(&disk_outcome, persist) && session_id.is_some()
     {
-        let params = serde_json::json!({
-            "yolo_mode": enabled,
-            "auto_mode": auto_mode,
-            "permission_mode": config_str,
-        });
-        let notification = acp::ExtNotification::new(
-            "x.ai/yolo_mode_changed",
-            serde_json::value::to_raw_value(&params)
-                .expect("serialize yolo_mode_changed params")
-                .into(),
-        );
-        if let Err(e) = acp_send(notification, &tx).await {
-            tracing::warn!("Failed to send yolo_mode_changed notification: {e}");
-        }
+        send_yolo_mode_changed(config_str, &tx).await;
     }
     route_permission_mode_result(disk_outcome, persist, config_str)
+}
+/// Fire ACP `x.ai/yolo_mode_changed` for `canonical`.
+async fn send_yolo_mode_changed(canonical: &'static str, tx: &AcpAgentTx) {
+    let params = serde_json::json!({
+        "yolo_mode": canonical == "always-approve",
+        "auto_mode": canonical == "auto",
+        "permission_mode": canonical,
+    });
+    let notification = acp::ExtNotification::new(
+        "x.ai/yolo_mode_changed",
+        serde_json::value::to_raw_value(&params)
+            .expect("serialize yolo_mode_changed params")
+            .into(),
+    );
+    if let Err(e) = acp_send(notification, tx).await {
+        tracing::warn!("Failed to send yolo_mode_changed notification: {e}");
+    }
 }
 /// Whether to fire the ACP `x.ai/yolo_mode_changed` notification.
 /// `WithRollback` suppresses on disk failure (agent must not see the

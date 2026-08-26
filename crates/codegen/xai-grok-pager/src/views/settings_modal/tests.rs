@@ -12,7 +12,7 @@ use super::state::*;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    CodingDataSharingLock, EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey,
+    CodingDataSharingLock, EnumChoice, PagerLocalSnapshot, RowLock, SettingCategory, SettingKey,
     SettingKind, SettingMeta, SettingOwner, SettingValue, SettingsRegistry, StringValidator,
 };
 use crate::theme::Theme;
@@ -8208,4 +8208,70 @@ fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
         !text.contains("Managed by your team admin."),
         "unlocked expansion must not mention the team-admin lock: {text:?}"
     );
+}
+
+/// A `config.toml` grok will not rewrite locks every row backed by it. The
+/// row keeps showing its real value — hiding it would answer "what is my
+/// theme?" with nothing — and says where the value is set, instead of taking
+/// a flip that snaps back the moment the declined write returns.
+#[test]
+fn read_only_config_locks_the_rows_it_owns() {
+    let snapshot = PagerLocalSnapshot {
+        config_read_only: true,
+        ..PagerLocalSnapshot::default()
+    };
+    let mut s = SettingsModalState::new(
+        Arc::new(SettingsRegistry::defaults()),
+        UiConfig::default(),
+        snapshot,
+    );
+
+    assert_eq!(s.row_lock("theme"), Some(RowLock::ReadOnlyConfig));
+    assert!(s.focus_key("theme"));
+    assert!(
+        !s.try_enter_picking_enum(),
+        "a locked row must not open its chooser"
+    );
+
+    let meta = s.registry.find("theme").expect("theme is registered");
+    let value = s.value_for("theme").expect("theme has a value");
+    let shown = value_display(meta, &value, s.row_lock("theme"));
+    assert!(
+        shown.starts_with(&value_display(meta, &value, None)),
+        "the real value must still be shown, got {shown:?}"
+    );
+    assert!(
+        shown.ends_with(ROW_FROM_CONFIG_SUFFIX),
+        "a locked row must say where its value comes from, got {shown:?}"
+    );
+}
+
+/// The lock follows the *file*, so only rows written to it are affected:
+/// PAGER-owned settings never reach disk, a Group row is navigation rather
+/// than a value, and `coding_data_sharing` lives in auth metadata.
+#[test]
+fn read_only_config_leaves_rows_it_does_not_own_alone() {
+    let snapshot = PagerLocalSnapshot {
+        config_read_only: true,
+        ..PagerLocalSnapshot::default()
+    };
+    let s = SettingsModalState::new(
+        Arc::new(SettingsRegistry::defaults()),
+        UiConfig::default(),
+        snapshot,
+    );
+
+    for key in ["multiline_mode", "contextual_hints", "coding_data_sharing"] {
+        assert_eq!(s.row_lock(key), None, "{key} must stay editable");
+    }
+}
+
+/// The default (writable) config locks nothing, so the probe cannot leak the
+/// developer's own `~/.grok` into the modal's behavior.
+#[test]
+fn a_writable_config_locks_nothing() {
+    let s = make_state();
+    for key in ["theme", "compact_mode", "permission_mode"] {
+        assert_eq!(s.row_lock(key), None, "{key} must stay editable");
+    }
 }

@@ -143,14 +143,9 @@ pub fn readonly_config_notice(subject: &str) -> Option<String> {
     ))
 }
 
-/// [`readonly_config_notice`] against the process-wide cached probe, for
-/// render paths that ask per row per frame.
-pub fn readonly_config_notice_cached(subject: &str) -> Option<String> {
-    let source = user_config_readonly_cached()?;
-    Some(format!(
-        "{subject} is set in {} — change it there",
-        readonly_config_clause(source)
-    ))
+/// The user `config.toml` path as a UI would show it (`~`-relative).
+pub fn user_config_display_path() -> String {
+    display_path(&config_path())
 }
 
 /// Why a file-level write was refused, naming the file it was aimed at
