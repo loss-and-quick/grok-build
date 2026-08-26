@@ -259,6 +259,10 @@ impl AgentRebuildSpec {
                 .get_or_insert_with(Default::default)
                 .web_search = Some(cfg_opts);
         }
+        // Captured before the definition is moved into the builder; the
+        // scheduler stamps it on tasks so a list can name the agent that
+        // scheduled them once that agent is gone.
+        let agent_type = definition.name.clone();
         let session_env = {
             let mut env = session_env.as_ref().clone();
             env.insert("GROK_SESSION_ID".to_string(), session_id_str.clone());
@@ -354,8 +358,8 @@ impl AgentRebuildSpec {
                         ChannelBackend, SubagentBackendResource,
                     };
                     use xai_grok_tools::implementations::grok_build::task::types::{
-                        MaxSubagentDepth, SessionIdResource, SubagentDepthCounter,
-                        SubagentEventSender,
+                        AgentTypeResource, MaxSubagentDepth, SessionIdResource,
+                        SubagentDepthCounter, SubagentEventSender,
                     };
                     resources
                         .insert(
@@ -371,6 +375,7 @@ impl AgentRebuildSpec {
                     resources.insert(SubagentDepthCounter(*subagent_depth));
                     resources.insert(MaxSubagentDepth(*subagents_max_depth));
                     resources.insert(SessionIdResource(session_id_str.clone()));
+                    resources.insert(AgentTypeResource(agent_type.clone()));
                     resources.insert(SubagentEventSender(event_tx));
                     resources
                         .insert(
