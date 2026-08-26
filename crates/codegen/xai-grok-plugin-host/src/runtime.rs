@@ -46,6 +46,32 @@ impl RuntimeKind {
     }
 }
 
+/// How a sidecar is launched.
+///
+/// The protocol, the supervision model and the `network: false` confinement are
+/// identical for both forms — only the argv differs. A plugin is an executable
+/// that speaks the wire contract; TypeScript is the first-class case, not the
+/// only one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginLaunch {
+    /// A TypeScript entry file executed by a JS runtime discovered on `PATH`.
+    Runtime {
+        /// Absolute path to the entry `.ts` file.
+        entry: PathBuf,
+        /// Declared or auto runtime.
+        runtime: RuntimeKind,
+    },
+    /// A program executed directly: an absolute path the manifest layer already
+    /// resolved inside the plugin root, or a bare name looked up on `PATH` at
+    /// spawn. No runtime discovery happens for this form.
+    Command {
+        /// Program to execute.
+        program: PathBuf,
+        /// Arguments after `argv[0]`.
+        args: Vec<String>,
+    },
+}
+
 /// A discovery failure: no suitable runtime on `PATH`.
 #[derive(Debug, thiserror::Error)]
 #[error("no plugin runtime available for `{requested}`: {detail}")]
@@ -244,8 +270,8 @@ fn discover_node() -> Result<ResolvedRuntime, RuntimeDiscoveryError> {
     })
 }
 
-/// Build the spawn `Command` for a plugin: discover its runtime, construct the
-/// argv, and set the working directory + env.
+/// Build the spawn `Command` for a plugin: resolve its launch form, construct
+/// the argv, and set the working directory + env.
 ///
 /// Network confinement for `network: false` sidecars is not applied here: the
 /// child runs under the per-child seccomp network filter
@@ -254,11 +280,28 @@ fn discover_node() -> Result<ResolvedRuntime, RuntimeDiscoveryError> {
 /// `xai-grok-sandbox` dependency and the trust flow, so this crate stays
 /// sandbox-free. Landlock/Seatbelt confinement is inherited automatically
 /// (plugins are children of the sandboxed process).
+///
+/// That confinement is a property of the child process, not of the launch form:
+/// the hardener is a `pre_exec` keyed on `spec.network` alone, and a seccomp
+/// filter survives `exec` and is inherited by descendants. So
+/// [`PluginLaunch::Command`] is confined exactly as [`PluginLaunch::Runtime`]
+/// is, without this crate learning anything about the program it runs. The one
+/// thing that does *not* generalize is deno's `--allow-read`/`--allow-write`
+/// scoping, which the manifest never advertised — a bun or node sidecar has
+/// never had it either.
 pub fn build_command(
     spec: &RegisteredPlugin,
 ) -> Result<tokio::process::Command, RuntimeDiscoveryError> {
-    let resolved = resolve_runtime(spec.runtime)?;
-    let (program, args) = build_argv(&resolved, &spec.entry, &spec.workspace_root, spec.network);
+    let (program, args) = match &spec.launch {
+        PluginLaunch::Runtime { entry, runtime } => {
+            let resolved = resolve_runtime(*runtime)?;
+            build_argv(&resolved, entry, &spec.workspace_root, spec.network)
+        }
+        PluginLaunch::Command { program, args } => (
+            program.clone(),
+            args.iter().map(OsString::from).collect::<Vec<_>>(),
+        ),
+    };
 
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args).current_dir(&spec.workspace_root);
@@ -396,8 +439,10 @@ mod tests {
         }
         let spec = |leader_socket: Option<String>| RegisteredPlugin {
             name: "p".into(),
-            entry: PathBuf::from("/ws/p/index.ts"),
-            runtime: RuntimeKind::Auto,
+            launch: PluginLaunch::Runtime {
+                entry: PathBuf::from("/ws/p/index.ts"),
+                runtime: RuntimeKind::Auto,
+            },
             network: false,
             config: serde_json::Value::Null,
             declared_tools: Vec::new(),
@@ -417,6 +462,37 @@ mod tests {
 
         let without = build_command(&spec(None)).unwrap();
         assert_eq!(env_of(&without), None);
+    }
+
+    #[test]
+    fn command_launch_needs_no_runtime_and_keeps_argv_verbatim() {
+        // The point of the command form: no JS runtime is probed, and the argv
+        // reaches the child exactly as the manifest resolved it. Works on a box
+        // with no bun/node/deno at all, which is the whole reason it exists.
+        let spec = RegisteredPlugin {
+            name: "p".into(),
+            launch: PluginLaunch::Command {
+                program: PathBuf::from("/ws/p/plugin"),
+                args: vec!["--serve".into(), "--flag=x y".into()],
+            },
+            network: false,
+            config: serde_json::Value::Null,
+            declared_tools: Vec::new(),
+            workspace_root: PathBuf::from("/ws"),
+            session_id: "s".into(),
+            leader_socket: None,
+        };
+        let cmd = build_command(&spec).expect("command launch never probes PATH for a runtime");
+        let std = cmd.as_std();
+        assert_eq!(std.get_program(), std::ffi::OsStr::new("/ws/p/plugin"));
+        assert_eq!(
+            std.get_args().collect::<Vec<_>>(),
+            vec![
+                std::ffi::OsStr::new("--serve"),
+                std::ffi::OsStr::new("--flag=x y"),
+            ]
+        );
+        assert_eq!(std.get_current_dir(), Some(Path::new("/ws")));
     }
 
     #[test]

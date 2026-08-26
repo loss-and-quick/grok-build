@@ -70,8 +70,10 @@ fn build_host(data_dir: PathBuf) -> Arc<PluginHost> {
     let host = PluginHost::new(data_dir);
     host.register_plugin(RegisteredPlugin {
         name: "demo-hooks".to_string(),
-        entry: demo_entry(),
-        runtime: RuntimeKind::Auto,
+        launch: xai_grok_plugin_host::PluginLaunch::Runtime {
+            entry: demo_entry(),
+            runtime: RuntimeKind::Auto,
+        },
         network: false,
         config: serde_json::json!({}),
         declared_tools: vec!["echo".to_string()],

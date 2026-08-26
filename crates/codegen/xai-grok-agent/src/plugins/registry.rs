@@ -8,16 +8,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::discovery::{DiscoveredPlugin, PluginId, PluginOrigin, PluginScope};
-use super::manifest::PluginRuntime;
+use super::manifest::SidecarLaunch;
 
-/// Resolved TypeScript sidecar plugin invocation, when the manifest declares
-/// a `plugin` entry (see `PluginManifest::sidecar_entry_path`).
+/// Resolved sidecar plugin invocation, when the manifest declares a `plugin`
+/// or `exec` entry (see `PluginManifest::sidecar_launch`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidecarSpec {
-    /// Absolute path to the sidecar entry file (e.g. `<plugin_root>/index.ts`).
-    pub entry: PathBuf,
-    /// Runtime to spawn the sidecar with (`Auto` resolves at spawn time).
-    pub runtime: PluginRuntime,
+    /// How to launch the sidecar: a TS entry file under a JS runtime, or a
+    /// program executed directly. The protocol, supervision and confinement are
+    /// identical either way.
+    pub launch: SidecarLaunch,
     /// Whether the sidecar's child process is allowed network access.
     pub network: bool,
     /// Validated model-visible tools from the manifest's `tools` array,
@@ -121,8 +121,8 @@ pub struct LoadedPlugin {
     pub inline_lsp_servers: Option<serde_json::Value>,
     /// Warning if this plugin won a name collision with another plugin.
     pub conflict: Option<String>,
-    /// Resolved TS sidecar invocation, when the manifest declares a `plugin`
-    /// entry and the entry file exists. See [`LoadedPlugin::sidecar_spec`].
+    /// Resolved sidecar invocation, when the manifest declares a `plugin` or
+    /// `exec` entry that resolves. See [`LoadedPlugin::sidecar_spec`].
     pub sidecar: Option<SidecarSpec>,
 }
 
@@ -144,8 +144,8 @@ impl LoadedPlugin {
         self.data_dir().to_string_lossy().to_string()
     }
 
-    /// Resolved TS sidecar spec (entry path, runtime, network flag), if the
-    /// manifest declares a `plugin` entry and the entry file exists.
+    /// Resolved sidecar spec (launch form, network flag, tools, config), if the
+    /// manifest declares an entry that resolves.
     pub fn sidecar_spec(&self) -> Option<SidecarSpec> {
         self.sidecar.clone()
     }
@@ -222,12 +222,19 @@ impl PluginRegistry {
             let lsp_server_count = count_lsp_servers(&dp);
             let has_inline_lsp_only =
                 dp.lsp_config_path.is_none() && dp.manifest.inline_lsp_servers().is_some();
+            // `${GROK_PLUGIN_DATA}` inside an `exec` argv resolves to the same
+            // per-plugin dir `LoadedPlugin::data_dir` hands the rest of the
+            // plugin surface; computed here because the id is about to move.
+            let plugin_data = xai_grok_config::grok_home()
+                .join("plugin-data")
+                .join(&dp.id.0)
+                .to_string_lossy()
+                .into_owned();
             let sidecar = dp
                 .manifest
-                .sidecar_entry_path(&dp.root)
-                .map(|entry| SidecarSpec {
-                    entry,
-                    runtime: dp.manifest.runtime_or_default(),
+                .sidecar_launch(&dp.root, &plugin_data)
+                .map(|launch| SidecarSpec {
+                    launch,
                     network: dp.manifest.network_enabled(),
                     tools: dp.manifest.sidecar_tools(),
                     config: dp.manifest.sidecar_config_defaults(),
@@ -757,6 +764,7 @@ mod tests {
                 lsp_servers: None,
                 plugin: None,
                 runtime: None,
+                exec: None,
                 network: None,
                 tools: None,
                 config: None,
@@ -1382,6 +1390,7 @@ mod tests {
                 lsp_servers: None,
                 plugin: Some("./index.ts".to_string()),
                 runtime: Some(super::super::manifest::PluginRuntime::Bun),
+                exec: None,
                 network: Some(true),
                 tools: Some(vec![super::super::manifest::ManifestToolSpec {
                     name: "echo".to_string(),
@@ -1421,9 +1430,13 @@ mod tests {
 
         let plugin = reg.get("ts-plugin").unwrap();
         let spec = plugin.sidecar_spec().expect("sidecar spec resolved");
-        assert_eq!(spec.entry, root.join("index.ts"));
-        assert!(spec.entry.is_absolute());
-        assert_eq!(spec.runtime, super::super::manifest::PluginRuntime::Bun);
+        assert_eq!(
+            spec.launch,
+            SidecarLaunch::Runtime {
+                entry: root.join("index.ts"),
+                runtime: super::super::manifest::PluginRuntime::Bun,
+            }
+        );
         assert!(spec.network);
         // Manifest tools flow through, validated and defaulted.
         assert_eq!(spec.tools.len(), 1);
@@ -1432,7 +1445,47 @@ mod tests {
         assert_eq!(spec.tools[0].timeout_ms, 1_000);
         assert_eq!(spec.tools[0].input_schema["type"], "object");
         // Manifest default config flows through as the sidecar's config defaults.
-        assert_eq!(spec.config, serde_json::json!({ "participants": ["alice"] }));
+        assert_eq!(
+            spec.config,
+            serde_json::json!({ "participants": ["alice"] })
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn registry_resolves_a_directly_executed_sidecar() {
+        // The whole chain for a non-TS plugin: manifest `exec` → resolved
+        // program → the spec the session hands the host. `${GROK_PLUGIN_DATA}`
+        // must reach the same per-plugin dir `LoadedPlugin::data_dir` names.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("any-lang");
+        std::fs::create_dir_all(&root).unwrap();
+        let program = root.join("plugin");
+        std::fs::write(&program, "#!/bin/sh\nexec cat\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut dp = make_discovered_with_sidecar(&root, "any-lang");
+        dp.manifest.plugin = None;
+        dp.manifest.runtime = None;
+        dp.manifest.exec = Some(super::super::manifest::ExecEntry::Argv(vec![
+            "./plugin".to_string(),
+            "--state=${GROK_PLUGIN_DATA}".to_string(),
+        ]));
+
+        let reg = PluginRegistry::from_discovered(vec![dp], &[], &["any-lang".to_string()]);
+        let plugin = reg.get("any-lang").unwrap();
+        let spec = plugin.sidecar_spec().expect("sidecar spec resolved");
+        assert_eq!(
+            spec.launch,
+            SidecarLaunch::Command {
+                program,
+                args: vec![format!("--state={}", plugin.data_dir_str())],
+            }
+        );
+        // The rest of the sidecar surface is unchanged by the launch form.
+        assert!(spec.network);
+        assert_eq!(spec.tools.len(), 1);
     }
 
     #[test]

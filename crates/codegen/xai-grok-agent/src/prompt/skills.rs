@@ -1651,6 +1651,7 @@ mod tests {
                 lsp_servers: None,
                 plugin: None,
                 runtime: None,
+                exec: None,
                 network: None,
                 tools: None,
                 config: None,

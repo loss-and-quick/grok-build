@@ -89,6 +89,28 @@ fn is_path_contained(resolved: &Path, plugin_root: &Path) -> bool {
     canonical_resolved.starts_with(&canonical_root)
 }
 
+/// Whether a manifest `exec` program names a path rather than a bare program.
+///
+/// `/` counts on every platform (manifests are written portably and JSON paths
+/// use it even on Windows); the native separator counts too.
+fn has_path_separator(program: &str) -> bool {
+    program.contains('/') || program.contains(std::path::MAIN_SEPARATOR)
+}
+
+/// Whether a resolved `exec` program carries an execute bit. Non-unix has no
+/// equivalent bit, so the check is vacuously true there and a bad program
+/// surfaces as a spawn error instead.
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    true
+}
+
 /// Resolve a plugin component path (hooks, MCP, LSP) from a manifest field.
 ///
 /// If the field is `Path(p)`, resolves relative to plugin root with containment check.
@@ -144,6 +166,55 @@ pub enum PluginRuntime {
     Deno,
 }
 
+/// A directly-executed sidecar entry (`plugin.json`'s `exec` field).
+///
+/// Either a bare program (`"exec": "./plugin"`) or a full argv
+/// (`"exec": ["python3", "${GROK_PLUGIN_ROOT}/plugin.py"]`). The same
+/// string-or-array idiom the manifest already uses for `skills`/`commands`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ExecEntry {
+    /// A single program, no arguments.
+    Program(String),
+    /// Program plus arguments, argv-style.
+    Argv(Vec<String>),
+}
+
+impl ExecEntry {
+    /// The declared argv, before token substitution or resolution.
+    fn argv(&self) -> Vec<String> {
+        match self {
+            ExecEntry::Program(p) => vec![p.clone()],
+            ExecEntry::Argv(v) => v.clone(),
+        }
+    }
+}
+
+/// How a sidecar plugin is launched — the resolved form of the manifest's
+/// mutually exclusive `plugin` and `exec` fields.
+///
+/// The wire contract and the supervision model are identical for both; only the
+/// argv differs. See [`PluginManifest::sidecar_launch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidecarLaunch {
+    /// `plugin` (+ optional `runtime`): a TypeScript entry file executed by a
+    /// JS runtime the host discovers at spawn time.
+    Runtime {
+        /// Absolute path to the entry file, inside the plugin root.
+        entry: PathBuf,
+        /// Declared runtime, or `Auto`.
+        runtime: PluginRuntime,
+    },
+    /// `exec`: a program executed directly, whatever language it is written in.
+    Command {
+        /// Either an absolute path inside the plugin root, or a bare program
+        /// name resolved on `PATH` at spawn time.
+        program: PathBuf,
+        /// Remaining argv, passed verbatim after token substitution.
+        args: Vec<String>,
+    },
+}
+
 /// Parsed plugin manifest from `plugin.json`.
 ///
 /// Forward-compatible: unknown fields are silently ignored via
@@ -183,17 +254,30 @@ pub struct PluginManifest {
     #[serde(default)]
     pub lsp_servers: Option<PathOrInline>,
 
-    // ── TypeScript sidecar plugin ────────────────────────────────────
-    /// Relative path to the sidecar entry file (e.g. `"./index.ts"`).
-    /// Presence of this field marks the plugin as a TS sidecar plugin.
+    // ── Sidecar plugin ───────────────────────────────────────────────
+    /// Relative path to the TypeScript sidecar entry file (e.g. `"./index.ts"`),
+    /// executed by a JS runtime. Mutually exclusive with [`Self::exec`].
     #[serde(default)]
     pub plugin: Option<String>,
     /// Sidecar runtime selection. Defaults to `Auto` when `plugin` is set
     /// but `runtime` is omitted; see [`PluginManifest::runtime_or_default`].
+    /// Meaningless with `exec`, which names its own program.
     #[serde(default)]
     pub runtime: Option<PluginRuntime>,
+    /// Program (or argv) executed directly as the sidecar, for a plugin written
+    /// in any language: `"exec": "./plugin"` or
+    /// `"exec": ["python3", "${GROK_PLUGIN_ROOT}/plugin.py"]`. Mutually
+    /// exclusive with [`Self::plugin`]; see [`PluginManifest::sidecar_launch`].
+    #[serde(default)]
+    pub exec: Option<ExecEntry>,
     /// Whether the sidecar's child process may reach the network.
     /// Defaults to `false`; see [`PluginManifest::network_enabled`].
+    ///
+    /// Enforcement is a property of the *child process*, not of the launch
+    /// form: on Linux the shell installs a per-child seccomp filter denying the
+    /// connect/bind/send/listen/accept syscalls, keyed on this flag alone, so a
+    /// `plugin` and an `exec` sidecar are confined identically. A deno sidecar
+    /// additionally has `--allow-net` withheld.
     #[serde(default)]
     pub network: Option<bool>,
     /// Model-visible tools the sidecar serves via `tool_invoke`. The manifest
@@ -384,9 +468,10 @@ impl PluginManifest {
         }
     }
 
-    /// Whether the manifest declares a TypeScript sidecar entry (`plugin` field).
+    /// Whether the manifest declares a sidecar entry — a TypeScript `plugin`
+    /// file or a directly-executed `exec` program.
     pub fn has_sidecar(&self) -> bool {
-        self.plugin.is_some()
+        self.plugin.is_some() || self.exec.is_some()
     }
 
     /// Effective sidecar runtime: the manifest's `runtime`, or `Auto` when unset.
@@ -492,7 +577,7 @@ impl PluginManifest {
             if !tools.is_empty() {
                 tracing::warn!(
                     plugin = %self.name,
-                    "manifest declares tools but no sidecar entry (`plugin`); ignoring them"
+                    "manifest declares tools but no sidecar entry (`plugin`/`exec`); ignoring them"
                 );
             }
             return Vec::new();
@@ -562,6 +647,118 @@ impl PluginManifest {
         resolved.is_file().then_some(resolved)
     }
 
+    /// Resolve how this plugin's sidecar is launched, from whichever of the two
+    /// mutually exclusive entry fields the manifest declares.
+    ///
+    /// `plugin` keeps its exact meaning and resolution rules (see
+    /// [`Self::sidecar_entry_path`]); `exec` names a program run directly, so a
+    /// plugin can be written in any language that can speak the wire contract.
+    /// Declaring both is refused outright rather than silently resolved one
+    /// way — an ambiguous launch spec is not something to guess at.
+    ///
+    /// `plugin_data` is the plugin's data directory, for `${GROK_PLUGIN_DATA}`
+    /// substitution inside `exec`; see [`Self::sidecar_exec_command`].
+    pub fn sidecar_launch(&self, plugin_root: &Path, plugin_data: &str) -> Option<SidecarLaunch> {
+        if self.plugin.is_some() && self.exec.is_some() {
+            tracing::warn!(
+                plugin = %self.name,
+                "manifest declares both `plugin` and `exec`; refusing to guess which to launch"
+            );
+            return None;
+        }
+        if self.exec.is_some() {
+            let (program, args) = self.sidecar_exec_command(plugin_root, plugin_data)?;
+            return Some(SidecarLaunch::Command { program, args });
+        }
+        Some(SidecarLaunch::Runtime {
+            entry: self.sidecar_entry_path(plugin_root)?,
+            runtime: self.runtime_or_default(),
+        })
+    }
+
+    /// Resolve the `exec` field into a `(program, args)` pair.
+    ///
+    /// Every argv element goes through the shared plugin-token substitution
+    /// first, because the sidecar's working directory is the *workspace* root,
+    /// not the plugin root: a bare `./plugin.py` argument would be resolved by
+    /// the child against the workspace. `${GROK_PLUGIN_ROOT}/plugin.py` is the
+    /// way to name a file that ships with the plugin.
+    ///
+    /// `argv[0]` is then resolved one of two ways:
+    ///
+    /// - it contains a path separator → a file that must live inside the plugin
+    ///   root (same containment check as every other manifest path) and be
+    ///   executable, resolved to an absolute path so the workspace cwd cannot
+    ///   reinterpret it;
+    /// - it is a bare name (`python3`, `uv`) → left alone and looked up on
+    ///   `PATH` at spawn time. This grants no authority the TS path does not
+    ///   already grant: `runtime: auto` likewise runs the first `bun`/`node`
+    ///   found on `PATH` against plugin-supplied code. A plugin is arbitrary
+    ///   code either way; the trust decision is the plugin's, not the argv's.
+    pub fn sidecar_exec_command(
+        &self,
+        plugin_root: &Path,
+        plugin_data: &str,
+    ) -> Option<(PathBuf, Vec<String>)> {
+        let exec = self.exec.as_ref()?;
+        let root_str = plugin_root.to_string_lossy();
+        let argv: Vec<String> = exec
+            .argv()
+            .iter()
+            .map(|a| substitute_env_vars(a, &root_str, plugin_data))
+            .collect();
+        let Some((raw_program, args)) = argv.split_first() else {
+            tracing::warn!(plugin = %self.name, "manifest `exec` is empty; skipping");
+            return None;
+        };
+        if raw_program.is_empty() {
+            tracing::warn!(plugin = %self.name, "manifest `exec` program is empty; skipping");
+            return None;
+        }
+
+        let program = if has_path_separator(raw_program) {
+            // Absolute paths land here too: `join` with an absolute path yields
+            // it unchanged, and containment then decides. That is deliberately
+            // laxer than `plugin`'s blanket absolute rejection — after token
+            // substitution `${GROK_PLUGIN_ROOT}/bin/tool` *is* absolute, and
+            // containment is the property actually worth enforcing.
+            let resolved = plugin_root.join(raw_program);
+            if !is_path_contained(&resolved, plugin_root) {
+                tracing::warn!(
+                    plugin = %self.name,
+                    path = %resolved.display(),
+                    plugin_root = %plugin_root.display(),
+                    "`exec` program escapes the plugin root; skipping"
+                );
+                return None;
+            }
+            if !resolved.is_file() {
+                tracing::warn!(
+                    plugin = %self.name,
+                    path = %resolved.display(),
+                    "`exec` program does not exist; skipping"
+                );
+                return None;
+            }
+            if !is_executable(&resolved) {
+                tracing::warn!(
+                    plugin = %self.name,
+                    path = %resolved.display(),
+                    "`exec` program is not executable; skipping"
+                );
+                return None;
+            }
+            resolved
+        } else {
+            // Bare name: `Command::new` searches `PATH` at spawn, the same
+            // lookup `runtime` discovery performs for bun/node/deno. Resolving
+            // it here instead would only move the failure earlier while adding
+            // a TOCTOU window.
+            PathBuf::from(raw_program)
+        };
+        Some((program, args.to_vec()))
+    }
+
     /// Log informational messages about manifest features.
     ///
     /// Called during discovery. Inline hooks and MCP servers are now
@@ -582,7 +779,13 @@ impl PluginManifest {
                 "plugin uses inline lspServers in manifest"
             );
         }
-        if self.has_sidecar() {
+        if self.exec.is_some() {
+            tracing::info!(
+                plugin = plugin_name,
+                network = self.network_enabled(),
+                "plugin declares a directly-executed sidecar entry (`exec`)"
+            );
+        } else if self.plugin.is_some() {
             tracing::info!(
                 plugin = plugin_name,
                 runtime = ?self.runtime_or_default(),
@@ -967,6 +1170,7 @@ mod tests {
             lsp_servers: None,
             plugin: None,
             runtime: None,
+            exec: None,
             network: None,
             tools: None,
             config: None,
@@ -1001,6 +1205,7 @@ mod tests {
             lsp_servers: None,
             plugin: None,
             runtime: None,
+            exec: None,
             network: None,
             tools: None,
             config: None,
@@ -1037,6 +1242,7 @@ mod tests {
             lsp_servers: None,
             plugin: None,
             runtime: None,
+            exec: None,
             network: None,
             tools: None,
             config: None,
@@ -1073,6 +1279,7 @@ mod tests {
             lsp_servers: None,
             plugin: None,
             runtime: None,
+            exec: None,
             network: None,
             tools: None,
             config: None,
@@ -1109,6 +1316,7 @@ mod tests {
             lsp_servers: None,
             plugin: None,
             runtime: None,
+            exec: None,
             network: None,
             tools: None,
             config: None,
@@ -1146,6 +1354,7 @@ mod tests {
             lsp_servers: None,
             plugin: None,
             runtime: None,
+            exec: None,
             network: None,
             tools: None,
             config: None,
@@ -1176,6 +1385,7 @@ mod tests {
             lsp_servers: None,
             plugin: None,
             runtime: None,
+            exec: None,
             network: None,
             tools: None,
             config: None,
@@ -1634,5 +1844,229 @@ mod tests {
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(manifest.oauth_accounts.is_none());
         assert!(manifest.oauth_login_accounts().is_empty());
+    }
+
+    // ── `exec`: a plugin is an executable that speaks the protocol ────
+
+    /// A plugin root holding one executable file, for the `exec` tests.
+    #[cfg(unix)]
+    fn exec_root(file: &str) -> (tempfile::TempDir, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("any-lang");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(file);
+        std::fs::write(&path, "#!/bin/sh\nexec cat\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (tmp, root)
+    }
+
+    fn exec_manifest(exec: ExecEntry) -> PluginManifest {
+        PluginManifest {
+            name: "any-lang".into(),
+            exec: Some(exec),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn exec_deserializes_both_string_and_argv_forms() {
+        let one: PluginManifest =
+            serde_json::from_str(r#"{"name":"p","exec":"./plugin"}"#).unwrap();
+        assert_eq!(one.exec, Some(ExecEntry::Program("./plugin".into())));
+        let many: PluginManifest =
+            serde_json::from_str(r#"{"name":"p","exec":["python3","./plugin.py"]}"#).unwrap();
+        assert_eq!(
+            many.exec,
+            Some(ExecEntry::Argv(vec![
+                "python3".into(),
+                "./plugin.py".into()
+            ]))
+        );
+        // A manifest with neither field is still a plain (non-sidecar) plugin.
+        let none: PluginManifest = serde_json::from_str(r#"{"name":"p"}"#).unwrap();
+        assert!(none.exec.is_none());
+        assert!(!none.has_sidecar());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exec_program_resolves_to_an_absolute_path_inside_the_root() {
+        // The sidecar's cwd is the workspace, not the plugin root, so a relative
+        // program must be made absolute here or the child would never find it.
+        let (_tmp, root) = exec_root("plugin");
+        let manifest = exec_manifest(ExecEntry::Program("./plugin".into()));
+        let launch = manifest.sidecar_launch(&root, "/data").unwrap();
+        assert_eq!(
+            launch,
+            SidecarLaunch::Command {
+                program: root.join("plugin"),
+                args: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn exec_bare_program_is_left_for_a_path_lookup_at_spawn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = exec_manifest(ExecEntry::Argv(vec![
+            "python3".into(),
+            "--".into(),
+            "-".into(),
+        ]));
+        let launch = manifest.sidecar_launch(tmp.path(), "/data").unwrap();
+        assert_eq!(
+            launch,
+            SidecarLaunch::Command {
+                program: PathBuf::from("python3"),
+                args: vec!["--".into(), "-".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn exec_argv_substitutes_the_plugin_root_and_data_tokens() {
+        // The token is the supported way to name a file that ships with the
+        // plugin: a bare `./plugin.py` argument would be resolved by the child
+        // against the *workspace* root instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("any-lang");
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = exec_manifest(ExecEntry::Argv(vec![
+            "python3".into(),
+            "${GROK_PLUGIN_ROOT}/plugin.py".into(),
+            "--state=${GROK_PLUGIN_DATA}/db".into(),
+        ]));
+        let SidecarLaunch::Command { args, .. } =
+            manifest.sidecar_launch(&root, "/data/any-lang").unwrap()
+        else {
+            panic!("expected a command launch");
+        };
+        assert_eq!(
+            args,
+            vec![
+                format!("{}/plugin.py", root.display()),
+                "--state=/data/any-lang/db".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exec_program_may_be_absolute_once_it_is_inside_the_root() {
+        // `${GROK_PLUGIN_ROOT}/bin/tool` is absolute after substitution, so the
+        // rule for `exec` is containment rather than `plugin`'s blanket
+        // rejection of absolute paths.
+        let (_tmp, root) = exec_root("plugin");
+        let manifest = exec_manifest(ExecEntry::Program("${GROK_PLUGIN_ROOT}/plugin".into()));
+        let launch = manifest.sidecar_launch(&root, "/data").unwrap();
+        assert_eq!(
+            launch,
+            SidecarLaunch::Command {
+                program: root.join("plugin"),
+                args: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn exec_program_escaping_the_root_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("any-lang");
+        std::fs::create_dir_all(&root).unwrap();
+        for escape in ["../evil", "/bin/sh"] {
+            let manifest = exec_manifest(ExecEntry::Program(escape.into()));
+            assert!(
+                manifest.sidecar_launch(&root, "/data").is_none(),
+                "{escape} should not resolve"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exec_program_must_exist_and_carry_an_execute_bit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("any-lang");
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = exec_manifest(ExecEntry::Program("./plugin".into()));
+        assert!(manifest.sidecar_launch(&root, "/data").is_none());
+
+        std::fs::write(root.join("plugin"), "#!/bin/sh\n").unwrap();
+        assert!(
+            manifest.sidecar_launch(&root, "/data").is_none(),
+            "a non-executable file must not be launched"
+        );
+    }
+
+    #[test]
+    fn exec_empty_argv_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        for empty in [ExecEntry::Argv(vec![]), ExecEntry::Program(String::new())] {
+            assert!(
+                exec_manifest(empty)
+                    .sidecar_launch(tmp.path(), "/d")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn declaring_both_plugin_and_exec_launches_neither() {
+        // An ambiguous launch spec is refused rather than resolved by
+        // precedence: guessing here would pick which code runs.
+        let (_tmp, root) = exec_root("index.ts");
+        let manifest = PluginManifest {
+            name: "any-lang".into(),
+            plugin: Some("./index.ts".into()),
+            exec: Some(ExecEntry::Program("./index.ts".into())),
+            ..Default::default()
+        };
+        assert!(manifest.has_sidecar());
+        assert!(manifest.sidecar_launch(&root, "/data").is_none());
+    }
+
+    #[test]
+    fn plugin_field_still_resolves_to_a_runtime_launch() {
+        // Every plugin in the wild uses `plugin` + `runtime`; the command form
+        // must not have changed what they resolve to.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ts-plugin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.ts"), "export default {};").unwrap();
+        let manifest = PluginManifest {
+            name: "ts-plugin".into(),
+            plugin: Some("./index.ts".into()),
+            runtime: Some(PluginRuntime::Node),
+            ..Default::default()
+        };
+        assert_eq!(
+            manifest.sidecar_launch(&root, "/data"),
+            Some(SidecarLaunch::Runtime {
+                entry: root.join("index.ts"),
+                runtime: PluginRuntime::Node,
+            })
+        );
+    }
+
+    #[test]
+    fn exec_plugin_keeps_its_declared_tools() {
+        // The tool catalog is gated on `has_sidecar`, which must recognise the
+        // command form — otherwise a non-TS plugin's tools vanish silently.
+        let manifest = PluginManifest {
+            name: "any-lang".into(),
+            exec: Some(ExecEntry::Program("./plugin".into())),
+            tools: Some(vec![ManifestToolSpec {
+                name: "echo".into(),
+                description: Some("echo back".into()),
+                input_schema: None,
+                timeout_ms: None,
+            }]),
+            ..Default::default()
+        };
+        let tools = manifest.sidecar_tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
     }
 }

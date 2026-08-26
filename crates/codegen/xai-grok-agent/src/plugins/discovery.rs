@@ -465,7 +465,7 @@ pub fn discover_plugins(
             has_hooks = p.hooks_path.is_some(),
             has_mcp = p.mcp_config_path.is_some(),
             has_lsp = p.lsp_config_path.is_some(),
-            has_sidecar = p.sidecar_entry_path().is_some(),
+            has_sidecar = p.manifest.has_sidecar(),
             "plugin discovered"
         );
     }
@@ -682,6 +682,7 @@ fn collect_plugin(
                 lsp_servers: None,
                 plugin: None,
                 runtime: None,
+                exec: None,
                 network: None,
                 tools: None,
                 config: None,

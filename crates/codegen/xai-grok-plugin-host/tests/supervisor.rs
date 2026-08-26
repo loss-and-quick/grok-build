@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use xai_grok_hooks::invoker::{PluginHookInvoker, PluginHookRequest, PluginHookResponse};
-use xai_grok_plugin_host::{PluginHost, PluginState, RegisteredPlugin, RuntimeKind};
+use xai_grok_plugin_host::{PluginHost, PluginLaunch, PluginState, RegisteredPlugin, RuntimeKind};
 
 /// Build a host whose sidecars are the fixture binary configured via env, plus a
 /// registered plugin named `p`. Returns the host and the temp dirs (kept alive).
@@ -30,8 +30,10 @@ fn host_with(env: &[(&'static str, String)], backoff: Duration) -> (PluginHost, 
     let host = PluginHost::new_for_test(data_dir.path().to_path_buf(), factory, backoff);
     host.register_plugin(RegisteredPlugin {
         name: "p".to_string(),
-        entry: PathBuf::from("/does/not/matter.ts"),
-        runtime: RuntimeKind::Auto,
+        launch: PluginLaunch::Runtime {
+            entry: PathBuf::from("/does/not/matter.ts"),
+            runtime: RuntimeKind::Auto,
+        },
         network: false,
         config: serde_json::json!({ "k": "v" }),
         declared_tools: vec!["echo".to_string()],
@@ -66,6 +68,32 @@ async fn spawn_hardener_runs_with_the_plugin_network_flag() {
     // through the injected SpawnHardener. Assert it actually runs on the real
     // spawn path, carrying the plugin's network flag. The test hardener only
     // records the flag — it never installs seccomp — so it stays host-agnostic.
+    assert_hardener_saw_no_network(PluginLaunch::Runtime {
+        entry: PathBuf::from("/does/not/matter.ts"),
+        runtime: RuntimeKind::Auto,
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn spawn_hardener_runs_for_a_directly_executed_plugin_too() {
+    // `network: false` is a manifest-level guarantee, and the manifest does not
+    // know what language the plugin is written in. The hardener is keyed on the
+    // network flag alone, so a directly-executed program must be confined on
+    // exactly the same path a TS sidecar is — otherwise the command form would
+    // silently downgrade a promise the manifest already makes.
+    assert_hardener_saw_no_network(PluginLaunch::Command {
+        program: PathBuf::from("/does/not/matter"),
+        args: vec!["--serve".to_string()],
+    })
+    .await;
+}
+
+/// Drive one plugin through spawn + handshake and assert the injected hardener
+/// ran, seeing `network == false`. The command factory ignores the launch form
+/// (it always spawns the fake sidecar), which is the point: the assertion is
+/// about the hardener seam, not about argv construction.
+async fn assert_hardener_saw_no_network(launch: PluginLaunch) {
     let data_dir = tempfile::tempdir().unwrap();
     let ws = tempfile::tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_fake_sidecar");
@@ -87,8 +115,7 @@ async fn spawn_hardener_runs_with_the_plugin_network_flag() {
     }));
     host.register_plugin(RegisteredPlugin {
         name: "p".to_string(),
-        entry: PathBuf::from("/does/not/matter.ts"),
-        runtime: RuntimeKind::Auto,
+        launch,
         network: false,
         config: serde_json::json!({}),
         declared_tools: vec![],
@@ -314,10 +341,7 @@ async fn crash_restarts_then_disables_after_three() {
 
 #[tokio::test]
 async fn tool_invoke_round_trips_with_call_context() {
-    let (host, _d, _w) = host_with(
-        &[("FAKE_MODE", "normal".into())],
-        Duration::from_millis(10),
-    );
+    let (host, _d, _w) = host_with(&[("FAKE_MODE", "normal".into())], Duration::from_millis(10));
 
     let result = host
         .invoke_tool(
@@ -337,9 +361,21 @@ async fn tool_invoke_round_trips_with_call_context() {
     assert!(!result.is_error);
     // The fixture echoes every per-call context field back into the content.
     assert!(result.content.contains("tool=echo"), "{}", result.content);
-    assert!(result.content.contains(r#""text":"hi""#), "{}", result.content);
-    assert!(result.content.contains("session=sess-9"), "{}", result.content);
-    assert!(result.content.contains("cwd=/work/dir"), "{}", result.content);
+    assert!(
+        result.content.contains(r#""text":"hi""#),
+        "{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("session=sess-9"),
+        "{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("cwd=/work/dir"),
+        "{}",
+        result.content
+    );
     assert!(result.content.contains("agent=main"), "{}", result.content);
 
     host.dispose().await;
@@ -410,7 +446,10 @@ async fn dropping_tool_invoke_notifies_plugin_tool_cancel() {
         host.invoke_tool("p", "echo", serde_json::json!({}), test_ctx(), 5_000),
     )
     .await;
-    assert!(dropped.is_err(), "hang fixture should keep the call pending");
+    assert!(
+        dropped.is_err(),
+        "hang fixture should keep the call pending"
+    );
 
     // The plugin recorded the cancelled invocation (plugin→core storage_set,
     // served by the still-live host). Poll the on-disk store briefly.
@@ -418,9 +457,8 @@ async fn dropping_tool_invoke_notifies_plugin_tool_cancel() {
     let mut seen = None;
     for _ in 0..50 {
         if let Ok(bytes) = std::fs::read(&store)
-            && let Ok(map) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(
-                &bytes,
-            )
+            && let Ok(map) =
+                serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)
             && let Some(v) = map.get("tool_cancel_seen")
         {
             seen = Some(v.clone());
@@ -508,8 +546,20 @@ async fn concurrent_tool_and_hook_invokes_share_one_sidecar() {
         Duration::from_millis(10),
     );
 
-    let t1 = host.invoke_tool("p", "echo", serde_json::json!({ "i": 1 }), test_ctx(), 5_000);
-    let t2 = host.invoke_tool("p", "echo", serde_json::json!({ "i": 2 }), test_ctx(), 5_000);
+    let t1 = host.invoke_tool(
+        "p",
+        "echo",
+        serde_json::json!({ "i": 1 }),
+        test_ctx(),
+        5_000,
+    );
+    let t2 = host.invoke_tool(
+        "p",
+        "echo",
+        serde_json::json!({ "i": 2 }),
+        test_ctx(),
+        5_000,
+    );
     let h = host.invoke(req("pre_tool_use", 5_000));
     let (r1, r2, hr) = tokio::join!(t1, t2, h);
 

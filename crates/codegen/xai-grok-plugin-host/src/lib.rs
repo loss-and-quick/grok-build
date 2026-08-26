@@ -1,14 +1,20 @@
-//! Sidecar supervisor for grok-build TypeScript plugins.
+//! Sidecar supervisor for grok-build plugins.
 //!
-//! A [`PluginHost`] owns one sidecar process per registered TS plugin, speaks the
+//! A [`PluginHost`] owns one sidecar process per registered plugin, speaks the
 //! versioned wire contract (`xai-grok-plugin-protocol`) with each over
 //! newline-delimited JSON-RPC 2.0, and implements
 //! [`xai_grok_hooks::invoker::PluginHookInvoker`] so the hook runner can drive a
 //! `Plugin` handler without knowing anything about processes or the wire.
 //!
+//! A plugin is an *executable that speaks the protocol*: either a TypeScript
+//! entry file run by a JS runtime the host discovers, or a program the manifest
+//! names outright ([`PluginLaunch`]). Everything below the argv — handshake,
+//! supervision, storage, process-scope enrollment, `network: false`
+//! confinement — is identical for both.
+//!
 //! # Module map
 //!
-//! - [`runtime`] — runtime discovery (bun → node >=22 → deno) and argv construction.
+//! - [`runtime`] — launch forms, runtime discovery (bun → node >=22 → deno), argv construction.
 //! - [`sidecar`] — one child + its bidirectional JSON-RPC loop.
 //! - [`capabilities`] — the plugin→core server (`log_emit`, `storage_*`, `config_get`).
 //! - [`supervisor`] — [`PluginHost`]: restart-on-crash, disable-after-N, routing.
@@ -44,7 +50,7 @@ pub use orchestration::{
     AgentStatusDto, OrchestratorCancel, OrchestratorFuture, OrchestratorMessage, PanelSink,
     SignInSink, SpawnedSubagent,
 };
-pub use runtime::RuntimeKind;
+pub use runtime::{PluginLaunch, RuntimeKind};
 pub use supervisor::{PluginHost, SpawnHardener};
 // Re-exported so tool-surface integrations (the shell) can name the
 // `tool_invoke` wire shapes without a direct protocol dependency (the same
@@ -57,12 +63,12 @@ pub use xai_grok_plugin_protocol::{ToolCallContextDto, ToolInvokeResult};
 pub struct RegisteredPlugin {
     /// Unique plugin name; the routing key from `HookSpec::plugin`.
     pub name: String,
-    /// Entry `.ts` file executed by the runtime.
-    pub entry: PathBuf,
-    /// Declared or auto runtime.
-    pub runtime: RuntimeKind,
+    /// How to launch the sidecar: a TS entry under a JS runtime, or a program
+    /// executed directly.
+    pub launch: runtime::PluginLaunch,
     /// Network access. `false` (default) is the seccomp-filtered case, applied
-    /// via the [`SpawnHardener`] seam.
+    /// via the [`SpawnHardener`] seam. The seam keys on this flag alone, so
+    /// both launch forms are confined identically.
     pub network: bool,
     /// Opaque config forwarded verbatim at `initialize` and via `config_get`.
     pub config: serde_json::Value,

@@ -1,4 +1,4 @@
-//! Session-level wiring for the TypeScript plugin sidecar host.
+//! Session-level wiring for the plugin sidecar host.
 //!
 //! Bridges three landed building blocks into a live session:
 //!
@@ -16,12 +16,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use xai_grok_agent::plugins::{PluginRegistry, PluginRuntime};
+use xai_grok_agent::plugins::{PluginRegistry, PluginRuntime, SidecarLaunch};
 use xai_grok_hooks::config::{
     DEFAULT_STOP_GATE_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, HandlerType, HookSpec,
 };
 use xai_grok_hooks::event::{GateKind, HookEventName};
-use xai_grok_plugin_host::{PluginHost, RegisteredPlugin, RuntimeKind};
+use xai_grok_plugin_host::{PluginHost, PluginLaunch, RegisteredPlugin, RuntimeKind};
 
 /// Canonical hook events a sidecar plugin is auto-subscribed to. All events the
 /// core fires except the `SubagentEnd` alias (canonicalizes to `SubagentStop`,
@@ -95,6 +95,59 @@ fn runtime_kind(runtime: PluginRuntime) -> RuntimeKind {
         PluginRuntime::Bun => RuntimeKind::Bun,
         PluginRuntime::Node => RuntimeKind::Node,
         PluginRuntime::Deno => RuntimeKind::Deno,
+    }
+}
+
+/// Map the manifest-resolved launch form onto the host's. Same explicit-match
+/// discipline as [`runtime_kind`]: the two enums are deliberately separate types
+/// (the agent crate does not depend on the host) and must not drift.
+fn plugin_launch(launch: SidecarLaunch) -> PluginLaunch {
+    match launch {
+        SidecarLaunch::Runtime { entry, runtime } => PluginLaunch::Runtime {
+            entry,
+            runtime: runtime_kind(runtime),
+        },
+        SidecarLaunch::Command { program, args } => PluginLaunch::Command { program, args },
+    }
+}
+
+/// Say so, loudly, when a plugin asked for `network: false` on a platform that
+/// has no per-child network filter to give it.
+///
+/// The manifest advertises `network: false` as a guarantee; without a hardener
+/// the only thing still enforcing it is a deno sidecar's own withheld
+/// `--allow-net`, and nothing at all enforces it for bun, node, or an `exec`
+/// program. That gap predates directly-executed plugins — it is what
+/// `spawn_hardener()` returning `None` off Linux has always meant — but a
+/// guarantee that quietly evaporates is worse than one the manifest could not
+/// express, so it gets a warning rather than silence.
+fn warn_if_network_confinement_unavailable(plugins: &[RegisteredPlugin], hardened: bool) {
+    if hardened {
+        return;
+    }
+    let confined: Vec<&str> = plugins
+        .iter()
+        .filter(|p| !p.network)
+        .map(|p| p.name.as_str())
+        .collect();
+    if !confined.is_empty() {
+        tracing::warn!(
+            plugins = %confined.join(", "),
+            "no per-child network filter on this platform; `network: false` is not enforced \
+             for these sidecars beyond a deno runtime's own permission flags",
+        );
+    }
+}
+
+/// A one-line label for a launch form, for the registration log.
+fn launch_label(launch: &PluginLaunch) -> String {
+    match launch {
+        PluginLaunch::Runtime { entry, runtime } => {
+            format!("{runtime:?} {}", entry.display())
+        }
+        PluginLaunch::Command { program, args } => {
+            format!("exec {} {}", program.display(), args.join(" "))
+        }
     }
 }
 
@@ -205,12 +258,13 @@ pub(crate) fn build_session_plugin_host(
     // so a `/login` served from a live session and one served by the
     // agent-level host reach the identical screen.
     host.set_sign_in_sink(crate::auth::plugin_sign_in::PluginSignInPrompt::global());
+    warn_if_network_confinement_unavailable(&sidecar_plugins, spawn_hardener().is_some());
     for spec in &sidecar_plugins {
         tracing::info!(
             plugin = %spec.name,
-            runtime = ?spec.runtime,
+            launch = %launch_label(&spec.launch),
             network = spec.network,
-            "registering TS sidecar plugin with host",
+            "registering sidecar plugin with host",
         );
         host.register_plugin(spec.clone());
     }
@@ -264,8 +318,7 @@ fn registered_sidecar_plugins(
             let spec = plugin.sidecar_spec()?;
             Some(RegisteredPlugin {
                 name: plugin.name.clone(),
-                entry: spec.entry,
-                runtime: runtime_kind(spec.runtime),
+                launch: plugin_launch(spec.launch),
                 network: spec.network,
                 // Per-plugin config the sidecar sees at `initialize` and via
                 // `config_get`: the manifest's `config` defaults with the user's
@@ -1585,6 +1638,7 @@ mod tests {
             lsp_servers: None,
             plugin: Some("./index.ts".to_string()),
             runtime: None,
+            exec: None,
             network: None,
             tools: None,
             config: Some(serde_json::json!({ "participants": ["default"], "rounds": 1 })),

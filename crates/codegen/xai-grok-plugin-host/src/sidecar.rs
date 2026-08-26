@@ -122,7 +122,8 @@ impl PluginSidecar {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         // Detach into its own session/group so teardown can killpg grandchildren
-        // (e.g. bun/node spawning workers) without orphaning them. This is also
+        // (bun/node spawning workers, a python plugin spawning a helper — this
+        // path never inspects what it launched) without orphaning them. This is also
         // what makes the child enrollable: `setsid` leaves it leading its own
         // group, so `ProcessScope::prepare` would be redundant here — and on
         // Windows harmful, since `creation_flags` replaces rather than ORs.

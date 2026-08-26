@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use xai_grok_hooks::invoker::{PluginHookInvoker, PluginHookRequest};
-use xai_grok_plugin_host::{PluginHost, PluginState, RegisteredPlugin, RuntimeKind};
+use xai_grok_plugin_host::{PluginHost, PluginLaunch, PluginState, RegisteredPlugin, RuntimeKind};
 use xai_tty_utils::ProcessScope;
 
 /// A host over the fixture binary, with a plugin `p` registered.
@@ -36,8 +36,10 @@ fn host_with(env: &[(&'static str, String)]) -> (PluginHost, TempDir, TempDir) {
     );
     host.register_plugin(RegisteredPlugin {
         name: "p".to_string(),
-        entry: PathBuf::from("/does/not/matter.ts"),
-        runtime: RuntimeKind::Auto,
+        launch: PluginLaunch::Runtime {
+            entry: PathBuf::from("/does/not/matter.ts"),
+            runtime: RuntimeKind::Auto,
+        },
         network: false,
         config: serde_json::json!({}),
         declared_tools: vec![],
