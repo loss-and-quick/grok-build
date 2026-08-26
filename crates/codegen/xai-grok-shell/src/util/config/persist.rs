@@ -204,10 +204,17 @@ fn merge_section<T: serde::Serialize>(
     }
 }
 /// Update settings with a read-modify-write, preserving unrelated fields.
+///
+/// Declines outright when the user `config.toml` is not grok's to rewrite
+/// (see [`super::readonly`]). The check belongs here rather than around the
+/// `rename`: the temp-file swap is what keeps a crash from truncating the
+/// config, and a write we should never have started is better refused before
+/// anything is serialized.
 pub async fn update_config<F>(f: F) -> Result<()>
 where
     F: FnOnce(&mut Config),
 {
+    super::readonly::refuse_readonly_config()?;
     let _guard = SAVE_LOCK.lock().await;
     let root: TomlValue =
         crate::config::load_from_disk().unwrap_or_else(|_| TomlValue::Table(TomlMap::new()));
