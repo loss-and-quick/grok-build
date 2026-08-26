@@ -17,6 +17,7 @@ pub mod oidc;
 pub(crate) mod plugin_sign_in;
 pub(crate) mod recovery;
 pub(crate) mod refresh;
+pub(crate) mod sign_in_record;
 pub(crate) mod single_flight;
 mod storage;
 mod token_output;

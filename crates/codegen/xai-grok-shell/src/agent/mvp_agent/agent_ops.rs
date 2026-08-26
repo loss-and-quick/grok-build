@@ -128,6 +128,37 @@ impl MvpAgent {
     pub(super) fn set_auth_method(&self, id: acp::AuthMethodId) {
         self.auth_method_id.store(Some(std::sync::Arc::new(id)));
     }
+    /// Publish the sign-in a previous launch left recorded, when nothing
+    /// first-party owns this one. Returns the id it restored, or `None`.
+    ///
+    /// The launch's own answer — `first_party_default`, from
+    /// [`auth_method::build_auth_methods`] — is derived from what the reload
+    /// path can see: a session token in `auth.json`, a stored API key. A plugin
+    /// sign-in leaves neither, because its credential never reaches the
+    /// `AuthManager` at all, so re-deriving reports "nobody is signed in" for a
+    /// session that is. The record of which advertised method minted it is the
+    /// only thing that carries the plugin and the account across the restart.
+    pub(crate) fn restore_plugin_sign_in(
+        &self,
+        first_party_default: Option<&acp::AuthMethodId>,
+        advertised: &[acp::AuthMethod],
+    ) -> Option<acp::AuthMethodId> {
+        let recorded = crate::auth::sign_in_record::load_from(
+            crate::auth::sign_in_record::home_for(&self.auth_manager),
+        );
+        let restored = auth_method::restored_sign_in_method_id(
+            first_party_default,
+            advertised,
+            recorded.as_ref(),
+        )?;
+        xai_grok_telemetry::unified_log::info(
+            "auth: restored a plugin sign-in from the previous launch",
+            None,
+            Some(serde_json::json!({ "method_id": restored.0.as_ref() })),
+        );
+        self.set_auth_method(restored.clone());
+        Some(restored)
+    }
     /// Publish model-owned credentials for voice/tools static fallthrough.
     /// Only [`ModelEntry::own_credential`] — not `sampling_config.api_key` (may be a session JWT).
     pub(crate) fn sync_process_static_api_key(&self, preferred_model_id: Option<&str>) {

@@ -442,6 +442,16 @@ impl acp::Agent for MvpAgent {
             );
             self.set_auth_method(default_id);
         }
+        // `default_auth_method_id` deliberately stays as it was: it is the
+        // method a client *authenticates with*, and a plugin method
+        // authenticates by re-driving the plugin's interactive flow. The
+        // restored identity travels in its own meta key instead.
+        let first_party_default = default_auth_method_id_wire
+            .as_deref()
+            .map(acp::AuthMethodId::new);
+        let restored_auth_meta = self
+            .restore_plugin_sign_in(first_party_default.as_ref(), &auth_methods)
+            .and_then(|_| self.auth_response_with_meta().meta);
         self.sync_process_static_api_key(None);
         let current_working_directory = self.launch_cwd.clone();
         let hostname = gethostname::gethostname();
@@ -509,6 +519,13 @@ impl acp::Agent for MvpAgent {
                     // Re-deriving this precedence client-side has regressed OIDC
                     // refresh, so clients consume the agent's choice from here.
                     "defaultAuthMethodId": default_auth_method_id_wire,
+                    // The sign-in this launch restored, in the shape
+                    // `authenticate` returns. Present only for a plugin
+                    // sign-in, whose credential no first-party path can
+                    // re-derive; a client that sees it is already
+                    // authenticated and must neither prompt for a login nor
+                    // re-run the plugin's interactive flow to learn this.
+                    (auth_method::RESTORED_AUTH_META_KEY): restored_auth_meta,
                     // The agent can drive in-process SDK MCP servers over the ACP reverse
                     // channel (`x.ai/mcp/sdk_call`); the SDK reads this to enable transport="acp".
                     (xai_grok_mcp::wire::MCP_SDK): true,
@@ -912,6 +929,12 @@ impl acp::Agent for MvpAgent {
                     crate::managed_config::post_login_sync(Some(auth.clone())),
                 );
                 self.set_auth_method(arguments.method_id.clone());
+                // A first-party credential now owns the session, and it leaves
+                // its own trace in `auth.json`. Drop any plugin sign-in record:
+                // it describes a session this login has replaced.
+                crate::auth::sign_in_record::clear_in(crate::auth::sign_in_record::home_for(
+                    &self.auth_manager,
+                ));
                 self.models_manager.on_auth_changed().await;
                 if crate::agent::chat_modes::process_chat_mode_enabled() {
                     self.chat_modes.warm_in_background();
@@ -1017,6 +1040,14 @@ impl acp::Agent for MvpAgent {
                     }
                 }
                 self.set_auth_method(arguments.method_id.clone());
+                // The only durable trace this sign-in leaves. The credential
+                // stays behind the plugin's own seam and the `AuthManager`
+                // never sees it, so without the record the next launch has
+                // nothing from which to name the plugin or the account.
+                crate::auth::sign_in_record::record_in(
+                    crate::auth::sign_in_record::home_for(&self.auth_manager),
+                    &arguments.method_id,
+                );
                 self.ensure_telemetry_client();
                 if crate::agent::chat_modes::process_chat_mode_enabled() {
                     self.chat_modes.warm_in_background();

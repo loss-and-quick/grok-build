@@ -3191,6 +3191,110 @@ async fn auth_meta_reports_a_plugin_account_without_inventing_a_first_party_one(
     );
 }
 
+/// An agent whose `~/.grok` is `home`. The plugin sign-in record lives beside
+/// that home's `auth.json`, so a test that exercises it must keep the home
+/// alive across the launches it simulates — and must never resolve
+/// `grok_home()`, which caches process-wide and would reach for the
+/// developer's real `~/.grok`.
+fn build_agent_in_home(home: &std::path::Path) -> MvpAgent {
+    use crate::agent::config::Config as AgentConfig;
+    use crate::auth::{AuthManager, GrokComConfig};
+    let auth_manager = std::sync::Arc::new(AuthManager::new(home, GrokComConfig::default()));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    MvpAgent::new(
+        GatewaySender::new(tx),
+        &AgentConfig::default(),
+        auth_manager,
+        None,
+    )
+    .expect("valid test config")
+}
+
+/// The one `/login` entry a plugin with a single declared account advertises.
+fn advertised_plugin_account() -> Vec<acp::AuthMethod> {
+    vec![crate::agent::auth_method::plugin_oauth_auth_method(
+        "example-auth",
+        "Example",
+        Some("work"),
+        Some("Work"),
+    )]
+}
+
+/// The relaunch half of the same question. A plugin sign-in puts nothing in
+/// `auth.json`, so the next launch has no first-party credential to re-derive
+/// an identity from — and re-deriving is all the reload path does. Only the
+/// record of which method minted the session carries the plugin and the
+/// account across the restart.
+#[tokio::test(flavor = "current_thread")]
+async fn auth_meta_identity_survives_a_relaunch_of_a_plugin_sign_in() {
+    use crate::agent::auth_method::plugin_oauth_method_id;
+
+    let home = tempfile::tempdir().unwrap();
+    let launch = || build_agent_in_home(home.path());
+    // This launch still advertises the plugin: enabled, trusted, and still
+    // declaring the account that signed in.
+    let advertised = advertised_plugin_account();
+    let signed_in_with =
+        acp::AuthMethodId::new(plugin_oauth_method_id("example-auth", Some("work")));
+
+    // First launch: the sign-in publishes the method and records who minted it.
+    let agent = launch();
+    agent.set_auth_method(signed_in_with.clone());
+    crate::auth::sign_in_record::record_in(
+        crate::auth::sign_in_record::home_for(&agent.auth_manager),
+        &signed_in_with,
+    );
+    let after_login = auth_meta_of(&agent).expect("a plugin sign-in is an authenticated session");
+    drop(agent);
+
+    // Next launch. Nothing first-party is in the home, so `build_auth_methods`
+    // would offer no default at all.
+    let relaunched = launch();
+    assert!(
+        auth_meta_of(&relaunched).is_none(),
+        "before the record is consulted the session looks unauthenticated"
+    );
+    let restored = relaunched
+        .restore_plugin_sign_in(None, &advertised)
+        .expect("the recorded sign-in is still advertised");
+    assert_eq!(restored, signed_in_with);
+
+    let after_relaunch = auth_meta_of(&relaunched).expect("the restored sign-in is an account");
+    assert_eq!(
+        after_relaunch.auth_method_id, after_login.auth_method_id,
+        "a restored plugin sign-in must not look like a different credential"
+    );
+    assert_eq!(
+        after_relaunch.auth_method_id.as_deref(),
+        Some("plugin-oauth:example-auth#work"),
+        "the account selector is half the identity: one plugin holds several"
+    );
+    assert!(!after_relaunch.is_first_party_account);
+}
+
+/// Logging out ends the plugin sign-in too, even though it left nothing in
+/// `auth.json` for the logout to clear. A record that outlived it would resume
+/// an account the user has just signed out of.
+#[tokio::test(flavor = "current_thread")]
+async fn logging_out_ends_a_restorable_plugin_sign_in() {
+    use crate::agent::auth_method::plugin_oauth_method_id;
+
+    let home = tempfile::tempdir().unwrap();
+    let agent = build_agent_in_home(home.path());
+    crate::auth::sign_in_record::record_in(
+        home.path(),
+        &acp::AuthMethodId::new(plugin_oauth_method_id("example-auth", Some("work"))),
+    );
+
+    crate::auth::perform_logout(&agent.auth_manager, None).expect("logout");
+
+    assert_eq!(
+        agent.restore_plugin_sign_in(None, &advertised_plugin_account()),
+        None,
+        "nothing is left to restore"
+    );
+}
+
 /// No first-party credential and nothing else owning one: report nothing at
 /// all rather than a default that reads like an account.
 #[tokio::test(flavor = "current_thread")]
@@ -7122,10 +7226,8 @@ async fn provider_model_without_own_key_takes_no_session_credential() {
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
     let temp_dir = tempfile::tempdir().unwrap();
-    let auth_manager = std::sync::Arc::new(AuthManager::new(
-        temp_dir.path(),
-        GrokComConfig::default(),
-    ));
+    let auth_manager =
+        std::sync::Arc::new(AuthManager::new(temp_dir.path(), GrokComConfig::default()));
     auth_manager.hot_swap(GrokAuth {
         key: "session-token".into(),
         auth_mode: AuthMode::Oidc,
@@ -7155,7 +7257,9 @@ async fn provider_model_without_own_key_takes_no_session_credential() {
     .expect("toml should parse");
     let cfg = AgentConfig::new_from_toml_cfg(&raw).expect("config should parse");
     let models = crate::agent::config::resolve_model_list(&cfg, None);
-    let provider_entry = models.get("acme/m-one").expect("provider entry synthesized");
+    let provider_entry = models
+        .get("acme/m-one")
+        .expect("provider entry synthesized");
     let sampling = agent.prepare_sampling_config_for_model(provider_entry, None);
     assert_eq!(
         sampling.api_key, None,

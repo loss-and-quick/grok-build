@@ -330,7 +330,9 @@ pub fn interactive_login_method_id(has_enterprise_oidc: bool) -> &'static str {
 /// method that owns it is what makes the answer survive a re-auth — and a
 /// restart — of the same account. A plugin sign-in needs no normalization: its
 /// id carries the plugin and the account selector, both declared in the
-/// manifest rather than derived from a token.
+/// manifest rather than derived from a token. It does need the id to *reach*
+/// here across a restart, which no first-party credential supplies —
+/// [`restored_sign_in_method_id`] is what puts it back.
 ///
 /// `session_credential` says a first-party *session* token backs the id (see
 /// [`crate::auth::GrokAuth::is_session_auth`]). A stored plain API key is not
@@ -350,6 +352,52 @@ pub fn credential_method_id(
             .then(|| acp::AuthMethodId::new(interactive_login_method_id(has_enterprise_oidc))),
         AuthMethodKind::XaiApiKey | AuthMethodKind::Unknown => None,
     }
+}
+
+/// `InitializeResponse.meta` key carrying the [`crate::auth::AuthMeta`] of a
+/// sign-in this launch restored, in the same shape `authenticate` returns.
+///
+/// Present only when [`restored_sign_in_method_id`] restored one — that is,
+/// only for a plugin sign-in, the one identity no first-party path can
+/// re-derive. Its presence is a client's signal that the agent is already
+/// authenticated: it must adopt the meta and skip the startup login, because
+/// authenticating on the restored method would re-drive the plugin's
+/// interactive flow.
+pub const RESTORED_AUTH_META_KEY: &str = "restoredAuthMeta";
+
+/// The method id a fresh launch resumes on, when the last sign-in was a
+/// plugin's and nothing first-party has taken over since.
+///
+/// [`build_auth_methods`] answers "which credential did this launch find on
+/// disk", and for a plugin sign-in the honest answer is none: the credential
+/// lives behind the plugin's own seam and the `AuthManager` never held it. So
+/// the identity has to come from the record of who minted it
+/// ([`crate::auth::sign_in_record`]) rather than from what the reload path
+/// happened to notice.
+///
+/// `first_party_default` is `build_auth_methods`' own answer. When it names
+/// anything — a cached session token, a stored API key — that credential is
+/// real, present, and owns the launch; the record stays inert rather than
+/// competing with it. `advertised` is the method list this launch built: a
+/// recorded plugin that is no longer advertised (disabled, untrusted, or
+/// uninstalled) cannot be resumed, and badging a row that is not on screen is
+/// worse than badging none.
+pub fn restored_sign_in_method_id(
+    first_party_default: Option<&acp::AuthMethodId>,
+    advertised: &[acp::AuthMethod],
+    recorded: Option<&acp::AuthMethodId>,
+) -> Option<acp::AuthMethodId> {
+    if first_party_default.is_some() {
+        return None;
+    }
+    let recorded = recorded?;
+    if AuthMethodKind::from_id(recorded) != AuthMethodKind::PluginOauth {
+        return None;
+    }
+    advertised
+        .iter()
+        .any(|method| method.id() == recorded)
+        .then(|| recorded.clone())
 }
 
 /// ACP session auth method. Use `is_session_based_method` for classification.
@@ -1628,6 +1676,136 @@ mod tests {
         assert_eq!(
             credential_method_id(Some(&work), false, false).map(|id| id.0.to_string()),
             Some("plugin-oauth:acme#work".to_string())
+        );
+    }
+
+    // ── restoring a plugin sign-in across a restart ─────────────────────
+    //
+    // The first-party half of this is `build_auth_methods`: a session token in
+    // `auth.json` comes back as `cached_token` and normalizes to the login row
+    // that owns it. A plugin sign-in has no such disk trace, so these pin the
+    // other source -- the record of who minted it.
+
+    /// The advertised list a plugin-only launch builds: the interactive
+    /// first-party row, then one row per plugin account.
+    fn advertised_with_plugin_accounts() -> Vec<acp::AuthMethod> {
+        vec![
+            grok_com_auth_method(None, false),
+            plugin_oauth_auth_method("acme", "Acme", Some("work"), Some("Work")),
+            plugin_oauth_auth_method("acme", "Acme", Some("personal"), Some("Personal")),
+        ]
+    }
+
+    /// The identity a plugin sign-in reported must be the identity the next
+    /// launch reports. Nothing first-party is present on either side -- that is
+    /// what makes the record the only thing that carries it.
+    #[test]
+    fn plugin_identity_survives_a_relaunch() {
+        let signed_in_with = acp::AuthMethodId::new(plugin_oauth_method_id("acme", Some("work")));
+        let after_login = credential_method_id(Some(&signed_in_with), false, false);
+
+        // Next launch: no cached token, no API key -- `build_auth_methods` has
+        // no first-party default to offer.
+        let restored = restored_sign_in_method_id(
+            None,
+            &advertised_with_plugin_accounts(),
+            Some(&signed_in_with),
+        )
+        .expect("the recorded sign-in is still advertised");
+        let after_relaunch = credential_method_id(Some(&restored), false, false);
+
+        assert_eq!(
+            after_relaunch, after_login,
+            "a restored plugin sign-in must not look like a different credential"
+        );
+        assert_eq!(
+            after_relaunch.map(|id| id.0.to_string()),
+            Some("plugin-oauth:acme#work".to_string()),
+            "the account selector is half the identity: one plugin holds several"
+        );
+    }
+
+    /// A plugin that declares no accounts signs in under the bare id, and that
+    /// is the id that comes back -- the `#<account>` half is absent on both
+    /// sides rather than invented on one.
+    #[test]
+    fn a_single_account_plugin_restores_its_account_less_id() {
+        let signed_in_with = acp::AuthMethodId::new(plugin_oauth_method_id("acme", None));
+        let advertised = vec![
+            grok_com_auth_method(None, false),
+            plugin_oauth_auth_method("acme", "Acme", None, None),
+        ];
+        assert_eq!(
+            restored_sign_in_method_id(None, &advertised, Some(&signed_in_with))
+                .map(|id| id.0.to_string()),
+            Some("plugin-oauth:acme".to_string())
+        );
+    }
+
+    /// A live first-party credential owns the launch: it is present, the
+    /// `AuthManager` holds it, and the record describes a sign-in it has
+    /// replaced.
+    #[test]
+    fn a_first_party_credential_outranks_the_record() {
+        let recorded = acp::AuthMethodId::new(plugin_oauth_method_id("acme", Some("work")));
+        for default in [CACHED_TOKEN_AUTH_METHOD_ID, XAI_API_KEY_METHOD_ID] {
+            assert_eq!(
+                restored_sign_in_method_id(
+                    Some(&acp::AuthMethodId::new(default)),
+                    &advertised_with_plugin_accounts(),
+                    Some(&recorded),
+                ),
+                None,
+                "{default} is a credential this launch actually has"
+            );
+        }
+    }
+
+    /// A recorded plugin that this launch does not advertise -- disabled,
+    /// untrusted, uninstalled, or an account dropped from the manifest -- is
+    /// not resumable. Report nothing rather than badge a row that is not there.
+    #[test]
+    fn an_unadvertised_plugin_is_not_restored() {
+        let advertised = advertised_with_plugin_accounts();
+        assert_eq!(
+            restored_sign_in_method_id(
+                None,
+                &advertised,
+                Some(&acp::AuthMethodId::new(plugin_oauth_method_id(
+                    "acme",
+                    Some("contractor")
+                ))),
+            ),
+            None,
+            "an account the manifest no longer declares"
+        );
+        assert_eq!(
+            restored_sign_in_method_id(
+                None,
+                &advertised,
+                Some(&acp::AuthMethodId::new(plugin_oauth_method_id(
+                    "other", None
+                ))),
+            ),
+            None,
+            "a plugin that is gone"
+        );
+    }
+
+    /// Only a plugin sign-in is restored this way. A first-party id has its own
+    /// disk trace and its own normalization; nothing recorded means nothing
+    /// restored.
+    #[test]
+    fn only_a_plugin_id_is_restored() {
+        let advertised = advertised_with_plugin_accounts();
+        assert_eq!(restored_sign_in_method_id(None, &advertised, None), None);
+        assert_eq!(
+            restored_sign_in_method_id(
+                None,
+                &advertised,
+                Some(&acp::AuthMethodId::new(GROK_COM_METHOD_ID))
+            ),
+            None
         );
     }
 

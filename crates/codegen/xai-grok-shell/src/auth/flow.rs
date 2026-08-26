@@ -1110,6 +1110,15 @@ pub fn perform_logout(
     let auth = auth_manager.current_or_expired();
     let email = auth.as_ref().and_then(|a| a.email.clone());
     let was_logged_in = auth.is_some();
+    // Outside the `was_logged_in` gate on purpose: that flag asks whether
+    // `auth.json` holds a credential, and a plugin sign-in never puts one
+    // there. Left behind, the record would resume a sign-in the user has just
+    // ended. A *scoped* logout is narrower -- it removes one `auth.json` scope
+    // and leaves the rest signed in -- and the plugin sign-in is not one of
+    // its scopes, so it survives that.
+    if scope.is_none() {
+        super::sign_in_record::clear_in(super::sign_in_record::home_for(auth_manager));
+    }
     // Intentional credential removal must be attributable in
     // unified.jsonl, so a later "auth.json entry gone" can be
     // distinguished from accidental loss (deleted/corrupt file).
