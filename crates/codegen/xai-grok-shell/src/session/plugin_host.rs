@@ -111,32 +111,66 @@ fn plugin_launch(launch: SidecarLaunch) -> PluginLaunch {
     }
 }
 
-/// Say so, loudly, when a plugin asked for `network: false` on a platform that
-/// has no per-child network filter to give it.
+/// Say so, loudly, at load time when a plugin asked for `network: false` on a
+/// platform that has nothing to enforce it with.
 ///
-/// The manifest advertises `network: false` as a guarantee; without a hardener
-/// the only thing still enforcing it is a deno sidecar's own withheld
-/// `--allow-net`, and nothing at all enforces it for bun, node, or an `exec`
-/// program. That gap predates directly-executed plugins — it is what
-/// `spawn_hardener()` returning `None` off Linux has always meant — but a
-/// guarantee that quietly evaporates is worse than one the manifest could not
-/// express, so it gets a warning rather than silence.
-fn warn_if_network_confinement_unavailable(plugins: &[RegisteredPlugin], hardened: bool) {
-    if hardened {
-        return;
-    }
+/// The manifest advertises `network: false` as a guarantee. Linux enforces it
+/// with a seccomp filter and macOS with a Seatbelt profile, both keyed on the
+/// flag alone, so both cover an `exec` plugin exactly as they cover a
+/// TypeScript one. On a platform with neither, the only thing still enforcing
+/// anything is a deno sidecar's own withheld `--allow-net`, and nothing at all
+/// enforces it for bun, node, or an `exec` program.
+///
+/// Whether that is fatal is [`strict_network_confinement`]'s call; this only
+/// makes sure it is never silent. The log names every affected plugin, because
+/// "some plugin on this machine is less confined than its manifest says" is not
+/// actionable and "these three are" is.
+fn warn_if_network_confinement_unavailable(plugins: &[RegisteredPlugin], reason: &str) {
     let confined: Vec<&str> = plugins
         .iter()
         .filter(|p| !p.network)
         .map(|p| p.name.as_str())
         .collect();
-    if !confined.is_empty() {
+    if confined.is_empty() {
+        return;
+    }
+    if let Some(profile) = strict_network_confinement() {
+        tracing::error!(
+            plugins = %confined.join(", "),
+            profile = %profile,
+            reason = %reason,
+            "`network: false` cannot be enforced on this platform and sandbox profile \
+             '{profile}' was requested; these sidecars will refuse to start",
+        );
+    } else {
         tracing::warn!(
             plugins = %confined.join(", "),
-            "no per-child network filter on this platform; `network: false` is not enforced \
-             for these sidecars beyond a deno runtime's own permission flags",
+            reason = %reason,
+            "`network: false` is not enforced for these sidecars on this platform, beyond a \
+             deno runtime's own permission flags; set a sandbox profile to make it fatal instead",
         );
     }
+}
+
+/// Whether an unenforceable `network: false` should refuse to start the sidecar,
+/// and under which profile name.
+///
+/// The signal is [`xai_grok_sandbox::requested_confinement_profile`] — the
+/// non-`off` sandbox profile this process was *asked* to run under. A user who
+/// selected a profile has said they want confinement they can rely on, and this
+/// codebase already reads that request as the fail-closed trigger: `grok
+/// workspace start` refuses under a requested profile, and so does connecting to
+/// a leader, both on exactly the grounds that the capability cannot be proven
+/// confined.
+///
+/// It is deliberately not a new config key. `network` defaults to `false`, so
+/// refusing unconditionally would mean the plugin system does not work at all on
+/// a platform Grok supports (Windows), which is too much to spend on a default;
+/// and a knob nobody sets would leave the guarantee exactly as soft as it is
+/// now. Reusing the profile request gives the user who actually depends on the
+/// guarantee a hard failure, and everyone else a warning and a working plugin.
+fn strict_network_confinement() -> Option<&'static str> {
+    xai_grok_sandbox::requested_confinement_profile()
 }
 
 /// A one-line label for a launch form, for the registration log.
@@ -158,31 +192,87 @@ fn plugin_storage_dir() -> PathBuf {
     xai_grok_config::grok_home().join("plugin-storage")
 }
 
-/// The last-mile spawn hardener the host applies to each sidecar `Command`. On
-/// Linux, `network: false` plugins get the per-child seccomp network filter
-/// (`xai-grok-sandbox`) installed via `pre_exec`; the host crate itself never
-/// depends on the sandbox — this closure is the seam. `None` elsewhere.
-#[cfg(target_os = "linux")]
-fn spawn_hardener() -> Option<xai_grok_plugin_host::SpawnHardener> {
-    Some(Arc::new(
-        |cmd: &mut tokio::process::Command, network: bool| {
-            if !network {
-                // SAFETY: `install_child_network_filter` performs only
-                // async-signal-safe syscalls (prctl + seccomp install), the
-                // documented contract for a `pre_exec` hook.
-                unsafe {
-                    cmd.pre_exec(|| xai_grok_sandbox::child_net::install_child_network_filter());
-                }
-            }
-        },
-    ))
+/// The last-mile spawn hardener the host applies to each sidecar `Command`.
+///
+/// It keys on the manifest's `network` flag alone — never on the runtime or the
+/// launch form — and asks `xai-grok-sandbox` what this platform can do about a
+/// child's network. The host crate itself never depends on the sandbox; this
+/// closure is the seam.
+///
+/// The two mechanisms attach at different points of a spawn, which is why the
+/// sandbox crate hands back a description rather than doing it: seccomp is
+/// installed inside the child between fork and exec, while Seatbelt is a
+/// re-exec through `sandbox-exec`, which rewrites the argv. Both survive `exec`
+/// and are inherited by descendants, so a sidecar cannot shed either by
+/// spawning something else.
+///
+/// When there is no mechanism the hardener fails the launch under a requested
+/// sandbox profile (see [`strict_network_confinement`]) and otherwise lets the
+/// sidecar run, having warned at load.
+fn spawn_hardener() -> xai_grok_plugin_host::SpawnHardener {
+    let denial = xai_grok_sandbox::child_network::child_network_denial();
+    Arc::new(move |cmd: &mut tokio::process::Command, network: bool| {
+        deny_child_network(&denial, strict_network_confinement(), cmd, network)
+    })
 }
 
-/// No sidecar network hardening on non-Linux (matches how the sandbox crate is
-/// `cfg`'d for other child spawns in the shell).
+/// The hardener's decision, with both inputs passed in.
+///
+/// Taking the platform's answer as an argument is what lets every branch —
+/// including the macOS one — be compiled and exercised on any host. A branch
+/// that only exists behind `cfg(target_os = "macos")` is a branch nobody here
+/// can type-check, and this one is the whole point of the change.
+fn deny_child_network(
+    denial: &Result<
+        xai_grok_sandbox::child_network::ChildNetworkDenial,
+        xai_grok_sandbox::child_network::NoChildNetworkDenial,
+    >,
+    strict: Option<&str>,
+    cmd: &mut tokio::process::Command,
+    network: bool,
+) -> Result<(), String> {
+    use xai_grok_sandbox::child_network::ChildNetworkDenial;
+
+    if network {
+        return Ok(());
+    }
+    match denial {
+        Ok(ChildNetworkDenial::Seccomp) => install_child_seccomp(cmd),
+        Ok(ChildNetworkDenial::Seatbelt { program, args }) => {
+            xai_grok_plugin_host::wrap_command(cmd, program, args);
+            Ok(())
+        }
+        Err(unavailable) => match strict {
+            Some(profile) => Err(format!(
+                "`network: false` cannot be enforced here ({unavailable}) and sandbox profile \
+                 '{profile}' was requested; refusing to start the sidecar unconfined"
+            )),
+            None => Ok(()),
+        },
+    }
+}
+
+/// Install the per-child seccomp network filter via `pre_exec`.
+///
+/// Split out rather than written inline so the non-Linux arm is a compile error
+/// away from being a silent `Ok(())`: `ChildNetworkDenial::Seccomp` is only ever
+/// produced on Linux, and if that ever changes elsewhere this says no instead of
+/// quietly launching an unconfined child.
+#[cfg(target_os = "linux")]
+fn install_child_seccomp(cmd: &mut tokio::process::Command) -> Result<(), String> {
+    // SAFETY: `install_child_network_filter` performs only async-signal-safe
+    // syscalls (prctl + seccomp install), the documented contract for a
+    // `pre_exec` hook.
+    unsafe {
+        cmd.pre_exec(|| xai_grok_sandbox::child_net::install_child_network_filter());
+    }
+    Ok(())
+}
+
+/// See the Linux variant.
 #[cfg(not(target_os = "linux"))]
-fn spawn_hardener() -> Option<xai_grok_plugin_host::SpawnHardener> {
-    None
+fn install_child_seccomp(_cmd: &mut tokio::process::Command) -> Result<(), String> {
+    Err("seccomp child network filtering is Linux-only".to_string())
 }
 
 /// Build a [`PluginHost`] for a session's TS sidecar plugins, or `None` when the
@@ -233,9 +323,7 @@ pub(crate) fn build_session_plugin_host(
     }
 
     let mut host = PluginHost::new(plugin_storage_dir());
-    if let Some(hardener) = spawn_hardener() {
-        host.set_spawn_hardener(hardener);
-    }
+    host.set_spawn_hardener(spawn_hardener());
     // Tier 2 orchestration: route the `agent_*` RPCs through this session's
     // subagent coordinator channel, so plugin spawns are real children of the
     // session (TUI-visible, cancellable) on the exact same path as Task spawns.
@@ -258,7 +346,9 @@ pub(crate) fn build_session_plugin_host(
     // so a `/login` served from a live session and one served by the
     // agent-level host reach the identical screen.
     host.set_sign_in_sink(crate::auth::plugin_sign_in::PluginSignInPrompt::global());
-    warn_if_network_confinement_unavailable(&sidecar_plugins, spawn_hardener().is_some());
+    if let Err(unavailable) = xai_grok_sandbox::child_network::child_network_denial() {
+        warn_if_network_confinement_unavailable(&sidecar_plugins, &unavailable.to_string());
+    }
     for spec in &sidecar_plugins {
         tracing::info!(
             plugin = %spec.name,
@@ -1776,5 +1866,85 @@ mod tests {
         // A parent with no sidecar plugins gives the child none — the child
         // must not start a host the parent itself decided not to have.
         assert!(session_plugin_host(true, None, || Some(other.clone())).is_none());
+    }
+}
+
+/// The confinement decision, driven with a synthetic platform answer so every
+/// branch — including the one this host cannot run — is exercised here.
+#[cfg(test)]
+mod network_confinement_tests {
+    use super::*;
+    use xai_grok_sandbox::child_network::{
+        ChildNetworkDenial, NoChildNetworkDenial, SEATBELT_DENY_NETWORK_PROFILE, seatbelt_denial,
+    };
+
+    fn cmd() -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("/usr/bin/plugin");
+        cmd.arg("--serve");
+        cmd
+    }
+
+    #[test]
+    fn a_network_true_plugin_is_left_alone_on_every_platform() {
+        // The opt-in is the whole opt-in: nothing is installed, nothing is
+        // wrapped, and an unconfinable platform is not an error for it.
+        for denial in [
+            Ok(ChildNetworkDenial::Seccomp),
+            Ok(seatbelt_denial(std::path::Path::new(
+                "/usr/bin/sandbox-exec",
+            ))),
+            Err(NoChildNetworkDenial::new("nothing here")),
+        ] {
+            let mut c = cmd();
+            assert!(deny_child_network(&denial, Some("workspace"), &mut c, true).is_ok());
+            assert_eq!(c.as_std().get_program(), "/usr/bin/plugin");
+        }
+    }
+
+    #[test]
+    fn seatbelt_rewrites_the_argv_to_run_under_the_deny_network_profile() {
+        let denial = Ok(seatbelt_denial(std::path::Path::new(
+            "/usr/bin/sandbox-exec",
+        )));
+        let mut c = cmd();
+        deny_child_network(&denial, None, &mut c, false).unwrap();
+        let std_cmd = c.as_std();
+        assert_eq!(std_cmd.get_program(), "/usr/bin/sandbox-exec");
+        let args: Vec<_> = std_cmd.get_args().collect();
+        assert_eq!(args[1], SEATBELT_DENY_NETWORK_PROFILE);
+        // The plugin's own program lands after `--`, not as a sandbox-exec flag.
+        assert_eq!(args[2], "--");
+        assert_eq!(args[3], "/usr/bin/plugin");
+        assert_eq!(args[4], "--serve");
+    }
+
+    #[test]
+    fn no_mechanism_warns_by_default_and_refuses_under_a_requested_profile() {
+        // `network` defaults to false, so an unconditional refusal would mean
+        // no plugin runs at all on a platform Grok ships for. The refusal is
+        // owed to the user who asked for confinement, and only to them.
+        let denial: Result<ChildNetworkDenial, _> =
+            Err(NoChildNetworkDenial::new("no mechanism on this platform"));
+        assert!(deny_child_network(&denial, None, &mut cmd(), false).is_ok());
+
+        let refused = deny_child_network(&denial, Some("workspace"), &mut cmd(), false)
+            .expect_err("a requested profile must make an unconfinable sidecar fatal");
+        assert!(
+            refused.contains("no mechanism on this platform"),
+            "{refused}"
+        );
+        assert!(refused.contains("workspace"), "{refused}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn seccomp_confines_in_the_child_without_touching_the_argv() {
+        // The filter is a `pre_exec` hook, so there is nothing to observe on
+        // the Command but the absence of a wrapper — which is the assertion
+        // that matters: the Linux path must not re-exec through anything.
+        let denial = Ok(ChildNetworkDenial::Seccomp);
+        let mut c = cmd();
+        deny_child_network(&denial, None, &mut c, false).unwrap();
+        assert_eq!(c.as_std().get_program(), "/usr/bin/plugin");
     }
 }

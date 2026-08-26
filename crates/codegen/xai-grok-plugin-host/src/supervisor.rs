@@ -65,13 +65,55 @@ type CommandFactory =
 /// just before the sidecar is launched, receiving the plugin's `network` flag.
 ///
 /// The host is deliberately ignorant of what hardening means: the shell injects
-/// a closure (via [`PluginHost::set_spawn_hardener`]) that installs the per-child
-/// seccomp network filter (`xai-grok-sandbox`) when `network == false`. Keeping
-/// this an injected callback is what lets the host crate stay free of any
-/// dependency on `xai-grok-sandbox` while still confining `network: false`
-/// sidecars. See the `TODO(sandbox-wiring)` in [`crate::runtime::build_command`].
-pub type SpawnHardener =
-    Arc<dyn Fn(&mut tokio::process::Command, /* network: */ bool) + Send + Sync>;
+/// a closure (via [`PluginHost::set_spawn_hardener`]) that confines a
+/// `network: false` sidecar with whatever the platform provides
+/// (`xai-grok-sandbox::child_network`). Keeping this an injected callback is
+/// what lets the host crate stay free of any dependency on `xai-grok-sandbox`
+/// while still confining `network: false` sidecars.
+///
+/// `Err` aborts the launch. A hardener that cannot deliver the confinement the
+/// manifest promised must say so here rather than let the sidecar start
+/// unconfined — the host has no way to tell a hardener that declined to act
+/// from one that acted.
+pub type SpawnHardener = Arc<
+    dyn Fn(&mut tokio::process::Command, /* network: */ bool) -> Result<(), String> + Send + Sync,
+>;
+
+/// Prepend a wrapper program to an already-built sidecar `Command`, preserving
+/// the argv, working directory and environment the factory set.
+///
+/// The macOS confinement is a re-exec through `sandbox-exec`, which means
+/// replacing the command's program — something a `&mut Command` cannot do in
+/// place. Rebuilding it is only sound at the one point this is called from: the
+/// [`SpawnHardener`] runs after [`crate::runtime::build_command`] (program,
+/// args, cwd, `GROK_LEADER_SOCKET`) and before [`PluginSidecar::spawn`] sets the
+/// stdio, which is the state this function knows how to carry over. Calling it
+/// after stdio is configured would silently drop it.
+pub fn wrap_command(
+    cmd: &mut tokio::process::Command,
+    wrapper: &std::path::Path,
+    wrapper_args: &[std::ffi::OsString],
+) {
+    let std_cmd = cmd.as_std();
+    let mut wrapped = tokio::process::Command::new(wrapper);
+    wrapped.args(wrapper_args);
+    wrapped.arg(std_cmd.get_program());
+    wrapped.args(std_cmd.get_args());
+    if let Some(dir) = std_cmd.get_current_dir() {
+        wrapped.current_dir(dir);
+    }
+    for (key, value) in std_cmd.get_envs() {
+        match value {
+            Some(value) => {
+                wrapped.env(key, value);
+            }
+            None => {
+                wrapped.env_remove(key);
+            }
+        }
+    }
+    *cmd = wrapped;
+}
 
 /// Owns and supervises the plugin sidecars. Share behind an `Arc`; it coerces to
 /// `Arc<dyn PluginHookInvoker>` for the hook runner.
@@ -425,11 +467,14 @@ impl PluginHost {
     ) -> Result<Arc<PluginSidecar>, StartError> {
         let spec = &entry.spec;
         let mut cmd = (self.command_factory)(spec).map_err(StartError::Spawn)?;
-        // Apply the injected last-mile hardener (production: seccomp network
-        // filter for `network: false` plugins) after the factory builds the
-        // argv/cwd but before we launch the child.
+        // Apply the injected last-mile hardener (production: the platform's
+        // per-child network confinement for `network: false` plugins) after the
+        // factory builds the argv/cwd but before we launch the child. A
+        // hardener that cannot confine a plugin that asked to be confined fails
+        // the start: a sidecar running with the network the manifest said it
+        // would not have is worse than one that does not run.
         if let Some(hardener) = &self.spawn_hardener {
-            hardener(&mut cmd, spec.network);
+            hardener(&mut cmd, spec.network).map_err(StartError::Spawn)?;
         }
         let sidecar = PluginSidecar::spawn(
             cmd,

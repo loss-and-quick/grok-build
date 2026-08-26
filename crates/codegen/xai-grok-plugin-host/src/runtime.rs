@@ -128,8 +128,14 @@ fn parse_node_version(raw: &str) -> Option<(u32, u32)> {
 /// Pure and side-effect-free — the unit tests drive it with synthetic
 /// `ResolvedRuntime`s. `network` only affects deno today: without it we still
 /// scope read/write to the workspace, and only add `--allow-net` when the
-/// manifest opts in. (bun/node network confinement is the seccomp filter's job;
-/// see [`build_command`].)
+/// manifest opts in.
+///
+/// This is defence in depth, not the enforcement point. The confinement that
+/// `network: false` actually names is the platform one applied by the
+/// [`crate::SpawnHardener`] (see [`build_command`]), which is keyed on the flag
+/// alone and so covers bun, node and a directly executed program identically.
+/// Nothing may be decided from the fact that a runtime happens to police itself
+/// — that would make the guarantee depend on the launch form again.
 fn build_argv(
     resolved: &ResolvedRuntime,
     entry: &Path,
@@ -274,21 +280,20 @@ fn discover_node() -> Result<ResolvedRuntime, RuntimeDiscoveryError> {
 /// the argv, and set the working directory + env.
 ///
 /// Network confinement for `network: false` sidecars is not applied here: the
-/// child runs under the per-child seccomp network filter
-/// (`xai-grok-sandbox::child_net`, an `unsafe pre_exec`) installed by the
-/// [`crate::SpawnHardener`] the shell injects — the shell owns the
-/// `xai-grok-sandbox` dependency and the trust flow, so this crate stays
-/// sandbox-free. Landlock/Seatbelt confinement is inherited automatically
-/// (plugins are children of the sandboxed process).
+/// child runs under whatever `xai-grok-sandbox::child_network` offers on this
+/// platform, installed by the [`crate::SpawnHardener`] the shell injects — the
+/// shell owns the `xai-grok-sandbox` dependency and the trust flow, so this
+/// crate stays sandbox-free. Landlock/Seatbelt filesystem confinement is
+/// inherited automatically (plugins are children of the sandboxed process).
 ///
 /// That confinement is a property of the child process, not of the launch form:
-/// the hardener is a `pre_exec` keyed on `spec.network` alone, and a seccomp
-/// filter survives `exec` and is inherited by descendants. So
-/// [`PluginLaunch::Command`] is confined exactly as [`PluginLaunch::Runtime`]
-/// is, without this crate learning anything about the program it runs. The one
-/// thing that does *not* generalize is deno's `--allow-read`/`--allow-write`
-/// scoping, which the manifest never advertised — a bun or node sidecar has
-/// never had it either.
+/// the hardener is keyed on `spec.network` alone, and both mechanisms (a Linux
+/// seccomp filter, a macOS Seatbelt profile) survive `exec` and are inherited by
+/// descendants. So [`PluginLaunch::Command`] is confined exactly as
+/// [`PluginLaunch::Runtime`] is, without this crate learning anything about the
+/// program it runs. The one thing that does *not* generalize is deno's
+/// `--allow-read`/`--allow-write` scoping, which the manifest never advertised —
+/// a bun or node sidecar has never had it either.
 pub fn build_command(
     spec: &RegisteredPlugin,
 ) -> Result<tokio::process::Command, RuntimeDiscoveryError> {

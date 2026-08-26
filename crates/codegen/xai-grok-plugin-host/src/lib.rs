@@ -31,10 +31,13 @@
 //! # Sandboxing
 //!
 //! Plugins inherit the parent's Landlock/Seatbelt confinement automatically (they
-//! are children of the sandboxed process). The per-child seccomp network filter
-//! for `network: false` plugins is not applied in this crate — the shell injects
-//! it through [`SpawnHardener`] (it owns `xai-grok-sandbox`), and [`PluginHost`]
-//! applies that `unsafe pre_exec` to each sidecar's spawn `Command`.
+//! are children of the sandboxed process). The per-child network confinement for
+//! `network: false` plugins is not applied in this crate — the shell injects it
+//! through [`SpawnHardener`] (it owns `xai-grok-sandbox`), and [`PluginHost`]
+//! applies it to each sidecar's spawn `Command`: a seccomp `pre_exec` on Linux,
+//! a `sandbox-exec` re-exec on macOS. A platform with neither makes the hardener
+//! return `Err`, which fails the sidecar's start rather than launching it with
+//! network the manifest said it would not have.
 
 mod capabilities;
 pub mod orchestration;
@@ -51,7 +54,7 @@ pub use orchestration::{
     SignInSink, SpawnedSubagent,
 };
 pub use runtime::{PluginLaunch, RuntimeKind};
-pub use supervisor::{PluginHost, SpawnHardener};
+pub use supervisor::{PluginHost, SpawnHardener, wrap_command};
 // Re-exported so tool-surface integrations (the shell) can name the
 // `tool_invoke` wire shapes without a direct protocol dependency (the same
 // idiom as `orchestration::AgentStatusDto`).
@@ -66,9 +69,9 @@ pub struct RegisteredPlugin {
     /// How to launch the sidecar: a TS entry under a JS runtime, or a program
     /// executed directly.
     pub launch: runtime::PluginLaunch,
-    /// Network access. `false` (default) is the seccomp-filtered case, applied
-    /// via the [`SpawnHardener`] seam. The seam keys on this flag alone, so
-    /// both launch forms are confined identically.
+    /// Network access. `false` (default) is the confined case, applied via the
+    /// [`SpawnHardener`] seam. The seam keys on this flag alone, so both launch
+    /// forms are confined identically.
     pub network: bool,
     /// Opaque config forwarded verbatim at `initialize` and via `config_get`.
     pub config: serde_json::Value,

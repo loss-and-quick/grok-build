@@ -112,6 +112,7 @@ async fn assert_hardener_saw_no_network(launch: PluginLaunch) {
     );
     host.set_spawn_hardener(Arc::new(move |_cmd, network| {
         rec.lock().unwrap().push(network);
+        Ok(())
     }));
     host.register_plugin(RegisteredPlugin {
         name: "p".to_string(),
@@ -626,4 +627,99 @@ async fn observed_reply_carries_additional_context() {
     );
 
     host.dispose().await;
+}
+
+#[tokio::test]
+async fn a_hardener_that_cannot_confine_fails_the_start() {
+    // `network: false` is a promise the manifest makes to the user, not a
+    // best-effort. When the platform has nothing to enforce it with, the
+    // hardener says so and the sidecar must not run: a plugin that quietly
+    // gains the network it was declared not to have is the failure mode this
+    // seam exists to prevent.
+    let data_dir = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_fake_sidecar");
+    let factory = Box::new(move |_spec: &RegisteredPlugin| {
+        let mut cmd = tokio::process::Command::new(bin);
+        cmd.env("FAKE_MODE", "normal");
+        cmd.env("FAKE_SUBSCRIPTIONS", "pre_tool_use");
+        Ok(cmd)
+    });
+    let mut host = PluginHost::new_for_test(
+        data_dir.path().to_path_buf(),
+        factory,
+        Duration::from_millis(10),
+    );
+    host.set_spawn_hardener(Arc::new(|_cmd, network| {
+        if network {
+            Ok(())
+        } else {
+            Err("no per-child network confinement here".to_string())
+        }
+    }));
+    host.register_plugin(RegisteredPlugin {
+        name: "p".to_string(),
+        launch: PluginLaunch::Command {
+            program: PathBuf::from("/does/not/matter"),
+            args: vec![],
+        },
+        network: false,
+        config: serde_json::json!({}),
+        declared_tools: vec![],
+        workspace_root: ws.path().to_path_buf(),
+        session_id: "sess-1".to_string(),
+        leader_socket: None,
+    });
+    assert!(
+        host.invoke(req("pre_tool_use", 5000)).await.is_err(),
+        "an unconfinable network:false sidecar must not serve invokes"
+    );
+    let status = host.status().await;
+    assert_ne!(status[0].state, PluginState::Running);
+    host.dispose().await;
+}
+
+#[test]
+fn wrap_command_prepends_the_wrapper_and_keeps_argv_cwd_and_env() {
+    // The macOS confinement replaces the program with `sandbox-exec`, so the
+    // plugin's own argv has to survive being pushed one level down — including
+    // the leader socket env and the workspace cwd `build_command` set.
+    let mut cmd = tokio::process::Command::new("/usr/bin/plugin");
+    cmd.args(["--serve", "-p"]);
+    cmd.current_dir("/ws");
+    cmd.env("GROK_LEADER_SOCKET", "/run/leader.sock");
+
+    xai_grok_plugin_host::wrap_command(
+        &mut cmd,
+        std::path::Path::new("/usr/bin/sandbox-exec"),
+        &[
+            std::ffi::OsString::from("-p"),
+            std::ffi::OsString::from("(deny network*)"),
+            std::ffi::OsString::from("--"),
+        ],
+    );
+
+    let std_cmd = cmd.as_std();
+    assert_eq!(std_cmd.get_program(), "/usr/bin/sandbox-exec");
+    let args: Vec<_> = std_cmd.get_args().collect();
+    assert_eq!(
+        args,
+        vec![
+            "-p",
+            "(deny network*)",
+            "--",
+            "/usr/bin/plugin",
+            "--serve",
+            "-p"
+        ]
+    );
+    assert_eq!(std_cmd.get_current_dir(), Some(std::path::Path::new("/ws")));
+    let envs: Vec<_> = std_cmd.get_envs().collect();
+    assert_eq!(
+        envs,
+        vec![(
+            std::ffi::OsStr::new("GROK_LEADER_SOCKET"),
+            Some(std::ffi::OsStr::new("/run/leader.sock"))
+        )]
+    );
 }
