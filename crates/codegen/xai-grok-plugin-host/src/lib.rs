@@ -71,7 +71,9 @@ pub struct RegisteredPlugin {
     pub launch: runtime::PluginLaunch,
     /// Network access. `false` (default) is the confined case, applied via the
     /// [`SpawnHardener`] seam. The seam keys on this flag alone, so both launch
-    /// forms are confined identically.
+    /// forms are confined identically. Also stated to the child in
+    /// [`runtime::NETWORK_ENV`], which is information a launcher can act on and
+    /// not the confinement itself.
     pub network: bool,
     /// Opaque config forwarded verbatim at `initialize` and via `config_get`.
     pub config: serde_json::Value,

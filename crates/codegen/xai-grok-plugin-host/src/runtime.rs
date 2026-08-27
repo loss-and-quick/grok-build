@@ -101,6 +101,17 @@ pub enum ResolvedRuntime {
 /// Minimum node major we run under (TS type-stripping landed in the 22 line).
 const MIN_NODE_MAJOR: u32 = 22;
 
+/// Env var carrying the manifest's `network` flag to the sidecar: `"1"` when
+/// the plugin may reach the network, `"0"` when it may not.
+///
+/// Set on every sidecar spawn, for both launch forms and both values — see
+/// [`build_command`] for why it is never simply omitted. It is *information*
+/// for the child, not the enforcement: what `network: false` is worth is
+/// decided by the platform confinement the [`crate::SpawnHardener`] installs on
+/// the spawn, which the child cannot see, undo, or escape by ignoring this
+/// variable.
+pub const NETWORK_ENV: &str = "GROK_PLUGIN_NETWORK";
+
 /// Whether node `major.minor` still needs `--experimental-strip-types`.
 ///
 /// Type-stripping is unflagged from 23.6.0 onwards; 22.x and 23.0–23.5 need the
@@ -317,6 +328,29 @@ pub fn build_command(
     if let Some(socket) = &spec.leader_socket {
         cmd.env("GROK_LEADER_SOCKET", socket);
     }
+    // Hand the manifest's `network` flag down as `NETWORK_ENV`, so a launcher on
+    // the far side of an `exec` can align a runtime's own permission model with
+    // it (deno's `--allow-net`) instead of being told the same fact a second
+    // time in its argv, where the two spellings can drift apart.
+    //
+    // Env and not argv: the `Command` form's argv is the manifest's, verbatim,
+    // and a program that never heard of this flag must not have to parse one.
+    // Env is inert to a child that ignores it, survives the `exec` a launcher
+    // performs into the real runtime, and is already how `GROK_LEADER_SOCKET`
+    // reaches a sidecar. `initialize` cannot carry it at all: the handshake
+    // happens long after argv is fixed.
+    //
+    // Always set, with both values, rather than present-when-allowed. Absence
+    // then means only "nothing that knows this variable spawned me", which a
+    // child reads as denied — the manifest default — without mistaking an old
+    // host for a decision. An unconditional `env` also overwrites any
+    // `GROK_PLUGIN_NETWORK` this process inherited, which a conditional one
+    // would leak into a plugin that was denied.
+    //
+    // Nothing is enforced here. The child's network confinement is applied to
+    // this spawn by the `SpawnHardener` regardless of what the child reads from
+    // this variable or does about it.
+    cmd.env(NETWORK_ENV, if spec.network { "1" } else { "0" });
     Ok(cmd)
 }
 
@@ -498,6 +532,46 @@ mod tests {
             ]
         );
         assert_eq!(std.get_current_dir(), Some(Path::new("/ws")));
+    }
+
+    #[test]
+    fn build_command_states_the_network_flag_both_ways() {
+        // The command form, so this needs no JS runtime on PATH — and so it
+        // also witnesses that the flag reaches a child whose argv the host
+        // never gets to shape.
+        let spec = |network: bool| RegisteredPlugin {
+            name: "p".into(),
+            launch: PluginLaunch::Command {
+                program: PathBuf::from("/ws/p/plugin"),
+                args: vec!["--serve".into()],
+            },
+            network,
+            config: serde_json::Value::Null,
+            declared_tools: Vec::new(),
+            workspace_root: PathBuf::from("/ws"),
+            session_id: "s".into(),
+            leader_socket: None,
+        };
+        let network_env = |cmd: &tokio::process::Command| -> Option<OsString> {
+            cmd.as_std()
+                .get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new(NETWORK_ENV))
+                .and_then(|(_, v)| v.map(|v| v.to_os_string()))
+        };
+
+        let allowed = build_command(&spec(true)).unwrap();
+        assert_eq!(network_env(&allowed), Some(OsString::from("1")));
+
+        // Denied is stated, not left absent: a child must be able to tell a
+        // denial from a host that never heard of the variable.
+        let denied = build_command(&spec(false)).unwrap();
+        assert_eq!(network_env(&denied), Some(OsString::from("0")));
+
+        // And it stays out of argv, which belongs to the manifest.
+        assert_eq!(
+            denied.as_std().get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("--serve")]
+        );
     }
 
     #[test]
