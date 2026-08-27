@@ -56,6 +56,98 @@ fn requested_wait_timeout(timeout_ms: Option<u64>) -> Duration {
         .unwrap_or(DEFAULT_WAIT_TIMEOUT)
 }
 
+/// Poll interval for [`wait_for_monitor_event`]. The monitor's own pipeline
+/// re-reads its log every `DEBOUNCE_MS`, so a shorter interval here buys no
+/// latency while costing a snapshot clone per tick.
+const MONITOR_EVENT_POLL: Duration =
+    Duration::from_millis(crate::implementations::grok_build::monitor::types::DEBOUNCE_MS);
+
+/// Grace after the log grows, spent looking for the *published* event.
+///
+/// The line still has to travel pipeline -> notification bridge -> session
+/// actor -> `MonitorEventBuffer`. Waiting a couple of debounce beats for that
+/// lets the wait hand back the rate-limited, batched event the notification
+/// path would have shown, instead of racing it to the raw log. Clamped to the
+/// caller's deadline, so it can never stretch the wait past the cap.
+const MONITOR_EVENT_PUBLISH_GRACE: Duration =
+    Duration::from_millis(2 * crate::implementations::grok_build::monitor::types::DEBOUNCE_MS);
+
+/// How a [`wait_for_monitor_event`] wait ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EventWaitOutcome {
+    /// The monitor emitted: either a notification is buffered for it, or its
+    /// log grew (the notification for that growth is still in flight).
+    Emitted,
+    /// The monitor exited, or is gone from the terminal registry.
+    Completed,
+    /// The deadline came first.
+    TimedOut,
+}
+
+/// Whether `buffer` holds an undelivered event for `task_id`.
+///
+/// Cheap when the buffer is empty — the common case on every tick of a wait
+/// that is waiting precisely because nothing has happened yet.
+fn buffer_holds_event(
+    buffer: &crate::implementations::grok_build::monitor::types::MonitorEventBuffer,
+    task_id: &str,
+) -> bool {
+    !buffer.is_empty() && buffer.snapshot().iter().any(|e| e.task_id == task_id)
+}
+
+/// Park until a running monitor emits, exits, or `timeout` elapses.
+///
+/// Two wake signals, because only one of them works everywhere. The
+/// `MonitorEventBuffer` carries the notification the model would have been
+/// shown, but it is filled by the session actor's mid-turn route, which a
+/// subagent never takes (its `is_turn_active` flag is unset). The task's
+/// `output_total_bytes` is written by the terminal backend itself and is
+/// therefore visible to any caller, so it is what actually guarantees the wait
+/// ends when the monitor speaks.
+///
+/// Nothing is consumed here: the buffer is drained once, synchronously, at the
+/// point the result is built. A wait aborted mid-flight by an interjection or a
+/// steer therefore leaves every event where it was, for the normal path.
+async fn wait_for_monitor_event(
+    terminal: &std::sync::Arc<dyn crate::computer::types::TerminalBackend>,
+    task_id: &str,
+    buffer: Option<&crate::implementations::grok_build::monitor::types::MonitorEventBuffer>,
+    timeout: Duration,
+) -> EventWaitOutcome {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let baseline = match terminal.get_task(task_id).await {
+        Some(snapshot) if !snapshot.completed => snapshot.output_total_bytes,
+        // Already finished (or gone) before the first tick: nothing to wait for.
+        _ => return EventWaitOutcome::Completed,
+    };
+    let mut grace_until: Option<tokio::time::Instant> = None;
+
+    loop {
+        if buffer.is_some_and(|b| buffer_holds_event(b, task_id)) {
+            return EventWaitOutcome::Emitted;
+        }
+        let now = tokio::time::Instant::now();
+        match grace_until {
+            // Growth already seen; only the published event is still awaited.
+            Some(until) if now >= until => return EventWaitOutcome::Emitted,
+            Some(_) => {}
+            None => match terminal.get_task(task_id).await {
+                None => return EventWaitOutcome::Completed,
+                Some(snapshot) if snapshot.completed => return EventWaitOutcome::Completed,
+                Some(snapshot) if snapshot.output_total_bytes > baseline => {
+                    grace_until = Some((now + MONITOR_EVENT_PUBLISH_GRACE).min(deadline));
+                }
+                Some(_) => {
+                    if now >= deadline {
+                        return EventWaitOutcome::TimedOut;
+                    }
+                }
+            },
+        }
+        tokio::time::sleep_until((now + MONITOR_EVENT_POLL).min(deadline)).await;
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WaitHint {
     NotRequested,
@@ -64,6 +156,10 @@ pub(crate) enum WaitHint {
         waited: Duration,
     },
     ReturnedEarly,
+    /// A `wait_for_event` wait ended because the monitor emitted. The monitor
+    /// itself is still running, so the "still running" body is right but the
+    /// "waited the whole budget" lead would be a lie.
+    MonitorEmitted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +195,10 @@ fn still_running_wait_hint(hint: WaitHint, subject: WaitSubject) -> String {
         WaitHint::ReturnedEarly => {
             format!("Wait returned early because another finished; this {noun} is still running.")
         }
+        WaitHint::MonitorEmitted => format!(
+            "The wait ended on the event above, not on a deadline; the {noun} is still running. \
+             Act on the event: wait again with wait_for_event only if you need the next one."
+        ),
         WaitHint::NotRequested => "Use timeout_ms to wait for completion.".to_string(),
     };
     format!("{lead} You will be notified automatically when the {noun} completes.")
@@ -180,9 +280,12 @@ impl TaskOutputTool {
         &self,
         task_id: &str,
         timeout_ms: Option<u64>,
+        wait_for_event: bool,
         ctx: &xai_tool_runtime::ToolCallContext,
         resources: SharedResources,
     ) -> Result<TaskOutputOutput, xai_tool_runtime::ToolError> {
+        use crate::implementations::grok_build::monitor::types::MonitorEventBuffer;
+
         let contract_version = ctx
             .extensions
             .get::<xai_tool_runtime::BehaviorVersion>()
@@ -193,20 +296,62 @@ impl TaskOutputTool {
             terminal = resources.lock().await.require::<Terminal>()?.0.clone();
         }
 
-        let waits = xai_tool_types::task_output_waits(timeout_ms);
+        // `wait_for_event` is a monitor-only wait. For anything else — a bash
+        // background task, a subagent, an id that never existed — it is dropped
+        // rather than refused, so the fallback is the ordinary completion wait
+        // the model would otherwise have asked for.
+        let monitor_wait = wait_for_event
+            && terminal
+                .get_task(task_id)
+                .await
+                .is_some_and(|s| s.kind == crate::computer::types::TaskKind::Monitor);
+        let waits = xai_tool_types::task_output_waits(timeout_ms) || wait_for_event;
         let wait_cap = max_wait_block();
-        let wait_hint = if waits {
+        // A `wait_for_event` call with no (or a zero) budget still waits: the
+        // flag alone is a request to park, so it gets the same default budget
+        // `wait_tasks` uses rather than degenerating into a poll. Kept in step
+        // with `TaskOutputToolInput::waits`, which is what the shell asks
+        // before deciding to race this call against a pending correction.
+        let effective_timeout_ms = if wait_for_event {
+            timeout_ms.filter(|ms| *ms > 0)
+        } else {
+            timeout_ms
+        };
+        let mut wait_hint = if waits {
             WaitHint::Elapsed {
-                requested: requested_wait_timeout(timeout_ms),
-                waited: capped_wait_timeout(timeout_ms, wait_cap),
+                requested: requested_wait_timeout(effective_timeout_ms),
+                waited: capped_wait_timeout(effective_timeout_ms, wait_cap),
             }
         } else {
             WaitHint::NotRequested
         };
-        let snapshot = if waits {
+        // Held across the wait so the drain at the end can suppress exactly the
+        // events this call is about to hand back. `None` outside grok-build
+        // hosts, which register no buffer.
+        let (event_buffer, owner_session_id) = if monitor_wait {
+            let res = resources.lock().await;
+            (
+                res.get::<MonitorEventBuffer>().cloned(),
+                res.get::<crate::types::resources::OwnerSessionId>()
+                    .map(|o| o.0.clone()),
+            )
+        } else {
+            (None, None)
+        };
+        let snapshot = if monitor_wait {
+            // Same cap as every other wait here: `capped_wait_timeout` clamps
+            // whatever the model asked for to `max_wait_block()`.
+            let timeout = capped_wait_timeout(effective_timeout_ms, wait_cap);
+            let outcome =
+                wait_for_monitor_event(&terminal, task_id, event_buffer.as_ref(), timeout).await;
+            if outcome == EventWaitOutcome::Emitted {
+                wait_hint = WaitHint::MonitorEmitted;
+            }
+            terminal.get_task(task_id).await
+        } else if waits {
             // Cap the blocking wait so a large `timeout_ms` can't wedge the turn;
             // the model is pinged on completion regardless (see `capped_wait_timeout`).
-            let timeout = capped_wait_timeout(timeout_ms, wait_cap);
+            let timeout = capped_wait_timeout(effective_timeout_ms, wait_cap);
             terminal.wait_for_completion(task_id, Some(timeout)).await
         } else {
             terminal.get_task(task_id).await
@@ -232,8 +377,28 @@ impl TaskOutputTool {
                     )
                 })
                 .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
+            let mut result = snapshot_to_result(snapshot, &read_file_name, max_output_bytes);
+            // Last statement before the return, and deliberately synchronous:
+            // the buffer is a destructive queue, so an event taken here is one
+            // the normal mid-turn injection can never show again, and an event
+            // that path already took is no longer here to be served twice.
+            // Awaiting after the drain would open a window where an aborted
+            // wait carries events away with it.
+            if let Some(buffer) = &event_buffer {
+                let drained = buffer.drain_matching(|e| {
+                    e.task_id == task_id && e.owned_by_session(owner_session_id.as_deref())
+                });
+                // Every buffered event, not just the first: a burst that the
+                // monitor's debounce did not already batch into one line still
+                // has to arrive whole.
+                if let Some(body) =
+                    crate::reminders::task_completion::format_monitor_events(&drained, None)
+                {
+                    result.output = format!("{body}\n\n{}", result.output);
+                }
+            }
             return Ok(TaskOutputOutput::Result(apply_running_wait_hint(
-                snapshot_to_result(snapshot, &read_file_name, max_output_bytes),
+                result,
                 wait_hint,
                 WaitSubject::Task,
             )));
@@ -249,9 +414,9 @@ impl TaskOutputTool {
         // Same cap as the bash path: a blocking subagent query can't wedge the
         // turn beyond the wait cap (the parent is pinged when the child finishes).
         let query_timeout_ms = if waits {
-            Some(capped_wait_timeout(timeout_ms, wait_cap).as_millis() as u64)
+            Some(capped_wait_timeout(effective_timeout_ms, wait_cap).as_millis() as u64)
         } else {
-            timeout_ms
+            effective_timeout_ms
         };
         if let Some(backend) = backend
             && let Some(snapshot) = backend
@@ -845,6 +1010,7 @@ impl crate::types::tool_metadata::ToolMetadata for TaskOutputTool {
                 task_ids_param: "task_ids",
                 timeout_ms_param: "timeout_ms",
                 task_id_param: "task_id",
+                wait_for_event_param: "wait_for_event",
             })
         });
         &DESC
@@ -912,6 +1078,9 @@ fn task_output_description(
         task_id_param: renderer
             .param_for_kind(ToolKind::KillTaskAction, "task_id")
             .unwrap_or("task_id"),
+        wait_for_event_param: renderer
+            .param_for_kind(ToolKind::BackgroundTaskAction, "wait_for_event")
+            .unwrap_or("wait_for_event"),
     })
 }
 
@@ -966,9 +1135,24 @@ impl xai_tool_runtime::Tool for TaskOutputTool {
             )));
         }
 
+        // One monitor per event wait. "Whichever of these speaks first" is a
+        // different question from the wait-all the multi-id path answers, and
+        // guessing which one was meant would silently give the wrong one.
+        if input.wait_for_event && ids.len() > 1 {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                "wait_for_event waits on one monitor: pass a single task id.".to_string(),
+            ));
+        }
+
         if ids.len() == 1 {
             return self
-                .run_single_task(&ids[0], input.timeout_ms, &ctx, resources)
+                .run_single_task(
+                    &ids[0],
+                    input.timeout_ms,
+                    input.wait_for_event,
+                    &ctx,
+                    resources,
+                )
                 .await;
         }
 
@@ -1105,6 +1289,9 @@ mod tests {
     use crate::computer::types::{
         BackgroundHandle, KillOutcome, TaskSnapshot, TerminalBackend, TerminalRunRequest,
         TerminalRunResult,
+    };
+    use crate::implementations::grok_build::monitor::types::{
+        MonitorEventBuffer, MonitorEventNotification,
     };
     use crate::types::resources::Resources;
     use crate::types::tool_metadata::ToolMetadata;
@@ -1385,6 +1572,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-1".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await
@@ -1413,6 +1601,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-2".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await
@@ -1440,6 +1629,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-3".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await
@@ -1465,6 +1655,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-x".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await
@@ -1542,6 +1733,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-unknown".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await
@@ -1615,6 +1807,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["nonexistent".into()],
                 timeout_ms: Some(1000),
+                ..Default::default()
             },
         )
         .await
@@ -1640,6 +1833,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-x".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await;
@@ -1673,6 +1867,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-4".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await
@@ -1703,6 +1898,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-5".into()],
                 timeout_ms: Some(5000),
+                ..Default::default()
             },
         )
         .await
@@ -1800,6 +1996,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-done".into()],
                 timeout_ms: Some(600_000),
+                ..Default::default()
             },
         )
         .await
@@ -1834,6 +2031,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-run".into()],
                 timeout_ms: Some(200),
+                ..Default::default()
             },
         )
         .await
@@ -1992,6 +2190,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-6".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await
@@ -2035,6 +2234,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-xyz".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await
@@ -2062,6 +2262,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-xyz".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await
@@ -2383,6 +2584,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec![String::new()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await;
@@ -2509,6 +2711,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["sub-done".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await
@@ -2560,6 +2763,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["sub-run".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await
@@ -2593,6 +2797,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["sub-nope".into()],
                 timeout_ms: None,
+                ..Default::default()
             },
         )
         .await
@@ -2648,6 +2853,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["sub-done".into()],
                 timeout_ms: Some(600_000),
+                ..Default::default()
             },
         )
         .await
@@ -2702,6 +2908,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["sub-run".into()],
                 timeout_ms: Some(5_000),
+                ..Default::default()
             },
         )
         .await
@@ -2729,6 +2936,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["never-existed".into()],
                 timeout_ms: Some(600_000),
+                ..Default::default()
             },
         )
         .await
@@ -2796,6 +3004,7 @@ mod tests {
                 TaskOutputToolInput {
                     task_ids: vec![id.to_string()],
                     timeout_ms: Some(600_000),
+                    ..Default::default()
                 },
             )
             .await
@@ -2852,5 +3061,316 @@ mod tests {
             }
             other => panic!("Expected MultiResult, got {other:?}"),
         }
+    }
+
+    // -- wait_for_event --------------------------------------------------
+    //
+    // Waiting for a *persistent* monitor's next event, which is the one thing
+    // completion-waiting cannot express: such a monitor never completes, so a
+    // plain `timeout_ms` wait on it can only run out the cap.
+
+    /// A monitor snapshot that reports a fixed number of written bytes, so a
+    /// test can say "the log grew" without running a process.
+    struct MonitorTerminal {
+        task_id: String,
+        bytes: Arc<std::sync::atomic::AtomicUsize>,
+        completed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl MonitorTerminal {
+        fn new(task_id: &str) -> Self {
+            Self {
+                task_id: task_id.to_string(),
+                bytes: Arc::new(std::sync::atomic::AtomicUsize::new(10)),
+                completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+
+        fn snapshot(&self) -> TaskSnapshot {
+            let completed = self.completed.load(std::sync::atomic::Ordering::Relaxed);
+            let mut snap = make_snapshot(&self.task_id, completed, completed.then_some(0));
+            snap.kind = crate::computer::types::TaskKind::Monitor;
+            snap.output_total_bytes = self.bytes.load(std::sync::atomic::Ordering::Relaxed);
+            snap
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TerminalBackend for MonitorTerminal {
+        async fn run(
+            &self,
+            _request: TerminalRunRequest,
+        ) -> Result<TerminalRunResult, crate::computer::types::ComputerError> {
+            unimplemented!()
+        }
+        async fn run_background(
+            &self,
+            _request: TerminalRunRequest,
+        ) -> Result<BackgroundHandle, crate::computer::types::ComputerError> {
+            unimplemented!()
+        }
+        async fn kill_task(&self, _task_id: &str) -> KillOutcome {
+            unimplemented!()
+        }
+        async fn get_task(&self, _task_id: &str) -> Option<TaskSnapshot> {
+            Some(self.snapshot())
+        }
+        async fn wait_for_completion(
+            &self,
+            _task_id: &str,
+            timeout: Option<Duration>,
+        ) -> Option<TaskSnapshot> {
+            // Stands in for a persistent monitor: never completes on its own,
+            // so the caller only ever gets back a running snapshot at the cap.
+            if let Some(timeout) = timeout {
+                tokio::time::sleep(timeout).await;
+            }
+            Some(self.snapshot())
+        }
+        async fn list_tasks(&self) -> Vec<TaskSnapshot> {
+            vec![self.snapshot()]
+        }
+    }
+
+    fn monitor_resources(
+        backend: Arc<dyn TerminalBackend>,
+        buffer: Option<MonitorEventBuffer>,
+    ) -> Resources {
+        let mut resources = Resources::new();
+        resources.insert(crate::types::resources::Terminal(backend));
+        resources.insert(TemplateRenderer::new(
+            std::collections::HashMap::from([(ToolKind::Read, "read_file".to_string())]),
+            std::collections::HashMap::new(),
+        ));
+        if let Some(buffer) = buffer {
+            resources.insert(buffer);
+        }
+        resources
+    }
+
+    fn buffered_event(task_id: &str, text: &str) -> MonitorEventNotification {
+        MonitorEventNotification {
+            task_id: task_id.to_string(),
+            event_text: crate::implementations::grok_build::monitor::event::wrap_monitor_event(
+                "ci", text, task_id,
+            ),
+            owner_session_id: None,
+        }
+    }
+
+    async fn run_wait_for_event(
+        resources: Resources,
+        task_id: &str,
+        timeout_ms: Option<u64>,
+    ) -> TaskOutputOutput {
+        xai_tool_runtime::Tool::run(
+            &TaskOutputTool,
+            test_ctx(resources.into_shared()),
+            TaskOutputToolInput {
+                task_ids: vec![task_id.to_string()],
+                timeout_ms,
+                wait_for_event: true,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    fn result_of(out: TaskOutputOutput) -> TaskOutputResult {
+        match out {
+            TaskOutputOutput::Result(r) => r,
+            other => panic!("expected a single Result, got {other:?}"),
+        }
+    }
+
+    /// The buffered event ends the wait and comes back in the result — with a
+    /// hint that says the wait ended on the event, not on a deadline.
+    #[tokio::test]
+    async fn wait_for_event_returns_the_buffered_event() {
+        let backend: Arc<dyn TerminalBackend> = Arc::new(MonitorTerminal::new("mon-1"));
+        let buffer = MonitorEventBuffer::default();
+        buffer.push(buffered_event("mon-1", "DONE"));
+        let resources = monitor_resources(backend, Some(buffer.clone()));
+
+        let started = std::time::Instant::now();
+        let result = result_of(run_wait_for_event(resources, "mon-1", Some(60_000)).await);
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait must end on the event, not on the 60s budget"
+        );
+        assert!(result.output.contains("DONE"), "{}", result.output);
+        assert!(
+            result.output.contains("ended on the event above"),
+            "the still-running hint must not claim a deadline: {}",
+            result.output
+        );
+    }
+
+    /// Offset coherence: the wait and the mid-turn injection share one
+    /// destructive queue, so an event handed back here is gone from the buffer
+    /// and cannot be delivered a second time as a system reminder.
+    #[tokio::test]
+    async fn a_returned_event_is_no_longer_buffered_for_the_normal_path() {
+        let backend: Arc<dyn TerminalBackend> = Arc::new(MonitorTerminal::new("mon-1"));
+        let buffer = MonitorEventBuffer::default();
+        buffer.push(buffered_event("mon-1", "DONE"));
+        let resources = monitor_resources(backend, Some(buffer.clone()));
+
+        let _ = run_wait_for_event(resources, "mon-1", Some(60_000)).await;
+
+        assert!(
+            buffer.is_empty(),
+            "the event the wait returned must not stay queued for re-delivery"
+        );
+    }
+
+    /// A burst arrives whole. Returning the first line and dropping the rest
+    /// would lose output that nothing else will ever show.
+    #[tokio::test]
+    async fn a_burst_comes_back_whole() {
+        let backend: Arc<dyn TerminalBackend> = Arc::new(MonitorTerminal::new("mon-1"));
+        let buffer = MonitorEventBuffer::default();
+        buffer.push(buffered_event("mon-1", "step one"));
+        buffer.push(buffered_event("mon-1", "step two"));
+        buffer.push(buffered_event("mon-1", "step three"));
+        let resources = monitor_resources(backend, Some(buffer.clone()));
+
+        let result = result_of(run_wait_for_event(resources, "mon-1", Some(60_000)).await);
+
+        for line in ["step one", "step two", "step three"] {
+            assert!(
+                result.output.contains(line),
+                "{line} missing: {}",
+                result.output
+            );
+        }
+        assert!(buffer.is_empty());
+    }
+
+    /// Another monitor's events belong to the normal path: consuming them here
+    /// would hide them inside a tool result about a task they say nothing about.
+    #[tokio::test]
+    async fn another_monitors_events_stay_buffered() {
+        let backend: Arc<dyn TerminalBackend> = Arc::new(MonitorTerminal::new("mon-1"));
+        let buffer = MonitorEventBuffer::default();
+        buffer.push(buffered_event("mon-1", "mine"));
+        buffer.push(buffered_event("mon-2", "not mine"));
+        let resources = monitor_resources(backend, Some(buffer.clone()));
+
+        let result = result_of(run_wait_for_event(resources, "mon-1", Some(60_000)).await);
+
+        assert!(result.output.contains("mine"));
+        assert!(!result.output.contains("not mine"), "{}", result.output);
+        let left = buffer.drain_all();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].task_id, "mon-2");
+    }
+
+    /// No buffer at all — the shape a subagent runs in, where nothing fills the
+    /// mid-turn queue. The wait still has to end when the monitor speaks, which
+    /// it learns from the task's own byte count.
+    #[tokio::test]
+    async fn a_growing_log_ends_the_wait_without_a_buffer() {
+        let terminal = MonitorTerminal::new("mon-1");
+        let bytes = terminal.bytes.clone();
+        let backend: Arc<dyn TerminalBackend> = Arc::new(terminal);
+        let resources = monitor_resources(backend, None);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            bytes.store(4096, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let started = std::time::Instant::now();
+        let result = result_of(run_wait_for_event(resources, "mon-1", Some(60_000)).await);
+
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "growth in the monitor's log must end the wait"
+        );
+        assert_eq!(result.status, "running");
+        assert!(
+            result.output.contains("ended on the event above"),
+            "{}",
+            result.output
+        );
+    }
+
+    /// A monitor that exits while we wait ends the wait as a completion, not as
+    /// an event: the caller gets the exit code rather than an event hint.
+    #[tokio::test]
+    async fn an_exiting_monitor_ends_the_wait_as_a_completion() {
+        let terminal = MonitorTerminal::new("mon-1");
+        let completed = terminal.completed.clone();
+        let backend: Arc<dyn TerminalBackend> = Arc::new(terminal);
+        let resources = monitor_resources(backend, None);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            completed.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let result = result_of(run_wait_for_event(resources, "mon-1", Some(60_000)).await);
+
+        assert_eq!(result.status, "completed");
+        assert!(
+            !result.output.contains("ended on the event above"),
+            "{}",
+            result.output
+        );
+    }
+
+    /// The cap still applies: a silent monitor returns a running snapshot at
+    /// the requested budget instead of parking indefinitely.
+    #[tokio::test]
+    async fn a_silent_monitor_returns_at_the_budget() {
+        let backend: Arc<dyn TerminalBackend> = Arc::new(MonitorTerminal::new("mon-1"));
+        let resources = monitor_resources(backend, None);
+
+        let started = std::time::Instant::now();
+        let result = result_of(run_wait_for_event(resources, "mon-1", Some(400)).await);
+
+        assert_eq!(result.status, "running");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the wait must end at the requested budget"
+        );
+        assert!(result.output.contains("still running"), "{}", result.output);
+    }
+
+    /// `wait_for_event` on something that is not a monitor is not an error: it
+    /// falls back to the completion wait the caller would otherwise have asked
+    /// for, rather than parking on events that can never arrive.
+    #[tokio::test]
+    async fn wait_for_event_on_a_bash_task_waits_for_completion() {
+        let resources = resources_with_terminal(Some(make_snapshot("bash-1", true, Some(0))));
+
+        let result = result_of(run_wait_for_event(resources, "bash-1", Some(60_000)).await);
+
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.task_id, "bash-1");
+    }
+
+    /// Two monitors would mean "whichever speaks first", a different question
+    /// from the wait-all the multi-id path answers. Say so instead of guessing.
+    #[tokio::test]
+    async fn wait_for_event_refuses_more_than_one_id() {
+        let resources = resources_with_terminal(None);
+        let err = xai_tool_runtime::Tool::run(
+            &TaskOutputTool,
+            test_ctx(resources.into_shared()),
+            TaskOutputToolInput {
+                task_ids: vec!["mon-1".into(), "mon-2".into()],
+                timeout_ms: Some(1_000),
+                wait_for_event: true,
+            },
+        )
+        .await
+        .expect_err("two ids with wait_for_event must be refused");
+        assert!(
+            format!("{err}").contains("single task id"),
+            "the error must name the fix: {err}"
+        );
     }
 }

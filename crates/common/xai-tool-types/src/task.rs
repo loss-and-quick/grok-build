@@ -631,6 +631,21 @@ pub struct TaskOutputToolInput {
     )]
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+
+    /// End the wait at the monitor's next event instead of at its exit.
+    ///
+    /// A `persistent: true` monitor never completes, so a plain wait on one can
+    /// only run out the cap. With this set the wait also ends the moment the
+    /// monitor emits, which is the thing the caller is actually waiting for.
+    /// Implies a wait: set without `timeout_ms` it waits the default budget.
+    #[schemars(
+        description = "Wait for the monitor's next event instead of its exit. Use for a persistent monitor, which never completes on its own. Implies waiting; still bounded by timeout_ms and the wait cap."
+    )]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_lenient::deserialize_lenient_bool"
+    )]
+    pub wait_for_event: bool,
 }
 
 /// Trimmed, de-duplicated task IDs preserving first-seen order. Single source
@@ -654,9 +669,10 @@ impl TaskOutputToolInput {
         resolve_task_ids(&self.task_ids)
     }
 
-    /// True only when `timeout_ms` is set and greater than zero.
+    /// True when `timeout_ms` is set and greater than zero, or when
+    /// `wait_for_event` asks to park until a monitor emits.
     pub fn waits(&self) -> bool {
-        task_output_waits(self.timeout_ms)
+        task_output_waits(self.timeout_ms) || self.wait_for_event
     }
 }
 
@@ -705,13 +721,22 @@ pub fn format_wait_cap_ms(ms: u64) -> String {
 /// configurable, so it cannot be baked in when the description is built.
 pub const MAX_WAIT_MS_PLACEHOLDER: &str = "{max_wait_ms}";
 
-/// Same as [`task_output_waits`], from raw tool-arg JSON (fingerprint / doom-loop).
+/// Same as [`TaskOutputToolInput::waits`], from raw tool-arg JSON
+/// (fingerprint / doom-loop / the interruptible-wait-tool gate).
+///
+/// `wait_for_event` counts: it parks the turn exactly like a positive
+/// `timeout_ms` does, so the shell must guard it with the same
+/// interjection/steering race or a monitor wait would swallow a correction.
 pub fn task_output_waits_from_json(args: &serde_json::Value) -> bool {
     let timeout_ms = args.get("timeout_ms").and_then(|v| {
         v.as_u64()
             .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
     });
-    task_output_waits(timeout_ms)
+    let wait_for_event = args
+        .get("wait_for_event")
+        .and_then(crate::serde_lenient::lenient_bool_from_json)
+        .unwrap_or(false);
+    task_output_waits(timeout_ms) || wait_for_event
 }
 
 /// Output from the `get_task_output` tool.
@@ -1320,6 +1345,8 @@ pub struct TaskOutputToolNaming<'a> {
     /// Singular monitor-id name for the monitor aside — kill_task's `task_id`
     /// (tracks renames). Not get_task_output's plural `task_ids`.
     pub task_id_param: &'a str,
+    /// Model-facing name of the `wait_for_event` input (tracks param renames).
+    pub wait_for_event_param: &'a str,
 }
 
 /// Build the shared `get_task_output` tool description.
@@ -1332,6 +1359,7 @@ pub fn build_task_output_description(naming: &TaskOutputToolNaming) -> String {
         task_ids_param,
         timeout_ms_param,
         task_id_param,
+        wait_for_event_param,
     } = *naming;
     let monitor_present = monitor_tool.is_some();
     let subagent_present = subagent_background_param.is_some();
@@ -1353,12 +1381,21 @@ pub fn build_task_output_description(naming: &TaskOutputToolNaming) -> String {
         None => String::new(),
     };
     let wait_cap = MAX_WAIT_MS_PLACEHOLDER;
+    // Only worth spending description budget on when a monitor tool exists —
+    // `wait_for_event` does nothing for a bash task or a subagent.
+    let event_note = match monitor_tool {
+        Some(m) => format!(
+            "\n- {wait_for_event_param}: with one monitor id, end the wait at that monitor's next event instead of at its exit. \
+             The way to wait on a {m} started with persistent: true, which never completes on its own"
+        ),
+        None => String::new(),
+    };
 
     format!(
         "Get output and status from a background task{target_suffix}.\n\n\
          Usage notes:\n\
          - Pass {task_ids_param} with one or more ids from {sources}{monitor_note}; for a single task use a one-element array. Multiple ids with a positive {timeout_ms_param} wait until all complete\n\
-         - Omit {timeout_ms_param} or pass 0 for a non-blocking status snapshot; set a positive {timeout_ms_param} to wait up to that many milliseconds, capped at {wait_cap}\n\
+         - Omit {timeout_ms_param} or pass 0 for a non-blocking status snapshot; set a positive {timeout_ms_param} to wait up to that many milliseconds, capped at {wait_cap}{event_note}\n\
          - Returns current output, status, and exit code if completed{read_note}"
     )
 }
@@ -1605,17 +1642,18 @@ mod tests {
     #[test]
     fn task_output_input_schema_does_not_advertise_the_alias() {
         // The leniency is wire-only: the advertised schema must keep exactly
-        // the canonical properties (task_ids, timeout_ms) so tool-definition
-        // dumps and param randomization are unaffected.
+        // the canonical properties (task_ids, timeout_ms, wait_for_event) so
+        // tool-definition dumps and param randomization are unaffected.
         let schema = serde_json::to_value(schemars::schema_for!(TaskOutputToolInput)).unwrap();
         let props = schema["properties"].as_object().unwrap();
         assert!(props.contains_key("task_ids"));
         assert!(props.contains_key("timeout_ms"));
+        assert!(props.contains_key("wait_for_event"));
         assert!(
             !props.contains_key("task_id"),
             "singular alias must not leak into the schema: {props:?}"
         );
-        assert_eq!(props.len(), 2);
+        assert_eq!(props.len(), 3);
         // And task_ids stays a plain string array.
         assert_eq!(props["task_ids"]["type"], "array");
         assert_eq!(props["task_ids"]["items"]["type"], "string");
@@ -1963,6 +2001,7 @@ mod tests {
             task_ids_param: "process_ids",
             timeout_ms_param: "max_wait",
             task_id_param: "id",
+            wait_for_event_param: "on_event",
         });
         assert!(
             desc.contains("Pass process_ids with"),
@@ -1980,6 +2019,10 @@ mod tests {
             !desc.contains("task_ids") && !desc.contains("timeout_ms") && !desc.contains("task_id"),
             "canonical param names must not remain after rename: {desc}"
         );
+        assert!(
+            desc.contains("on_event: with one monitor id") && !desc.contains("wait_for_event"),
+            "renamed wait_for_event must appear: {desc}"
+        );
     }
 
     #[test]
@@ -1992,6 +2035,7 @@ mod tests {
             task_ids_param: "task_ids",
             timeout_ms_param: "timeout_ms",
             task_id_param: "task_id",
+            wait_for_event_param: "wait_for_event",
         });
         assert_eq!(
             desc,
@@ -1999,6 +2043,7 @@ mod tests {
              Usage notes:\n\
              - Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
              - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
+             - wait_for_event: with one monitor id, end the wait at that monitor's next event instead of at its exit. The way to wait on a monitor started with persistent: true, which never completes on its own\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
@@ -2014,6 +2059,7 @@ mod tests {
             task_ids_param: "task_ids",
             timeout_ms_param: "timeout_ms",
             task_id_param: "task_id",
+            wait_for_event_param: "wait_for_event",
         });
         assert_eq!(
             desc,
@@ -2245,5 +2291,38 @@ mod tests {
             "review",
             "review the diff",
         ));
+    }
+
+    /// The shell decides whether to race a tool call against a pending
+    /// interjection or steer by asking this. A `wait_for_event` call parks the
+    /// turn just as a positive `timeout_ms` does, so if it did not count here a
+    /// monitor wait would sit through a correction meant to stop it.
+    #[test]
+    fn wait_for_event_counts_as_a_wait() {
+        assert!(task_output_waits_from_json(
+            &serde_json::json!({"task_ids": ["m"], "wait_for_event": true})
+        ));
+        // Models spell booleans as strings often enough that the input itself
+        // is lenient; the gate has to read them the same way.
+        assert!(task_output_waits_from_json(
+            &serde_json::json!({"task_ids": ["m"], "wait_for_event": "true"})
+        ));
+        assert!(!task_output_waits_from_json(
+            &serde_json::json!({"task_ids": ["m"], "wait_for_event": false})
+        ));
+        assert!(!task_output_waits_from_json(
+            &serde_json::json!({"task_ids": ["m"]})
+        ));
+    }
+
+    /// `wait_for_event` alone is a request to park: without it the tool would
+    /// take a snapshot and return, which is not what was asked for.
+    #[test]
+    fn wait_for_event_implies_waiting_without_a_timeout() {
+        let input: TaskOutputToolInput =
+            serde_json::from_value(serde_json::json!({"task_ids": ["m"], "wait_for_event": true}))
+                .unwrap();
+        assert!(input.waits());
+        assert!(input.wait_for_event);
     }
 }
