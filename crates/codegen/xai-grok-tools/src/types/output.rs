@@ -966,14 +966,16 @@ impl ToolOutput {
                 if o.persistent {
                     format!(
                         "Monitor started (task {}, persistent -- runs until kill_task or session end).\n\
-                         You will be notified on each event. Keep working -- do not poll or sleep.\n\
+                         You will be notified on each event. Keep working -- never sleep or re-poll in a loop.\n\
+                         When the next event is the only thing left to do, wait for it: get_task_output on this task id with wait_for_event.\n\
                          Events may arrive while you are waiting for the user -- an event is not their reply.",
                         o.task_id
                     )
                 } else {
                     format!(
                         "Monitor started (task {}, timeout {}ms).\n\
-                         You will be notified on each event. Keep working -- do not poll or sleep.\n\
+                         You will be notified on each event. Keep working -- never sleep or re-poll in a loop.\n\
+                         When the next event is the only thing left to do, wait for it: get_task_output on this task id with wait_for_event.\n\
                          Events may arrive while you are waiting for the user -- an event is not their reply.",
                         o.task_id, o.timeout_ms
                     )
