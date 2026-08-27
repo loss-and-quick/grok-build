@@ -1746,3 +1746,174 @@ async fn state_is_busy_reflects_queued_inputs() {
         })
         .await;
 }
+/// A child session actor: identical to the parent fixture except for the
+/// `is_subagent` hint the runtime-wake gate reads.
+async fn create_test_subagent_actor() -> std::sync::Arc<SessionActor> {
+    let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+    let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    actor.startup_hints.is_subagent = true;
+    std::sync::Arc::new(actor)
+}
+/// A monitor the child armed exits mid-turn and the bridge asks the child's own
+/// actor to wake. The child must refuse, and — unlike every other refusal here
+/// — must NOT park a fallback: a parked fallback is drained into a
+/// `NotificationDrain` turn at the next idle tick, which is the same self-wake
+/// through a different door.
+#[tokio::test(flavor = "current_thread")]
+async fn subagent_refuses_its_own_task_wake_without_parking_a_fallback() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = create_test_subagent_actor().await;
+            let origin = crate::session::PromptOrigin::TaskCompleted {
+                task_id: "mon-child".to_string(),
+            };
+            let (admission, response_rx) = task_wake_admission(
+                "mon-child",
+                NotificationSource::MonitorCompleted {
+                    task_id: "mon-child".to_string(),
+                },
+            );
+            assert!(
+                actor
+                    .admit_task_completion_wake(&origin, admission)
+                    .await
+                    .is_none(),
+                "a child must not wake itself for its own monitor"
+            );
+            assert_eq!(response_rx.await, Ok(false));
+            let state = actor.state.lock().await;
+            assert!(state.running_task.is_none());
+            assert!(state.pending_inputs.is_empty());
+            assert!(
+                state.pending_notifications.is_empty(),
+                "a refused child wake must not park a fallback the idle drain \
+                 would turn back into a turn"
+            );
+        })
+        .await;
+}
+/// The gate is keyed on `is_subagent`, not on the origin: the same completion
+/// in a top-level session is still admitted, so a user's own monitor keeps
+/// waking their session.
+#[tokio::test(flavor = "current_thread")]
+async fn parent_session_still_admits_the_same_task_wake() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let origin = crate::session::PromptOrigin::TaskCompleted {
+                task_id: "mon-child".to_string(),
+            };
+            let (admission, response_rx) = task_wake_admission(
+                "mon-child",
+                NotificationSource::MonitorCompleted {
+                    task_id: "mon-child".to_string(),
+                },
+            );
+            assert!(
+                actor
+                    .admit_task_completion_wake(&origin, admission)
+                    .await
+                    .is_some(),
+                "reparenting hands the task to the parent, whose wake must survive"
+            );
+            assert_eq!(response_rx.await, Ok(true));
+        })
+        .await;
+}
+/// The routes that never reach an admission decision: a batched
+/// `NotificationDrain` (built inside `maybe_drain_notifications`) and a
+/// backgrounded grandchild's `subagent-completed-*` prompt (sent with
+/// `admission: None`). Both land in `pending_inputs`, so the promote
+/// chokepoint is where they have to die.
+#[tokio::test(flavor = "current_thread")]
+async fn subagent_promote_drops_runtime_wake_fronts_and_keeps_the_driver_turn() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = create_test_subagent_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state
+                    .pending_inputs
+                    .push_back(notification_drain_input("notifications-child"));
+                state
+                    .pending_inputs
+                    .push_back(subagent_completed_input("grandchild-1"));
+                state
+                    .pending_inputs
+                    .push_back(task_completed_input("bg-child"));
+            }
+            let (completion_tx, _completion_rx) =
+                tokio::sync::mpsc::unbounded_channel::<(String, PromptTurnResult)>();
+            std::sync::Arc::clone(&actor)
+                .maybe_start_running_task(completion_tx.clone())
+                .await;
+            {
+                let state = actor.state.try_lock().expect("uncontended");
+                assert!(
+                    state.running_task.is_none(),
+                    "no runtime wake may start a turn in a child session"
+                );
+                assert!(
+                    state.pending_inputs.is_empty(),
+                    "the refused wakes must be dropped, not left to promote later"
+                );
+            }
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_input("driver-turn"));
+            }
+            std::sync::Arc::clone(&actor)
+                .maybe_start_running_task(completion_tx)
+                .await;
+            let state = actor.state.try_lock().expect("no await since promote");
+            assert_eq!(
+                state.running_prompt_id(),
+                Some("driver-turn"),
+                "the turn the subagent driver asked for must still run"
+            );
+            if let Some(task) = state.running_task.as_ref() {
+                task.handle.abort();
+            }
+        })
+        .await;
+}
+/// End of the real chain: a completion the child's bridge parked reaches the
+/// idle drain, which batches it into a `NotificationDrain` turn. In a child
+/// that turn must never start — nothing awaits it, and the driver is already
+/// capturing usage and about to reparent, shut down and dispose the worktree.
+#[tokio::test(flavor = "current_thread")]
+async fn subagent_idle_drain_does_not_start_a_second_turn() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = create_test_subagent_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state
+                    .pending_notifications
+                    .push(monitor_completed_notification("mon-child"));
+            }
+            let (completion_tx, _completion_rx) =
+                tokio::sync::mpsc::unbounded_channel::<(String, PromptTurnResult)>();
+            std::sync::Arc::clone(&actor)
+                .maybe_drain_notifications(completion_tx)
+                .await;
+            let state = actor.state.lock().await;
+            assert!(
+                state.running_task.is_none(),
+                "a child must not wake itself out of the idle notification drain"
+            );
+            assert!(
+                state.pending_inputs.is_empty(),
+                "the drained turn must be dropped, not left queued"
+            );
+        })
+        .await;
+}

@@ -60,6 +60,34 @@ async fn finish_session_exit_feedback(session: &SessionActor) {
     cleanup_session_scratch(session);
 }
 impl SessionActor {
+    /// Whether this session must refuse a runtime-initiated wake turn.
+    ///
+    /// A subagent session runs the turns its driver asks for and no others:
+    /// `run_one_turn_attempt` sends one `Prompt` and awaits one result. But
+    /// background work the child armed — a monitor, a bash task, a
+    /// backgrounded grandchild — reports completion into the CHILD's own
+    /// actor, and every wake path downstream of that asks only whether wakes
+    /// are currently suppressed, never whether this session is entitled to
+    /// wake itself. The resulting second turn spends tokens nobody awaits and
+    /// can still edit the worktree while the driver is capturing usage,
+    /// reparenting notifications and sending `Shutdown` — with disposal of
+    /// that worktree next in line.
+    ///
+    /// The parent keeps its wake: `reparent_notifications` hands the child's
+    /// still-live tasks to the parent before the child shuts down, so a
+    /// completion landing after teardown wakes the session that owns the task
+    /// by then. This gate covers only the window where the child still owns
+    /// it, and only turns the runtime invented.
+    pub(super) fn rejects_runtime_wake(&self, origin: &super::PromptOrigin) -> bool {
+        self.startup_hints.is_subagent
+            && matches!(
+                origin,
+                super::PromptOrigin::TaskCompleted { .. }
+                    | super::PromptOrigin::SubagentCompleted { .. }
+                    | super::PromptOrigin::WorkflowCompleted { .. }
+                    | super::PromptOrigin::NotificationDrain
+            )
+    }
     /// Serialize terminal task-wake admission with interactive cancellation.
     pub(super) async fn admit_task_completion_wake(
         &self,
@@ -70,6 +98,25 @@ impl SessionActor {
             respond_to,
             fallback,
         } = admission;
+        if self.rejects_runtime_wake(origin) {
+            // Refuse WITHOUT storing the fallback. Every other refusal here
+            // parks the completion in `pending_notifications` so a later user
+            // turn can pick it up; in a child that buffer is drained into a
+            // `NotificationDrain` turn at the next idle tick — the same
+            // self-wake through a different door. A child has no later user
+            // turn to owe the notification to.
+            let _ = respond_to.send(false);
+            xai_grok_telemetry::unified_log::info(
+                "shell.task_wake.actor_admission",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({
+                    "task_id": origin.completion_id(),
+                    "subagent": true,
+                    "admitted": false,
+                })),
+            );
+            return None;
+        }
         let super::PromptOrigin::TaskCompleted { task_id } = origin else {
             return respond_to.send(true).is_ok().then_some(fallback);
         };

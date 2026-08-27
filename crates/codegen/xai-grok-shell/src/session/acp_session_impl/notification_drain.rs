@@ -188,6 +188,12 @@ impl SessionActor {
                 .front()
                 .map(|item| item.input_origin.as_prompt_origin())
             {
+                // The last gate before a queued prompt becomes a turn, and the
+                // only one every runtime wake passes through: a subagent's
+                // batched notification drain and a backgrounded grandchild's
+                // completion both reach the queue without an admission
+                // decision. See `SessionActor::rejects_runtime_wake`.
+                Some(origin) if self.rejects_runtime_wake(origin) => true,
                 Some(super::PromptOrigin::WorkflowCompleted { completion_id }) => {
                     match completion_id
                         .rsplit_once('-')
