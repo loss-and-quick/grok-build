@@ -89,6 +89,12 @@ the first SDK, not the boundary.
   Both mechanisms are keyed on the manifest flag alone and are inherited across
   `exec`, so an `exec` plugin is confined exactly as a TypeScript one is and
   neither can be shed by spawning a child.
+
+  The sidecar is also told the flag directly, as `GROK_PLUGIN_NETWORK=1` or
+  `=0` in its environment, so a launcher that runs the plugin under a runtime
+  with its own permission model (deno) can line the two up without the
+  manifest being restated on its command line. That variable is information;
+  the confinement above is applied to the child either way.
 - `@grok-build/plugin` ([`sdk/plugin/`](sdk/plugin/)) — the TypeScript SDK:
   `definePlugin()`, wire types generated from the Rust side, and a typed
   `ctx` (log/storage/config). No build step: Bun and Deno run the source

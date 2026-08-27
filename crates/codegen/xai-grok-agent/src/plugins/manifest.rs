@@ -291,6 +291,11 @@ pub struct PluginManifest {
     /// A deno sidecar additionally has `--allow-net` withheld. That is defence
     /// in depth and nothing decides anything from it: a guarantee that held
     /// only under one runtime would be a guarantee about the launch form.
+    ///
+    /// The sidecar is told the flag in its environment as
+    /// `GROK_PLUGIN_NETWORK` (`1` or `0`), so a launcher between the host and
+    /// the plugin can line a runtime's own permission model up with it. That
+    /// is information for the child, not the enforcement above.
     #[serde(default)]
     pub network: Option<bool>,
     /// Model-visible tools the sidecar serves via `tool_invoke`. The manifest
