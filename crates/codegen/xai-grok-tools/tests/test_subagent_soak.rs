@@ -25,7 +25,8 @@ use xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits
 use xai_grok_tools::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
 use xai_grok_tools::implementations::grok_build::task::coordinator::{
     ChildCompletion, ChildControl, ChildRunOutput, ChildRunRequest, ChildRunner, CoordinatorConfig,
-    LocalBoxFuture, MAX_COMPLETED_ENTRIES, StartedChild, SubagentCoordinator, SubagentProgress,
+    LocalBoxFuture, MAX_COMPLETED_ENTRIES, ParentReportDelivery, StartedChild, SubagentCoordinator,
+    SubagentProgress,
 };
 use xai_grok_tools::implementations::grok_build::task::types::{
     SubagentDescribeOutcome, SubagentMessageOutcome, SubagentOwner, SubagentRegistryCounts,
@@ -297,9 +298,14 @@ struct SoakControl {
 impl ChildControl for SoakControl {
     type ProgressFuture = std::future::Ready<SubagentProgress>;
     type MessageFuture = std::future::Ready<SubagentMessageOutcome>;
+    type ParentReportFuture = std::future::Ready<ParentReportDelivery>;
 
     fn message(&self, _text: String) -> Self::MessageFuture {
         std::future::ready(SubagentMessageOutcome::Delivered)
+    }
+
+    fn message_parent(&self, _text: String) -> Self::ParentReportFuture {
+        std::future::ready(ParentReportDelivery::Buffered)
     }
 
     fn progress(&self) -> Self::ProgressFuture {

@@ -23,22 +23,23 @@ use tokio::sync::{mpsc, oneshot};
 use super::admission::Admission;
 use super::coordinator_state::{
     ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, CompletedChild, InternalEvent,
-    ListRequest, PendingChild, ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture,
-    active_summary, background_at_deadline, background_if_caller_gone, completed_snapshot,
-    completion_summary, sleep_until, workflow_outstanding,
+    ListRequest, ParentReportReply, PendingChild, ProgressFuture, ProgressTarget, ReplyFuture,
+    TaggedFuture, active_summary, background_at_deadline, background_if_caller_gone,
+    completed_snapshot, completion_summary, sleep_until, workflow_outstanding,
 };
 use super::types::{
-    SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome,
-    SubagentEvent, SubagentMessageOutcome, SubagentOutstandingReply, SubagentRegistryCounts,
-    SubagentRequest, SubagentResult, SubagentResumeLookup, SubagentResumeSource,
-    SubagentTypeDescriptor, SubagentValidateTypeOutcome,
+    MAX_PARENT_MESSAGES_PER_SUBAGENT, ParentMessageOutcome, SpawnedSubagentRef,
+    SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome, SubagentEvent,
+    SubagentMessageOutcome, SubagentOutstandingReply, SubagentRegistryCounts, SubagentRequest,
+    SubagentResult, SubagentResumeLookup, SubagentResumeSource, SubagentTypeDescriptor,
+    SubagentValidateTypeOutcome,
 };
 
 pub use super::coordinator_state::{
     ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, ChildRunRequest, ChildRunner,
     CompletionDisposition, CoordinatorConfig, LimitedSpawnOrigin, LocalBoxFuture,
-    MAX_COMPLETED_ENTRIES, SendBoxFuture, StartedChild, SubagentLimitDecision, SubagentLimitNotice,
-    SubagentLimitSink, SubagentProgress,
+    MAX_COMPLETED_ENTRIES, ParentReportDelivery, SendBoxFuture, StartedChild,
+    SubagentLimitDecision, SubagentLimitNotice, SubagentLimitSink, SubagentProgress,
 };
 use queue::{QUEUED_REAP_INTERVAL, QueuedCaller, SpawnQueue, StartOrigin};
 
@@ -87,6 +88,8 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     messages: FuturesUnordered<
         ReplyFuture<<R::Control as ChildControl>::MessageFuture, SubagentMessageOutcome>,
     >,
+    parent_messages:
+        FuturesUnordered<ParentReportReply<<R::Control as ChildControl>::ParentReportFuture>>,
     list_requests: HashMap<u64, ListRequest>,
     next_list_request_id: u64,
 }
@@ -96,6 +99,9 @@ type ImmediateMessageReply = (
     oneshot::Sender<SubagentMessageOutcome>,
     SubagentMessageOutcome,
 );
+
+/// The child→parent counterpart of [`ImmediateMessageReply`].
+type ImmediateParentMessageReply = (oneshot::Sender<ParentMessageOutcome>, ParentMessageOutcome);
 
 /// Backstop for a delete-path teardown hold: if a cancelled child never
 /// finishes, force-reopen the session's spawn admission after this long (with a
@@ -157,6 +163,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             type_lists: FuturesUnordered::new(),
             progress: FuturesUnordered::new(),
             messages: FuturesUnordered::new(),
+            parent_messages: FuturesUnordered::new(),
             list_requests: HashMap::new(),
             next_list_request_id: 0,
         }
@@ -175,6 +182,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 && self.type_lists.is_empty()
                 && self.progress.is_empty()
                 && self.messages.is_empty()
+                && self.parent_messages.is_empty()
             {
                 debug_assert!(
                     self.queued.is_empty(),
@@ -206,6 +214,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     self.finish_progress(seed, target, progress);
                 }
                 Some((respond_to, outcome)) = self.messages.next(), if !self.messages.is_empty() => {
+                    let _ = respond_to.send(outcome);
+                }
+                Some((respond_to, outcome)) = self.parent_messages.next(), if !self.parent_messages.is_empty() => {
                     let _ = respond_to.send(outcome);
                 }
                 command = self.commands.recv(), if commands_open => {
@@ -275,6 +286,15 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     request.respond_to,
                 );
                 if let Some((respond_to, outcome)) = outcome {
+                    let _ = respond_to.send(outcome);
+                }
+            }
+            SubagentEvent::MessageParent(request) => {
+                if let Some((respond_to, outcome)) = self.begin_parent_message(
+                    &request.child_session_id,
+                    request.text,
+                    request.respond_to,
+                ) {
                     let _ = respond_to.send(outcome);
                 }
             }
@@ -536,6 +556,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         child_cwd: child.child_cwd,
                         worktree_path: child.worktree_path,
                         effective_model_id: child.effective_model_id,
+                        parent_messages_sent: 0,
                         control: child.control,
                     },
                 );
@@ -854,6 +875,47 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             ));
         }
         Some((respond_to, SubagentMessageOutcome::NotFound))
+    }
+
+    /// Start a child's message to the session that spawned it.
+    ///
+    /// The sender names only itself; the parent is whatever the registry says
+    /// spawned this child, so a child can address nobody else — not a sibling,
+    /// not a grandparent. `Some` is an answer the registry settled on its own;
+    /// `None` means the delivery future was pushed and its arm will answer.
+    fn begin_parent_message(
+        &mut self,
+        child_session_id: &str,
+        text: String,
+        respond_to: oneshot::Sender<ParentMessageOutcome>,
+    ) -> Option<ImmediateParentMessageReply> {
+        // A child knows its own session id, which is not necessarily the
+        // subagent id the registry keys on (a resumed child mints a new one),
+        // so match on the field the child can actually report.
+        let Some(child) = self
+            .active
+            .values_mut()
+            .find(|child| child.child_session_id == child_session_id)
+        else {
+            return Some((respond_to, ParentMessageOutcome::NoParent));
+        };
+        if child.cancellation.is_cancelled() {
+            return Some((respond_to, ParentMessageOutcome::Unreachable));
+        }
+        let Some(remaining) = child.take_parent_message_budget() else {
+            return Some((
+                respond_to,
+                ParentMessageOutcome::BudgetExhausted {
+                    limit: MAX_PARENT_MESSAGES_PER_SUBAGENT,
+                },
+            ));
+        };
+        self.parent_messages.push(ParentReportReply {
+            future: Box::pin(child.control.message_parent(text)),
+            remaining,
+            respond_to: Some(respond_to),
+        });
+        None
     }
 
     fn cancel_one(

@@ -13,11 +13,12 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use super::types::{
-    SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget,
-    SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent, SubagentInspectRequest,
-    SubagentInspection, SubagentListRunningRequest, SubagentMessageOutcome, SubagentMessageRequest,
-    SubagentQueryRequest, SubagentRegistryCounts, SubagentRegistryCountsRequest, SubagentRequest,
-    SubagentResult, SubagentSnapshot, SubagentSpawnRequest, SubagentSpawnedRefsRequest,
+    ParentMessageOutcome, SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelRequest,
+    SubagentCancelTarget, SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent,
+    SubagentInspectRequest, SubagentInspection, SubagentListRunningRequest, SubagentMessageOutcome,
+    SubagentMessageRequest, SubagentParentMessageRequest, SubagentQueryRequest,
+    SubagentRegistryCounts, SubagentRegistryCountsRequest, SubagentRequest, SubagentResult,
+    SubagentSnapshot, SubagentSpawnRequest, SubagentSpawnedRefsRequest,
     SubagentValidateTypeOutcome, SubagentValidateTypeRequest,
 };
 use crate::register_resource;
@@ -60,6 +61,16 @@ pub trait SubagentBackend: Send + Sync + 'static {
     /// is about to become a delivery. The reply arrives when the child settles
     /// it, or when the child's session goes away and the reply channel drops.
     async fn message(&self, id: &str, text: &str) -> SubagentMessageOutcome;
+
+    /// Send `text` up to the session that spawned *this* session, if one did.
+    ///
+    /// Takes no address: the coordinator resolves the parent from its own
+    /// registry, so the reverse channel reaches exactly one place and cannot be
+    /// turned into an agent-to-agent bus. Unlike [`Self::message`] it resolves
+    /// as soon as the parent has taken the text, not once the parent has read
+    /// it — a child whose parent is blocked awaiting that same child would
+    /// otherwise wait on itself.
+    async fn message_parent(&self, text: &str) -> ParentMessageOutcome;
 
     /// Validate a subagent type synchronously before spawning.
     /// Returns `ValidationUnavailable` on channel close / responder drop / timeout.
@@ -422,6 +433,29 @@ impl SubagentBackend for ChannelBackend {
         response_rx
             .await
             .unwrap_or(SubagentMessageOutcome::Unreachable)
+    }
+
+    /// The session id this backend is bound to is the caller's *own* — the
+    /// coordinator reads it as "who is speaking", never as "who to reach". An
+    /// unbound backend has no identity to look up and so has no parent.
+    async fn message_parent(&self, text: &str) -> ParentMessageOutcome {
+        let Some(child_session_id) = self.parent_session_id() else {
+            return ParentMessageOutcome::NoParent;
+        };
+        let (respond_to, response_rx) = oneshot::channel();
+        let sent = self
+            .tx
+            .send(SubagentEvent::MessageParent(SubagentParentMessageRequest {
+                child_session_id,
+                text: text.to_string(),
+                respond_to,
+            }));
+        if sent.is_err() {
+            return ParentMessageOutcome::Unreachable;
+        }
+        response_rx
+            .await
+            .unwrap_or(ParentMessageOutcome::Unreachable)
     }
 
     async fn validate_type(

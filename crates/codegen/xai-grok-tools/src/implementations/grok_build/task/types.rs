@@ -660,6 +660,68 @@ pub enum SubagentMessageOutcome {
     NotFound,
 }
 
+/// How many messages one subagent may send up to its parent, for its whole
+/// life.
+///
+/// The cap is the only thing standing between this channel and a parent/child
+/// ping-pong. With a reverse route open, "child reports, parent replies, child
+/// reports again" is a cycle both models can sustain indefinitely, and nothing
+/// else bounds it: a message continues a turn rather than starting one, so no
+/// turn budget is spent, and a sampler loop may iterate as long as it likes.
+/// Counting outbound messages per child bounds the exchange at this number
+/// whatever either model decides, because the child cannot send the (n+1)th
+/// half of the (n+1)th round. The count lives on the coordinator's registry
+/// entry, out of reach of the child that it constrains.
+///
+/// Three, because a task worth interrupting the parent over has one wrong
+/// assumption, one blocker and one late surprise. The fourth thing belongs in
+/// the final result, which reaches the parent anyway.
+pub const MAX_PARENT_MESSAGES_PER_SUBAGENT: u32 = 3;
+
+/// What became of a message a subagent sent up to the agent that spawned it.
+///
+/// The mirror of [`SubagentMessageOutcome`], and deliberately not the same
+/// enum: the answers a child can honestly be given are different ones. A child
+/// learns whether its parent *took* the text, never whether the parent has
+/// read it — waiting for that would park the child behind a parent that may be
+/// blocked inside the very tool call awaiting this child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParentMessageOutcome {
+    /// Buffered into the parent's running turn. The parent reads it at its
+    /// next step unless that turn is cancelled first; the child does not wait
+    /// to find out which.
+    Accepted { remaining: u32 },
+    /// The parent has no turn running — it handed control back to its own
+    /// caller. Dropped, not queued, and the parent is NOT woken: a session
+    /// nobody is awaiting must not be started into a turn by a child. The
+    /// child's own completion is the wake-capable path.
+    NoTurnRunning,
+    /// The child has spent [`MAX_PARENT_MESSAGES_PER_SUBAGENT`]. Nothing was
+    /// sent, and nothing more ever will be for this subagent.
+    BudgetExhausted { limit: u32 },
+    /// The parent's session channel is gone (mid-teardown, or a crashed parent
+    /// session actor).
+    Unreachable,
+    /// This session has no parent to message: it is a root session, or the
+    /// coordinator no longer holds it as a running child.
+    NoParent,
+}
+
+/// A subagent's out-of-band message to the agent that spawned it.
+///
+/// `child_session_id` is the *sender's own* session id, not an address: the
+/// coordinator resolves the parent from its own registry, so a child can only
+/// ever reach the session that spawned it. That is what keeps this from being
+/// an agent-to-agent bus — there is no field in which to name anyone else.
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct SubagentParentMessageRequest {
+    pub child_session_id: String,
+    pub text: String,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<ParentMessageOutcome>,
+}
+
 /// Summary of a completed subagent, used for between-turn delivery.
 /// Session ownership lives on the coordinator's `BufferedCompletion` wrapper;
 /// drains are scoped there, so delivered summaries carry no owner field.
@@ -954,6 +1016,7 @@ pub enum SubagentEvent {
     Query(SubagentQueryRequest),
     Cancel(SubagentCancelRequest),
     Message(SubagentMessageRequest),
+    MessageParent(SubagentParentMessageRequest),
     ListActive(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),
     Completions(SubagentCompletionsRequest),

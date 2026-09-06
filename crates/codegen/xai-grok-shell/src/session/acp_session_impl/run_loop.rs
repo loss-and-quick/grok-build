@@ -2044,6 +2044,9 @@ pub(super) async fn run_session(
                         SessionCommand::Steer { text, ack } => {
                             session.accept_steering_message(text, ack);
                         }
+                        SessionCommand::ChildReport { subagent_id, text, ack } => {
+                            session.accept_child_report(subagent_id, text, ack);
+                        }
                         SessionCommand::GoalSummaryTurn { prompt_text } => {
                             // Queue a synthetic prompt so the model gets a turn
                             // to print a visible progress summary. Mirrors the

@@ -83,15 +83,32 @@ async fn wait_for_pending_interjection(buf: &InterjectionBuffer<acp::ImageConten
     }
 }
 
-/// Steering counterpart of [`wait_for_pending_interjection`]. A child parked in
-/// a wait tool is the case a correction most needs to reach: without this the
-/// message would sit buffered until whatever it was told to stop doing finished.
+/// Steering counterpart of [`wait_for_pending_interjection`]. A session parked
+/// in a wait tool is the case an out-of-band message most needs to reach:
+/// without this it would sit buffered until whatever the session is waiting for
+/// finished — and for a parent waiting on the very subagent that just reported,
+/// that is until the report is moot.
+///
+/// Returns the sentence for the aborted wait. The two directions read
+/// differently to the model, and an owner's correction outranks a child's
+/// report when both are pending: the correction is the one it must not mistake
+/// for information.
 async fn wait_for_pending_steering(
     buf: &std::sync::Arc<parking_lot::Mutex<Vec<super::PendingSteeringMessage>>>,
-) {
+) -> &'static str {
     loop {
-        if !buf.lock().is_empty() {
-            return;
+        {
+            let pending = buf.lock();
+            if !pending.is_empty() {
+                return if pending
+                    .iter()
+                    .all(|entry| matches!(entry.origin, super::SteeringOrigin::Child { .. }))
+                {
+                    "Wait interrupted: a subagent you spawned sent a report while running."
+                } else {
+                    "Wait interrupted: the agent that started this task sent a correction."
+                };
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -689,14 +706,14 @@ impl SessionActor {
                                     );
                                     Ok(interrupted_wait_tool_result(&prepared.parsed_args))
                                 }
-                                _ = wait_for_pending_steering(&pending_steering) => {
+                                msg = wait_for_pending_steering(&pending_steering) => {
                                     tracing::info!(
                                         tool = %prepared.tool_name,
                                         "abort wait tool: steering message pending"
                                     );
                                     Ok(interrupted_wait_tool_result_with_msg(
                                         &prepared.parsed_args,
-                                        "Wait interrupted: the agent that started this task sent a correction.",
+                                        msg,
                                     ))
                                 }
                             }

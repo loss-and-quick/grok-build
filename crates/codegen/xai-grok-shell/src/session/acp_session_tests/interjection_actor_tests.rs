@@ -540,6 +540,100 @@ async fn steering_message_lands_as_a_system_reminder_and_acks_on_injection() {
         .await;
 }
 
+/// A child's report lands in its parent's running turn, framed as a report
+/// from below rather than as an instruction from above, and naming the child so
+/// the parent can answer the right subagent.
+///
+/// The ack is the deliberate asymmetry: it fires at enqueue, not at injection.
+/// A parent parked inside the `task` call that awaits this very child reaches
+/// no drain point until the child finishes, so an injection ack would be the
+/// child waiting on itself.
+#[tokio::test]
+async fn a_child_report_lands_framed_as_a_report_and_acks_at_enqueue() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("running".into());
+
+            let (ack, ack_rx) = tokio::sync::oneshot::channel();
+            actor.accept_child_report(
+                "sub-9".to_string(),
+                "the repo is Rust, not Go".to_string(),
+                ack,
+            );
+            assert_eq!(
+                ack_rx.await,
+                Ok(true),
+                "a child must not park behind its parent's next injection point",
+            );
+
+            assert!(actor.drain_pending_steering());
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let item = match conversation.last() {
+                Some(ConversationItem::User(u)) => u,
+                other => panic!("conversation tail must be a user item, got: {other:?}"),
+            };
+            assert_eq!(item.synthetic_reason, Some(SyntheticReason::SystemReminder));
+            let text = match item.content.first() {
+                Some(xai_grok_sampling_types::conversation::ContentPart::Text { text }) => {
+                    text.to_string()
+                }
+                other => panic!("expected a text part, got {other:?}"),
+            };
+            assert!(text.contains("the repo is Rust, not Go"), "framing: {text}");
+            assert!(
+                text.contains("sub-9"),
+                "the parent must be able to tell which child spoke: {text}",
+            );
+            assert!(
+                text.contains("not waiting for a reply"),
+                "a report read as a question to answer is the first half of a \
+                 ping-pong: {text}",
+            );
+            assert!(
+                !text.contains("The agent that started this task"),
+                "a child has no standing to instruct its parent: {text}",
+            );
+        })
+        .await;
+}
+
+/// A report aimed at a parent between turns is refused and dropped. It must not
+/// wake the parent: waking is the completion path's job, gated on whether
+/// anything awaits the child, and a child that could start parent turns at will
+/// is one half of a ping-pong.
+#[tokio::test]
+async fn a_child_report_never_wakes_an_idle_parent() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            assert!(
+                actor
+                    .current_prompt_id
+                    .lock()
+                    .expect("current_prompt_id mutex poisoned")
+                    .is_none(),
+                "precondition: the parent is between turns",
+            );
+
+            let (ack, ack_rx) = tokio::sync::oneshot::channel();
+            actor.accept_child_report("sub-9".to_string(), "blocked".to_string(), ack);
+
+            assert_eq!(ack_rx.await, Ok(false));
+            assert!(actor.pending_steering.lock().is_empty());
+            assert!(
+                actor.state.lock().await.pending_inputs.is_empty(),
+                "a child must never queue a turn in the session that spawned it",
+            );
+        })
+        .await;
+}
+
 /// A steering message that arrives while the session is between turns is
 /// answered `false` and dropped. It must never become a prompt turn the way a
 /// stranded interjection does: a subagent runs exactly one prompt, so a

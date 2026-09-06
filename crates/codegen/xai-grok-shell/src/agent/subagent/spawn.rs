@@ -22,8 +22,8 @@ use agent_client_protocol as acp;
 use tokio::sync::mpsc;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 pub(crate) use xai_grok_tools::implementations::grok_build::task::coordinator::{
-    self, ChildCompletion, ChildControl, ChildRunOutput, LocalBoxFuture, StartedChild,
-    SubagentProgress,
+    self, ChildCompletion, ChildControl, ChildRunOutput, LocalBoxFuture, ParentReportDelivery,
+    StartedChild, SubagentProgress,
 };
 use xai_grok_tools::implementations::grok_build::task::types::{SubagentRequest, SubagentResult};
 /// Floor keeps the pool responsive when `available_parallelism` is tiny.

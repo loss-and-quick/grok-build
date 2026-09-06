@@ -913,6 +913,35 @@ pub enum SessionCommand {
         text: String,
         ack: oneshot::Sender<bool>,
     },
+    /// A running subagent reporting up to the session that spawned it — the
+    /// reverse of [`Self::Steer`], and the only command a child may aim at its
+    /// parent.
+    ///
+    /// It shares the steering buffer and every one of its drain points, so a
+    /// parent parked in `wait_tasks` is interrupted for it exactly as a child
+    /// is interrupted for a correction. Three things differ.
+    ///
+    /// The framing names a child rather than an owner, so the parent reads a
+    /// report from below rather than an instruction from above, and carries
+    /// the child's id so the parent can answer with `message_subagent`.
+    ///
+    /// `ack` fires when the text is *taken*, not when it is read. The parent
+    /// may be blocked inside the very `task` call awaiting this child, which
+    /// reaches no injection point until the child finishes, so a delivery ack
+    /// would be the child waiting on itself.
+    ///
+    /// And a report that finds no turn running is dropped without waking the
+    /// parent. Waking is the completion path's job, gated on whether anyone is
+    /// awaiting the child at all; a mid-task report carries no such gate, and a
+    /// child that could start parent turns at will is one half of a ping-pong.
+    ChildReport {
+        /// The reporting subagent's id, as its parent knows it.
+        subagent_id: String,
+        text: String,
+        /// `true` once buffered into a running turn; `false` when the parent
+        /// has no turn to put it in.
+        ack: oneshot::Sender<bool>,
+    },
     /// Trigger a model turn so the model can print a visible goal progress
     /// summary.  The goal orchestrator injects a system reminder into context
     /// (via `push_parent_reminder`) *before* sending this command.  The session

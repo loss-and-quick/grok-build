@@ -2,6 +2,9 @@ use super::*;
 use crate::implementations::grok_build::task::admission::{LimitBehavior, SubagentLimits};
 use crate::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
 use crate::implementations::grok_build::task::types::{
+    MAX_PARENT_MESSAGES_PER_SUBAGENT, ParentMessageOutcome,
+};
+use crate::implementations::grok_build::task::types::{
     SubagentCancelRequest, SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest,
     SubagentListActiveRequest, SubagentLoopUnitActiveRequest, SubagentMarkUsageNotAppliedRequest,
     SubagentOutstandingReply, SubagentOutstandingRequest, SubagentOwner, SubagentRegistryCounts,
@@ -19,11 +22,21 @@ struct TestControl {
     /// Held open by a test that wants a message to stay in flight; the
     /// control's future does not resolve until this fires.
     message_gate: Option<tokio::sync::broadcast::Sender<()>>,
+    /// Where a report aimed at the parent is recorded, and what the mock
+    /// parent does with it.
+    parent_reports: mpsc::UnboundedSender<String>,
+    parent_report_delivery: ParentReportDelivery,
 }
 
 impl ChildControl for TestControl {
     type ProgressFuture = std::future::Ready<SubagentProgress>;
     type MessageFuture = SendBoxFuture<SubagentMessageOutcome>;
+    type ParentReportFuture = std::future::Ready<ParentReportDelivery>;
+
+    fn message_parent(&self, text: String) -> Self::ParentReportFuture {
+        let _ = self.parent_reports.send(text);
+        std::future::ready(self.parent_report_delivery)
+    }
 
     fn message(&self, text: String) -> Self::MessageFuture {
         let _ = self.messages.send(text);
@@ -65,6 +78,8 @@ struct TestRunner {
     messages: mpsc::UnboundedSender<String>,
     message_outcome: SubagentMessageOutcome,
     message_gate: Option<tokio::sync::broadcast::Sender<()>>,
+    parent_reports: mpsc::UnboundedSender<String>,
+    parent_report_delivery: ParentReportDelivery,
     queue_waits: mpsc::UnboundedSender<(String, Option<std::time::Duration>, usize)>,
 }
 
@@ -86,6 +101,8 @@ impl ChildRunner for TestRunner {
         let messages = self.messages.clone();
         let message_outcome = self.message_outcome.clone();
         let message_gate = self.message_gate.clone();
+        let parent_reports = self.parent_reports.clone();
+        let parent_report_delivery = self.parent_report_delivery;
         let queue_waits = self.queue_waits.clone();
         Box::pin(async move {
             let ChildRunRequest {
@@ -127,6 +144,8 @@ impl ChildRunner for TestRunner {
                         messages: messages.clone(),
                         message_outcome: message_outcome.clone(),
                         message_gate: message_gate.clone(),
+                        parent_reports: parent_reports.clone(),
+                        parent_report_delivery,
                     },
                 })
                 .await
@@ -235,6 +254,8 @@ struct Harness {
     messages: mpsc::UnboundedReceiver<String>,
     /// Releases a gated message future (see [`TestControl::message_gate`]).
     message_gate: tokio::sync::broadcast::Sender<()>,
+    /// Text each mock child aimed at its parent via `ChildControl::message_parent`.
+    parent_reports: mpsc::UnboundedReceiver<String>,
     queue_waits: mpsc::UnboundedReceiver<(String, Option<std::time::Duration>, usize)>,
     actor: tokio::task::JoinHandle<()>,
 }
@@ -264,6 +285,7 @@ fn harness_with_options(
         config,
         SubagentMessageOutcome::Delivered,
         false,
+        ParentReportDelivery::Buffered,
     )
 }
 
@@ -276,6 +298,7 @@ fn harness_with_messaging(
     config: CoordinatorConfig,
     message_outcome: SubagentMessageOutcome,
     gate_messages: bool,
+    parent_report_delivery: ParentReportDelivery,
 ) -> Harness {
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (start, _) = tokio::sync::broadcast::channel(4);
@@ -285,6 +308,7 @@ fn harness_with_messaging(
     let (started_tx, started) = mpsc::unbounded_channel();
     let (message_tx, messages) = mpsc::unbounded_channel();
     let (message_gate, _) = tokio::sync::broadcast::channel(4);
+    let (parent_report_tx, parent_reports) = mpsc::unbounded_channel();
     let (queue_wait_tx, queue_waits) = mpsc::unbounded_channel();
     let actor = tokio::spawn(
         SubagentCoordinator::new(
@@ -300,6 +324,8 @@ fn harness_with_messaging(
                 messages: message_tx,
                 message_outcome,
                 message_gate: gate_messages.then(|| message_gate.clone()),
+                parent_reports: parent_report_tx,
+                parent_report_delivery,
                 queue_waits: queue_wait_tx,
             },
             config,
@@ -318,6 +344,7 @@ fn harness_with_messaging(
         started,
         messages,
         message_gate,
+        parent_reports,
         queue_waits,
         actor,
     }
@@ -1953,6 +1980,7 @@ async fn message_between_turns_is_reported_undelivered_and_dropped() {
         },
         SubagentMessageOutcome::NotDelivered,
         false,
+        ParentReportDelivery::Buffered,
     );
     let spawn = tokio::spawn({
         let backend = harness.backend.clone();
@@ -1967,6 +1995,140 @@ async fn message_between_turns_is_reported_undelivered_and_dropped() {
     assert_eq!(harness.messages.recv().await.as_deref(), Some("too late"));
     let _ = harness.finish.send(());
     assert!(spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+/// A child's report reaches its parent, and the answer counts down the
+/// allowance so the child knows how much rope it has left.
+#[tokio::test]
+async fn a_child_report_reaches_the_parent_and_reports_the_remaining_budget() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("reporter", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("reporter"));
+
+    let child = ChannelBackend::for_session(harness.backend.sender(), "reporter");
+    assert_eq!(
+        child.message_parent("the brief assumes a Rust main").await,
+        ParentMessageOutcome::Accepted {
+            remaining: MAX_PARENT_MESSAGES_PER_SUBAGENT - 1
+        },
+    );
+    assert_eq!(
+        harness.parent_reports.recv().await.as_deref(),
+        Some("the brief assumes a Rust main"),
+    );
+
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+/// The ping-pong bound. Whatever the two models decide, a child gets exactly
+/// [`MAX_PARENT_MESSAGES_PER_SUBAGENT`] turns of the crank; the (n+1)th never
+/// reaches the parent at all, so the cycle cannot continue past it.
+#[tokio::test]
+async fn a_child_cannot_message_its_parent_past_the_cap() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("chatty", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("chatty"));
+
+    let child = ChannelBackend::for_session(harness.backend.sender(), "chatty");
+    for i in 0..MAX_PARENT_MESSAGES_PER_SUBAGENT {
+        assert_eq!(
+            child.message_parent(&format!("round {i}")).await,
+            ParentMessageOutcome::Accepted {
+                remaining: MAX_PARENT_MESSAGES_PER_SUBAGENT - i - 1
+            },
+        );
+        assert_eq!(
+            harness.parent_reports.recv().await,
+            Some(format!("round {i}"))
+        );
+    }
+    for _ in 0..3 {
+        assert_eq!(
+            child.message_parent("one more thing").await,
+            ParentMessageOutcome::BudgetExhausted {
+                limit: MAX_PARENT_MESSAGES_PER_SUBAGENT
+            },
+        );
+    }
+    // Nothing past the cap was handed to the parent, so there is no round the
+    // parent could answer to keep the exchange alive.
+    assert!(harness.parent_reports.try_recv().is_err());
+
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+/// A parent between turns is told about, not woken. The budget is still spent:
+/// a free retry against an idle parent is the same unbounded loop by another
+/// route.
+#[tokio::test]
+async fn a_report_to_an_idle_parent_is_dropped_and_still_costs_budget() {
+    let mut harness = harness_with_messaging(
+        false,
+        false,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(60),
+            ..CoordinatorConfig::default()
+        },
+        SubagentMessageOutcome::Delivered,
+        false,
+        ParentReportDelivery::NoTurnRunning,
+    );
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("orphan-voice", true)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("orphan-voice")
+    );
+
+    let child = ChannelBackend::for_session(harness.backend.sender(), "orphan-voice");
+    for _ in 0..MAX_PARENT_MESSAGES_PER_SUBAGENT {
+        assert_eq!(
+            child.message_parent("anyone there").await,
+            ParentMessageOutcome::NoTurnRunning,
+        );
+    }
+    assert_eq!(
+        child.message_parent("anyone there").await,
+        ParentMessageOutcome::BudgetExhausted {
+            limit: MAX_PARENT_MESSAGES_PER_SUBAGENT
+        },
+    );
+
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+/// A session the registry does not hold as a running child has no parent to
+/// reach — a root session, or a child already finished. Distinct from the
+/// budget answer: one says "not you", the other says "not again".
+#[tokio::test]
+async fn a_session_with_no_live_registry_entry_has_no_parent() {
+    let harness = harness(false, std::time::Duration::from_secs(60));
+    let root = ChannelBackend::for_session(harness.backend.sender(), "root-session");
+    assert_eq!(
+        root.message_parent("hello").await,
+        ParentMessageOutcome::NoParent
+    );
+    // An unbound backend cannot even name itself, so there is nothing to
+    // resolve a parent from.
+    assert_eq!(
+        harness.backend.message_parent("hello").await,
+        ParentMessageOutcome::NoParent
+    );
     harness.actor.abort();
 }
 
@@ -2103,6 +2265,7 @@ async fn an_in_flight_message_does_not_stall_a_blocking_waiter() {
         },
         SubagentMessageOutcome::Delivered,
         true,
+        ParentReportDelivery::Buffered,
     );
     let spawn = tokio::spawn({
         let backend = harness.backend.clone();

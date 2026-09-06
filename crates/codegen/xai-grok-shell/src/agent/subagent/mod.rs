@@ -46,8 +46,8 @@ use xai_hunk_tracker::HunkTrackerHandle;
 mod attempt_runner;
 mod spawn;
 pub(crate) use spawn::{
-    ChildControl, ChildRunOutput, LocalBoxFuture, StartedChild, SubagentProgress,
-    emit_subagent_notification, spawn_subagent_coordinator, worker_runtime,
+    ChildControl, ChildRunOutput, LocalBoxFuture, ParentReportDelivery, StartedChild,
+    SubagentProgress, emit_subagent_notification, spawn_subagent_coordinator, worker_runtime,
 };
 mod attempt_store;
 mod handle_request;
@@ -447,10 +447,51 @@ impl SubagentSpawnContext {
 pub(crate) struct ShellChildRuntime {
     pub child_handle: SessionHandle,
     pub _child_thread: SessionThread,
+    /// The parent session's mailbox, for the child's reports back up. `None`
+    /// when the parent handle was already gone at spawn — the child still runs,
+    /// it simply has nowhere to report to.
+    pub parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
+    /// The child's id as its parent knows it, carried in the report so the
+    /// parent can answer the right subagent.
+    pub subagent_id: String,
 }
 impl ChildControl for ShellChildRuntime {
     type ProgressFuture = LocalBoxFuture<SubagentProgress>;
     type MessageFuture = LocalBoxFuture<SubagentMessageOutcome>;
+    type ParentReportFuture = LocalBoxFuture<ParentReportDelivery>;
+    /// Post the child's text to the parent session's mailbox and resolve on the
+    /// parent's take, not on its read.
+    ///
+    /// A deadline would be wrong here for the same reason it is wrong in
+    /// [`Self::message`], but so would waiting for delivery: a parent that
+    /// foreground-spawned this child is parked inside that `task` call and
+    /// reaches no injection point until the child finishes, so a delivery ack
+    /// would deadlock the pair. The parent answers the take immediately from
+    /// its command loop, which runs alongside its turn.
+    fn message_parent(&self, text: String) -> Self::ParentReportFuture {
+        let Some(cmd_tx) = self.parent_cmd_tx.clone() else {
+            return Box::pin(std::future::ready(ParentReportDelivery::Unreachable));
+        };
+        let subagent_id = self.subagent_id.clone();
+        Box::pin(async move {
+            let (ack, ack_rx) = oneshot::channel();
+            if cmd_tx
+                .send(SessionCommand::ChildReport {
+                    subagent_id,
+                    text,
+                    ack,
+                })
+                .is_err()
+            {
+                return ParentReportDelivery::Unreachable;
+            }
+            match ack_rx.await {
+                Ok(true) => ParentReportDelivery::Buffered,
+                Ok(false) => ParentReportDelivery::NoTurnRunning,
+                Err(_) => ParentReportDelivery::Unreachable,
+            }
+        })
+    }
     /// Post the text to the child session's own mailbox and wait for the child
     /// to say what became of it.
     ///

@@ -29,10 +29,29 @@ pub(crate) type PendingInterjection = xai_interjection_core::PendingInterjection
 /// resurrecting a steering message as a turn of its own.
 pub(crate) struct PendingSteeringMessage {
     pub(crate) text: String,
+    /// Who is speaking, which decides the framing at drain time.
+    pub(crate) origin: SteeringOrigin,
     /// `true` once the text is in the conversation; `false` if the turn ended
     /// or was cancelled first. Dropped without a send only when the session
     /// actor itself goes away, which the sender reads as unreachable.
-    pub(crate) ack: tokio::sync::oneshot::Sender<bool>,
+    ///
+    /// `None` for an entry whose sender was already answered at enqueue — a
+    /// child's report, which is acknowledged as *taken* rather than as read so
+    /// the child does not park behind a parent that may be awaiting it.
+    pub(crate) ack: Option<tokio::sync::oneshot::Sender<bool>>,
+}
+
+/// Which direction a buffered message came from.
+///
+/// Both ride the same buffer and the same drain points; only the framing and
+/// the standing they claim differ. Keeping the distinction in the entry rather
+/// than in pre-formatted text means the truncation and the wrapper stay in one
+/// place.
+pub(crate) enum SteeringOrigin {
+    /// The agent that owns this session, correcting it.
+    Owner,
+    /// A subagent this session spawned, reporting up mid-task.
+    Child { subagent_id: String },
 }
 
 /// Wrap steering text for the model. The framing names the sender's standing —
@@ -40,12 +59,28 @@ pub(crate) struct PendingSteeringMessage {
 /// model treats it as a correction to follow rather than a change of mind to
 /// weigh. Truncated on the same threshold as an interjection so one oversized
 /// message cannot displace the turn's own context.
-pub(crate) fn format_steering_message(text: String) -> String {
+///
+/// A child's report is framed the opposite way. It comes from below, so it is
+/// information rather than instruction, and the text says so — including that
+/// the child is still working and is not waiting for an answer. A parent that
+/// reads a report as a question to reply to is the first half of a ping-pong;
+/// the cap on a child's outbound messages bounds that regardless, but the
+/// framing is what keeps the ordinary case from starting one.
+pub(crate) fn format_steering_message(text: String, origin: &SteeringOrigin) -> String {
     let truncated = xai_interjection_core::truncate_large_prompt(text);
-    format!(
-        "The agent that started this task sent a correction while you were \
-         working. Treat it as an instruction, not as new information:\n{truncated}"
-    )
+    match origin {
+        SteeringOrigin::Owner => format!(
+            "The agent that started this task sent a correction while you were \
+             working. Treat it as an instruction, not as new information:\n{truncated}"
+        ),
+        SteeringOrigin::Child { subagent_id } => format!(
+            "Subagent {subagent_id}, which you spawned and which is still running, \
+             sent this while working. It is a report, not an instruction, and it is \
+             not waiting for a reply — it has already gone back to work. Take it \
+             into account; answer only if it changes what that subagent or another \
+             one should be doing, and then by messaging that subagent:\n{truncated}"
+        ),
+    }
 }
 
 /// Prompt-id prefix for interjections that missed their turn and were
@@ -157,10 +192,52 @@ impl SessionActor {
             tracing::info!("Dropped steering message: no turn running in this session");
             return;
         }
-        self.pending_steering
-            .lock()
-            .push(PendingSteeringMessage { text, ack });
+        self.pending_steering.lock().push(PendingSteeringMessage {
+            text,
+            origin: SteeringOrigin::Owner,
+            ack: Some(ack),
+        });
         tracing::info!("Queued out-of-band steering message");
+    }
+
+    /// Take a running subagent's report into this session's turn.
+    ///
+    /// The same running-turn test as [`Self::accept_steering_message`], and the
+    /// same drop when there is none: a session between turns is not woken by a
+    /// child, only by that child's completion, which is gated on whether
+    /// anything is awaiting it.
+    ///
+    /// The ack fires here rather than at drain — the one place this path
+    /// deliberately differs. A parent blocked inside the `task` call that
+    /// awaits this very child reaches no drain point until the child finishes,
+    /// so a delivery ack would be the child waiting on itself.
+    pub(crate) fn accept_child_report(
+        &self,
+        subagent_id: String,
+        text: String,
+        ack: tokio::sync::oneshot::Sender<bool>,
+    ) {
+        let turn_running = self
+            .current_prompt_id
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .is_some();
+        if !turn_running {
+            let _ = ack.send(false);
+            tracing::info!(
+                subagent_id,
+                "Dropped subagent report: no turn running in the parent session"
+            );
+            return;
+        }
+        self.pending_steering.lock().push(PendingSteeringMessage {
+            text,
+            origin: SteeringOrigin::Child { subagent_id },
+            ack: None,
+        });
+        let _ = ack.send(true);
+        tracing::info!("Queued a running subagent's report into the parent's turn");
     }
 
     /// Drain buffered steering messages into the conversation as
@@ -176,9 +253,11 @@ impl SessionActor {
         if entries.is_empty() {
             return false;
         }
-        for PendingSteeringMessage { text, ack } in entries {
-            self.push_system_reminder(&format_steering_message(text));
-            let _ = ack.send(true);
+        for PendingSteeringMessage { text, origin, ack } in entries {
+            self.push_system_reminder(&format_steering_message(text, &origin));
+            if let Some(ack) = ack {
+                let _ = ack.send(true);
+            }
         }
         tracing::info!("Injected out-of-band steering message(s) into the running turn");
         true
@@ -197,7 +276,12 @@ impl SessionActor {
         }
         let count = entries.len();
         for entry in entries {
-            let _ = entry.ack.send(false);
+            // A child's report was already answered "taken" at enqueue and
+            // carries no channel here; only the owner's steering is waiting to
+            // hear that its turn is gone.
+            if let Some(ack) = entry.ack {
+                let _ = ack.send(false);
+            }
         }
         tracing::info!(count, "Discarded steering message(s) with no turn to steer");
     }

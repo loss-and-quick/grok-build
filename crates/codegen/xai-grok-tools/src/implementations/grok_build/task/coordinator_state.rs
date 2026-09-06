@@ -8,9 +8,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::types::{
-    ActiveSubagentSummary, SubagentCompletionSummary, SubagentDescribeOutcome, SubagentInspection,
-    SubagentMessageOutcome, SubagentRequest, SubagentResult, SubagentResumeLookup,
-    SubagentSnapshot, SubagentSnapshotStatus, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
+    ActiveSubagentSummary, MAX_PARENT_MESSAGES_PER_SUBAGENT, ParentMessageOutcome,
+    SubagentCompletionSummary, SubagentDescribeOutcome, SubagentInspection, SubagentMessageOutcome,
+    SubagentRequest, SubagentResult, SubagentResumeLookup, SubagentSnapshot,
+    SubagentSnapshotStatus, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
 };
 
 /// Cap on retained completed-subagent entries before the oldest are evicted.
@@ -32,13 +33,41 @@ pub struct SubagentProgress {
     pub error_count: u32,
 }
 
+/// What the host could do with a child's message to its parent.
+///
+/// Deliberately narrower than [`super::types::ParentMessageOutcome`]: a control
+/// reports only what the transport saw. Whether the child had any budget left,
+/// and how much of it remains, is registry state the coordinator owns and a
+/// child's own runtime must never be able to answer for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentReportDelivery {
+    /// The parent had a turn running and took the text into it.
+    Buffered,
+    /// The parent is between turns. Dropped; the parent is not woken.
+    NoTurnRunning,
+    /// The parent's session channel is gone.
+    Unreachable,
+}
+
 /// Runtime handle retained while a child is active.
 pub trait ChildControl: 'static {
     type ProgressFuture: Future<Output = SubagentProgress> + 'static;
     type MessageFuture: Future<Output = SubagentMessageOutcome> + 'static;
+    type ParentReportFuture: Future<Output = ParentReportDelivery> + 'static;
 
     fn progress(&self) -> Self::ProgressFuture;
     fn cancel(&self);
+
+    /// Hand `text` up to the session that spawned this child, resolving as soon
+    /// as the parent has *taken* it — not once the parent has read it.
+    ///
+    /// The asymmetry with [`Self::message`] is deliberate and load-bearing. A
+    /// parent steering a child can wait for the real delivery because the
+    /// child's turn advances on its own. A child cannot: its parent may be
+    /// parked inside the very `task` call awaiting this child, which reaches no
+    /// injection point until the child finishes, so waiting for delivery would
+    /// be waiting for itself.
+    fn message_parent(&self, text: String) -> Self::ParentReportFuture;
 
     /// Hand `text` to the running child out of band, resolving only once the
     /// child has put it in its conversation or established that it will not.
@@ -325,7 +354,26 @@ pub(super) struct ActiveChild<C> {
     pub(super) child_cwd: String,
     pub(super) worktree_path: Option<String>,
     pub(super) effective_model_id: String,
+    /// Messages this child has already sent up to its parent, counted against
+    /// [`MAX_PARENT_MESSAGES_PER_SUBAGENT`]. Lives here rather than in the
+    /// child's own session so nothing the child does can reset it, and dies
+    /// with the registry entry so a resumed subagent — a new id, a new
+    /// conversation — starts fresh rather than inheriting a spent budget.
+    pub(super) parent_messages_sent: u32,
     pub(super) control: C,
+}
+
+impl<C> ActiveChild<C> {
+    /// Spend one of this child's parent-message allowance, returning what is
+    /// left afterwards. `None` once the allowance is gone — and it stays gone,
+    /// because nothing ever decrements the counter.
+    pub(super) fn take_parent_message_budget(&mut self) -> Option<u32> {
+        if self.parent_messages_sent >= MAX_PARENT_MESSAGES_PER_SUBAGENT {
+            return None;
+        }
+        self.parent_messages_sent += 1;
+        Some(MAX_PARENT_MESSAGES_PER_SUBAGENT - self.parent_messages_sent)
+    }
 }
 
 pub(super) struct CompletedChild {
@@ -436,6 +484,42 @@ where
                 None => unreachable!("progress future polled without a target"),
             };
             (seed, target, progress)
+        })
+    }
+}
+
+/// A child's parent-message in flight, carrying the allowance already spent on
+/// it so the answer can name what is left.
+///
+/// The budget is charged when the message is *sent*, not when it lands. A child
+/// that got `NoTurnRunning` and could retry for free would turn an idle parent
+/// into an unbounded poll, which is the same loop the cap exists to close.
+pub(super) struct ParentReportReply<F> {
+    pub(super) future: Pin<Box<F>>,
+    pub(super) remaining: u32,
+    pub(super) respond_to: Option<oneshot::Sender<ParentMessageOutcome>>,
+}
+
+impl<F> Future for ParentReportReply<F>
+where
+    F: Future<Output = ParentReportDelivery>,
+{
+    type Output = (oneshot::Sender<ParentMessageOutcome>, ParentMessageOutcome);
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let remaining = this.remaining;
+        this.future.as_mut().poll(cx).map(|delivery| {
+            let respond_to = match this.respond_to.take() {
+                Some(respond_to) => respond_to,
+                None => unreachable!("parent report future polled after completion"),
+            };
+            let outcome = match delivery {
+                ParentReportDelivery::Buffered => ParentMessageOutcome::Accepted { remaining },
+                ParentReportDelivery::NoTurnRunning => ParentMessageOutcome::NoTurnRunning,
+                ParentReportDelivery::Unreachable => ParentMessageOutcome::Unreachable,
+            };
+            (respond_to, outcome)
         })
     }
 }

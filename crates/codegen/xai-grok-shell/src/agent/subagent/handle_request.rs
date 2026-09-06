@@ -1311,6 +1311,8 @@ pub(crate) async fn run_shell_child(
             control: ShellChildRuntime {
                 child_handle: child_handle.clone(),
                 _child_thread: child_thread,
+                parent_cmd_tx: ctx.parent_cmd_tx.clone(),
+                subagent_id: request.id.clone(),
             },
         })
         .await;
