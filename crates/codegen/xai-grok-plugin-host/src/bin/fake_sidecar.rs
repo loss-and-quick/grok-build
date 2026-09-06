@@ -203,7 +203,11 @@ fn main() {
                         let _ = read_response_for(&mut reader, set_id);
 
                         let get_id = alloc(&mut next_id);
-                        request(get_id, "storage_get", json!({ "key": params.invocation_id }));
+                        request(
+                            get_id,
+                            "storage_get",
+                            json!({ "key": params.invocation_id }),
+                        );
                         let got = read_response_for(&mut reader, get_id);
                         ToolInvokeResult {
                             content: format!(

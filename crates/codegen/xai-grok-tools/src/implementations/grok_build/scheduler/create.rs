@@ -549,7 +549,6 @@ mod tests {
         assert!(instr.contains(args));
     }
 
-
     /// The scheduler actor belongs to the root session, so a foreground fire is
     /// a turn in the ROOT conversation. A subagent asking for one is asking for
     /// a prompt to appear in a conversation that is not its own, after it has

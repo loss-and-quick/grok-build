@@ -15,7 +15,6 @@ pub mod tool_overrides;
 pub mod types;
 
 pub use self::conversation::*;
-pub use self::gemini::build_gemini_request;
 pub use self::doom_loop::{
     DEFAULT_EXACT_REPETITION_MIN_TOKENS, DOOM_LOOP_CHECK_EVENT_TYPE, DOOM_LOOP_CHECK_HEADER,
     DoomLoopPeek, DoomLoopRecoveryPolicy, DoomLoopSignal, DoomLoopSignalKind,
@@ -27,6 +26,7 @@ pub use self::error::{
     is_encrypted_content_message, is_retryable_api_status, is_size_overflow_error_code,
     parse_error_code, status_user_message, user_facing_api_error_message,
 };
+pub use self::gemini::build_gemini_request;
 pub use self::tool_overrides::{
     ClearableField, MAX_WEB_SEARCH_DOMAINS, SearchDateBound, SearchDateBoundError, ToolOverrides,
     ToolOverridesUpdate, WebSearchOptions, WebSearchOptionsError, XSearchOptions,

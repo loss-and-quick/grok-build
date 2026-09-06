@@ -822,7 +822,10 @@ fn loop_prompt_matches_pager_wording() {
     use xai_grok_tools::implementations::grok_build::{
         loop_schedule_instruction, loop_usage_message,
     };
-    assert_eq!(loop_text("", LoopFireMode::Detached), loop_usage_message(LoopFireMode::Detached));
+    assert_eq!(
+        loop_text("", LoopFireMode::Detached),
+        loop_usage_message(LoopFireMode::Detached)
+    );
     for mode in [LoopFireMode::Detached, LoopFireMode::InSession] {
         assert_eq!(
             loop_text("2h run tests", mode),

@@ -965,59 +965,59 @@ impl MockInferenceServer {
             )
             .route(
                 "/v1/models/{model_action}",
-                post(move |
-                    axum::extract::Path(model_action): axum::extract::Path<String>,
-                    headers: HeaderMap,
-                    Json(body): Json<Value>,
-                | {
-                    let log = log_gm.clone();
-                    let mode = mode_gm.clone();
-                    let delay = delay_gm.clone();
-                    async move {
-                        // Path segment is `<model>:streamGenerateContent`.
-                        let model = model_action
-                            .split(':')
-                            .next()
-                            .unwrap_or("test-model")
-                            .to_owned();
-                        let auth = Self::extract_auth(&headers);
-                        log.record(
-                            "POST",
-                            &format!("/v1/models/{model_action}"),
-                            Some(&body),
-                            auth.as_deref(),
-                            Self::headers_vec(&headers),
-                        );
+                post(
+                    move |axum::extract::Path(model_action): axum::extract::Path<String>,
+                          headers: HeaderMap,
+                          Json(body): Json<Value>| {
+                        let log = log_gm.clone();
+                        let mode = mode_gm.clone();
+                        let delay = delay_gm.clone();
+                        async move {
+                            // Path segment is `<model>:streamGenerateContent`.
+                            let model = model_action
+                                .split(':')
+                                .next()
+                                .unwrap_or("test-model")
+                                .to_owned();
+                            let auth = Self::extract_auth(&headers);
+                            log.record(
+                                "POST",
+                                &format!("/v1/models/{model_action}"),
+                                Some(&body),
+                                auth.as_deref(),
+                                Self::headers_vec(&headers),
+                            );
 
-                        // Extract the last user text from `contents[].parts[].text`.
-                        let user_msg = body
-                            .get("contents")
-                            .and_then(|c| c.as_array())
-                            .and_then(|turns| {
-                                turns.iter().rev().find(|t| {
-                                    t.get("role").and_then(Value::as_str) == Some("user")
+                            // Extract the last user text from `contents[].parts[].text`.
+                            let user_msg = body
+                                .get("contents")
+                                .and_then(|c| c.as_array())
+                                .and_then(|turns| {
+                                    turns.iter().rev().find(|t| {
+                                        t.get("role").and_then(Value::as_str) == Some("user")
+                                    })
                                 })
-                            })
-                            .and_then(|t| t.get("parts"))
-                            .and_then(|p| p.as_array())
-                            .and_then(|parts| {
-                                parts.iter().find_map(|p| {
-                                    p.get("text").and_then(Value::as_str).map(String::from)
+                                .and_then(|t| t.get("parts"))
+                                .and_then(|p| p.as_array())
+                                .and_then(|parts| {
+                                    parts.iter().find_map(|p| {
+                                        p.get("text").and_then(Value::as_str).map(String::from)
+                                    })
                                 })
-                            })
-                            .unwrap_or_else(|| "hello".to_string());
+                                .unwrap_or_else(|| "hello".to_string());
 
-                        let text = match &*mode.read().unwrap() {
-                            ResponseMode::Echo => format!("Echo: {user_msg}"),
-                            ResponseMode::Fixed(t) => t.clone(),
-                        };
-                        let events = sse::gemini_api_events(&text, &model);
-                        let stream = paced_events(events, *delay.read().unwrap(), None);
-                        Sse::new(stream)
-                            .keep_alive(KeepAlive::default())
-                            .into_response()
-                    }
-                }),
+                            let text = match &*mode.read().unwrap() {
+                                ResponseMode::Echo => format!("Echo: {user_msg}"),
+                                ResponseMode::Fixed(t) => t.clone(),
+                            };
+                            let events = sse::gemini_api_events(&text, &model);
+                            let stream = paced_events(events, *delay.read().unwrap(), None);
+                            Sse::new(stream)
+                                .keep_alive(KeepAlive::default())
+                                .into_response()
+                        }
+                    },
+                ),
             )
             .route(
                 "/v1/models",

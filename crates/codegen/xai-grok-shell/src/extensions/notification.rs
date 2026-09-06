@@ -576,10 +576,7 @@ pub enum SessionUpdate {
         view_model: xai_grok_plugin_protocol::PanelViewModel,
     },
     /// A plugin closed a previously published panel, keyed by (plugin, id).
-    PanelClosed {
-        plugin: String,
-        id: String,
-    },
+    PanelClosed { plugin: String, id: String },
     /// Marketplace plugin updates were auto-installed on session start.
     /// Sent so desktop/pager can show a notification to the user.
     PluginUpdatesInstalled {

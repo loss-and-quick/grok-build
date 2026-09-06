@@ -76,7 +76,8 @@ pub struct RequestReplacement {
 pub trait RequestInterceptor: Send + Sync + std::fmt::Debug {
     /// Inspect `view` and optionally return a replacement. Called at most
     /// once per outbound request.
-    fn intercept<'a>(&'a self, view: &'a RequestView) -> SeamFuture<'a, Option<RequestReplacement>>;
+    fn intercept<'a>(&'a self, view: &'a RequestView)
+    -> SeamFuture<'a, Option<RequestReplacement>>;
 }
 
 /// Shared, cheap-to-clone alias for a request interceptor.

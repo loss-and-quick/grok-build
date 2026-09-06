@@ -90,17 +90,19 @@ pub fn resolve_effective_overrides(
     // reasoning_effort that failed to parse.
     let reasoning_effort = reasoning_from_override_or_role
         .or_else(|| resolved_persona.and_then(|p| p.reasoning_effort.clone()))
-        .and_then(|raw| match raw.parse::<xai_grok_sampling_types::ReasoningEffort>() {
-            Ok(effort) => Some(effort),
-            Err(err) => {
-                tracing::warn!(
-                    value = %raw,
-                    error = %err,
-                    "subagent reasoning_effort: unrecognized value, ignoring"
-                );
-                None
-            }
-        });
+        .and_then(
+            |raw| match raw.parse::<xai_grok_sampling_types::ReasoningEffort>() {
+                Ok(effort) => Some(effort),
+                Err(err) => {
+                    tracing::warn!(
+                        value = %raw,
+                        error = %err,
+                        "subagent reasoning_effort: unrecognized value, ignoring"
+                    );
+                    None
+                }
+            },
+        );
 
     // ── Persona instructions loading ─────────────────────────────
     // Fail-closed: if persona resolution produces an error (file unreadable, not found, empty), return early with only persona and error populated
