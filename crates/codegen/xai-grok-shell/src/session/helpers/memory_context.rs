@@ -42,11 +42,34 @@ pub fn injected_memory_context(item: &ConversationItem) -> Option<(String, usize
     let rest = &sys.content[start..];
     let end = rest.find(MEMORY_CONTEXT_CLOSE_TAG)? + MEMORY_CONTEXT_CLOSE_TAG.len();
     let block = &rest[..end];
-    // `format_memory_reminder` writes one "### Result N" heading per result,
-    // each on its own line. Counting them beats threading a count through the
-    // system message, which stores text and nothing else.
-    let results = block.matches("\n### Result ").count();
-    Some((block.to_string(), results))
+    // Counting the headings beats threading a count through the system
+    // message, which stores text and nothing else.
+    Some((block.to_string(), count_result_headings(block)))
+}
+
+/// Count the result headings [`format_memory_reminder`] wrote into a block.
+///
+/// Counting every `### Result ` occurrence would count the snippets too, and
+/// each snippet is a verbatim excerpt of the user's memory markdown. Memory
+/// records past sessions, so a stored `/context` output or search transcript
+/// carries exactly those lines and would inflate the total.
+///
+/// Two things narrow it to what the formatter writes: a heading is a whole
+/// line that also carries the `(score:` it emits, and the headings are
+/// numbered from one, so only the next number in sequence counts. Tracking the
+/// fences instead would be worse — a snippet may hold fences of its own, and
+/// the parity would desync and silently drop real headings.
+fn count_result_headings(block: &str) -> usize {
+    let mut seen = 0usize;
+    for line in block.lines() {
+        let Some(rest) = line.strip_prefix("### Result ") else {
+            continue;
+        };
+        if rest.starts_with(&format!("{} (score:", seen + 1)) {
+            seen += 1;
+        }
+    }
+    seen
 }
 
 /// Format memory search results as a markdown section for system-reminder injection.
@@ -384,6 +407,25 @@ mod tests {
             injected_memory_context(&system).expect("the block is in the system message");
         assert_eq!(recovered, block);
         assert_eq!(results, 2);
+    }
+
+    /// A memory entry is the user's own markdown, and memory records past
+    /// sessions — so a snippet can hold the text of an earlier injection.
+    /// Those lines must not be counted as results of this one.
+    #[test]
+    fn a_snippet_quoting_an_earlier_injection_does_not_inflate_the_count() {
+        let quoted = "### Result 1 (score: 0.99, source: workspace)\n\
+                      **File:** MEMORY.md (lines 0-3)\n\
+                      ### Result 2 (score: 0.50, source: session)\n\
+                      ### Result nine (score: 0.10, source: session)";
+        let block = format_memory_reminder(&[result(quoted), result("second")])
+            .expect("two results render a block");
+        let system = ConversationItem::system(block);
+        let (_, results) = injected_memory_context(&system).expect("the block is recovered");
+        assert_eq!(
+            results, 2,
+            "only the headings this block wrote are counted, not the quoted ones"
+        );
     }
 
     #[test]
