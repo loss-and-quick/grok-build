@@ -797,6 +797,73 @@ async fn memory_index_reaches_the_prefix_when_the_agent_can_open_an_entry() {
         .await;
 }
 
+/// `/context` renders the same block to report what the prefix holds. That is
+/// a read: it must not write an injection event, or every `/context` inflates
+/// whatever counts that marker.
+#[tokio::test(flavor = "current_thread")]
+async fn reporting_the_index_to_context_records_no_injection() {
+    // The literal is the message the `tracing::info!` in `with_memory_index`
+    // writes; the macro takes no const.
+    const INJECTED: &str = "MEMORY_INDEX_INJECT: folded";
+    let (_guard, counter) = xai_test_utils::tracing_capture::install_prefix_counter_thread(&[
+        INJECTED,
+        "MEMORY_INDEX_INJECT: skipped",
+    ]);
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = create_index_actor(vec![
+                xai_grok_tools::registry::types::ToolConfig::for_tool::<
+                    xai_grok_tools::implementations::memory::MemoryGetImpl,
+                >(),
+            ])
+            .await;
+            let (block, entries) = actor
+                .memory_index_block()
+                .await
+                .expect("the store has entries and the agent can open one");
+            assert!(block.contains("## Global"), "got: {block}");
+            assert_eq!(entries, 2);
+            assert_eq!(
+                0,
+                counter.count(INJECTED),
+                "reading the block for a report is not an injection"
+            );
+            let _ = actor.with_memory_index("<user_info>".to_string()).await;
+            assert_eq!(
+                1,
+                counter.count(INJECTED),
+                "the one site that injects is the one site that logs"
+            );
+        })
+        .await;
+}
+
+/// The skip is telemetry about an injection that did not happen, so it belongs
+/// on the injecting path too — a `/context` on an agent without `memory_get`
+/// must not write one either.
+#[tokio::test(flavor = "current_thread")]
+async fn reporting_an_unopenable_index_records_no_skip() {
+    const SKIPPED: &str = "MEMORY_INDEX_INJECT: skipped";
+    let (_guard, counter) = xai_test_utils::tracing_capture::install_prefix_counter_thread(&[
+        SKIPPED,
+        "MEMORY_INDEX_INJECT: folded",
+    ]);
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = create_index_actor(vec![]).await;
+            assert!(actor.memory_index_block().await.is_none());
+            assert_eq!(0, counter.count(SKIPPED));
+            assert_eq!(
+                "<user_info>",
+                actor.with_memory_index("<user_info>".to_string()).await,
+            );
+            assert_eq!(1, counter.count(SKIPPED));
+        })
+        .await;
+}
+
 /// Ported from the out-of-tree memory plugin's catalog gate: an agent that
 /// cannot open an entry has no use for a list of entries, and would pay for
 /// the block on every request of its session.

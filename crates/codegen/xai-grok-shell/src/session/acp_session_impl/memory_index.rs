@@ -103,24 +103,56 @@ pub(crate) fn format_memory_index(scopes: &[IndexScope<'_>]) -> Option<String> {
     Some(out)
 }
 
+/// What the memory index came to for this session: the block to inject, or
+/// why there is none.
+///
+/// The reason is carried rather than logged where it is found, because the
+/// same render answers two different questions. `/context` asks what the
+/// prefix holds, which is a read; only [`SessionActor::with_memory_index`]
+/// injects. A telemetry event written from the shared render would say an
+/// injection happened every time a user opened `/context`, and anything
+/// counting that marker would be reading `/context` invocations as injections.
+pub(super) enum MemoryIndexOutcome {
+    /// Rendered and ready: the block, and the number of entries it points at.
+    Ready { block: String, entries: usize },
+    /// Entries exist, but the agent's catalog has no `memory_get` to open one.
+    NoOpener { entries: usize },
+    /// Nothing to show: injection is off, there is no storage, or the store is
+    /// empty.
+    Nothing,
+}
+
 impl SessionActor {
-    /// Read both scopes' indexes and render the block with the number of
-    /// entries it points at, or `None` when it should not be injected.
+    /// Read both scopes' indexes and render the block, with the number of
+    /// entries it points at and, when there is none, why.
     ///
-    /// The count comes back alongside the text because `/context` reports it
-    /// and re-deriving it from the rendered block would have to parse back out
-    /// what this function already knows.
+    /// Writes no telemetry: see [`MemoryIndexOutcome`]. The count comes back
+    /// alongside the text because `/context` reports it and re-deriving it
+    /// from the rendered block would have to parse back out what this function
+    /// already knows.
     ///
     /// Skipped when the session's tool catalog has no `memory_get`: an agent
     /// that cannot open an entry has no use for a list of entries, and the
     /// block would be dead weight in every one of its requests. This is the
     /// gate the out-of-tree memory plugin applies to its own injection, moved
     /// to the tool the injected text actually asks the model to call.
-    pub(super) async fn memory_index_block(&self) -> Option<(String, usize)> {
+    ///
+    /// The two index files are read synchronously on the actor's own task, and
+    /// stay that way. Each session actor owns a dedicated thread and runtime
+    /// ([`spawn_session_actor`](super::spawn)), so the only thing a read can
+    /// delay is the session that asked for it; the files are a few kilobytes
+    /// of pointer lines, usually warm because the same reads happen at every
+    /// prefix build and on every `memory_write`; and the added caller is
+    /// `/context`, which is human-paced and runs once per invocation. Handing
+    /// them to `spawn_blocking` would park this `!Send` actor at the same
+    /// point anyway, buying a hop for a read measured in microseconds.
+    pub(super) async fn memory_index_outcome(&self) -> MemoryIndexOutcome {
         if !self.memory.index_injection_config.enabled {
-            return None;
+            return MemoryIndexOutcome::Nothing;
         }
-        let storage = self.memory.storage()?;
+        let Some(storage) = self.memory.storage() else {
+            return MemoryIndexOutcome::Nothing;
+        };
         let read =
             |scope| std::fs::read_to_string(storage.memories_index_file(scope)).unwrap_or_default();
         let (workspace, global) = (
@@ -148,28 +180,28 @@ impl SessionActor {
         ];
         let entries: usize = scopes.iter().map(|s| s.lines.len()).sum();
         if entries == 0 {
-            return None;
+            return MemoryIndexOutcome::Nothing;
         }
         let tool_names = self.registered_tool_names().await;
         if !tool_names
             .iter()
             .any(|n| n == xai_grok_tools::implementations::memory::MEMORY_GET_TOOL_NAME)
         {
-            tracing::info!(
-                target: xai_grok_telemetry::memory_log::TARGET,
-                entries,
-                "MEMORY_INDEX_INJECT: skipped -- agent has no memory_get to open an entry with"
-            );
-            return None;
+            return MemoryIndexOutcome::NoOpener { entries };
         }
-        let block = format_memory_index(&scopes)?;
-        tracing::info!(
-            target: xai_grok_telemetry::memory_log::TARGET,
-            entries,
-            block_chars = block.chars().count(),
-            "MEMORY_INDEX_INJECT: folded the memory index into the session prefix"
-        );
-        Some((block, entries))
+        match format_memory_index(&scopes) {
+            Some(block) => MemoryIndexOutcome::Ready { block, entries },
+            None => MemoryIndexOutcome::Nothing,
+        }
+    }
+
+    /// The rendered index block for a read-only report of what the prefix
+    /// holds, such as `/context`. Injects nothing and records nothing.
+    pub(super) async fn memory_index_block(&self) -> Option<(String, usize)> {
+        match self.memory_index_outcome().await {
+            MemoryIndexOutcome::Ready { block, entries } => Some((block, entries)),
+            MemoryIndexOutcome::NoOpener { .. } | MemoryIndexOutcome::Nothing => None,
+        }
     }
 
     /// Append the memory index to a freshly built `<user_info>` prefix,
@@ -180,10 +212,28 @@ impl SessionActor {
     /// `build_user_message_prefix` would race the background build armed at
     /// `Initialize`, and appending at more than one consumption point would
     /// duplicate the block.
+    ///
+    /// This is also the only place the injection is logged, because it is the
+    /// only place an injection happens.
     pub(super) async fn with_memory_index(&self, prefix: String) -> String {
-        let Some((body, _)) = self.memory_index_block().await else {
-            return prefix;
+        let (body, entries) = match self.memory_index_outcome().await {
+            MemoryIndexOutcome::Ready { block, entries } => (block, entries),
+            MemoryIndexOutcome::NoOpener { entries } => {
+                tracing::info!(
+                    target: xai_grok_telemetry::memory_log::TARGET,
+                    entries,
+                    "MEMORY_INDEX_INJECT: skipped -- agent has no memory_get to open an entry with"
+                );
+                return prefix;
+            }
+            MemoryIndexOutcome::Nothing => return prefix,
         };
+        tracing::info!(
+            target: xai_grok_telemetry::memory_log::TARGET,
+            entries,
+            block_chars = body.chars().count(),
+            "MEMORY_INDEX_INJECT: folded the memory index into the session prefix"
+        );
         let tag = self.reminder_wrapper_tag();
         let body = body.replace(&format!("</{tag}>"), &format!("<\\/{tag}>"));
         format!("{prefix}\n\n<{tag}>\n{body}</{tag}>")
