@@ -122,7 +122,7 @@ impl BarLayout {
     /// [`Self::WIDE`] to [`Self::NARROW`]. The wide layout needs 39
     /// columns just for the bar; 50 leaves ~11 columns of margin and
     /// is also roughly where the legend rows
-    /// (e.g. `◈ Tool definitions  5.6k tokens   (0.6%) · 12 tools`)
+    /// (e.g. `◆ Tool schemas  5.6k tokens   (0.6%) · 12 tools`)
     /// start to word-wrap, so the breakpoint is consistent with the
     /// rest of the block's responsive behavior.
     const NARROW_BREAKPOINT: u16 = 50;
@@ -171,8 +171,10 @@ const INJECTION_NOTE: [&str; 3] = [
      on the Context usage tab, so they are listed here rather than added to \
      them.",
     "",
-    "Not listed: the system prompt and the tool schemas. Both are sized on \
-     the Context usage tab, and neither is text this session composed.",
+    "Not listed: the system prompt and the tool schemas, both sized on the \
+     Context usage tab; and the <user_info> prefix these blocks hang off, \
+     which cannot be re-rendered without re-running the git status it \
+     carries.",
 ];
 
 /// One legend or informational row, before column formatting.
