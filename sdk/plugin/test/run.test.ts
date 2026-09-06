@@ -313,7 +313,11 @@ describe("deno permissions", () => {
     expect(allowed.argv).toContain("--allow-net");
 
     // Denied and absent both fail closed — the manifest default.
-    for (const env of [{ GROK_PLUGIN_NETWORK: "0" }, {}]) {
+    // Annotated so both array elements are checked against `Record<string, string>`
+    // directly, instead of TS inferring a union where the `{}` arm's absent key
+    // widens to `{ GROK_PLUGIN_NETWORK?: undefined }` and no longer matches it.
+    const envs: Record<string, string>[] = [{ GROK_PLUGIN_NETWORK: "0" }, {}];
+    for (const env of envs) {
       const denied = await runShim(["index.ts"], { path: [deno], env });
       expect(denied.argv).not.toContain("--allow-net");
     }
