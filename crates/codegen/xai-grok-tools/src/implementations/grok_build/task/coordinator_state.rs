@@ -365,14 +365,27 @@ pub(super) struct ActiveChild<C> {
 
 impl<C> ActiveChild<C> {
     /// Spend one of this child's parent-message allowance, returning what is
-    /// left afterwards. `None` once the allowance is gone — and it stays gone,
-    /// because nothing ever decrements the counter.
+    /// left afterwards. `None` once the allowance is gone, and the only thing
+    /// that ever gives one back is [`Self::refund_parent_message_budget`].
     pub(super) fn take_parent_message_budget(&mut self) -> Option<u32> {
         if self.parent_messages_sent >= MAX_PARENT_MESSAGES_PER_SUBAGENT {
             return None;
         }
         self.parent_messages_sent += 1;
         Some(MAX_PARENT_MESSAGES_PER_SUBAGENT - self.parent_messages_sent)
+    }
+
+    /// Give back a send whose delivery reached nothing at all.
+    ///
+    /// Only [`ParentReportDelivery::Unreachable`] qualifies, and the line is
+    /// between a parent that is gone and a parent that is merely idle. A gone
+    /// parent's channel does not come back, so the send bought nothing and no
+    /// retry can buy anything either — charging for it would spend the whole
+    /// allowance on the one outcome that can never succeed. An idle parent is
+    /// alive and will have turns again, so its send stays spent: a free retry
+    /// there is the unbounded poll the cap exists to prevent.
+    pub(super) fn refund_parent_message_budget(&mut self) {
+        self.parent_messages_sent = self.parent_messages_sent.saturating_sub(1);
     }
 }
 
@@ -491,20 +504,37 @@ where
 /// A child's parent-message in flight, carrying the allowance already spent on
 /// it so the answer can name what is left.
 ///
-/// The budget is charged when the message is *sent*, not when it lands. A child
-/// that got `NoTurnRunning` and could retry for free would turn an idle parent
-/// into an unbounded poll, which is the same loop the cap exists to close.
+/// The budget is charged when the message is *sent*, not when it lands, because
+/// a child that got `NoTurnRunning` and could retry for free would turn an idle
+/// parent into an unbounded poll — the same loop the cap exists to close. A
+/// delivery that finds the parent's channel gone is the one outcome that is
+/// handed back (see [`ActiveChild::refund_parent_message_budget`]); the
+/// registry already answers a cancelled child `Unreachable` without touching
+/// the budget at all, so this only makes the two agree.
 pub(super) struct ParentReportReply<F> {
     pub(super) future: Pin<Box<F>>,
     pub(super) remaining: u32,
+    /// The sender's session id, so a send that reached nothing can be credited
+    /// back to the registry entry it was taken from.
+    pub(super) child_session_id: String,
     pub(super) respond_to: Option<oneshot::Sender<ParentMessageOutcome>>,
+}
+
+/// A settled child→parent report: the answer to hand back, and whether the send
+/// it spent is owed to the child.
+pub(super) struct ResolvedParentReport {
+    pub(super) respond_to: oneshot::Sender<ParentMessageOutcome>,
+    pub(super) outcome: ParentMessageOutcome,
+    /// `Some(child session id)` when nothing was delivered and the allowance
+    /// must be credited back.
+    pub(super) refund: Option<String>,
 }
 
 impl<F> Future for ParentReportReply<F>
 where
     F: Future<Output = ParentReportDelivery>,
 {
-    type Output = (oneshot::Sender<ParentMessageOutcome>, ParentMessageOutcome);
+    type Output = ResolvedParentReport;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
@@ -519,7 +549,13 @@ where
                 ParentReportDelivery::NoTurnRunning => ParentMessageOutcome::NoTurnRunning,
                 ParentReportDelivery::Unreachable => ParentMessageOutcome::Unreachable,
             };
-            (respond_to, outcome)
+            let refund = matches!(delivery, ParentReportDelivery::Unreachable)
+                .then(|| std::mem::take(&mut this.child_session_id));
+            ResolvedParentReport {
+                respond_to,
+                outcome,
+                refund,
+            }
         })
     }
 }

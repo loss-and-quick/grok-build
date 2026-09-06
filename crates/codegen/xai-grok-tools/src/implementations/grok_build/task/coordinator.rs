@@ -24,8 +24,9 @@ use super::admission::Admission;
 use super::coordinator_state::{
     ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, CompletedChild, InternalEvent,
     ListRequest, ParentReportReply, PendingChild, ProgressFuture, ProgressTarget, ReplyFuture,
-    TaggedFuture, active_summary, background_at_deadline, background_if_caller_gone,
-    completed_snapshot, completion_summary, sleep_until, workflow_outstanding,
+    ResolvedParentReport, TaggedFuture, active_summary, background_at_deadline,
+    background_if_caller_gone, completed_snapshot, completion_summary, sleep_until,
+    workflow_outstanding,
 };
 use super::types::{
     MAX_PARENT_MESSAGES_PER_SUBAGENT, ParentMessageOutcome, SpawnedSubagentRef,
@@ -216,8 +217,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 Some((respond_to, outcome)) = self.messages.next(), if !self.messages.is_empty() => {
                     let _ = respond_to.send(outcome);
                 }
-                Some((respond_to, outcome)) = self.parent_messages.next(), if !self.parent_messages.is_empty() => {
-                    let _ = respond_to.send(outcome);
+                Some(resolved) = self.parent_messages.next(), if !self.parent_messages.is_empty() => {
+                    self.settle_parent_message(resolved);
                 }
                 command = self.commands.recv(), if commands_open => {
                     match command {
@@ -913,9 +914,33 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         self.parent_messages.push(ParentReportReply {
             future: Box::pin(child.control.message_parent(text)),
             remaining,
+            child_session_id: child_session_id.to_string(),
             respond_to: Some(respond_to),
         });
         None
+    }
+
+    /// Answer a settled child→parent report, giving back a send that reached
+    /// nothing.
+    ///
+    /// The refund is the transport's `Unreachable` only, and it opens no free
+    /// retry the cap was closing: a parent whose channel is gone stays gone, so
+    /// every further send from this child resolves the same way, reaches no
+    /// model, and can draw no reply. That is a child talking to nobody, which
+    /// the registry already allows for free on its own `Unreachable` paths (a
+    /// cancelled child, a session it holds no entry for). What stays charged is
+    /// every outcome a live parent can produce — `Buffered` and
+    /// `NoTurnRunning` — which is what bounds the exchange between two models.
+    fn settle_parent_message(&mut self, resolved: ResolvedParentReport) {
+        if let Some(child_session_id) = resolved.refund
+            && let Some(child) = self
+                .active
+                .values_mut()
+                .find(|child| child.child_session_id == child_session_id)
+        {
+            child.refund_parent_message_budget();
+        }
+        let _ = resolved.respond_to.send(resolved.outcome);
     }
 
     fn cancel_one(

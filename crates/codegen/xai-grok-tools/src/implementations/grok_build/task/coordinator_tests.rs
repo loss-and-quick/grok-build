@@ -2112,6 +2112,57 @@ async fn a_report_to_an_idle_parent_is_dropped_and_still_costs_budget() {
     harness.actor.abort();
 }
 
+/// A parent that cannot be reached at all costs the child nothing. The budget
+/// bounds an exchange between two live models; a gone channel produces no
+/// exchange to bound, so spending all three sends on it would only silence a
+/// child that might still reach a parent that comes back — and none of them
+/// ever can.
+///
+/// It opens no free-retry hole either: unlike an idle parent, an unreachable
+/// one stays unreachable, so the repeat this makes free is a child talking to
+/// nobody — which the registry already answers for free when the child is
+/// cancelled or unknown.
+#[tokio::test]
+async fn a_report_that_reaches_nothing_costs_the_child_no_budget() {
+    let mut harness = harness_with_messaging(
+        false,
+        false,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(60),
+            ..CoordinatorConfig::default()
+        },
+        SubagentMessageOutcome::Delivered,
+        false,
+        ParentReportDelivery::Unreachable,
+    );
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("shouting-into-void", true)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("shouting-into-void")
+    );
+
+    let child = ChannelBackend::for_session(harness.backend.sender(), "shouting-into-void");
+    // Past the cap on purpose: if any of these had been charged, the last ones
+    // would answer `BudgetExhausted` instead of reaching the transport.
+    for _ in 0..MAX_PARENT_MESSAGES_PER_SUBAGENT + 2 {
+        assert_eq!(
+            child.message_parent("still here").await,
+            ParentMessageOutcome::Unreachable,
+        );
+        assert_eq!(
+            harness.parent_reports.recv().await.as_deref(),
+            Some("still here")
+        );
+    }
+
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
 /// A session the registry does not hold as a running child has no parent to
 /// reach — a root session, or a child already finished. Distinct from the
 /// budget answer: one says "not you", the other says "not again".
