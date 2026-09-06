@@ -49,6 +49,7 @@ pub fn max_calls_per_batch(kind: ToolKind, limits: &MediaGenBatchLimits) -> Opti
         | ToolKind::WaitTasksAction
         | ToolKind::KillTaskAction
         | ToolKind::MessageSubagentAction
+        | ToolKind::MessageParentAction
         | ToolKind::List
         | ToolKind::Skill
         | ToolKind::MemorySearch

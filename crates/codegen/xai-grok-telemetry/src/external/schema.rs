@@ -600,6 +600,7 @@ pub(crate) const BUILTIN_TOOL_NAMES: &[&str] = &[
     "kill_task",
     "kill_command_or_subagent",
     "kill_terminal_command",
+    "message_parent",
     "message_subagent",
     "memory_write",
     "memory_delete",

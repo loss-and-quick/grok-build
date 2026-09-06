@@ -87,6 +87,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::WaitTasksAction,
     ToolKind::KillTaskAction,
     ToolKind::MessageSubagentAction,
+    ToolKind::MessageParentAction,
     ToolKind::List,
     ToolKind::Skill,
     ToolKind::MemorySearch,
@@ -163,6 +164,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         | WaitTasksAction
         | KillTaskAction
         | MessageSubagentAction
+        | MessageParentAction
         | Task
         | Monitor
         | Workflow => matches!(mode, M::Execute),

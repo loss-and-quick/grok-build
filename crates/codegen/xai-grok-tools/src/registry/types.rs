@@ -699,6 +699,7 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::WaitTasksTool>();
         b.register::<grok_build::TaskTool>();
         b.register::<grok_build::MessageSubagentTool>();
+        b.register::<grok_build::MessageParentTool>();
         b.register::<grok_build::WebSearchTool>();
         b.register_with_params::<grok_build::WebFetchTool, grok_build::web_fetch::WebFetchParams>();
         b.register::<grok_build::LspTool>();

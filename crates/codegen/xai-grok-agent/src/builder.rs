@@ -261,6 +261,28 @@ fn drop_orphaned_task_lifecycle_tools(
         .tools
         .retain(|tc| !TASK_LIFECYCLE_TOOLS.contains(&short_tool_name(&tc.id)));
 }
+/// The tool a subagent uses to report back up to whoever spawned it.
+const MESSAGE_PARENT_TOOL: &str = "message_parent";
+
+/// Drop `message_parent` from a session nothing spawned.
+///
+/// Unlike the task-lifecycle tools, this one depends on nothing in the toolset
+/// — being spawned is not something a toolset can express — so the toolset's
+/// own composition cannot decide it. The audience can: a root session has no
+/// parent to reach, and offering it the tool would spend prompt on a call whose
+/// only possible answer is "you have no parent".
+fn drop_message_parent_outside_a_subagent(
+    tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
+    is_subagent: bool,
+) {
+    if is_subagent {
+        return;
+    }
+    tool_config
+        .tools
+        .retain(|tc| short_tool_name(&tc.id) != MESSAGE_PARENT_TOOL);
+}
+
 fn apply_workflow_tool_gates(
     tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
     background_workflows_enabled: bool,
@@ -886,6 +908,10 @@ impl AgentBuilder {
         apply_workflow_tool_gates(
             &mut tool_config,
             self.background_workflows_enabled,
+            self.prompt_audience == crate::prompt::context::PromptAudience::Subagent,
+        );
+        drop_message_parent_outside_a_subagent(
+            &mut tool_config,
             self.prompt_audience == crate::prompt::context::PromptAudience::Subagent,
         );
         let task_tool_id = format!(
