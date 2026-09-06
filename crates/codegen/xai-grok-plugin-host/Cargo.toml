@@ -3,7 +3,7 @@ license = "Apache-2.0"
 edition.workspace = true
 name = "xai-grok-plugin-host"
 version = "0.1.0"
-description = "Sidecar supervisor for grok-build TS plugins: spawns per-plugin runtimes (bun/node/deno), speaks bidirectional JSON-RPC 2.0 over stdio, restarts on crash, and bridges hook invocations onto the plugin wire protocol."
+description = "Sidecar supervisor for grok-build plugins: spawns the program a manifest names, speaks bidirectional JSON-RPC 2.0 over stdio, restarts on crash, and bridges hook invocations onto the plugin wire protocol."
 authors = ["xAI"]
 
 [dependencies]
@@ -23,7 +23,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-which = { workspace = true }
 # Atomic KV persistence (NamedTempFile + persist).
 tempfile = { workspace = true }
 

@@ -10,14 +10,21 @@ use std::path::{Path, PathBuf};
 use super::discovery::{DiscoveredPlugin, PluginId, PluginOrigin, PluginScope};
 use super::manifest::SidecarLaunch;
 
-/// Resolved sidecar plugin invocation, when the manifest declares a `plugin`
-/// or `exec` entry (see `PluginManifest::sidecar_launch`).
+/// Resolved sidecar plugin invocation, when the manifest declares an `exec`
+/// entry (see `PluginManifest::sidecar_launch`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidecarSpec {
-    /// How to launch the sidecar: a TS entry file under a JS runtime, or a
-    /// program executed directly. The protocol, supervision and confinement are
-    /// identical either way.
+    /// The program and argv to run.
     pub launch: SidecarLaunch,
+    /// The plugin's own directory, exported to the sidecar as
+    /// `GROK_PLUGIN_ROOT`. A sidecar's cwd is the *workspace* root, so without
+    /// this a plugin has no way to name a file it ships with unless its
+    /// manifest happened to substitute the token into argv.
+    pub plugin_root: PathBuf,
+    /// The plugin's per-plugin data directory (`~/.grok/plugin-data/<id>`),
+    /// exported to the sidecar as `GROK_PLUGIN_DATA`. Same reason: it is
+    /// nowhere in a sidecar's environment otherwise.
+    pub plugin_data: PathBuf,
     /// Whether the sidecar's child process is allowed network access.
     pub network: bool,
     /// Validated model-visible tools from the manifest's `tools` array,
@@ -235,6 +242,8 @@ impl PluginRegistry {
                 .sidecar_launch(&dp.root, &plugin_data)
                 .map(|launch| SidecarSpec {
                     launch,
+                    plugin_root: dp.root.clone(),
+                    plugin_data: PathBuf::from(&plugin_data),
                     network: dp.manifest.network_enabled(),
                     tools: dp.manifest.sidecar_tools(),
                     config: dp.manifest.sidecar_config_defaults(),
@@ -762,7 +771,7 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
-                plugin: None,
+                withdrawn_plugin: None,
                 runtime: None,
                 exec: None,
                 network: None,
@@ -1366,11 +1375,11 @@ mod tests {
         );
     }
 
-    // ── TS sidecar plugin (SidecarSpec) ─────────────────────────────────
+    // ── sidecar plugin (SidecarSpec) ────────────────────────────────────
 
-    /// Build a [`DiscoveredPlugin`] whose manifest declares a `plugin` sidecar
-    /// entry, rooted at a real tempdir so `sidecar_entry_path`'s existence
-    /// check (and thus `SidecarSpec` resolution) succeeds.
+    /// Build a [`DiscoveredPlugin`] whose manifest declares an `exec` sidecar
+    /// entry, rooted at a real tempdir so the program's existence check (and
+    /// thus `SidecarSpec` resolution) succeeds.
     fn make_discovered_with_sidecar(root: &Path, name: &str) -> DiscoveredPlugin {
         DiscoveredPlugin {
             manifest: PluginManifest {
@@ -1388,9 +1397,11 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
-                plugin: Some("./index.ts".to_string()),
-                runtime: Some(super::super::manifest::PluginRuntime::Bun),
-                exec: None,
+                withdrawn_plugin: None,
+                runtime: None,
+                exec: Some(super::super::manifest::ExecEntry::Program(
+                    "./plugin".to_string(),
+                )),
                 network: Some(true),
                 tools: Some(vec![super::super::manifest::ManifestToolSpec {
                     name: "echo".to_string(),
@@ -1419,11 +1430,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn registry_exposes_sidecar_spec_with_resolved_absolute_path() {
+        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("ts-plugin");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("index.ts"), "export default {};").unwrap();
+        let program = root.join("plugin");
+        std::fs::write(&program, "#!/bin/sh\nexec cat\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let dp = make_discovered_with_sidecar(&root, "ts-plugin");
         let reg = PluginRegistry::from_discovered(vec![dp], &[], &["ts-plugin".to_string()]);
@@ -1432,11 +1447,16 @@ mod tests {
         let spec = plugin.sidecar_spec().expect("sidecar spec resolved");
         assert_eq!(
             spec.launch,
-            SidecarLaunch::Runtime {
-                entry: root.join("index.ts"),
-                runtime: super::super::manifest::PluginRuntime::Bun,
+            SidecarLaunch {
+                program,
+                args: vec![],
             }
         );
+        // The plugin's own two directories ride along, so the host can put them
+        // in the sidecar's environment. A sidecar's cwd is the workspace; it
+        // has no other way to name either.
+        assert_eq!(spec.plugin_root, root);
+        assert_eq!(spec.plugin_data, plugin.data_dir());
         assert!(spec.network);
         // Manifest tools flow through, validated and defaulted.
         assert_eq!(spec.tools.len(), 1);
@@ -1453,10 +1473,10 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn registry_resolves_a_directly_executed_sidecar() {
-        // The whole chain for a non-TS plugin: manifest `exec` → resolved
-        // program → the spec the session hands the host. `${GROK_PLUGIN_DATA}`
-        // must reach the same per-plugin dir `LoadedPlugin::data_dir` names.
+    fn registry_substitutes_the_data_dir_token_in_exec_argv() {
+        // The whole chain: manifest `exec` → resolved program → the spec the
+        // session hands the host. `${GROK_PLUGIN_DATA}` must reach the same
+        // per-plugin dir `LoadedPlugin::data_dir` names.
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("any-lang");
@@ -1466,8 +1486,6 @@ mod tests {
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let mut dp = make_discovered_with_sidecar(&root, "any-lang");
-        dp.manifest.plugin = None;
-        dp.manifest.runtime = None;
         dp.manifest.exec = Some(super::super::manifest::ExecEntry::Argv(vec![
             "./plugin".to_string(),
             "--state=${GROK_PLUGIN_DATA}".to_string(),
@@ -1478,12 +1496,11 @@ mod tests {
         let spec = plugin.sidecar_spec().expect("sidecar spec resolved");
         assert_eq!(
             spec.launch,
-            SidecarLaunch::Command {
+            SidecarLaunch {
                 program,
                 args: vec![format!("--state={}", plugin.data_dir_str())],
             }
         );
-        // The rest of the sidecar surface is unchanged by the launch form.
         assert!(spec.network);
         assert_eq!(spec.tools.len(), 1);
     }
@@ -1523,7 +1540,13 @@ mod tests {
     /// a sidecar entry written to `root` so `SidecarSpec` resolves.
     fn oauth_registry(root: &Path, manifest_json: serde_json::Value) -> PluginRegistry {
         std::fs::create_dir_all(root).unwrap();
-        std::fs::write(root.join("index.ts"), "export default {};").unwrap();
+        let program = root.join("plugin");
+        std::fs::write(&program, "#!/bin/sh\nexec cat\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let manifest: PluginManifest = serde_json::from_value(manifest_json).unwrap();
         let name = manifest.name.clone();
         let dp = DiscoveredPlugin {
@@ -1552,7 +1575,7 @@ mod tests {
             &tmp.path().join("example-auth"),
             serde_json::json!({
                 "name": "example-auth",
-                "plugin": "./index.ts",
+                "exec": "./plugin",
                 "oauthLabel": "Acme",
                 "oauthAccounts": [
                     { "id": "work", "label": "work@example.com" },
@@ -1589,7 +1612,7 @@ mod tests {
             &tmp.path().join("example-auth"),
             serde_json::json!({
                 "name": "example-auth",
-                "plugin": "./index.ts",
+                "exec": "./plugin",
                 "oauthLabel": "Acme",
             }),
         );

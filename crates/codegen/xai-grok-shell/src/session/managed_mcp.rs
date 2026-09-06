@@ -1214,7 +1214,7 @@ Authorization = "Bearer org2-token"
                 "sentry": { "type": "http", "url": "https://mcp.sentry.dev/mcp" }
             }))),
             lsp_servers: None,
-            plugin: None,
+            withdrawn_plugin: None,
             runtime: None,
             exec: None,
             network: None,
@@ -1290,7 +1290,7 @@ Authorization = "Bearer org2-token"
                 "sentry": { "type": "http", "url": "https://inline.example/mcp" }
             }))),
             lsp_servers: None,
-            plugin: None,
+            withdrawn_plugin: None,
             runtime: None,
             exec: None,
             network: None,
@@ -1372,7 +1372,7 @@ Authorization = "Bearer org2-token"
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
-            plugin: None,
+            withdrawn_plugin: None,
             runtime: None,
             exec: None,
             network: None,

@@ -57,7 +57,7 @@ const DEFAULT_INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_TOOL_INVOKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Produces the spawn `Command` for a plugin. Overridable in tests to inject a
-/// fake sidecar; production uses [`crate::runtime::build_command`].
+/// fake sidecar; production uses [`crate::spawn::build_command`].
 type CommandFactory =
     Box<dyn Fn(&RegisteredPlugin) -> Result<tokio::process::Command, String> + Send + Sync>;
 
@@ -85,7 +85,7 @@ pub type SpawnHardener = Arc<
 /// The macOS confinement is a re-exec through `sandbox-exec`, which means
 /// replacing the command's program — something a `&mut Command` cannot do in
 /// place. Rebuilding it is only sound at the one point this is called from: the
-/// [`SpawnHardener`] runs after [`crate::runtime::build_command`] (program,
+/// [`SpawnHardener`] runs after [`crate::spawn::build_command`] (program,
 /// args, cwd, `GROK_LEADER_SOCKET`) and before [`PluginSidecar::spawn`] sets the
 /// stdio, which is the state this function knows how to carry over. Calling it
 /// after stdio is configured would silently drop it.
@@ -175,9 +175,7 @@ impl PluginHost {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
             data_dir,
-            command_factory: Box::new(|spec| {
-                crate::runtime::build_command(spec).map_err(|e| e.to_string())
-            }),
+            command_factory: Box::new(|spec| Ok(crate::spawn::build_command(spec))),
             spawn_hardener: None,
             backoff_base: DEFAULT_BACKOFF_BASE,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,

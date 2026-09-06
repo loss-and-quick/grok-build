@@ -32,7 +32,7 @@ use xai_grok_hooks::discovery::HookRegistry;
 use xai_grok_hooks::event::{HookEventEnvelope, HookEventName, HookPayload};
 use xai_grok_hooks::invoker::PluginHookInvoker;
 use xai_grok_hooks::runner::RunContext;
-use xai_grok_plugin_host::{PluginHost, RegisteredPlugin, RuntimeKind};
+use xai_grok_plugin_host::{PluginHost, RegisteredPlugin};
 
 // These MUST match the constants in `examples/plugins/demo-hooks/index.ts`; the
 // whole point of the test is that the plugin and the command hook agree on them.
@@ -50,15 +50,35 @@ fn repo_root() -> PathBuf {
         .expect("repo root resolves")
 }
 
-/// The demo plugin's entry file.
-fn demo_entry() -> PathBuf {
-    repo_root().join("examples/plugins/demo-hooks/index.ts")
+/// The demo plugin's root and entry file.
+fn demo_root() -> PathBuf {
+    repo_root().join("examples/plugins/demo-hooks")
 }
 
-/// `true` when a JS runtime is available. Uses the host's own probe so the gate
-/// matches exactly what a real spawn would resolve.
+fn demo_entry() -> PathBuf {
+    demo_root().join("index.ts")
+}
+
+/// The SDK launcher the demo's manifest names, which finds a JS runtime and
+/// execs the entry under it.
+fn sdk_launcher() -> PathBuf {
+    repo_root().join("sdk/plugin/src/run")
+}
+
+/// `true` when the SDK launcher can run (it is a POSIX `sh` script) and at
+/// least one of the runtimes it probes for is on `PATH`. Same candidates, same
+/// order as the launcher's own `auto` chain.
 fn runtime_available() -> bool {
-    xai_grok_plugin_host::runtime::resolve_runtime(RuntimeKind::Auto).is_ok()
+    cfg!(unix)
+        && ["bun", "node", "deno"].iter().any(|bin| {
+            std::process::Command::new(bin)
+                .arg("--version")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        })
 }
 
 /// Build a real `PluginHost` with the demo plugin registered. `workspace_root`
@@ -67,13 +87,16 @@ fn runtime_available() -> bool {
 /// plugin dir. No spawn hardener: this test asserts dispatch parity, not the
 /// sandbox, and the sidecar needs no network.
 fn build_host(data_dir: PathBuf) -> Arc<PluginHost> {
+    let plugin_data = data_dir.join("demo-hooks");
     let host = PluginHost::new(data_dir);
     host.register_plugin(RegisteredPlugin {
         name: "demo-hooks".to_string(),
-        launch: xai_grok_plugin_host::PluginLaunch::Runtime {
-            entry: demo_entry(),
-            runtime: RuntimeKind::Auto,
+        launch: xai_grok_plugin_host::PluginLaunch {
+            program: sdk_launcher(),
+            args: vec![demo_entry().to_string_lossy().into_owned()],
         },
+        plugin_root: demo_root(),
+        plugin_data,
         network: false,
         config: serde_json::json!({}),
         declared_tools: vec!["echo".to_string()],

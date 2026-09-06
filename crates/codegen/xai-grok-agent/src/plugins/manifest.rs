@@ -89,6 +89,39 @@ fn is_path_contained(resolved: &Path, plugin_root: &Path) -> bool {
     canonical_resolved.starts_with(&canonical_root)
 }
 
+/// Check whether a path *names* a location within the plugin root, without
+/// asking the filesystem what is really there.
+///
+/// `.` is dropped and `..` pops, so `<root>/../etc/passwd` is still refused;
+/// what is not refused is a symlink the plugin itself placed inside its own
+/// directory. That case is the whole reason this exists: the SDK launcher a
+/// TypeScript plugin names as `${GROK_PLUGIN_ROOT}/_sdk/run` is a real copy in
+/// a deployed plugin but a symlink into a shared SDK checkout during
+/// development, and [`is_path_contained`] would read the second as an escape
+/// and refuse to start the plugin.
+///
+/// Only `exec`'s `argv[0]` uses this. It is not a weakening of a trust
+/// boundary, because `exec` never had one: `"exec": "python3"` is a bare
+/// `PATH` lookup with no containment at all, and every form runs
+/// plugin-supplied code regardless. Component paths (hooks, MCP, LSP, skills)
+/// keep the canonicalizing check.
+fn is_lexically_contained(resolved: &Path, plugin_root: &Path) -> bool {
+    fn normalize(path: &Path) -> PathBuf {
+        let mut out = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                other => out.push(other),
+            }
+        }
+        out
+    }
+    normalize(resolved).starts_with(normalize(plugin_root))
+}
+
 /// Whether a manifest `exec` program names a path rather than a bare program.
 ///
 /// `/` counts on every platform (manifests are written portably and JSON paths
@@ -151,21 +184,6 @@ pub enum PathOrInline {
     Inline(serde_json::Value),
 }
 
-/// TypeScript sidecar plugin runtime selection (`plugin.json`'s `runtime` field).
-///
-/// `Auto` (the default) defers to the plugin host's own probe order —
-/// `bun` → `node` (22+) → `deno`. Explicit variants pin the sidecar to a
-/// single runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PluginRuntime {
-    #[default]
-    Auto,
-    Bun,
-    Node,
-    Deno,
-}
-
 /// A directly-executed sidecar entry (`plugin.json`'s `exec` field).
 ///
 /// Either a bare program (`"exec": "./plugin"`) or a full argv
@@ -191,28 +209,19 @@ impl ExecEntry {
 }
 
 /// How a sidecar plugin is launched — the resolved form of the manifest's
-/// mutually exclusive `plugin` and `exec` fields.
+/// `exec` field.
 ///
-/// The wire contract and the supervision model are identical for both; only the
-/// argv differs. See [`PluginManifest::sidecar_launch`].
+/// A plugin is an executable that speaks the wire contract, in whatever
+/// language it is written. A TypeScript plugin reaches this same form through
+/// the SDK's `_sdk/run` launcher, which picks a JS runtime on the far side of
+/// the `exec`. See [`PluginManifest::sidecar_launch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SidecarLaunch {
-    /// `plugin` (+ optional `runtime`): a TypeScript entry file executed by a
-    /// JS runtime the host discovers at spawn time.
-    Runtime {
-        /// Absolute path to the entry file, inside the plugin root.
-        entry: PathBuf,
-        /// Declared runtime, or `Auto`.
-        runtime: PluginRuntime,
-    },
-    /// `exec`: a program executed directly, whatever language it is written in.
-    Command {
-        /// Either an absolute path inside the plugin root, or a bare program
-        /// name resolved on `PATH` at spawn time.
-        program: PathBuf,
-        /// Remaining argv, passed verbatim after token substitution.
-        args: Vec<String>,
-    },
+pub struct SidecarLaunch {
+    /// Either an absolute path inside the plugin root, or a bare program name
+    /// resolved on `PATH` at spawn time.
+    pub program: PathBuf,
+    /// Remaining argv, passed verbatim after token substitution.
+    pub args: Vec<String>,
 }
 
 /// Parsed plugin manifest from `plugin.json`.
@@ -255,28 +264,32 @@ pub struct PluginManifest {
     pub lsp_servers: Option<PathOrInline>,
 
     // ── Sidecar plugin ───────────────────────────────────────────────
-    /// Relative path to the TypeScript sidecar entry file (e.g. `"./index.ts"`),
-    /// executed by a JS runtime. Mutually exclusive with [`Self::exec`].
-    #[serde(default)]
-    pub plugin: Option<String>,
-    /// Sidecar runtime selection. Defaults to `Auto` when `plugin` is set
-    /// but `runtime` is omitted; see [`PluginManifest::runtime_or_default`].
-    /// Meaningless with `exec`, which names its own program.
-    #[serde(default)]
-    pub runtime: Option<PluginRuntime>,
-    /// Program (or argv) executed directly as the sidecar, for a plugin written
-    /// in any language: `"exec": "./plugin"` or
-    /// `"exec": ["python3", "${GROK_PLUGIN_ROOT}/plugin.py"]`. Mutually
-    /// exclusive with [`Self::plugin`]; see [`PluginManifest::sidecar_launch`].
+    /// Program (or argv) executed as the sidecar, for a plugin written in any
+    /// language: `"exec": "./plugin"` or
+    /// `"exec": ["python3", "${GROK_PLUGIN_ROOT}/plugin.py"]`. A TypeScript
+    /// plugin names the SDK launcher:
+    /// `"exec": ["${GROK_PLUGIN_ROOT}/_sdk/run", "index.ts"]`.
+    /// See [`PluginManifest::sidecar_launch`].
     #[serde(default)]
     pub exec: Option<ExecEntry>,
+    /// The withdrawn `plugin` / `runtime` launch form, parsed only so a
+    /// manifest still carrying it is refused by name instead of loading into a
+    /// plugin whose sidecar silently never starts. See
+    /// [`ManifestError::WithdrawnLaunchField`].
+    #[serde(default, rename = "plugin")]
+    pub withdrawn_plugin: Option<serde_json::Value>,
+    /// Companion of [`Self::withdrawn_plugin`]; `runtime` only ever qualified
+    /// `plugin`, and the launcher on the far side of `exec` takes
+    /// `--runtime=` instead.
+    #[serde(default)]
+    pub runtime: Option<serde_json::Value>,
     /// Whether the sidecar's child process may reach the network.
     /// Defaults to `false`; see [`PluginManifest::network_enabled`].
     ///
-    /// Enforcement is a property of the *child process*, not of the launch
-    /// form, and it is keyed on this flag alone — a `plugin` and an `exec`
-    /// sidecar are confined identically. What `false` is worth depends on the
-    /// host:
+    /// Enforcement is a property of the *child process*, not of the program it
+    /// runs, and it is keyed on this flag alone — a TypeScript sidecar and a
+    /// compiled one are confined identically. What `false` is worth depends on
+    /// the host:
     ///
     /// - **Linux**: a per-child seccomp filter denies
     ///   `connect`/`bind`/`sendto`/`sendmsg`/`listen`/`accept` for every
@@ -288,9 +301,10 @@ pub struct PluginManifest {
     ///   warned about at load and started anyway, unless a sandbox profile was
     ///   requested, in which case it refuses to start.
     ///
-    /// A deno sidecar additionally has `--allow-net` withheld. That is defence
-    /// in depth and nothing decides anything from it: a guarantee that held
-    /// only under one runtime would be a guarantee about the launch form.
+    /// A deno sidecar additionally has `--allow-net` withheld by the SDK
+    /// launcher. That is defence in depth and nothing decides anything from
+    /// it: a guarantee that held only under one runtime would be a guarantee
+    /// about which program the manifest happened to name.
     ///
     /// The sidecar is told the flag in its environment as
     /// `GROK_PLUGIN_NETWORK` (`1` or `0`), so a launcher between the host and
@@ -422,6 +436,22 @@ impl PluginManifest {
                 ),
             });
         }
+        // A manifest still on the withdrawn launch form is refused outright.
+        // Ignoring the field would load the plugin's skills and hooks while its
+        // sidecar — the reason most of these plugins exist — never started, and
+        // nothing would say why.
+        if self.withdrawn_plugin.is_some() {
+            return Err(ManifestError::WithdrawnLaunchField {
+                name: self.name.clone(),
+                field: "plugin",
+            });
+        }
+        if self.runtime.is_some() {
+            return Err(ManifestError::WithdrawnLaunchField {
+                name: self.name.clone(),
+                field: "runtime",
+            });
+        }
         Ok(())
     }
 
@@ -486,15 +516,9 @@ impl PluginManifest {
         }
     }
 
-    /// Whether the manifest declares a sidecar entry — a TypeScript `plugin`
-    /// file or a directly-executed `exec` program.
+    /// Whether the manifest declares a sidecar entry (`exec`).
     pub fn has_sidecar(&self) -> bool {
-        self.plugin.is_some() || self.exec.is_some()
-    }
-
-    /// Effective sidecar runtime: the manifest's `runtime`, or `Auto` when unset.
-    pub fn runtime_or_default(&self) -> PluginRuntime {
-        self.runtime.unwrap_or_default()
+        self.exec.is_some()
     }
 
     /// Effective network flag: the manifest's `network`, or `false` when unset.
@@ -595,7 +619,7 @@ impl PluginManifest {
             if !tools.is_empty() {
                 tracing::warn!(
                     plugin = %self.name,
-                    "manifest declares tools but no sidecar entry (`plugin`/`exec`); ignoring them"
+                    "manifest declares tools but no sidecar entry (`exec`); ignoring them"
                 );
             }
             return Vec::new();
@@ -635,63 +659,14 @@ impl PluginManifest {
         out
     }
 
-    /// Resolve the sidecar entry path from the manifest `plugin` field.
-    ///
-    /// Returns `None` when `plugin` is unset, the path is absolute or escapes
-    /// the plugin root (via `..` components — reuses the same
-    /// [`is_path_contained`] containment check as `hooks_path`/`mcp_config_path`),
-    /// or the resolved file does not exist. Like the other component-path
-    /// accessors, existence is checked lazily here rather than eagerly in
-    /// [`PluginManifest::validate`].
-    pub fn sidecar_entry_path(&self, plugin_root: &Path) -> Option<PathBuf> {
-        let entry = self.plugin.as_ref()?;
-        if Path::new(entry).is_absolute() {
-            tracing::warn!(
-                path = entry,
-                plugin_root = %plugin_root.display(),
-                "sidecar plugin path must be relative; skipping"
-            );
-            return None;
-        }
-        let resolved = plugin_root.join(entry);
-        if !is_path_contained(&resolved, plugin_root) {
-            tracing::warn!(
-                path = %resolved.display(),
-                plugin_root = %plugin_root.display(),
-                "sidecar plugin path escapes plugin root; skipping"
-            );
-            return None;
-        }
-        resolved.is_file().then_some(resolved)
-    }
-
-    /// Resolve how this plugin's sidecar is launched, from whichever of the two
-    /// mutually exclusive entry fields the manifest declares.
-    ///
-    /// `plugin` keeps its exact meaning and resolution rules (see
-    /// [`Self::sidecar_entry_path`]); `exec` names a program run directly, so a
-    /// plugin can be written in any language that can speak the wire contract.
-    /// Declaring both is refused outright rather than silently resolved one
-    /// way — an ambiguous launch spec is not something to guess at.
+    /// Resolve how this plugin's sidecar is launched, from the manifest's
+    /// `exec` field.
     ///
     /// `plugin_data` is the plugin's data directory, for `${GROK_PLUGIN_DATA}`
     /// substitution inside `exec`; see [`Self::sidecar_exec_command`].
     pub fn sidecar_launch(&self, plugin_root: &Path, plugin_data: &str) -> Option<SidecarLaunch> {
-        if self.plugin.is_some() && self.exec.is_some() {
-            tracing::warn!(
-                plugin = %self.name,
-                "manifest declares both `plugin` and `exec`; refusing to guess which to launch"
-            );
-            return None;
-        }
-        if self.exec.is_some() {
-            let (program, args) = self.sidecar_exec_command(plugin_root, plugin_data)?;
-            return Some(SidecarLaunch::Command { program, args });
-        }
-        Some(SidecarLaunch::Runtime {
-            entry: self.sidecar_entry_path(plugin_root)?,
-            runtime: self.runtime_or_default(),
-        })
+        let (program, args) = self.sidecar_exec_command(plugin_root, plugin_data)?;
+        Some(SidecarLaunch { program, args })
     }
 
     /// Resolve the `exec` field into a `(program, args)` pair.
@@ -704,15 +679,14 @@ impl PluginManifest {
     ///
     /// `argv[0]` is then resolved one of two ways:
     ///
-    /// - it contains a path separator → a file that must live inside the plugin
-    ///   root (same containment check as every other manifest path) and be
-    ///   executable, resolved to an absolute path so the workspace cwd cannot
-    ///   reinterpret it;
+    /// - it contains a path separator → a file that must be named inside the
+    ///   plugin root and be executable, resolved to an absolute path so the
+    ///   workspace cwd cannot reinterpret it;
     /// - it is a bare name (`python3`, `uv`) → left alone and looked up on
-    ///   `PATH` at spawn time. This grants no authority the TS path does not
-    ///   already grant: `runtime: auto` likewise runs the first `bun`/`node`
-    ///   found on `PATH` against plugin-supplied code. A plugin is arbitrary
-    ///   code either way; the trust decision is the plugin's, not the argv's.
+    ///   `PATH` at spawn time. A plugin is arbitrary code either way; the trust
+    ///   decision is the plugin's, not the argv's — which is also why the
+    ///   containment above is lexical (see [`is_lexically_contained`]) and not
+    ///   the canonicalizing check the component paths use.
     pub fn sidecar_exec_command(
         &self,
         plugin_root: &Path,
@@ -736,12 +710,11 @@ impl PluginManifest {
 
         let program = if has_path_separator(raw_program) {
             // Absolute paths land here too: `join` with an absolute path yields
-            // it unchanged, and containment then decides. That is deliberately
-            // laxer than `plugin`'s blanket absolute rejection — after token
+            // it unchanged, and containment then decides — after token
             // substitution `${GROK_PLUGIN_ROOT}/bin/tool` *is* absolute, and
             // containment is the property actually worth enforcing.
             let resolved = plugin_root.join(raw_program);
-            if !is_path_contained(&resolved, plugin_root) {
+            if !is_lexically_contained(&resolved, plugin_root) {
                 tracing::warn!(
                     plugin = %self.name,
                     path = %resolved.display(),
@@ -768,10 +741,9 @@ impl PluginManifest {
             }
             resolved
         } else {
-            // Bare name: `Command::new` searches `PATH` at spawn, the same
-            // lookup `runtime` discovery performs for bun/node/deno. Resolving
-            // it here instead would only move the failure earlier while adding
-            // a TOCTOU window.
+            // Bare name: `Command::new` searches `PATH` at spawn. Resolving it
+            // here instead would only move the failure earlier while adding a
+            // TOCTOU window.
             PathBuf::from(raw_program)
         };
         Some((program, args.to_vec()))
@@ -801,14 +773,7 @@ impl PluginManifest {
             tracing::info!(
                 plugin = plugin_name,
                 network = self.network_enabled(),
-                "plugin declares a directly-executed sidecar entry (`exec`)"
-            );
-        } else if self.plugin.is_some() {
-            tracing::info!(
-                plugin = plugin_name,
-                runtime = ?self.runtime_or_default(),
-                network = self.network_enabled(),
-                "plugin declares a TypeScript sidecar entry"
+                "plugin declares a sidecar entry (`exec`)"
             );
         }
     }
@@ -936,6 +901,14 @@ pub enum ManifestError {
 
     #[error("failed to parse {path}: {message}")]
     ParseError { path: PathBuf, message: String },
+
+    #[error(
+        "plugin {name:?} declares the withdrawn manifest field `{field}`: a sidecar is now \
+         launched by `exec` alone. Replace `\"plugin\": \"./index.ts\"` (and any `\"runtime\"`) \
+         with `\"exec\": [\"${{GROK_PLUGIN_ROOT}}/_sdk/run\", \"index.ts\"]`, which finds a JS \
+         runtime the same way — add `--runtime=bun` before the entry to pin one"
+    )]
+    WithdrawnLaunchField { name: String, field: &'static str },
 }
 
 #[cfg(test)]
@@ -1186,7 +1159,7 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
-            plugin: None,
+            withdrawn_plugin: None,
             runtime: None,
             exec: None,
             network: None,
@@ -1221,7 +1194,7 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
-            plugin: None,
+            withdrawn_plugin: None,
             runtime: None,
             exec: None,
             network: None,
@@ -1258,7 +1231,7 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
-            plugin: None,
+            withdrawn_plugin: None,
             runtime: None,
             exec: None,
             network: None,
@@ -1295,7 +1268,7 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
-            plugin: None,
+            withdrawn_plugin: None,
             runtime: None,
             exec: None,
             network: None,
@@ -1332,7 +1305,7 @@ mod tests {
             hooks: Some(PathOrInline::Path("../outside-hooks.json".to_string())),
             mcp_servers: None,
             lsp_servers: None,
-            plugin: None,
+            withdrawn_plugin: None,
             runtime: None,
             exec: None,
             network: None,
@@ -1370,7 +1343,7 @@ mod tests {
             hooks: None,
             mcp_servers: Some(PathOrInline::Path("../outside-mcp.json".to_string())),
             lsp_servers: None,
-            plugin: None,
+            withdrawn_plugin: None,
             runtime: None,
             exec: None,
             network: None,
@@ -1401,7 +1374,7 @@ mod tests {
             hooks: None,
             mcp_servers: Some(PathOrInline::Inline(servers)),
             lsp_servers: None,
-            plugin: None,
+            withdrawn_plugin: None,
             runtime: None,
             exec: None,
             network: None,
@@ -1469,19 +1442,23 @@ mod tests {
         assert!(manifest.mcp_config_path(&root).is_none());
     }
 
-    // ── TS sidecar plugin (`plugin`/`runtime`/`network`) ────────────────
+    // ── sidecar plugin (`exec`/`network`) ───────────────────────────────
 
     #[test]
-    fn parse_manifest_with_sidecar_plugin() {
+    fn parse_manifest_with_sidecar_exec() {
         let json = r#"{
             "name": "ts-plugin",
-            "plugin": "./index.ts",
-            "runtime": "bun",
+            "exec": ["${GROK_PLUGIN_ROOT}/_sdk/run", "index.ts"],
             "network": true
         }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        assert_eq!(manifest.plugin.as_deref(), Some("./index.ts"));
-        assert_eq!(manifest.runtime, Some(PluginRuntime::Bun));
+        assert_eq!(
+            manifest.exec,
+            Some(ExecEntry::Argv(vec![
+                "${GROK_PLUGIN_ROOT}/_sdk/run".into(),
+                "index.ts".into(),
+            ]))
+        );
         assert_eq!(manifest.network, Some(true));
         assert!(manifest.has_sidecar());
         assert!(manifest.network_enabled());
@@ -1489,118 +1466,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_manifest_sidecar_runtime_spellings() {
-        for (spelling, expected) in [
-            ("auto", PluginRuntime::Auto),
-            ("bun", PluginRuntime::Bun),
-            ("node", PluginRuntime::Node),
-            ("deno", PluginRuntime::Deno),
-        ] {
-            let json = format!(
-                r#"{{"name": "ts-plugin", "plugin": "./index.ts", "runtime": "{spelling}"}}"#
-            );
-            let manifest: PluginManifest = serde_json::from_str(&json).unwrap();
-            assert_eq!(manifest.runtime, Some(expected), "spelling: {spelling}");
-        }
-    }
-
-    #[test]
-    fn sidecar_runtime_defaults_to_auto_when_plugin_set() {
-        let json = r#"{"name": "ts-plugin", "plugin": "./index.ts"}"#;
-        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        assert!(manifest.runtime.is_none());
-        assert_eq!(manifest.runtime_or_default(), PluginRuntime::Auto);
-    }
-
-    #[test]
     fn sidecar_network_defaults_to_false() {
-        let json = r#"{"name": "ts-plugin", "plugin": "./index.ts"}"#;
+        let json = r#"{"name": "ts-plugin", "exec": "./plugin"}"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(manifest.network.is_none());
         assert!(!manifest.network_enabled());
     }
 
     #[test]
-    fn existing_manifest_without_plugin_field_unchanged() {
-        // Manifests authored before the sidecar fields existed must still
-        // parse identically: `plugin`/`runtime`/`network` all default to None.
+    fn existing_manifest_without_sidecar_fields_unchanged() {
+        // A manifest that declares no sidecar at all must still parse: `exec`
+        // and `network` both default to None.
         let json = r#"{"name": "my-plugin", "version": "1.0.0"}"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(!manifest.has_sidecar());
-        assert!(manifest.plugin.is_none());
-        assert!(manifest.runtime.is_none());
+        assert!(manifest.exec.is_none());
         assert!(manifest.network.is_none());
         manifest.validate().unwrap();
-    }
-
-    #[test]
-    fn sidecar_entry_path_resolves_within_root() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("ts-plugin");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("index.ts"), "export default {};").unwrap();
-
-        let json = r#"{"name": "ts-plugin", "plugin": "./index.ts"}"#;
-        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        let resolved = manifest.sidecar_entry_path(&root);
-        assert_eq!(resolved, Some(root.join("index.ts")));
-    }
-
-    #[test]
-    fn sidecar_entry_path_missing_file_is_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("ts-plugin");
-        std::fs::create_dir_all(&root).unwrap();
-        // index.ts is never written.
-
-        let json = r#"{"name": "ts-plugin", "plugin": "./index.ts"}"#;
-        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        assert!(manifest.sidecar_entry_path(&root).is_none());
-    }
-
-    #[test]
-    fn sidecar_entry_path_escape_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("ts-plugin");
-        std::fs::create_dir_all(&root).unwrap();
-        let outside = tmp.path().join("outside-index.ts");
-        std::fs::write(&outside, "export default {};").unwrap();
-
-        let json = r#"{"name": "ts-plugin", "plugin": "../outside-index.ts"}"#;
-        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        assert!(
-            manifest.sidecar_entry_path(&root).is_none(),
-            "sidecar path escaping plugin root should be rejected"
-        );
-    }
-
-    #[test]
-    fn sidecar_entry_path_absolute_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("ts-plugin");
-        std::fs::create_dir_all(&root).unwrap();
-        // Create the file at the absolute path the manifest points to, so a
-        // permissive implementation would otherwise happily resolve it.
-        let absolute_target = tmp.path().join("abs-index.ts");
-        std::fs::write(&absolute_target, "export default {};").unwrap();
-
-        let json = serde_json::json!({
-            "name": "ts-plugin",
-            "plugin": absolute_target.to_string_lossy(),
-        })
-        .to_string();
-        let manifest: PluginManifest = serde_json::from_str(&json).unwrap();
-        assert!(
-            manifest.sidecar_entry_path(&root).is_none(),
-            "absolute sidecar path should be rejected"
-        );
     }
 
     #[test]
     fn sidecar_tools_parse_with_defaults_and_camel_case() {
         let json = r#"{
             "name": "toolful",
-            "plugin": "./index.ts",
+            "exec": "./index.ts",
             "tools": [
                 {
                     "name": "planner",
@@ -1632,7 +1521,7 @@ mod tests {
     fn sidecar_tools_skip_invalid_entries() {
         let json = r#"{
             "name": "toolful",
-            "plugin": "./index.ts",
+            "exec": "./index.ts",
             "tools": [
                 { "name": "ok-tool" },
                 { "name": "" },
@@ -1668,7 +1557,7 @@ mod tests {
     fn manifest_config_object_is_surfaced_as_defaults() {
         let json = r#"{
             "name": "council",
-            "plugin": "./index.ts",
+            "exec": "./index.ts",
             "config": { "participants": ["a", "b"], "rounds": 2 }
         }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
@@ -1679,7 +1568,7 @@ mod tests {
 
     #[test]
     fn manifest_config_absent_defaults_to_empty_object() {
-        let json = r#"{ "name": "plain", "plugin": "./index.ts" }"#;
+        let json = r#"{ "name": "plain", "exec": "./index.ts" }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(manifest.config.is_none());
         assert_eq!(manifest.sidecar_config_defaults(), serde_json::json!({}));
@@ -1689,7 +1578,7 @@ mod tests {
     fn manifest_config_non_object_is_ignored() {
         // A non-object `config` (array/string/number) is dropped to `{}` so the
         // SDK's `ctx.config()` always sees an object.
-        let json = r#"{ "name": "bad", "plugin": "./index.ts", "config": [1, 2, 3] }"#;
+        let json = r#"{ "name": "bad", "exec": "./index.ts", "config": [1, 2, 3] }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(manifest.config.is_some());
         assert_eq!(manifest.sidecar_config_defaults(), serde_json::json!({}));
@@ -1701,7 +1590,7 @@ mod tests {
     fn oauth_label_parses_from_camel_case() {
         let json = r#"{
             "name": "sign-in-plugin",
-            "plugin": "./index.ts",
+            "exec": "./index.ts",
             "oauthLabel": "Sign in with Acme"
         }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
@@ -1711,7 +1600,7 @@ mod tests {
 
     #[test]
     fn oauth_label_absent_defaults_to_none() {
-        let json = r#"{ "name": "plain", "plugin": "./index.ts" }"#;
+        let json = r#"{ "name": "plain", "exec": "./index.ts" }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(manifest.oauth_label.is_none());
         assert_eq!(manifest.oauth_login_label(), None);
@@ -1721,7 +1610,7 @@ mod tests {
     fn oauth_label_snake_case_is_ignored_as_unknown() {
         // The wire field is camelCase `oauthLabel`; a snake_case spelling is an
         // unknown field (silently ignored) and does not opt the plugin in.
-        let json = r#"{ "name": "plain", "plugin": "./index.ts", "oauth_label": "Nope" }"#;
+        let json = r#"{ "name": "plain", "exec": "./index.ts", "oauth_label": "Nope" }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(manifest.oauth_login_label().is_none());
     }
@@ -1732,7 +1621,7 @@ mod tests {
     fn oauth_accounts_parse_in_declaration_order() {
         let json = r#"{
             "name": "example-auth",
-            "plugin": "./index.ts",
+            "exec": "./index.ts",
             "oauthLabel": "Acme",
             "oauthAccounts": [
                 { "id": "work", "label": "work@example.com" },
@@ -1761,8 +1650,8 @@ mod tests {
         // Both spellings of "this plugin has no accounts" behave identically,
         // and identically to a manifest authored before the field existed.
         for json in [
-            r#"{ "name": "example-auth", "plugin": "./index.ts", "oauthLabel": "Acme" }"#,
-            r#"{ "name": "example-auth", "plugin": "./index.ts", "oauthLabel": "Acme",
+            r#"{ "name": "example-auth", "exec": "./index.ts", "oauthLabel": "Acme" }"#,
+            r#"{ "name": "example-auth", "exec": "./index.ts", "oauthLabel": "Acme",
                  "oauthAccounts": [] }"#,
         ] {
             let manifest: PluginManifest = serde_json::from_str(json).unwrap();
@@ -1778,7 +1667,7 @@ mod tests {
     fn oauth_accounts_label_defaults_to_id() {
         let json = r#"{
             "name": "example-auth",
-            "plugin": "./index.ts",
+            "exec": "./index.ts",
             "oauthLabel": "Acme",
             "oauthAccounts": [{ "id": "work" }, { "id": "personal", "label": "  " }]
         }"#;
@@ -1797,7 +1686,7 @@ mod tests {
         let json = format!(
             r#"{{
                 "name": "example-auth",
-                "plugin": "./index.ts",
+                "exec": "./index.ts",
                 "oauthLabel": "Acme",
                 "oauthAccounts": [
                     {{ "id": "work" }},
@@ -1829,7 +1718,7 @@ mod tests {
         // manifest that omits it is a parse error, not a silent empty id.
         let json = r#"{
             "name": "example-auth",
-            "plugin": "./index.ts",
+            "exec": "./index.ts",
             "oauthLabel": "Acme",
             "oauthAccounts": [{ "label": "work@example.com" }]
         }"#;
@@ -1842,7 +1731,7 @@ mod tests {
         // no login entry for them to narrow.
         let json = r#"{
             "name": "example-auth",
-            "plugin": "./index.ts",
+            "exec": "./index.ts",
             "oauthAccounts": [{ "id": "work" }]
         }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
@@ -1855,7 +1744,7 @@ mod tests {
         // an unknown field (silently ignored) and declares no accounts.
         let json = r#"{
             "name": "example-auth",
-            "plugin": "./index.ts",
+            "exec": "./index.ts",
             "oauthLabel": "Acme",
             "oauth_accounts": [{ "id": "work" }]
         }"#;
@@ -1917,7 +1806,7 @@ mod tests {
         let launch = manifest.sidecar_launch(&root, "/data").unwrap();
         assert_eq!(
             launch,
-            SidecarLaunch::Command {
+            SidecarLaunch {
                 program: root.join("plugin"),
                 args: vec![],
             }
@@ -1935,7 +1824,7 @@ mod tests {
         let launch = manifest.sidecar_launch(tmp.path(), "/data").unwrap();
         assert_eq!(
             launch,
-            SidecarLaunch::Command {
+            SidecarLaunch {
                 program: PathBuf::from("python3"),
                 args: vec!["--".into(), "-".into()],
             }
@@ -1955,11 +1844,7 @@ mod tests {
             "${GROK_PLUGIN_ROOT}/plugin.py".into(),
             "--state=${GROK_PLUGIN_DATA}/db".into(),
         ]));
-        let SidecarLaunch::Command { args, .. } =
-            manifest.sidecar_launch(&root, "/data/any-lang").unwrap()
-        else {
-            panic!("expected a command launch");
-        };
+        let SidecarLaunch { args, .. } = manifest.sidecar_launch(&root, "/data/any-lang").unwrap();
         assert_eq!(
             args,
             vec![
@@ -1980,7 +1865,7 @@ mod tests {
         let launch = manifest.sidecar_launch(&root, "/data").unwrap();
         assert_eq!(
             launch,
-            SidecarLaunch::Command {
+            SidecarLaunch {
                 program: root.join("plugin"),
                 args: vec![],
             }
@@ -2031,41 +1916,46 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn declaring_both_plugin_and_exec_launches_neither() {
-        // An ambiguous launch spec is refused rather than resolved by
-        // precedence: guessing here would pick which code runs.
-        let (_tmp, root) = exec_root("index.ts");
-        let manifest = PluginManifest {
-            name: "any-lang".into(),
-            plugin: Some("./index.ts".into()),
-            exec: Some(ExecEntry::Program("./index.ts".into())),
-            ..Default::default()
-        };
-        assert!(manifest.has_sidecar());
-        assert!(manifest.sidecar_launch(&root, "/data").is_none());
+    fn exec_program_may_be_a_symlink_the_plugin_ships() {
+        // The SDK launcher is `${GROK_PLUGIN_ROOT}/_sdk/run`: a real copy in a
+        // deployed plugin, a symlink into a shared SDK checkout during
+        // development. Canonicalizing would read the second as an escape and
+        // refuse to start a plugin that is perfectly well formed.
+        let (_tmp, root) = exec_root("real-launcher");
+        let elsewhere = root.parent().unwrap().join("sdk");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::rename(root.join("real-launcher"), elsewhere.join("run")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("_sdk")).unwrap();
+
+        let manifest = exec_manifest(ExecEntry::Argv(vec![
+            "${GROK_PLUGIN_ROOT}/_sdk/run".into(),
+            "index.ts".into(),
+        ]));
+        assert_eq!(
+            manifest.sidecar_launch(&root, "/data"),
+            Some(SidecarLaunch {
+                program: root.join("_sdk/run"),
+                args: vec!["index.ts".to_string()],
+            })
+        );
     }
 
     #[test]
-    fn plugin_field_still_resolves_to_a_runtime_launch() {
-        // Every plugin in the wild uses `plugin` + `runtime`; the command form
-        // must not have changed what they resolve to.
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("ts-plugin");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("index.ts"), "export default {};").unwrap();
-        let manifest = PluginManifest {
-            name: "ts-plugin".into(),
-            plugin: Some("./index.ts".into()),
-            runtime: Some(PluginRuntime::Node),
-            ..Default::default()
-        };
-        assert_eq!(
-            manifest.sidecar_launch(&root, "/data"),
-            Some(SidecarLaunch::Runtime {
-                entry: root.join("index.ts"),
-                runtime: PluginRuntime::Node,
-            })
-        );
+    fn the_withdrawn_launch_fields_are_refused_by_name() {
+        // A manifest still on `plugin` + `runtime` must fail loudly. Ignoring
+        // the fields would load the plugin with a sidecar that never starts,
+        // and nothing would say why.
+        for field in ["plugin", "runtime"] {
+            let json = format!(r#"{{"name": "stale", "{field}": "./index.ts"}}"#);
+            let manifest: PluginManifest = serde_json::from_str(&json).unwrap();
+            let err = manifest.validate().expect_err("must be refused");
+            let text = err.to_string();
+            assert!(text.contains(field), "error must name `{field}`: {text}");
+            assert!(
+                text.contains("exec"),
+                "error must say what to write instead: {text}"
+            );
+        }
     }
 
     #[test]

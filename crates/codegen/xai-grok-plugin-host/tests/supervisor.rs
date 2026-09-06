@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use xai_grok_hooks::invoker::{PluginHookInvoker, PluginHookRequest, PluginHookResponse};
-use xai_grok_plugin_host::{PluginHost, PluginLaunch, PluginState, RegisteredPlugin, RuntimeKind};
+use xai_grok_plugin_host::{PluginHost, PluginLaunch, PluginState, RegisteredPlugin};
 
 /// Build a host whose sidecars are the fixture binary configured via env, plus a
 /// registered plugin named `p`. Returns the host and the temp dirs (kept alive).
@@ -30,10 +30,12 @@ fn host_with(env: &[(&'static str, String)], backoff: Duration) -> (PluginHost, 
     let host = PluginHost::new_for_test(data_dir.path().to_path_buf(), factory, backoff);
     host.register_plugin(RegisteredPlugin {
         name: "p".to_string(),
-        launch: PluginLaunch::Runtime {
-            entry: PathBuf::from("/does/not/matter.ts"),
-            runtime: RuntimeKind::Auto,
+        launch: PluginLaunch {
+            program: PathBuf::from("/does/not/matter"),
+            args: vec![],
         },
+        plugin_root: PathBuf::from("/does/not"),
+        plugin_data: PathBuf::from("/does/not/data"),
         network: false,
         config: serde_json::json!({ "k": "v" }),
         declared_tools: vec!["echo".to_string()],
@@ -68,21 +70,12 @@ async fn spawn_hardener_runs_with_the_plugin_network_flag() {
     // through the injected SpawnHardener. Assert it actually runs on the real
     // spawn path, carrying the plugin's network flag. The test hardener only
     // records the flag — it never installs seccomp — so it stays host-agnostic.
-    assert_hardener_saw_no_network(PluginLaunch::Runtime {
-        entry: PathBuf::from("/does/not/matter.ts"),
-        runtime: RuntimeKind::Auto,
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn spawn_hardener_runs_for_a_directly_executed_plugin_too() {
+    //
     // `network: false` is a manifest-level guarantee, and the manifest does not
-    // know what language the plugin is written in. The hardener is keyed on the
-    // network flag alone, so a directly-executed program must be confined on
-    // exactly the same path a TS sidecar is — otherwise the command form would
-    // silently downgrade a promise the manifest already makes.
-    assert_hardener_saw_no_network(PluginLaunch::Command {
+    // know what language the plugin is written in: the hardener is keyed on the
+    // flag alone, so a plugin that execs its way into a JS runtime and one that
+    // is a compiled binary are confined on the identical path.
+    assert_hardener_saw_no_network(PluginLaunch {
         program: PathBuf::from("/does/not/matter"),
         args: vec!["--serve".to_string()],
     })
@@ -90,7 +83,7 @@ async fn spawn_hardener_runs_for_a_directly_executed_plugin_too() {
 }
 
 /// Drive one plugin through spawn + handshake and assert the injected hardener
-/// ran, seeing `network == false`. The command factory ignores the launch form
+/// ran, seeing `network == false`. The command factory ignores the launch spec
 /// (it always spawns the fake sidecar), which is the point: the assertion is
 /// about the hardener seam, not about argv construction.
 async fn assert_hardener_saw_no_network(launch: PluginLaunch) {
@@ -117,6 +110,8 @@ async fn assert_hardener_saw_no_network(launch: PluginLaunch) {
     host.register_plugin(RegisteredPlugin {
         name: "p".to_string(),
         launch,
+        plugin_root: PathBuf::from("/does/not"),
+        plugin_data: PathBuf::from("/does/not/data"),
         network: false,
         config: serde_json::json!({}),
         declared_tools: vec![],
@@ -659,10 +654,12 @@ async fn a_hardener_that_cannot_confine_fails_the_start() {
     }));
     host.register_plugin(RegisteredPlugin {
         name: "p".to_string(),
-        launch: PluginLaunch::Command {
+        launch: PluginLaunch {
             program: PathBuf::from("/does/not/matter"),
             args: vec![],
         },
+        plugin_root: PathBuf::from("/does/not"),
+        plugin_data: PathBuf::from("/does/not/data"),
         network: false,
         config: serde_json::json!({}),
         declared_tools: vec![],

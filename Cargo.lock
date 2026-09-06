@@ -14022,7 +14022,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "which",
  "xai-grok-hooks",
  "xai-grok-plugin-protocol",
  "xai-tty-utils",

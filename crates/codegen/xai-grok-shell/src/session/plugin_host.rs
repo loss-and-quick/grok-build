@@ -16,12 +16,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use xai_grok_agent::plugins::{PluginRegistry, PluginRuntime, SidecarLaunch};
+use xai_grok_agent::plugins::PluginRegistry;
 use xai_grok_hooks::config::{
     DEFAULT_STOP_GATE_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, HandlerType, HookSpec,
 };
 use xai_grok_hooks::event::{GateKind, HookEventName};
-use xai_grok_plugin_host::{PluginHost, PluginLaunch, RegisteredPlugin, RuntimeKind};
+use xai_grok_plugin_host::{PluginHost, PluginLaunch, RegisteredPlugin};
 
 /// Canonical hook events a sidecar plugin is auto-subscribed to. All events the
 /// core fires except the `SubagentEnd` alias (canonicalizes to `SubagentStop`,
@@ -86,40 +86,15 @@ fn merge_plugin_config(
     serde_json::Value::Object(out)
 }
 
-/// Map the agent-side runtime selection onto the host's runtime enum. Both are
-/// `auto|bun|node|deno`; kept as an explicit match so a future variant on either
-/// side fails to compile until it's mapped, rather than drifting silently.
-fn runtime_kind(runtime: PluginRuntime) -> RuntimeKind {
-    match runtime {
-        PluginRuntime::Auto => RuntimeKind::Auto,
-        PluginRuntime::Bun => RuntimeKind::Bun,
-        PluginRuntime::Node => RuntimeKind::Node,
-        PluginRuntime::Deno => RuntimeKind::Deno,
-    }
-}
-
-/// Map the manifest-resolved launch form onto the host's. Same explicit-match
-/// discipline as [`runtime_kind`]: the two enums are deliberately separate types
-/// (the agent crate does not depend on the host) and must not drift.
-fn plugin_launch(launch: SidecarLaunch) -> PluginLaunch {
-    match launch {
-        SidecarLaunch::Runtime { entry, runtime } => PluginLaunch::Runtime {
-            entry,
-            runtime: runtime_kind(runtime),
-        },
-        SidecarLaunch::Command { program, args } => PluginLaunch::Command { program, args },
-    }
-}
-
 /// Say so, loudly, at load time when a plugin asked for `network: false` on a
 /// platform that has nothing to enforce it with.
 ///
 /// The manifest advertises `network: false` as a guarantee. Linux enforces it
 /// with a seccomp filter and macOS with a Seatbelt profile, both keyed on the
-/// flag alone, so both cover an `exec` plugin exactly as they cover a
-/// TypeScript one. On a platform with neither, the only thing still enforcing
-/// anything is a deno sidecar's own withheld `--allow-net`, and nothing at all
-/// enforces it for bun, node, or an `exec` program.
+/// flag alone, so both cover every sidecar whatever program it runs. On a
+/// platform with neither, the only thing still enforcing anything is a deno
+/// sidecar's own withheld `--allow-net`, and nothing at all enforces it for
+/// bun, node, or a compiled program.
 ///
 /// Whether that is fatal is [`strict_network_confinement`]'s call; this only
 /// makes sure it is never silent. The log names every affected plugin, because
@@ -173,16 +148,13 @@ fn strict_network_confinement() -> Option<&'static str> {
     xai_grok_sandbox::requested_confinement_profile()
 }
 
-/// A one-line label for a launch form, for the registration log.
+/// A one-line label for a launch spec, for the registration log.
 fn launch_label(launch: &PluginLaunch) -> String {
-    match launch {
-        PluginLaunch::Runtime { entry, runtime } => {
-            format!("{runtime:?} {}", entry.display())
-        }
-        PluginLaunch::Command { program, args } => {
-            format!("exec {} {}", program.display(), args.join(" "))
-        }
-    }
+    format!(
+        "exec {} {}",
+        launch.program.display(),
+        launch.args.join(" ")
+    )
 }
 
 /// Storage root for plugin sidecars: `~/.grok/plugin-storage/`, alongside the
@@ -408,7 +380,15 @@ fn registered_sidecar_plugins(
             let spec = plugin.sidecar_spec()?;
             Some(RegisteredPlugin {
                 name: plugin.name.clone(),
-                launch: plugin_launch(spec.launch),
+                // The two enums are deliberately separate types (the agent
+                // crate does not depend on the host); one carries the other's
+                // fields across the boundary.
+                launch: PluginLaunch {
+                    program: spec.launch.program,
+                    args: spec.launch.args,
+                },
+                plugin_root: spec.plugin_root,
+                plugin_data: spec.plugin_data,
                 network: spec.network,
                 // Per-plugin config the sidecar sees at `initialize` and via
                 // `config_get`: the manifest's `config` defaults with the user's
@@ -1176,8 +1156,8 @@ mod tests {
 
     /// A `DiscoveredPlugin` rooted at `parent/<name>`, exactly as discovery
     /// would hand it to [`PluginRegistry::from_discovered`]. `sidecar` writes the
-    /// entry file too: the manifest's `plugin` field only resolves to a
-    /// `SidecarSpec` when that file is really on disk.
+    /// program too: the manifest's `exec` field only resolves to a
+    /// `SidecarSpec` when that file is really on disk and executable.
     fn discovered_plugin(
         parent: &std::path::Path,
         name: &str,
@@ -1191,8 +1171,14 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let mut manifest = serde_json::json!({ "name": name });
         if sidecar {
-            std::fs::write(root.join("index.ts"), "export default {};").unwrap();
-            manifest["plugin"] = serde_json::json!("./index.ts");
+            let program = root.join("plugin");
+            std::fs::write(&program, "#!/bin/sh\nexec cat\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            manifest["exec"] = serde_json::json!("./plugin");
         }
         DiscoveredPlugin {
             manifest: serde_json::from_value(manifest).unwrap(),
@@ -1709,7 +1695,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("council");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("index.ts"), "export default {};").unwrap();
+        let program = root.join("plugin");
+        std::fs::write(&program, "#!/bin/sh\nexec cat\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let manifest = xai_grok_agent::plugins::PluginManifest {
             name: "council".to_string(),
@@ -1726,9 +1718,11 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
-            plugin: Some("./index.ts".to_string()),
+            withdrawn_plugin: None,
             runtime: None,
-            exec: None,
+            exec: Some(xai_grok_agent::plugins::ExecEntry::Program(
+                "./plugin".to_string(),
+            )),
             network: None,
             tools: None,
             config: Some(serde_json::json!({ "participants": ["default"], "rounds": 1 })),
@@ -1772,14 +1766,6 @@ mod tests {
         // User overrides participants; manifest default `rounds` survives.
         assert_eq!(cfg["participants"], serde_json::json!(["grok", "claude"]));
         assert_eq!(cfg["rounds"], 1);
-    }
-
-    #[test]
-    fn runtime_mapping_is_total() {
-        assert_eq!(runtime_kind(PluginRuntime::Auto), RuntimeKind::Auto);
-        assert_eq!(runtime_kind(PluginRuntime::Bun), RuntimeKind::Bun);
-        assert_eq!(runtime_kind(PluginRuntime::Node), RuntimeKind::Node);
-        assert_eq!(runtime_kind(PluginRuntime::Deno), RuntimeKind::Deno);
     }
 
     fn tool_spec(name: &str) -> xai_grok_agent::plugins::SidecarToolSpec {

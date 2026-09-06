@@ -6,15 +6,16 @@
 //! [`xai_grok_hooks::invoker::PluginHookInvoker`] so the hook runner can drive a
 //! `Plugin` handler without knowing anything about processes or the wire.
 //!
-//! A plugin is an *executable that speaks the protocol*: either a TypeScript
-//! entry file run by a JS runtime the host discovers, or a program the manifest
-//! names outright ([`PluginLaunch`]). Everything below the argv — handshake,
-//! supervision, storage, process-scope enrollment, `network: false`
-//! confinement — is identical for both.
+//! A plugin is an *executable that speaks the protocol*: the manifest names a
+//! program and its argv ([`PluginLaunch`]) and the host runs it. Nothing below
+//! the argv — handshake, supervision, storage, process-scope enrollment,
+//! `network: false` confinement — knows what language it is written in. A
+//! TypeScript plugin names the SDK's `_sdk/run` launcher, which finds a JS
+//! runtime on the far side of the `exec`.
 //!
 //! # Module map
 //!
-//! - [`runtime`] — launch forms, runtime discovery (bun → node >=22 → deno), argv construction.
+//! - [`spawn`] — the launch form and the sidecar's `Command`: cwd and environment.
 //! - [`sidecar`] — one child + its bidirectional JSON-RPC loop.
 //! - [`capabilities`] — the plugin→core server (`log_emit`, `storage_*`, `config_get`).
 //! - [`supervisor`] — [`PluginHost`]: restart-on-crash, disable-after-N, routing.
@@ -42,8 +43,8 @@
 mod capabilities;
 pub mod orchestration;
 mod rpc;
-pub mod runtime;
 pub mod sidecar;
+pub mod spawn;
 pub mod supervisor;
 
 use std::path::PathBuf;
@@ -53,7 +54,7 @@ pub use orchestration::{
     AgentStatusDto, OrchestratorCancel, OrchestratorFuture, OrchestratorMessage, PanelSink,
     SignInSink, SpawnedSubagent,
 };
-pub use runtime::{PluginLaunch, RuntimeKind};
+pub use spawn::PluginLaunch;
 pub use supervisor::{PluginHost, SpawnHardener, wrap_command};
 // Re-exported so tool-surface integrations (the shell) can name the
 // `tool_invoke` wire shapes without a direct protocol dependency (the same
@@ -66,14 +67,20 @@ pub use xai_grok_plugin_protocol::{ToolCallContextDto, ToolInvokeResult};
 pub struct RegisteredPlugin {
     /// Unique plugin name; the routing key from `HookSpec::plugin`.
     pub name: String,
-    /// How to launch the sidecar: a TS entry under a JS runtime, or a program
-    /// executed directly.
-    pub launch: runtime::PluginLaunch,
+    /// The program and argv to run.
+    pub launch: spawn::PluginLaunch,
+    /// The plugin's own directory, exported as
+    /// [`spawn::PLUGIN_ROOT_ENV`]. A sidecar's cwd is the workspace, so this is
+    /// the only way it can name a file that ships with it.
+    pub plugin_root: PathBuf,
+    /// The plugin's per-plugin data directory, exported as
+    /// [`spawn::PLUGIN_DATA_ENV`].
+    pub plugin_data: PathBuf,
     /// Network access. `false` (default) is the confined case, applied via the
-    /// [`SpawnHardener`] seam. The seam keys on this flag alone, so both launch
-    /// forms are confined identically. Also stated to the child in
-    /// [`runtime::NETWORK_ENV`], which is information a launcher can act on and
-    /// not the confinement itself.
+    /// [`SpawnHardener`] seam. The seam keys on this flag alone, so every
+    /// sidecar is confined identically whatever program it runs. Also stated to
+    /// the child in [`spawn::NETWORK_ENV`], which is information a launcher can
+    /// act on and not the confinement itself.
     pub network: bool,
     /// Opaque config forwarded verbatim at `initialize` and via `config_get`.
     pub config: serde_json::Value,
@@ -82,7 +89,7 @@ pub struct RegisteredPlugin {
     /// drift warning at handshake against the code-registered handlers the
     /// sidecar reports in `InitializeResult::tools`.
     pub declared_tools: Vec<String>,
-    /// Workspace root; the sidecar's cwd and deno's read/write scope.
+    /// Workspace root; the sidecar's cwd.
     pub workspace_root: PathBuf,
     /// Session id, forwarded at `initialize`.
     pub session_id: String,

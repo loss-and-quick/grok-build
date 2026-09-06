@@ -1649,7 +1649,7 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
-                plugin: None,
+                withdrawn_plugin: None,
                 runtime: None,
                 exec: None,
                 network: None,

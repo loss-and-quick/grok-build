@@ -566,7 +566,7 @@ pub fn initialize_params(
             storage,
             // Tier 1 orchestration: the leader's Unix-socket path, when the
             // hosting process is a leader (also exported to the sidecar env
-            // as `GROK_LEADER_SOCKET`; see `runtime::build_command`).
+            // as `GROK_LEADER_SOCKET`; see `spawn::build_command`).
             leader_socket,
         },
     }

@@ -165,13 +165,6 @@ impl DiscoveredPlugin {
     pub fn plugin_name(&self) -> &str {
         &self.manifest.name
     }
-
-    /// Resolved absolute path to the TS sidecar entry file, if the manifest
-    /// declares a `plugin` entry. Computed on demand from `manifest`/`root`
-    /// rather than cached as a field (mirrors `plugin_name()` above).
-    pub fn sidecar_entry_path(&self) -> Option<PathBuf> {
-        self.manifest.sidecar_entry_path(&self.root)
-    }
 }
 
 /// Configuration for plugin discovery.
@@ -680,7 +673,7 @@ fn collect_plugin(
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
-                plugin: None,
+                withdrawn_plugin: None,
                 runtime: None,
                 exec: None,
                 network: None,
@@ -691,10 +684,14 @@ fn collect_plugin(
             }
         }
         Err(e) => {
-            tracing::warn!(
+            // `error!`, not `warn!`: a directory with a manifest is a plugin
+            // someone deployed on purpose, and one that fails to load
+            // contributes nothing at all -- no skills, no hooks, no sidecar.
+            // The error text is the only place the reason is ever stated.
+            tracing::error!(
                 path = %plugin_root.display(),
                 error = %e,
-                "failed to load plugin manifest; skipping"
+                "failed to load plugin manifest; skipping the whole plugin"
             );
             return;
         }
