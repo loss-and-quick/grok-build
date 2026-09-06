@@ -272,15 +272,26 @@ fn screen_mode_allowlist_is_pinned() {
 
 #[test]
 fn tool_name_sanitization() {
-    assert_eq!(schema::sanitize_tool_name("read_file"), "read_file");
-    assert_eq!(schema::sanitize_tool_name("memory_search"), "memory_search");
-    assert_eq!(schema::sanitize_tool_name("memory_get"), "memory_get");
+    assert_eq!(schema::sanitize_tool_name("read_file", false), "read_file");
     assert_eq!(
-        schema::sanitize_tool_name("nebula__post_message"),
+        schema::sanitize_tool_name("memory_search", false),
+        "memory_search"
+    );
+    assert_eq!(
+        schema::sanitize_tool_name("memory_get", false),
+        "memory_get"
+    );
+    assert_eq!(
+        schema::sanitize_tool_name("nebula__post_message", false),
         "mcp_tool"
     );
     assert_eq!(
-        schema::sanitize_tool_name("SuperSecretProjectTool"),
+        schema::sanitize_tool_name("acme__deploy", true),
+        "plugin_tool",
+        "a plugin's tool wears the MCP name shape and must not report as MCP"
+    );
+    assert_eq!(
+        schema::sanitize_tool_name("SuperSecretProjectTool", false),
         "custom_tool",
         "unknown tool names must not pass verbatim"
     );
@@ -557,6 +568,7 @@ fn tool_result_gates_off_collapses_and_reduces() {
             tool_result_size_bytes: None,
             file_path: Some("/Users/alice/secret-project/main.rs".into()),
             parameters: Some(serde_json::json!({"text": "CANARY_TOOL_ARGS"})),
+            plugin_tool: false,
         },
     );
     let events = exported_events(&stream);
@@ -578,6 +590,33 @@ fn tool_result_gates_off_collapses_and_reduces() {
     assert!(!blob.contains("secret-project"), "path leaked: {blob}");
 }
 
+/// A plugin's sidecar tool is registered under the same `<owner>__<tool>`
+/// shape as an MCP tool, so before the caller-supplied `plugin_tool` flag both
+/// exported as `"mcp_tool"` and plugin usage could not be separated out of the
+/// `tool.usage` metric.
+#[test]
+fn tool_result_reports_plugin_tools_apart_from_mcp() {
+    let stream = build(gates_off());
+    emit_event_into(
+        &stream,
+        &events::ToolCallCompleted {
+            tool_name: "acme__deploy".into(),
+            outcome: xai_grok_session_events::types::ToolOutcome::Success,
+            duration_ms: 42,
+            tool_result_size_bytes: None,
+            file_path: None,
+            parameters: None,
+            plugin_tool: true,
+        },
+    );
+    let events = exported_events(&stream);
+    assert_eq!(events[0].0, "grok_code.tool_result");
+    assert_eq!(
+        attr(&events[0], "tool_name").as_deref(),
+        Some("plugin_tool")
+    );
+}
+
 #[test]
 fn tool_result_details_gate_exposes_verbatim_scrubbed() {
     let stream = build(gates_all_on());
@@ -596,6 +635,7 @@ fn tool_result_details_gate_exposes_verbatim_scrubbed() {
             tool_result_size_bytes: None,
             file_path: Some(path.clone()),
             parameters: Some(serde_json::json!({"key": "sk-CANARYabcdefghij1234567890"})),
+            plugin_tool: false,
         },
     );
     let events = exported_events(&stream);
@@ -746,6 +786,7 @@ fn tool_decision_snapshot() {
             classifier_latency_ms: Some(42),
             auto_denials_consecutive: Some(3),
             auto_denials_total: Some(3),
+            plugin_tool: false,
         },
     );
     let events = exported_events(&stream);

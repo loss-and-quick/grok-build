@@ -876,6 +876,27 @@ pub(crate) fn plugin_sidecar_tool_registrations(
     out
 }
 
+/// Whether `qualified_name` addresses a manifest-declared sidecar tool of an
+/// active plugin.
+///
+/// Plugin tools and MCP tools share the `<owner>__<tool>` name shape and the
+/// dynamic-registration path, so nothing about the name distinguishes them —
+/// only the registry that produced the registration can. Used to keep plugin
+/// calls from being reported as MCP calls in telemetry, where the exported
+/// tool name is reduced to a fixed token and the two would otherwise merge.
+pub(crate) fn is_plugin_sidecar_tool(registry: &PluginRegistry, qualified_name: &str) -> bool {
+    let Some((owner, tool)) = crate::session::mcp_servers::parse_mcp_tool_name(qualified_name)
+    else {
+        return false;
+    };
+    registry.active_plugins().into_iter().any(|plugin| {
+        plugin.name == owner
+            && plugin
+                .sidecar_spec()
+                .is_some_and(|spec| spec.tools.iter().any(|t| t.name == tool))
+    })
+}
+
 /// Build one catalog registration for a validated manifest tool, or `None`
 /// (with a warning) when the qualified name fails the authoritative MCP-side
 /// validators. Split out of [`plugin_sidecar_tool_registrations`] for direct
@@ -1804,6 +1825,30 @@ mod tests {
         assert_eq!(reg.input_schema["type"], "object");
         use xai_tool_runtime::Tool as _;
         assert_eq!(reg.tool.id().as_str(), "demo-hooks__echo");
+    }
+
+    /// Provenance comes from the registry, never from the name: a plugin tool
+    /// and an MCP tool are both `<owner>__<tool>`, and telemetry reports the
+    /// two as different things.
+    #[test]
+    fn plugin_sidecar_tools_are_recognized_by_registry_not_by_name_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut dp = discovered_plugin(tmp.path(), "demo", true, true);
+        dp.manifest.tools = Some(vec![xai_grok_agent::plugins::manifest::ManifestToolSpec {
+            name: "echo".to_string(),
+            description: Some("a tool".to_string()),
+            input_schema: None,
+            timeout_ms: None,
+        }]);
+        let registry = plugin_registry(vec![dp], &["demo"]);
+
+        assert!(is_plugin_sidecar_tool(&registry, "demo__echo"));
+        // Same owner, a tool the manifest never declared.
+        assert!(!is_plugin_sidecar_tool(&registry, "demo__missing"));
+        // An MCP server's tool wears the identical shape.
+        assert!(!is_plugin_sidecar_tool(&registry, "github__create_issue"));
+        // A built-in is not qualified at all.
+        assert!(!is_plugin_sidecar_tool(&registry, "read_file"));
     }
 
     #[test]

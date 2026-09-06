@@ -207,7 +207,10 @@ pub(crate) fn permission_outcome(decision: &Decision) -> PermissionOutcome {
 /// pass the ONE [`ResolvedDecisionTelemetry`] they already built (and fed to the
 /// `tool.decision` span), so mode/wait/source are never re-derived — the span and
 /// product rails cannot observe different shell state. Content-free analytics
-/// come from [`manager_permission_analytics`].
+/// come from [`manager_permission_analytics`]. `plugin_tool` is the session's
+/// answer to which side of the shared `<owner>__<tool>` name shape the call
+/// came from, so the external `tool_decision` name reduction agrees with
+/// `tool_result`.
 pub(crate) fn permission_decision_payload(
     tool_name: String,
     access_kind: events::AccessKind,
@@ -215,6 +218,7 @@ pub(crate) fn permission_decision_payload(
     subagent_session_id: Option<String>,
     manager_event: Option<&PermissionEvent>,
     resolved: ResolvedDecisionTelemetry,
+    plugin_tool: bool,
 ) -> PermissionDecisionPayload {
     let analytics = manager_permission_analytics(manager_event);
     PermissionDecisionPayload {
@@ -237,6 +241,7 @@ pub(crate) fn permission_decision_payload(
         classifier_latency_ms: analytics.classifier_latency_ms,
         auto_denials_consecutive: analytics.auto_denials_consecutive,
         auto_denials_total: analytics.auto_denials_total,
+        plugin_tool,
     }
 }
 
@@ -313,6 +318,7 @@ mod permission_analytics_tests {
             None,
             Some(ev),
             resolved,
+            false,
         )
     }
 

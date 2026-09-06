@@ -116,6 +116,7 @@ fn external_stream_gates_on_end_to_end() {
             "token": SECRET_KEY,
             "deep": {"a": {"b": "c"}},
         })),
+        plugin_tool: false,
     });
 
     external::flush();

@@ -638,9 +638,18 @@ pub(crate) const BUILTIN_TOOL_NAMES: &[&str] = &[
 /// names (`server__tool`) collapse to `"mcp_tool"`, anything else collapses
 /// to `"custom_tool"` (fail-closed — never export an unknown free-text name).
 /// The verbatim name rides the `ToolDetails` gate.
-pub(crate) fn sanitize_tool_name(raw: &str) -> &'static str {
+///
+/// `plugin_tool` is the caller's answer to a question the name cannot settle:
+/// a plugin's sidecar tool is registered under the same `<owner>__<tool>`
+/// shape as an MCP tool, so without it every plugin call would export as
+/// `"mcp_tool"` and plugin usage would be unmeasurable. Only the session knows
+/// which owner is a loaded plugin, so it is passed in rather than guessed.
+pub(crate) fn sanitize_tool_name(raw: &str, plugin_tool: bool) -> &'static str {
     if let Some(known) = BUILTIN_TOOL_NAMES.iter().find(|n| **n == raw) {
         return known;
+    }
+    if plugin_tool {
+        return "plugin_tool";
     }
     if raw.contains("__") {
         return "mcp_tool";
@@ -905,7 +914,7 @@ pub fn map_api_error(ev: &events::ApiError) -> Option<ExternalRecord> {
 /// `ToolCallCompleted` → `grok_code.tool_result` + `tool.usage`.
 pub fn map_tool_result(ev: &events::ToolCallCompleted) -> Option<ExternalRecord> {
     use xai_grok_session_events::types::ToolOutcome;
-    let sanitized = sanitize_tool_name(&ev.tool_name);
+    let sanitized = sanitize_tool_name(&ev.tool_name, ev.plugin_tool);
     let outcome = tool_outcome_label(&ev.outcome);
     let mut rec = ExternalRecord::event(ExternalEventName::ToolResult)
         .attr(ExternalKey::ToolName, sanitized)
@@ -941,7 +950,7 @@ pub fn map_tool_result(ev: &events::ToolCallCompleted) -> Option<ExternalRecord>
 
 /// `PermissionDecisionPayload` → `grok_code.tool_decision` + `tool.decision`.
 pub fn map_tool_decision(ev: &events::PermissionDecisionPayload) -> Option<ExternalRecord> {
-    let sanitized = sanitize_tool_name(&ev.tool_name);
+    let sanitized = sanitize_tool_name(&ev.tool_name, ev.plugin_tool);
     let decision = ev.decision.as_str();
     let access_kind = access_kind_label(ev.access_kind);
     let permission_mode = permission_mode_label(ev.permission_mode);

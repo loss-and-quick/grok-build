@@ -966,6 +966,7 @@ impl SessionActor {
                     tool_result_size_bytes,
                     file_path: ext_file_path,
                     parameters: ext_parameters,
+                    plugin_tool: self.is_plugin_tool_call(&prepared.tool_name),
                 },
             );
             if let Some(artifact) = compaction_artifact_read(&prepared.parsed_args) {
@@ -995,6 +996,20 @@ impl SessionActor {
         }
         Ok(())
     }
+    /// Whether `tool_name` addresses a plugin's sidecar tool in this session.
+    ///
+    /// Plugin tools register under `<plugin>__<tool>`, the same shape MCP
+    /// tools take, so telemetry's name reduction cannot tell them apart on
+    /// its own — this is the session-side answer it needs.
+    fn is_plugin_tool_call(&self, tool_name: &str) -> bool {
+        self.plugin_registry
+            .borrow()
+            .as_deref()
+            .is_some_and(|registry| {
+                crate::session::plugin_host::is_plugin_sidecar_tool(registry, tool_name)
+            })
+    }
+
     /// Phase 1: pre-flight (MCP, args, hooks, permission, ExitPlanMode).
     pub(crate) async fn prepare_tool_call(
         &self,
@@ -1405,6 +1420,7 @@ impl SessionActor {
                     subagent_session_id.clone(),
                     manager_event.as_ref(),
                     resolved,
+                    self.is_plugin_tool_call(&call.function.name),
                 ),
             );
             match decision {

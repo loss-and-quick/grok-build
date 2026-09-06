@@ -1531,6 +1531,13 @@ pub struct ToolCallCompleted {
     /// at emit time).
     #[serde(skip)]
     pub parameters: Option<serde_json::Value>,
+    /// Whether the call went to a plugin's sidecar tool rather than an MCP
+    /// server. Both wear `<owner>__<tool>` names and ride the same dynamic
+    /// registration, so the reduced external `tool_name` cannot tell them
+    /// apart without this. External stream only (`#[serde(skip)]`): the
+    /// product event already carries the verbatim name.
+    #[serde(skip)]
+    pub plugin_tool: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -2766,6 +2773,7 @@ mod tests {
                 tool_result_size_bytes: Some(2_048),
                 file_path: None,
                 parameters: None,
+                plugin_tool: false,
             })
             .unwrap(),
             serde_json::json!({
@@ -2783,6 +2791,7 @@ mod tests {
                 tool_result_size_bytes: None,
                 file_path: None,
                 parameters: None,
+                plugin_tool: false,
             })
             .unwrap(),
             serde_json::json!({

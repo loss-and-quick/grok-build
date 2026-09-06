@@ -467,6 +467,13 @@ pub struct PermissionDecisionPayload {
     /// Total auto denials at decision time, clamped to the manager budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_denials_total: Option<u32>,
+    /// Whether the gated tool is a plugin's sidecar tool rather than an MCP
+    /// server's. Only the external projection reads it, to keep the reduced
+    /// `tool_name` on `tool_decision` agreeing with `tool_result`;
+    /// `#[serde(skip)]` because the product payload already carries the
+    /// verbatim name.
+    #[serde(skip)]
+    pub plugin_tool: bool,
 }
 
 #[cfg(test)]
@@ -595,6 +602,7 @@ mod permission_analytics_tests {
             classifier_latency_ms: Some(10),
             auto_denials_consecutive: Some(3),
             auto_denials_total: Some(3),
+            plugin_tool: false,
         }
     }
 
