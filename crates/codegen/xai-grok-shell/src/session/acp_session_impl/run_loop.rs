@@ -2316,10 +2316,13 @@ pub(super) async fn run_session(
                         tracing::info!("Flushed stranded interjection(s) into prompt turns");
                     }
                     // The steering counterpart of that flush, and deliberately
-                    // not the same move: a message that raced past the turn's
-                    // final drain has no later turn it could honestly run in,
-                    // so it is answered "not delivered" instead of queued.
-                    session.discard_pending_steering();
+                    // not the same move: the owner's steering aimed at a turn
+                    // that has now ended has no later turn it could honestly
+                    // run in, so it is answered "not delivered" instead of
+                    // queued. A child's report is held instead of dropped — it
+                    // was charged and acknowledged as taken, and only a cancel
+                    // was ever excluded.
+                    session.discard_steering_at_turn_end();
                     SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                     // If no user prompt started, check for pending notifications
                     SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;

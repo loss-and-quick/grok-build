@@ -265,10 +265,17 @@ impl SessionActor {
 
     /// Answer every buffered steering message with "not delivered" and drop it.
     ///
-    /// Used where the turn the messages were aimed at is gone — cancelled, or
-    /// already past its final drain. Dropping is the point: a subagent runs one
-    /// prompt, so there is no later turn these could honestly be held for, and
-    /// the sender is told so rather than left believing it steered.
+    /// Used on the cancel paths, where the turn the messages were aimed at was
+    /// taken away rather than allowed to finish. Dropping is the point: a
+    /// cancel means the model stops, so nothing here may survive into whatever
+    /// runs next, and the owner is told so rather than left believing it
+    /// steered. A child's report goes with it, which is the one thing
+    /// `message_parent` warns the child about in as many words — it promises
+    /// delivery "unless that turn is cancelled first" — so the send it spent
+    /// buys the outcome the child was told it might.
+    ///
+    /// A turn that simply *ends* is not this case; see
+    /// [`Self::discard_steering_at_turn_end`].
     pub(super) fn discard_pending_steering(&self) {
         let entries = std::mem::take(&mut *self.pending_steering.lock());
         if entries.is_empty() {
@@ -284,6 +291,54 @@ impl SessionActor {
             }
         }
         tracing::info!(count, "Discarded steering message(s) with no turn to steer");
+    }
+
+    /// Turn-end counterpart of [`Self::discard_pending_steering`]: answer the
+    /// owner's steering "not delivered", and carry a child's report over to
+    /// whatever turn the session runs next.
+    ///
+    /// The two entries were promised different things, so a turn ending
+    /// normally has to treat them differently. The owner's steering was aimed
+    /// at *that* turn, its sender is still waiting on an answer, and there is
+    /// nothing honest to do but answer `false`. A child's report was already
+    /// answered "taken" at enqueue and one of the child's three sends was spent
+    /// on it; the only escape clause it was given was a cancel. Dropping it
+    /// here — the reachable case being a report that arrives while the parent
+    /// is in turn-end bookkeeping, past its final drain — spends the send on
+    /// nothing and reports a delivery that never happened.
+    ///
+    /// Holding it costs the child nothing it has not already paid and breaks no
+    /// rule the reverse channel rests on. Nothing here starts a turn, so an
+    /// idle parent is still never woken by a child; the text simply waits for
+    /// the parent's next step, which is what the child was told it would get.
+    /// The alternative — crediting the send back — would need the parent's
+    /// session actor to reach into the coordinator's registry to undo an
+    /// accounting decision the child cannot see, to compensate for a message
+    /// that is still perfectly deliverable.
+    pub(super) fn discard_steering_at_turn_end(&self) {
+        let mut pending = self.pending_steering.lock();
+        let mut carried = 0usize;
+        let mut answered = 0usize;
+        pending.retain_mut(|entry| match entry.origin {
+            SteeringOrigin::Child { .. } => {
+                carried += 1;
+                true
+            }
+            SteeringOrigin::Owner => {
+                if let Some(ack) = entry.ack.take() {
+                    let _ = ack.send(false);
+                }
+                answered += 1;
+                false
+            }
+        });
+        if answered > 0 || carried > 0 {
+            tracing::info!(
+                answered,
+                carried,
+                "Turn ended under buffered steering message(s)"
+            );
+        }
     }
 
     /// Convert interjections that missed their turn's final drain into queued

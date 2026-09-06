@@ -701,3 +701,108 @@ async fn discarding_steering_messages_answers_every_waiting_sender() {
         })
         .await;
 }
+
+/// A turn that ends normally is not a turn that was cancelled, and the two
+/// buffered kinds part ways there.
+///
+/// The owner's steering was aimed at the turn that just finished and its sender
+/// is still waiting, so it is answered "not delivered". A child's report was
+/// answered "taken" at enqueue and cost one of the child's three sends; the
+/// only escape clause the child was given is a cancel, so an ordinary turn end
+/// must not drop it. It is held for the parent's next step instead — held, not
+/// requeued: nothing here starts a turn, so an idle parent is still never woken
+/// by a child.
+#[tokio::test]
+async fn a_turn_ending_keeps_a_child_report_and_answers_the_owner() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("running".into());
+
+            let (owner_ack, owner_rx) = tokio::sync::oneshot::channel();
+            actor.accept_steering_message("drop the rewrite".to_string(), owner_ack);
+            let (child_ack, child_rx) = tokio::sync::oneshot::channel();
+            actor.accept_child_report(
+                "sub-9".to_string(),
+                "the repo is Rust, not Go".to_string(),
+                child_ack,
+            );
+            assert_eq!(child_rx.await, Ok(true), "the child was charged for this");
+
+            actor.discard_steering_at_turn_end();
+
+            assert_eq!(
+                owner_rx.await,
+                Ok(false),
+                "the turn the owner aimed at is gone, and it is waiting to hear so",
+            );
+            assert_eq!(
+                actor.pending_steering.lock().len(),
+                1,
+                "a charged report must survive an ordinary turn end",
+            );
+            assert!(
+                actor.state.lock().await.pending_inputs.is_empty(),
+                "holding a report must not queue a turn in the parent",
+            );
+
+            // The parent's next step is where the child was told it would land.
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("next".into());
+            assert!(actor.drain_pending_steering());
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let item = match conversation.last() {
+                Some(ConversationItem::User(u)) => u,
+                other => panic!("conversation tail must be a user item, got: {other:?}"),
+            };
+            let text = match item.content.first() {
+                Some(xai_grok_sampling_types::conversation::ContentPart::Text { text }) => {
+                    text.to_string()
+                }
+                other => panic!("expected a text part, got {other:?}"),
+            };
+            assert!(text.contains("the repo is Rust, not Go"), "framing: {text}");
+            assert!(
+                !text.contains("drop the rewrite"),
+                "the owner's steering was answered and dropped: {text}",
+            );
+        })
+        .await;
+}
+
+/// A cancel still takes a child's report with it. That is not the same loss as
+/// a silent one: `message_parent` tells the child in as many words that the
+/// parent reads its text "unless that turn is cancelled first", so the send it
+/// spent bought exactly the outcome it was warned about — and a cancel means
+/// the model stops, which nothing buffered may quietly survive.
+#[tokio::test]
+async fn cancelling_a_turn_still_drops_a_child_report() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("running".into());
+
+            let (child_ack, child_rx) = tokio::sync::oneshot::channel();
+            actor.accept_child_report("sub-9".to_string(), "blocked".to_string(), child_ack);
+            assert_eq!(child_rx.await, Ok(true));
+
+            actor.discard_pending_steering();
+
+            assert!(actor.pending_steering.lock().is_empty());
+            assert!(
+                !actor.drain_pending_steering(),
+                "a cancelled turn's report must not resurface later",
+            );
+        })
+        .await;
+}
