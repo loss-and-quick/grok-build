@@ -1946,6 +1946,21 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
+            // The same reasoning read the other way round, and if anything
+            // stronger: a report is a child interrupting work already under
+            // way, and the `<system-reminder>` it produces in the parent's
+            // turn is unattributable unless the call that sent it is visible.
+            // Named by the child's own subagent type — the identity a subagent
+            // session holds about itself, and the one its parent spawned it by.
+            ToolInput::MessageParent(_) => (
+                match self.startup_hints.subagent_type.as_deref() {
+                    Some(kind) => format!("Message parent: report from {kind}"),
+                    None => "Message parent: report from a subagent".to_string(),
+                },
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
             ToolInput::Skill(skill) => {
                 xai_grok_telemetry::session_ctx::log_event(
                     xai_grok_telemetry::events::SkillDispatched {
