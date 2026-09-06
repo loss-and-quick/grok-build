@@ -441,6 +441,52 @@ type AcknowledgedNotifyChannel = (
 fn acknowledged_notify_channel(_enabled: bool) -> Option<AcknowledgedNotifyChannel> {
     None
 }
+/// Build the LSP backend that serves `root`: the servers declared under
+/// `<root>/.grok/lsp.json` (plus the user-scoped ones), with the repo-local
+/// entries dropped when `project_lsp_trusted` is `false`, driving an
+/// `LspManager` rooted at `root`.
+///
+/// `None` when `root` declares no usable server — the common case, and the
+/// reason a per-root backend costs nothing for a session whose tree has no
+/// LSP config.
+///
+/// `warm` starts the servers immediately. Only the workspace root does that:
+/// a backend built later, for a session rooted elsewhere, starts on its first
+/// dispatch instead, so binding a session never spawns language servers the
+/// binder may replace before using.
+fn build_lsp_backend(
+    root: &std::path::Path,
+    project_lsp_trusted: bool,
+    warm: bool,
+) -> Option<Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>> {
+    let sourced = xai_grok_tools::implementations::lsp::config::load_servers_with_plugins_sourced(
+        root,
+        &[],
+        &[],
+        &[],
+        &[],
+    );
+    let servers = xai_grok_tools::implementations::lsp::config::filter_project_lsp_when_untrusted(
+        sourced,
+        project_lsp_trusted,
+    );
+    if servers.is_empty() {
+        return None;
+    }
+    use xai_grok_tools::implementations::lsp::{LspBackend, LspBackendAdapter, LspManager};
+    let mgr = Arc::new(tokio::sync::Mutex::new(LspManager::new(
+        servers,
+        root.to_path_buf(),
+        true,
+        xai_grok_tools::notification::ToolNotificationHandle::noop(),
+    )));
+    let adapter = Arc::new(LspBackendAdapter::new(mgr));
+    if warm {
+        adapter.ensure_started_background();
+    }
+    let backend: Arc<dyn LspBackend> = adapter;
+    Some(backend)
+}
 /// Client-fs resolution base: request paths resolve against `base`,
 /// `canonical` is the matching canonicalization-containment boundary.
 pub(crate) struct ClientFsBase {
@@ -603,37 +649,7 @@ impl WorkspaceHandle {
             );
             (registry, errors)
         };
-        let lsp: Option<Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>> = {
-            let sourced =
-                xai_grok_tools::implementations::lsp::config::load_servers_with_plugins_sourced(
-                    &config.root_cwd,
-                    &[],
-                    &[],
-                    &[],
-                    &[],
-                );
-            let servers =
-                xai_grok_tools::implementations::lsp::config::filter_project_lsp_when_untrusted(
-                    sourced,
-                    config.project_lsp_trusted,
-                );
-            if servers.is_empty() {
-                None
-            } else {
-                use xai_grok_tools::implementations::lsp::{
-                    LspBackend, LspBackendAdapter, LspManager,
-                };
-                let mgr = Arc::new(tokio::sync::Mutex::new(LspManager::new(
-                    servers,
-                    config.root_cwd.clone(),
-                    true,
-                    xai_grok_tools::notification::ToolNotificationHandle::noop(),
-                )));
-                let adapter = Arc::new(LspBackendAdapter::new(mgr));
-                adapter.ensure_started_background();
-                Some(adapter)
-            }
-        };
+        let lsp = build_lsp_backend(&config.root_cwd, config.project_lsp_trusted, true);
         let session_event_writers: Arc<
             dashmap::DashMap<String, xai_grok_session_events::EventWriter>,
         > = Arc::new(dashmap::DashMap::new());
@@ -669,6 +685,9 @@ impl WorkspaceHandle {
         let producer_tasks = tokio_util::task::TaskTracker::new();
         activity_tracker.set_producer_tasks(producer_tasks.clone());
         let shared = WorkspaceShared {
+            project_lsp_trusted: config.project_lsp_trusted,
+            project_lsp_trust: arc_swap::ArcSwap::new(Arc::new(None)),
+            lsp_by_root: parking_lot::Mutex::new(std::collections::HashMap::new()),
             default_tool_config: config.default_tool_config,
             require_explicit_toolset: config.require_explicit_toolset,
             confine_fs_to_workspace_root: config.confine_fs_to_workspace_root,
@@ -748,6 +767,82 @@ impl WorkspaceHandle {
     /// Get the workspace root directory.
     pub(crate) fn root_cwd(&self) -> crate::error::WorkspaceResult<PathBuf> {
         Ok(self.shared.root_cwd.clone())
+    }
+    /// Install the folder-trust resolver consulted when a session rooted
+    /// outside [`Self::root_cwd`] first needs an LSP backend. Without it every
+    /// such tree inherits the root's verdict, which is the launch dir's — the
+    /// wrong answer for a worktree or any other separately-rooted session.
+    pub fn set_project_lsp_trust_resolver(
+        &self,
+        resolver: crate::session::ProjectLspTrustFn,
+    ) -> &Self {
+        self.shared
+            .project_lsp_trust
+            .store(Arc::new(Some(resolver)));
+        self
+    }
+    /// Canonical key for the per-root LSP map. Falls back to the raw path when
+    /// the root does not resolve, so two spellings of a live tree still share
+    /// one backend.
+    fn lsp_root_key(root: &std::path::Path) -> PathBuf {
+        dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    }
+    /// The LSP backend serving `root`, built on first use and memoized per
+    /// root. `root_cwd` keeps the backend built at construction; every other
+    /// tree gets one loaded from its own `.grok/lsp.json` under its own
+    /// folder-trust verdict.
+    ///
+    /// The verdict is read once, when the root's first session binds — a trust
+    /// grant made later reaches this root's servers when its next session
+    /// starts, the same point at which the workspace root's own startup-time
+    /// verdict would be re-read.
+    pub(crate) fn lsp_for_root(
+        &self,
+        root: &std::path::Path,
+    ) -> Option<Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>> {
+        let key = Self::lsp_root_key(root);
+        if key == Self::lsp_root_key(&self.shared.root_cwd) {
+            return self.shared.lsp.clone();
+        }
+        if let Some(existing) = self.shared.lsp_by_root.lock().get(&key) {
+            return existing.clone();
+        }
+        // Built outside the map lock: `load_servers_with_plugins_sourced` reads
+        // config off disk and `ensure_started_background` spawns servers, and
+        // an unrelated root must not queue behind that.
+        let trusted = match self.shared.project_lsp_trust.load().as_ref() {
+            Some(resolve) => resolve(&key),
+            None => self.shared.project_lsp_trusted,
+        };
+        let built = build_lsp_backend(&key, trusted, false);
+        let mut map = self.shared.lsp_by_root.lock();
+        // A concurrent caller may have inserted while we were building; prefer
+        // theirs so one root never ends up with two live server sets.
+        map.entry(key).or_insert(built).clone()
+    }
+    /// Drop the per-root LSP backend for `root` once no live session is rooted
+    /// there, stopping its language servers. Keeps a leader's backend count
+    /// bounded by live roots rather than by sessions opened over its lifetime.
+    fn release_lsp_root(&self, root: &std::path::Path) {
+        let key = Self::lsp_root_key(root);
+        if key == Self::lsp_root_key(&self.shared.root_cwd) {
+            return;
+        }
+        {
+            let sessions = self.shared.sessions.read();
+            if sessions
+                .values()
+                .any(|s| Self::lsp_root_key(s.cwd()) == key)
+            {
+                return;
+            }
+        }
+        self.shared.lsp_by_root.lock().remove(&key);
+    }
+    /// Roots other than `root_cwd` that currently hold an LSP backend.
+    #[cfg(test)]
+    pub(crate) fn lsp_root_count(&self) -> usize {
+        self.shared.lsp_by_root.lock().len()
     }
     /// Create a new top-level session from the workspace's default config.
     ///
@@ -903,7 +998,7 @@ impl WorkspaceHandle {
                 &session_id,
                 self.shared.session_factory.as_ref(),
                 Some(self.shared.local_registry.clone()),
-                self.shared.lsp.clone(),
+                self.lsp_for_root(&cwd),
                 viewer_ctx.clone(),
                 self.shared
                     .compose_session_notification_handle(system_notify_handle),
@@ -1073,7 +1168,7 @@ impl WorkspaceHandle {
         let cap = session.capability_mode();
         let factory = self.shared.session_factory.clone();
         let lr = self.shared.local_registry.clone();
-        let lsp = self.shared.lsp.clone();
+        let lsp = self.lsp_for_root(&cwd);
         let sid = session_id.to_owned();
         let viewer_ctx = session.viewer_ctx().cloned();
         let notification_handle = self
@@ -2993,7 +3088,7 @@ impl WorkspaceHandle {
             &config.agent_id,
             self.shared.session_factory.as_ref(),
             Some(self.shared.local_registry.clone()),
-            self.shared.lsp.clone(),
+            self.lsp_for_root(&cwd),
             inherited_viewer_ctx.clone(),
             self.shared.compose_session_notification_handle(None),
         )?;
@@ -3100,6 +3195,7 @@ impl WorkspaceHandle {
             return Err(WorkspaceError::SessionNotFound(session_id.to_owned()));
         };
         drop(sessions);
+        self.release_lsp_root(session.cwd());
         self.invoke_unbind_hook(&session);
         session.abort_system_notify_producers();
         session.shutdown_terminal_backend();

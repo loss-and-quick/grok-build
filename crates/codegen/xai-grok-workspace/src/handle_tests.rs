@@ -5934,3 +5934,106 @@ async fn fork_inherits_path_virtualization() {
         .expect("fork must inherit mapping");
     assert_eq!(virt.real_root(), "/workspace/conv-abc");
 }
+/// A tree with a repo-local LSP config, so `build_lsp_backend` has something
+/// to load for it.
+fn project_with_lsp_config() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let grok = dir.path().join(".grok");
+    std::fs::create_dir_all(&grok).expect("mkdir .grok");
+    std::fs::write(
+        grok.join("lsp.json"),
+        r#"{"stub":{"command":"true","extensions":{".stub":"stub"}}}"#,
+    )
+    .expect("write lsp.json");
+    dir
+}
+fn canonical(path: &std::path::Path) -> std::path::PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+/// A session rooted outside the workspace root must have its repo-local LSP
+/// servers judged against **its own** tree. Before per-root backends the
+/// launch dir's verdict decided for every session, so a worktree session
+/// silently ran (or lost) the wrong tree's servers.
+#[tokio::test]
+async fn lsp_trust_is_resolved_for_the_session_root_not_the_workspace_root() {
+    let handle = make_handle();
+    let project = project_with_lsp_config();
+    let seen: Arc<parking_lot::Mutex<Vec<std::path::PathBuf>>> =
+        Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let recorder = seen.clone();
+    handle.set_project_lsp_trust_resolver(Arc::new(move |root: &std::path::Path| {
+        recorder.lock().push(root.to_path_buf());
+        true
+    }));
+    handle
+        .create_session_with_cwd("worktree", Some(project.path().to_path_buf()))
+        .expect("create session rooted outside the workspace root");
+    assert_eq!(
+        seen.lock().as_slice(),
+        &[canonical(project.path())],
+        "the session's own root must be the tree whose trust is resolved"
+    );
+}
+/// The workspace root keeps the backend built at construction: it already
+/// carries the root's verdict, so re-resolving it would be a redundant
+/// trust-store read on every session bound to the launch dir.
+#[tokio::test]
+async fn workspace_root_sessions_do_not_re_resolve_trust() {
+    let handle = make_handle();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = calls.clone();
+    handle.set_project_lsp_trust_resolver(Arc::new(move |_: &std::path::Path| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        true
+    }));
+    handle
+        .create_session_with_cwd("at-root", None)
+        .expect("create session at the workspace root");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a session at the workspace root must reuse the root's backend"
+    );
+    assert_eq!(
+        handle.lsp_root_count(),
+        0,
+        "the workspace root must not get a second entry in the per-root map"
+    );
+}
+/// Sessions sharing a root share one backend, and the entry — with the
+/// language servers it owns — is released only when the last of them is
+/// dropped. A leader accumulating sessions must not accumulate backends.
+#[tokio::test]
+async fn per_root_lsp_backend_is_shared_and_released_with_the_last_session() {
+    let handle = make_handle();
+    let project = project_with_lsp_config();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = calls.clone();
+    handle.set_project_lsp_trust_resolver(Arc::new(move |_: &std::path::Path| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        true
+    }));
+    for sid in ["wt-a", "wt-b"] {
+        handle
+            .create_session_with_cwd(sid, Some(project.path().to_path_buf()))
+            .expect("create session");
+    }
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "two sessions in one root must build one backend"
+    );
+    assert_eq!(handle.lsp_root_count(), 1);
+    handle.drop_session("wt-a", "wt-a").expect("drop first");
+    assert_eq!(
+        handle.lsp_root_count(),
+        1,
+        "the backend must outlive a session while another shares its root"
+    );
+    handle.drop_session("wt-b", "wt-b").expect("drop last");
+    assert_eq!(
+        handle.lsp_root_count(),
+        0,
+        "the last session leaving a root must release its backend"
+    );
+}

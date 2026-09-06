@@ -47,6 +47,9 @@ pub mod result {
         pub error: Option<serde_json::Value>,
     }
 }
+/// Resolves whether a tree's repo-local (`<root>/.grok/lsp.json`) LSP servers
+/// are trusted. Called once per root, on the first session bound there.
+pub type ProjectLspTrustFn = Arc<dyn Fn(&Path) -> bool + Send + Sync>;
 /// Per-session state held in [`WorkspaceShared::sessions`].
 ///
 /// The `effective_tool_config` baseline and the resolved `toolset` are
@@ -641,7 +644,27 @@ pub struct WorkspaceShared {
     /// clients.
     pub(crate) fuzzy_searches:
         std::sync::Arc<tokio::sync::Mutex<crate::file_system::FuzzySearchManager>>,
+    /// LSP backend for [`Self::root_cwd`]. Sessions rooted elsewhere are served
+    /// from [`Self::lsp_by_root`] instead.
     pub(crate) lsp: Option<std::sync::Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>>,
+    /// Folder-trust verdict for `root_cwd`'s repo-local LSP servers, kept so a
+    /// per-root backend built after construction can fall back to it when no
+    /// [`Self::project_lsp_trust`] resolver was installed.
+    pub(crate) project_lsp_trusted: bool,
+    /// Resolves the repo-local-LSP folder-trust verdict for an arbitrary root.
+    /// The embedder installs it via
+    /// [`WorkspaceHandle::set_project_lsp_trust_resolver`](crate::handle::WorkspaceHandle::set_project_lsp_trust_resolver);
+    /// without one every non-root tree inherits `project_lsp_trusted`.
+    pub(crate) project_lsp_trust: arc_swap::ArcSwap<Option<ProjectLspTrustFn>>,
+    /// LSP backends for session roots other than `root_cwd`, keyed by the
+    /// canonical root. Built on the first session bound to that root and
+    /// dropped — stopping its language servers — when the last session
+    /// there is dropped, so a long-lived leader holds one entry per *live*
+    /// root rather than one per session.
+    #[allow(clippy::type_complexity)]
+    pub(crate) lsp_by_root: parking_lot::Mutex<
+        HashMap<PathBuf, Option<Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>>>,
+    >,
     pub(crate) codebase_indexes:
         std::sync::Arc<parking_lot::Mutex<crate::file_system::CodebaseIndexManager>>,
     /// Finalize the FS rewind checkpoint on non-`Completed` turn-end outcomes

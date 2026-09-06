@@ -1428,7 +1428,23 @@ impl MvpAgent {
             workspace_identity,
             project_lsp_trusted,
         ) {
-            Ok(handle) => xai_grok_workspace::WorkspaceOps::local(handle),
+            Ok(handle) => {
+                // The handle serves every session in the process, so a session
+                // rooted outside the launch dir must not inherit the launch
+                // dir's verdict for its own `.grok/lsp.json`. Same fail-closed
+                // `allow_prompt: false` every non-launch-dir call site uses.
+                let remote_settings = self.cfg.borrow().remote_settings.clone();
+                handle.set_project_lsp_trust_resolver(std::sync::Arc::new(
+                    move |root: &std::path::Path| {
+                        folder_trust::resolve_and_record(
+                            root,
+                            remote_settings.as_ref(),
+                            false,
+                        )
+                    },
+                ));
+                xai_grok_workspace::WorkspaceOps::local(handle)
+            }
             Err(e) => {
                 tracing::error!(
                     error = %e,
