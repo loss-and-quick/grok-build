@@ -6643,6 +6643,30 @@ mod tests {
         );
     }
 
+    /// A plugin whose manifest could not be loaded is listed with its reason,
+    /// which is the only place a user is told why it stopped contributing
+    /// anything -- the alternative was disappearing from this list entirely.
+    #[test]
+    fn plugins_render_a_failed_manifest_with_its_reason() {
+        let mut plugin = make_plugin("legacy-tool");
+        plugin.load_error = Some("declares the withdrawn manifest field".to_string());
+        let mut state = plugins_modal_state(vec![plugin]);
+
+        // Collapsed: the badge is what marks the row as worth opening.
+        let buf = render_plugins_into_buffer(&mut state, 100, 40);
+        assert_eq!(buffer_count(&buf, "legacy-tool"), 1);
+        assert_eq!(buffer_count(&buf, "[error]"), 1);
+
+        // Expanded (entry 0 is the group header, 1 the plugin): the reason.
+        state.picker_state.expanded.insert(1);
+        let buf = render_plugins_into_buffer(&mut state, 100, 40);
+        assert_eq!(
+            buffer_count(&buf, "declares the withdrawn manifest field"),
+            2,
+            "the reason reads as both the row's description and its `error` field"
+        );
+    }
+
     #[test]
     fn plugins_render_multiple_plugins_under_one_group() {
         use xai_hooks_plugins_types::PluginOrigin;
