@@ -4,11 +4,10 @@
 #
 #   { "exec": ["${GROK_PLUGIN_ROOT}/_sdk/run", "index.ts"] }
 #
-# This is the SDK-side twin of the host's built-in `plugin` + `runtime` path
-# (xai-grok-plugin-host/src/runtime.rs): the same discovery order
-# bun -> node (>=22) -> deno, the same `--experimental-strip-types` decision,
-# the same deno permission scoping. Knowledge about *running TypeScript* lives
-# here, next to the TypeScript authors, rather than in the host.
+# The host runs whatever program the manifest names and knows nothing about JS:
+# discovery order bun -> node (>=22) -> deno, the `--experimental-strip-types`
+# decision and the deno permission scoping all live here, next to the TypeScript
+# authors.
 #
 # Written in POSIX sh on purpose. The job is to find a JS runtime, so it cannot
 # be written in JS; and it must run from a deployed plugin directory with no
@@ -17,25 +16,25 @@
 # Usage:
 #   run [--runtime=auto|bun|node|deno] [--net] [--] <entry.ts> [args...]
 #
-#   --runtime=  Pin a runtime instead of probing. Mirrors the manifest's
-#               `runtime` field, which the `exec` form has no room for.
-#               Falls back to $GROK_PLUGIN_RUNTIME, then `auto`.
-#   --net       Declare that this plugin is allowed outbound network. Affects
-#               deno only (adds --allow-net); see "Network" below.
+#   --runtime=  Pin a runtime instead of probing. Falls back to
+#               $GROK_PLUGIN_RUNTIME, then `auto`.
+#   --net       Force outbound network on for deno (see "Network"). Rarely
+#               needed: the host states the manifest's flag in the environment.
 #
-# <entry.ts> is resolved against the PLUGIN ROOT (the parent of this script's
-# directory), not against the working directory: the host runs a sidecar with
-# its cwd set to the *workspace* root, so a bare `index.ts` would otherwise be
-# looked up in the user's project. An absolute entry is used as given.
+# <entry.ts> is resolved against the PLUGIN ROOT ($GROK_PLUGIN_ROOT, or the
+# parent of this script's directory when unset), not against the working
+# directory: the host runs a sidecar with its cwd set to the *workspace* root,
+# so a bare `index.ts` would otherwise be looked up in the user's project. An
+# absolute entry is used as given.
 #
-# Network: whether a plugin may reach the network is a manifest field the host
-# reads, and it is not passed to the child in any form -- not in argv, not in
-# the environment, and not in the `initialize` handshake, which by then is far
-# too late to shape argv anyway. So a launcher on this side of `exec` cannot
-# know it, and `--net` has to be stated a second time here. Without the flag we
-# fail closed, matching the manifest default. On Linux the real enforcement for
-# `network: false` is the host's per-child seccomp filter, which applies to this
-# process and every descendant regardless of what deno was told.
+# Network: the host states the manifest's `network` flag in the environment as
+# GROK_PLUGIN_NETWORK (`1` or `0`, always set), so this launcher reads the
+# decision rather than being told it a second time in its argv where the two
+# spellings could drift. `--net` still forces it on for anyone running this
+# script by hand. Absent and unflagged we fail closed, matching the manifest
+# default. None of this is the enforcement: on Linux that is the host's
+# per-child seccomp filter, which applies to this process and every descendant
+# regardless of what deno was told.
 #
 # Diagnostics: stdout is the JSON-RPC channel and this script never writes to
 # it. Everything goes to stderr, and a failure to find a runtime exits 127
@@ -43,12 +42,11 @@
 #
 # Cost: no discovery cache. `command -v` is a shell builtin, so the bun and deno
 # paths fork nothing extra; only node costs one `node --version` per spawn
-# (~20ms, against node's own ~50ms startup). The host caches process-wide
-# because it survives across spawns; a launcher process does not, and the only
-# writable places to persist a cache to are the user's workspace or state dir --
-# not somewhere a launcher should be scribbling, and a cache stale after a
-# toolchain upgrade fails worse than the probe costs. `--runtime=` skips
-# discovery for anyone who cares.
+# (~20ms, against node's own ~50ms startup). A launcher process does not survive
+# across spawns, and the only writable places to persist a cache to are the
+# user's workspace or state dir -- not somewhere a launcher should be
+# scribbling, and a cache stale after a toolchain upgrade fails worse than the
+# probe costs. `--runtime=` skips discovery for anyone who cares.
 
 set -u
 
@@ -156,7 +154,13 @@ try_node() {
 # ── argv ──────────────────────────────────────────────────────────────────────
 
 runtime=${GROK_PLUGIN_RUNTIME:-auto}
-net=0
+# The host always sets this, to `1` or `0`. Anything else (including absent --
+# nothing that knows the variable spawned us) reads as denied, which is the
+# manifest default.
+case ${GROK_PLUGIN_NETWORK-} in
+1) net=1 ;;
+*) net=0 ;;
+esac
 
 while [ $# -gt 0 ]; do
 	case $1 in
@@ -194,23 +198,30 @@ shift
 
 # ── plugin root ───────────────────────────────────────────────────────────────
 
-# This script lives at <plugin root>/_sdk/run once deployed. `pwd` is logical on
-# purpose: in a dev checkout `_sdk` is a symlink into the SDK source tree, and
-# resolving it would put the plugin root inside the SDK instead.
-self=$0
-case $self in
-*/*) ;;
-*) self=$(find_on_path "$self") || die "cannot locate myself from argv[0] '$0'" ;;
-esac
-sdk_dir=${self%/*}
-[ -n "$sdk_dir" ] || sdk_dir=/
-# `cd` + `pwd` only to absolutise a relative argv[0]; both are builtins, so the
-# launcher needs no external command at all -- it must work under whatever PATH
-# the host happens to have, including one holding nothing but a runtime.
-sdk_dir=$(CDPATH= cd -- "$sdk_dir" && pwd) ||
-	die "cannot resolve my own directory from '$self'"
-plugin_root=${sdk_dir%/*}
-[ -n "$plugin_root" ] || plugin_root=/
+# The host exports the plugin's own directory, so take it. Reconstructing it
+# from argv[0] is the fallback for running this script by hand, and for a host
+# too old to export the variable.
+plugin_root=${GROK_PLUGIN_ROOT-}
+if [ -z "$plugin_root" ]; then
+	# This script lives at <plugin root>/_sdk/run once deployed. `pwd` is
+	# logical on purpose: in a dev checkout `_sdk` is a symlink into the SDK
+	# source tree, and resolving it would put the plugin root inside the SDK.
+	self=$0
+	case $self in
+	*/*) ;;
+	*) self=$(find_on_path "$self") || die "cannot locate myself from argv[0] '$0'" ;;
+	esac
+	sdk_dir=${self%/*}
+	[ -n "$sdk_dir" ] || sdk_dir=/
+	# `cd` + `pwd` only to absolutise a relative argv[0]; both are builtins, so
+	# the launcher needs no external command at all -- it must work under
+	# whatever PATH the host happens to have, including one holding nothing but
+	# a runtime.
+	sdk_dir=$(CDPATH= cd -- "$sdk_dir" && pwd) ||
+		die "cannot resolve my own directory from '$self'"
+	plugin_root=${sdk_dir%/*}
+	[ -n "$plugin_root" ] || plugin_root=/
+fi
 
 case $entry in
 /*) ;;

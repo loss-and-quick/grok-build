@@ -300,6 +300,25 @@ describe("deno permissions", () => {
     ]);
   });
 
+  test("takes the network decision from the host's GROK_PLUGIN_NETWORK", async () => {
+    // The manifest's flag reaches us in the environment, so a plugin does not
+    // have to spell it a second time in its argv where the two could drift.
+    entryFile("index.ts");
+    const deno = fakeRuntime("deno", "deno");
+
+    const allowed = await runShim(["index.ts"], {
+      path: [deno],
+      env: { GROK_PLUGIN_NETWORK: "1" },
+    });
+    expect(allowed.argv).toContain("--allow-net");
+
+    // Denied and absent both fail closed — the manifest default.
+    for (const env of [{ GROK_PLUGIN_NETWORK: "0" }, {}]) {
+      const denied = await runShim(["index.ts"], { path: [deno], env });
+      expect(denied.argv).not.toContain("--allow-net");
+    }
+  });
+
   test("scopes to the real cwd even when PWD is inherited stale", async () => {
     // The host sets the child's cwd but not its PWD, so a stale value can be
     // inherited from the host's environment. It must never reach the
@@ -327,6 +346,22 @@ describe("entry resolution", () => {
     const r = await runShim(["index.ts"], { path: [bun] });
     expect(r.argv).toEqual([entry]);
     expect(r.stdout).toContain(`cwd:${workspace}`);
+  });
+
+  test("takes the plugin root from the host rather than argv[0]", async () => {
+    // The host exports the plugin's own directory, so the launcher need not
+    // reconstruct it from where it happens to have been copied.
+    const elsewhere = mkdtempSync(join(tmpdir(), "grok-run-root-"));
+    const entry = join(elsewhere, "index.ts");
+    writeFileSync(entry, "// entry\n");
+    const bun = fakeRuntime("bun", "bun");
+
+    const r = await runShim(["index.ts"], {
+      path: [bun],
+      env: { GROK_PLUGIN_ROOT: elsewhere },
+    });
+    expect(r.argv).toEqual([entry]);
+    rmSync(elsewhere, { recursive: true, force: true });
   });
 
   test("passes an absolute entry through untouched", async () => {
