@@ -339,51 +339,53 @@ impl ContextInfoBlock {
         let mut lines = vec![Line::from(Span::styled("Injected context", primary))];
         lines.push(Line::from(""));
 
+        // No early return for the empty case: every line this view emits has
+        // to leave through the wrap below, or it is the one line that gets
+        // clipped.
         if self.facts.itemized.is_empty() {
             lines.push(Line::from(Span::styled(
                 "This session injects nothing beyond the system prompt.",
                 muted,
             )));
-            return lines;
-        }
-
-        for row in &self.facts.itemized {
-            let mut head = vec![
-                Span::styled(format!("{} ", crate::glyphs::diamond_dotted()), label_style),
-                Span::styled(row.label.clone(), label_style),
-                Span::styled(
-                    format!(
-                        "  {} tokens ({})",
-                        fmt_tok(row.tokens),
-                        percent_of_window(row.tokens, self.facts.total)
+        } else {
+            for row in &self.facts.itemized {
+                let mut head = vec![
+                    Span::styled(format!("{} ", crate::glyphs::diamond_dotted()), label_style),
+                    Span::styled(row.label.clone(), label_style),
+                    Span::styled(
+                        format!(
+                            "  {} tokens ({})",
+                            fmt_tok(row.tokens),
+                            percent_of_window(row.tokens, self.facts.total)
+                        ),
+                        muted,
                     ),
-                    muted,
-                ),
-            ];
-            if let Some(detail) = &row.detail {
-                head.push(Span::styled(format!(" \u{00b7} {detail}"), muted));
+                ];
+                if let Some(detail) = &row.detail {
+                    head.push(Span::styled(format!(" \u{00b7} {detail}"), muted));
+                }
+                lines.push(Line::from(head));
+                match row.text.as_deref() {
+                    Some(text) => lines.extend(
+                        text.lines()
+                            .map(|l| Line::from(Span::styled(l.to_string(), muted))),
+                    ),
+                    // An older shell sends the size without the text. Say which of
+                    // the two is missing rather than rendering an empty section
+                    // that reads as "this block is empty".
+                    None => lines.push(Line::from(Span::styled(
+                        "  (this agent reports the size but not the text)",
+                        muted,
+                    ))),
+                }
+                lines.push(Line::from(""));
             }
-            lines.push(Line::from(head));
-            match row.text.as_deref() {
-                Some(text) => lines.extend(
-                    text.lines()
-                        .map(|l| Line::from(Span::styled(l.to_string(), muted))),
-                ),
-                // An older shell sends the size without the text. Say which of
-                // the two is missing rather than rendering an empty section
-                // that reads as "this block is empty".
-                None => lines.push(Line::from(Span::styled(
-                    "  (this agent reports the size but not the text)",
-                    muted,
-                ))),
-            }
-            lines.push(Line::from(""));
+            lines.extend(
+                INJECTION_NOTE
+                    .iter()
+                    .map(|l| Line::from(Span::styled(*l, muted))),
+            );
         }
-        lines.extend(
-            INJECTION_NOTE
-                .iter()
-                .map(|l| Line::from(Span::styled(*l, muted))),
-        );
         // Wrap everything once, at the end: the usage modal renders one row
         // per logical line and clips the rest, so any line this view emits
         // past the right edge would simply be lost — including the injected
@@ -1788,6 +1790,22 @@ mod injection_tests {
     fn a_session_with_no_injections_says_that_too() {
         let out = all_text(&block_with(vec![]).injection_lines(&test_theme(), 80));
         assert!(out.contains("injects nothing"), "{out}");
+    }
+
+    #[test]
+    fn the_empty_case_is_wrapped_like_every_other_line() {
+        // The sentence is wider than a narrow pane; unwrapped it would be
+        // clipped by the modal into a half-sentence.
+        let lines = block_with(vec![]).injection_lines(&test_theme(), 30);
+        for line in &lines {
+            let width: usize = line
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>();
+            assert!(width <= 30, "line overflows the content width: {line:?}");
+        }
+        assert!(all_text(&lines).contains("injects nothing"), "{lines:?}");
     }
 
     #[test]
