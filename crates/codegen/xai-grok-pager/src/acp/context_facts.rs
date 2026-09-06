@@ -49,6 +49,11 @@ pub struct Contributor {
     pub tokens: u64,
     /// Count-then-noun detail from the shell, e.g. `"12 tools"`.
     pub detail: Option<String>,
+    /// For an injected block, the text `tokens` was measured over, so the
+    /// view can show what the tokens bought and not only how many. `None`
+    /// for rows the shell measures without a text of their own, and for any
+    /// row from a shell too old to send one.
+    pub text: Option<String>,
 }
 
 impl Contributor {
@@ -256,12 +261,14 @@ impl ContextFacts {
                 label: "System prompt".to_string(),
                 tokens: system,
                 detail: None,
+                text: None,
             },
             Contributor {
                 kind: ContributorKind::Messages,
                 label: "Messages".to_string(),
                 tokens: messages,
                 detail: None,
+                text: None,
             },
         ];
         // Tool schemas are a contributor, not an informational row: they are a
@@ -277,6 +284,7 @@ impl ContextFacts {
                     snapshot.tool_definitions_count,
                     "tool",
                 )),
+                text: None,
             });
         }
         if unattributed > 0 {
@@ -285,6 +293,7 @@ impl ContextFacts {
                 label: "Unattributed".to_string(),
                 tokens: unattributed,
                 detail: None,
+                text: None,
             });
         }
         contributors.push(Contributor {
@@ -292,6 +301,7 @@ impl ContextFacts {
             label: "Free".to_string(),
             tokens: snapshot.free_tokens,
             detail: None,
+            text: None,
         });
 
         let itemized = snapshot
@@ -302,6 +312,7 @@ impl ContextFacts {
                 label: c.label.clone(),
                 tokens: c.tokens,
                 detail: c.detail.clone(),
+                text: c.text.clone(),
             })
             .collect();
 

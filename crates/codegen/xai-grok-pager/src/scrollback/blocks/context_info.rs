@@ -158,6 +158,23 @@ const UNATTRIBUTED_NOTE: [&str; 4] = [
     "the provider's tokenizer.",
 ];
 
+/// Footer for the injected-context view: what it does and does not cover.
+///
+/// Printed after the blocks rather than before them so the first thing on the
+/// screen is the largest block, not a paragraph about the screen.
+///
+/// Kept as paragraphs rather than pre-split lines because this view knows the
+/// content width and wraps everything it emits — unlike the legend footnote,
+/// which is measured against a bar whose layout is chosen for it.
+const INJECTION_NOTE: [&str; 3] = [
+    "These blocks ride in every request and are already counted in the bands \
+     on the Context usage tab, so they are listed here rather than added to \
+     them.",
+    "",
+    "Not listed: the system prompt and the tool schemas. Both are sized on \
+     the Context usage tab, and neither is text this session composed.",
+];
+
 /// One legend or informational row, before column formatting.
 struct LegendRow {
     glyph: &'static str,
@@ -301,6 +318,76 @@ impl ContextInfoBlock {
             facts: ContextFacts::resolve(&snapshot, history),
             model: model.into(),
         }
+    }
+
+    /// Build the "Injected context" view: one section per injected block,
+    /// each headed by its measured size and followed by the text that size
+    /// was measured over.
+    ///
+    /// Lives here rather than in the modal for the same reason `build_lines`
+    /// does — the facts are already resolved, and the modal's own renderer
+    /// deliberately does not wrap, so wrapping has to happen where the width
+    /// is known and the content is owned.
+    pub(crate) fn injection_lines(&self, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+        let muted = theme.muted();
+        let primary = Style::default()
+            .fg(theme.text_primary)
+            .add_modifier(Modifier::BOLD);
+        let label_style = Style::default().fg(theme.text_secondary);
+        let mut lines = vec![Line::from(Span::styled("Injected context", primary))];
+        lines.push(Line::from(""));
+
+        if self.facts.itemized.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "This session injects nothing beyond the system prompt.",
+                muted,
+            )));
+            return lines;
+        }
+
+        for row in &self.facts.itemized {
+            let mut head = vec![
+                Span::styled(format!("{} ", crate::glyphs::diamond_dotted()), label_style),
+                Span::styled(row.label.clone(), label_style),
+                Span::styled(
+                    format!(
+                        "  {} tokens ({})",
+                        fmt_tok(row.tokens),
+                        percent_of_window(row.tokens, self.facts.total)
+                    ),
+                    muted,
+                ),
+            ];
+            if let Some(detail) = &row.detail {
+                head.push(Span::styled(format!(" \u{00b7} {detail}"), muted));
+            }
+            lines.push(Line::from(head));
+            match row.text.as_deref() {
+                Some(text) => lines.extend(
+                    text.lines()
+                        .map(|l| Line::from(Span::styled(l.to_string(), muted))),
+                ),
+                // An older shell sends the size without the text. Say which of
+                // the two is missing rather than rendering an empty section
+                // that reads as "this block is empty".
+                None => lines.push(Line::from(Span::styled(
+                    "  (this agent reports the size but not the text)",
+                    muted,
+                ))),
+            }
+            lines.push(Line::from(""));
+        }
+        lines.extend(
+            INJECTION_NOTE
+                .iter()
+                .map(|l| Line::from(Span::styled(*l, muted))),
+        );
+        // Wrap everything once, at the end: the usage modal renders one row
+        // per logical line and clips the rest, so any line this view emits
+        // past the right edge would simply be lost — including the injected
+        // text the view exists to show. `.max(20)` keeps a pathologically
+        // narrow pane from wrapping to nothing.
+        word_wrap_lines(lines, (width as usize).max(20))
     }
 
     /// Build the styled lines for an arbitrary content width. Reused by the
@@ -778,7 +865,7 @@ mod tests {
     use super::*;
     use xai_grok_shell::session::TokenUsageCategory;
 
-    fn snapshot() -> ContextInfo {
+    pub(super) fn snapshot() -> ContextInfo {
         ContextInfo {
             used: 36_700,
             total: 1_000_000,
@@ -800,7 +887,7 @@ mod tests {
     /// Theme handle used by the unit tests. `Theme::current()` is the same
     /// resolver `output()` calls; the active theme doesn't matter for these
     /// tests since they assert on text content / span counts, not colors.
-    fn test_theme() -> Theme {
+    pub(super) fn test_theme() -> Theme {
         Theme::current()
     }
 
@@ -815,7 +902,7 @@ mod tests {
 
     /// Render a block and collapse all spans into a flat newline-joined
     /// string, useful for `contains` assertions.
-    fn all_text(lines: &[Line<'static>]) -> String {
+    pub(super) fn all_text(lines: &[Line<'static>]) -> String {
         lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()).chain(["\n"]))
@@ -1647,6 +1734,84 @@ mod tests {
         assert!(
             l14.contains("Free") && l14.contains("963k"),
             "wide legend should keep label + tokens on one line, got: {l14:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod injection_tests {
+    use super::tests::*;
+    use super::*;
+    use xai_grok_shell::session::TokenUsageCategory;
+
+    fn block_with(rows: Vec<TokenUsageCategory>) -> ContextInfoBlock {
+        let mut snap = snapshot();
+        snap.usage_categories = rows;
+        ContextInfoBlock::new(snap, &[], "grok-4")
+    }
+
+    #[test]
+    fn each_block_is_headed_by_its_size_and_followed_by_its_text() {
+        let block = block_with(vec![TokenUsageCategory::project_instructions(
+            "Always fix clippy warnings.",
+            2,
+        )]);
+        let out = all_text(&block.injection_lines(&test_theme(), 80));
+        assert!(out.contains("Project instructions"), "{out}");
+        assert!(out.contains("2 files"), "{out}");
+        assert!(
+            out.contains("Always fix clippy warnings."),
+            "the text is the point of the view:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_row_without_text_says_so_rather_than_rendering_empty() {
+        // What an older shell sends: the size, but not what it measured.
+        let block = block_with(vec![TokenUsageCategory {
+            label: "Skills".to_string(),
+            tokens: 2_400,
+            detail: Some("21 skills".to_string()),
+            text: None,
+        }]);
+        let out = all_text(&block.injection_lines(&test_theme(), 80));
+        assert!(out.contains("Skills"), "{out}");
+        assert!(
+            out.contains("reports the size but not the text"),
+            "an empty section would read as an empty block:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_injections_says_that_too() {
+        let out = all_text(&block_with(vec![]).injection_lines(&test_theme(), 80));
+        assert!(out.contains("injects nothing"), "{out}");
+    }
+
+    #[test]
+    fn injected_text_is_wrapped_to_the_content_width() {
+        // The usage modal renders one row per logical line and clips the rest,
+        // so anything past the right edge would simply be lost.
+        let long = "word ".repeat(60);
+        let block = block_with(vec![TokenUsageCategory::session_start_hooks(&long)]);
+        let lines = block.injection_lines(&test_theme(), 40);
+        for line in &lines {
+            let width: usize = line
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>();
+            assert!(width <= 40, "line overflows the content width: {line:?}");
+        }
+    }
+
+    #[test]
+    fn the_view_says_what_it_does_not_cover() {
+        let block = block_with(vec![TokenUsageCategory::memory_index("- an entry\n", 1)]);
+        let out = all_text(&block.injection_lines(&test_theme(), 80));
+        assert!(
+            out.contains("Not listed: the system prompt and the tool schemas"),
+            "a view of the injections must not read as a view of everything:\n{out}"
         );
     }
 }

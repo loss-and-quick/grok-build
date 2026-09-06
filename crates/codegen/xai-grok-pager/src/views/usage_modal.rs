@@ -30,17 +30,25 @@ pub const COPY_SESSION_ID_SHORTCUT: usize = 1;
 /// Footer shortcut ID for "copy all session info".
 pub const COPY_ALL_SESSION_INFO_SHORTCUT: usize = 2;
 
-/// The three tabs, in display order.
+/// The tabs, in display order.
+///
+/// `Injections` sits next to `ContextUsage` because it reads the same
+/// snapshot: the context tab says how much each injected block costs, and
+/// this one shows what the block actually says. It is a tab rather than a
+/// separate view so it needs no fetch, no command and no surface of its own
+/// — the modal is already open on the numbers when the question comes up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageInfoTab {
     ContextUsage,
+    Injections,
     UsageLimit,
     SessionInfo,
 }
 
 impl UsageInfoTab {
-    pub const ALL: [UsageInfoTab; 3] = [
+    pub const ALL: [UsageInfoTab; 4] = [
         UsageInfoTab::ContextUsage,
+        UsageInfoTab::Injections,
         UsageInfoTab::UsageLimit,
         UsageInfoTab::SessionInfo,
     ];
@@ -48,6 +56,7 @@ impl UsageInfoTab {
     pub fn label(self) -> &'static str {
         match self {
             UsageInfoTab::ContextUsage => "Context usage",
+            UsageInfoTab::Injections => "Injected context",
             UsageInfoTab::UsageLimit => "Usage limit",
             UsageInfoTab::SessionInfo => "Session info",
         }
@@ -768,6 +777,9 @@ fn tab_content(
         UsageInfoTab::ContextUsage => {
             TabContent::from_lines(context_tab_lines(state, theme, width))
         }
+        UsageInfoTab::Injections => {
+            TabContent::from_lines(injections_tab_lines(state, theme, width))
+        }
         UsageInfoTab::UsageLimit => {
             TabContent::from_lines(usage_limit_lines(state, balance, theme))
         }
@@ -803,6 +815,31 @@ fn context_tab_lines(state: &UsageInfoModalState, theme: &Theme, width: u16) -> 
         return vec![muted_line(theme, "No active session.")];
     }
     vec![muted_line(theme, "Loading context usage\u{2026}")]
+}
+
+/// The injected blocks, each with the text its token count was measured over.
+///
+/// Reads the same fetched snapshot as the context tab — one request feeds
+/// both — so switching tabs costs nothing and cannot show two disagreeing
+/// pictures of the same session.
+fn injections_tab_lines(
+    state: &UsageInfoModalState,
+    theme: &Theme,
+    width: u16,
+) -> Vec<Line<'static>> {
+    if let Some(error) = &state.context_error {
+        return vec![muted_line(
+            theme,
+            format!("Couldn't load injected context: {error}"),
+        )];
+    }
+    if let Some(block) = &state.context {
+        return block.injection_lines(theme, width);
+    }
+    if state.ctx.session_id.is_none() {
+        return vec![muted_line(theme, "No active session.")];
+    }
+    vec![muted_line(theme, "Loading injected context\u{2026}")]
 }
 
 /// Account allowance followed by this session's token/cost totals.
@@ -1122,6 +1159,7 @@ mod tests {
             .collect();
         for needle in [
             "Context usage",
+            "Injected context",
             "Usage limit",
             "Session info",
             "copy session ID",
@@ -1129,7 +1167,7 @@ mod tests {
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }
-        assert_eq!(state.window.tab_rects.len(), 3);
+        assert_eq!(state.window.tab_rects.len(), UsageInfoTab::ALL.len());
         assert!(state.window.close_button_rect.is_some());
     }
 
