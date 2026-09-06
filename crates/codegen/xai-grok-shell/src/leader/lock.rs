@@ -169,13 +169,20 @@ impl LeaderLock {
     }
 
     /// Open (or create) the lock file for subsequent locking operations.
+    ///
+    /// The lock file is the socket's sibling and names the leader's PID, which
+    /// is the one thing a stranger needs to signal it. Created `0o600` so the
+    /// mode does not fall out of the ambient umask; a pre-existing file keeps
+    /// whatever mode it already has, since it may not even be ours to chmod.
     fn open_lock_file(&self) -> Result<File, LockError> {
-        Ok(OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.lock_path)?)
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        Ok(opts.open(&self.lock_path)?)
     }
 
     /// Record a successful lock acquisition in our state.
@@ -674,5 +681,23 @@ mod tests {
         assert!(lock2.is_held());
 
         handle.join().unwrap();
+    }
+
+    /// The lock file sits beside the socket and holds the leader's PID, so it
+    /// gets the same owner-only treatment rather than the ambient umask's.
+    #[cfg(unix)]
+    #[test]
+    fn newly_created_lock_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut lock = test_lock(&temp);
+        assert!(lock.try_acquire().unwrap());
+
+        let mode = fs::metadata(lock.lock_path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "lock file must not be group- or world-readable"
+        );
     }
 }

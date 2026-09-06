@@ -27,6 +27,61 @@ pub fn listener_is_ready(path: &std::path::Path) -> bool {
     }
 }
 
+/// Bind the leader's IPC listener at `path`, reachable only by its owner.
+///
+/// The leader authenticates nobody: `Register` carries a free-form
+/// `client_type` and no credential, so on Unix the socket's file mode *is* the
+/// access control for the whole IPC channel — and left to the ambient umask
+/// that is typically `0o755`, i.e. connectable by every local user.
+///
+/// `bind()` creates the socket inode itself and neither std nor tokio can hand
+/// it a mode, so the mode cannot be set atomically with creation. The gap is
+/// closed from the directory side instead: the containing directory is created
+/// `0o700` *before* the socket exists, so the path is unreachable to other
+/// users even during the bind-to-chmod window, and the socket is then narrowed
+/// to `0o600` as the second line of defence. A directory the user already set
+/// up keeps its own mode — this only governs one we create.
+///
+/// Windows named pipes are out of scope: they carry no filesystem mode, and
+/// their default DACL is a separate question from this one.
+pub(super) fn bind_listener<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<LeaderListener> {
+    let path = path.as_ref();
+    #[cfg(unix)]
+    {
+        ensure_private_parent_dir(path);
+        let listener = LeaderListener::bind(path)?;
+        restrict_to_owner(path)?;
+        Ok(listener)
+    }
+    #[cfg(windows)]
+    {
+        LeaderListener::bind(path)
+    }
+}
+
+/// Narrow `path` to owner-only (`0o600`). Unix-only; a no-op elsewhere.
+#[cfg(unix)]
+pub(super) fn restrict_to_owner(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+/// Create the directory holding the socket as `0o700` if it does not exist yet.
+///
+/// Best-effort: a missing directory makes the following `bind()` fail with a
+/// clearer error than anything reported from here, and an existing one is left
+/// exactly as the user configured it.
+#[cfg(unix)]
+fn ensure_private_parent_dir(socket: &std::path::Path) {
+    use std::os::unix::fs::DirBuilderExt;
+    if let Some(parent) = socket.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent);
+    }
+}
+
 #[cfg(windows)]
 pub(super) use windows_impl::{LeaderListener, LeaderStream};
 
@@ -300,5 +355,79 @@ mod windows_impl {
             drop(listener);
             assert!(!listener_is_ready(&path));
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    use tempfile::TempDir;
+
+    use super::bind_listener;
+
+    fn mode_of(path: &std::path::Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// Root scratch dirs under the user's cache dir: a bound socket must sit on
+    /// a real filesystem, and the machine's `/tmp` is a small RAM disk.
+    fn scratch_root() -> PathBuf {
+        let root = dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("grok-leader-transport-tests");
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[tokio::test]
+    async fn bound_socket_is_owner_only() {
+        let temp = TempDir::new_in(scratch_root()).unwrap();
+        // Deliberately world-accessible, so a mode we did not set would show.
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let socket = temp.path().join("leader.sock");
+
+        let listener = bind_listener(&socket).unwrap();
+
+        assert_eq!(
+            mode_of(&socket),
+            0o600,
+            "leader socket must not be reachable by group or other: \
+             Register accepts any client_type with no credential"
+        );
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn missing_parent_dir_is_created_owner_only() {
+        let temp = TempDir::new_in(scratch_root()).unwrap();
+        let dir = temp.path().join("grok-home");
+        let socket = dir.join("leader.sock");
+
+        let listener = bind_listener(&socket).unwrap();
+
+        assert_eq!(mode_of(&dir), 0o700, "socket directory must be owner-only");
+        assert_eq!(mode_of(&socket), 0o600);
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn existing_parent_dir_keeps_its_own_mode() {
+        let temp = TempDir::new_in(scratch_root()).unwrap();
+        let dir = temp.path().join("preconfigured");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let socket = dir.join("leader.sock");
+
+        let listener = bind_listener(&socket).unwrap();
+
+        assert_eq!(
+            mode_of(&dir),
+            0o750,
+            "a user-configured directory is theirs"
+        );
+        assert_eq!(mode_of(&socket), 0o600);
+        drop(listener);
     }
 }

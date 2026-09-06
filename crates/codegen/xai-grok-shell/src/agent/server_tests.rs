@@ -140,3 +140,113 @@ async fn matching_fail_boot_resets_slot() {
     let _ = fail_boot(&slot, 3).await;
     assert!(matches!(*slot.lock().await, AgentSlot::Down));
 }
+
+mod auth {
+    use axum::http::HeaderMap;
+
+    use super::super::{WsQueryParams, secret_matches, validate_auth};
+
+    const SECRET: &str = "s3cret-value";
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {token}").parse().expect("header value"),
+        );
+        headers
+    }
+
+    fn query(key: &str) -> WsQueryParams {
+        WsQueryParams {
+            server_key: Some(key.to_string()),
+        }
+    }
+
+    #[test]
+    fn bearer_header_accepts_only_the_exact_secret() {
+        assert!(validate_auth(
+            &bearer(SECRET),
+            &WsQueryParams::default(),
+            SECRET
+        ));
+        assert!(!validate_auth(
+            &bearer("wrong"),
+            &WsQueryParams::default(),
+            SECRET
+        ));
+    }
+
+    #[test]
+    fn query_param_accepts_only_the_exact_secret() {
+        assert!(validate_auth(&HeaderMap::new(), &query(SECRET), SECRET));
+        assert!(!validate_auth(&HeaderMap::new(), &query("wrong"), SECRET));
+    }
+
+    #[test]
+    fn missing_credential_is_rejected() {
+        assert!(!validate_auth(
+            &HeaderMap::new(),
+            &WsQueryParams::default(),
+            SECRET
+        ));
+    }
+
+    /// A byte-at-a-time attacker walks the secret by submitting guesses that
+    /// share a longer and longer prefix with it. Each of these must be refused
+    /// as flatly as a guess that is wrong from the first byte, and the
+    /// constant-time comparison must not treat a correct prefix as a match.
+    #[test]
+    fn prefixes_and_near_misses_are_rejected() {
+        for len in 0..SECRET.len() {
+            let prefix = &SECRET[..len];
+            assert!(
+                !validate_auth(&bearer(prefix), &WsQueryParams::default(), SECRET),
+                "prefix of length {len} was accepted"
+            );
+            assert!(
+                !validate_auth(&HeaderMap::new(), &query(prefix), SECRET),
+                "prefix of length {len} was accepted via query"
+            );
+        }
+
+        // Differs from the secret only in its final byte.
+        let mut last_byte_off = SECRET.to_string();
+        last_byte_off.pop();
+        last_byte_off.push('X');
+        assert!(!validate_auth(
+            &bearer(&last_byte_off),
+            &WsQueryParams::default(),
+            SECRET
+        ));
+
+        // A correct secret with anything appended is a different secret.
+        assert!(!validate_auth(
+            &bearer(&format!("{SECRET}X")),
+            &WsQueryParams::default(),
+            SECRET
+        ));
+    }
+
+    #[test]
+    fn secret_matches_agrees_with_equality_on_every_input() {
+        let cases = [
+            ("", ""),
+            ("", "a"),
+            ("a", ""),
+            ("a", "a"),
+            ("a", "b"),
+            ("ab", "aa"),
+            ("aa", "ab"),
+            (SECRET, SECRET),
+            ("\u{1f600}", "\u{1f600}"),
+        ];
+        for (lhs, rhs) in cases {
+            assert_eq!(
+                secret_matches(lhs, rhs),
+                lhs == rhs,
+                "{lhs:?} vs {rhs:?} disagreed with =="
+            );
+        }
+    }
+}

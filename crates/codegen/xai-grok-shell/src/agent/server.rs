@@ -106,6 +106,18 @@ pub(crate) struct WsQueryParams {
     pub server_key: Option<String>,
 }
 
+/// Compare a client-supplied credential against the server secret without
+/// leaking where the two diverge.
+///
+/// `==` on `str` short-circuits at the first differing byte, so how long a
+/// rejection takes reveals how long a correct prefix the guess had — enough for
+/// a caller who can retry to recover the secret one byte at a time. Only the
+/// contents are secret here; the length is fixed by whoever launched the server
+/// and is allowed to leak.
+pub(crate) fn secret_matches(supplied: &str, expected: &str) -> bool {
+    constant_time_eq::constant_time_eq(supplied.as_bytes(), expected.as_bytes())
+}
+
 /// Validate the bearer token from request headers or query parameters.
 fn validate_auth(headers: &HeaderMap, query: &WsQueryParams, expected_secret: &str) -> bool {
     // Try Authorization header
@@ -114,12 +126,12 @@ fn validate_auth(headers: &HeaderMap, query: &WsQueryParams, expected_secret: &s
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
-        return token == expected_secret;
+        return secret_matches(token, expected_secret);
     }
 
     // Fall back to query parameter for browser connections
     if let Some(ref key) = query.server_key {
-        return key == expected_secret;
+        return secret_matches(key, expected_secret);
     }
 
     false

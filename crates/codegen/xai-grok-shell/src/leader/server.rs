@@ -18,7 +18,7 @@ use super::protocol::{
     InternalMethod, LEADER_PROTOCOL_VERSION, LeaderCapabilities, ProtocolError, ServerMessage,
     internal_notification, read_message, write_message,
 };
-use super::transport::{LeaderListener, LeaderStream};
+use super::transport::LeaderStream;
 use crate::agent::activity::AgentActivity;
 use crate::auth::AuthManager;
 use crate::cpu_profile::{
@@ -1589,7 +1589,7 @@ pub async fn run_leader_server(
 ) -> Result<(), ServerError> {
     let _ = std::fs::remove_file(&socket_path);
     let shutdown_reason_rx = shutdown_tx.subscribe();
-    let listener = LeaderListener::bind(&socket_path)?;
+    let listener = super::transport::bind_listener(&socket_path)?;
     info!("Leader server listening");
     let (event_tx, event_rx) = kanal::unbounded_async::<ServerEvent>();
     let mut clients: HashMap<ClientId, ClientState> = HashMap::new();

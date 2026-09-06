@@ -373,18 +373,29 @@ pub struct ServeArgs {
     #[command(flatten)]
     pub headless: HeadlessArgs,
 }
+/// Length of an auto-generated `agent serve` secret.
+///
+/// 32 alphanumeric characters is ~190 bits, which puts online guessing out of
+/// reach regardless of how long the server stays up. The old 12-character key
+/// was cycled out of a UUID's 32 hex digits, so its real entropy was capped at
+/// the 12 hex digits it repeated — under 50 bits, and drawn from a
+/// non-cryptographic source.
+const GENERATED_SECRET_LEN: usize = 32;
 impl ServeArgs {
     /// Get the secret, generating a random one if not provided.
     pub fn get_secret(&self) -> String {
         self.secret
             .clone()
-            .unwrap_or_else(|| generate_random_key(12))
+            .unwrap_or_else(|| generate_random_key(GENERATED_SECRET_LEN))
     }
 }
-/// Generate a random alphanumeric key of the given length.
+/// Generate a random alphanumeric key of the given length from the OS CSPRNG.
+///
+/// The alphabet is `[A-Za-z0-9]`, which needs no escaping in the
+/// `?server-key=` query parameter the startup banner prints.
 fn generate_random_key(len: usize) -> String {
-    let raw = uuid::Uuid::new_v4().to_string().replace('-', "");
-    raw.chars().cycle().take(len).collect()
+    use rand::distr::{Alphanumeric, SampleString};
+    Alphanumeric.sample_string(&mut rand::rng(), len)
 }
 /// Arguments for the `agent leader` subcommand.
 #[derive(Debug, clap::Args, Clone)]
@@ -1493,5 +1504,48 @@ mod tests {
             panic!("expected agent subcommand");
         };
         assert_eq!(agent.reasoning_effort.as_deref(), Some("max"));
+    }
+    /// The generated secret is pasted into a `?server-key=` query string by the
+    /// startup banner, so every character must survive a URL unescaped.
+    #[test]
+    fn generated_secret_is_long_and_url_safe() {
+        for _ in 0..64 {
+            let key = generate_random_key(GENERATED_SECRET_LEN);
+            assert_eq!(key.chars().count(), GENERATED_SECRET_LEN);
+            assert!(
+                key.chars().all(|c| c.is_ascii_alphanumeric()),
+                "not URL-safe: {key}"
+            );
+        }
+    }
+
+    /// The old generator cycled a UUID's digits, so any key longer than the
+    /// source repeated itself and gained length without gaining entropy.
+    #[test]
+    fn generated_secrets_do_not_repeat_within_or_across_keys() {
+        let keys: Vec<String> = (0..64)
+            .map(|_| generate_random_key(GENERATED_SECRET_LEN))
+            .collect();
+
+        let unique: std::collections::HashSet<&String> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len(), "generator repeated a whole key");
+
+        // A cycled key of length 2n is its own first half twice over.
+        let long = generate_random_key(GENERATED_SECRET_LEN * 4);
+        let (head, tail) = long.split_at(long.len() / 2);
+        assert_ne!(head, tail, "key repeats its own prefix");
+    }
+
+    #[test]
+    fn explicit_secret_is_used_verbatim() {
+        let args = PagerArgs::try_parse_from(["grok", "agent", "serve", "--secret", "hunter2"])
+            .expect("--secret parses");
+        let Command::Agent(agent) = args.command.expect("agent subcommand") else {
+            panic!("expected agent subcommand");
+        };
+        let AgentCmd::Serve(serve) = agent.mode.expect("serve subcommand") else {
+            panic!("expected serve subcommand");
+        };
+        assert_eq!(serve.get_secret(), "hunter2");
     }
 }

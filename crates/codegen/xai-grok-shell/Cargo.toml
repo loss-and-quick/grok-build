@@ -42,6 +42,9 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 bm25 = "2.3"
 bytes = { workspace = true }
+# Constant-time comparison for the `agent serve` shared secret. Already built
+# as a blake3 dependency, so naming it here adds an edge, not a crate.
+constant_time_eq = "0.3"
 chrono = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 ignore = { workspace = true }
