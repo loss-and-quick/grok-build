@@ -71,6 +71,7 @@ pub(crate) fn loaded_plugin_to_info(plugin: &xai_grok_agent::plugins::LoadedPlug
         marketplace_source: marketplace_source_label(&origin),
         origin: Some(origin),
         conflict: plugin.conflict.clone(),
+        load_error: plugin.load_error.clone(),
     }
 }
 
@@ -239,8 +240,20 @@ mod tests {
             inline_mcp_servers: None,
             inline_lsp_servers: None,
             conflict: None,
+            load_error: None,
             sidecar: None,
         }
+    }
+
+    /// A plugin whose manifest could not be loaded reaches the pager as a
+    /// listed entry carrying its reason, which is the only place a user is
+    /// told why the plugin stopped contributing anything.
+    #[test]
+    fn load_error_reaches_the_plugins_list() {
+        let mut plugin = make_loaded_plugin(AgentOrigin::UserGrok);
+        plugin.load_error = Some("declares the withdrawn manifest field `plugin`".to_string());
+        let info = loaded_plugin_to_info(&plugin);
+        assert_eq!(info.load_error, plugin.load_error);
     }
 
     #[test]

@@ -1195,6 +1195,7 @@ mod tests {
             mcp_config_path: None,
             lsp_config_path: None,
             conflict: None,
+            load_error: None,
         }
     }
 
@@ -1745,6 +1746,7 @@ mod tests {
             mcp_config_path: None,
             lsp_config_path: None,
             conflict: None,
+            load_error: None,
         };
         let registry = PluginRegistry::from_discovered(vec![dp], &[], &["council".to_string()]);
 

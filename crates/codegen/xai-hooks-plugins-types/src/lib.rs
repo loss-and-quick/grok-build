@@ -337,6 +337,11 @@ pub struct PluginInfo {
     /// Warning when this plugin shadowed another with the same name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
+    /// Why this plugin's manifest could not be loaded. `Some` means the entry
+    /// contributes nothing — every count above is zero — and this is the reason
+    /// to show instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_error: Option<String>,
 }
 
 /// Response for `x.ai/plugins/list`.
@@ -861,6 +866,7 @@ mod tests {
             marketplace_source: None,
             origin: Some(PluginOrigin::UserGrok),
             conflict: None,
+            load_error: None,
         };
         let json = serde_json::to_string(&plugin).unwrap();
         assert!(json.contains("skillCount"));

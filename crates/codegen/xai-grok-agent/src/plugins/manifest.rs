@@ -274,8 +274,11 @@ pub struct PluginManifest {
     pub exec: Option<ExecEntry>,
     /// The withdrawn `plugin` / `runtime` launch form, parsed only so a
     /// manifest still carrying it is refused by name instead of loading into a
-    /// plugin whose sidecar silently never starts. See
-    /// [`ManifestError::WithdrawnLaunchField`].
+    /// plugin whose sidecar silently never starts. The refusal is a
+    /// [`ManifestError::WithdrawnLaunchField`], which discovery keeps as the
+    /// plugin's
+    /// [`load_error`](crate::plugins::discovery::DiscoveredPlugin::load_error)
+    /// so `/plugins` can say why the plugin now does nothing.
     #[serde(default, rename = "plugin")]
     pub withdrawn_plugin: Option<serde_json::Value>,
     /// Companion of [`Self::withdrawn_plugin`]; `runtime` only ever qualified
@@ -439,7 +442,8 @@ impl PluginManifest {
         // A manifest still on the withdrawn launch form is refused outright.
         // Ignoring the field would load the plugin's skills and hooks while its
         // sidecar — the reason most of these plugins exist — never started, and
-        // nothing would say why.
+        // nothing would say why. The plugin stays listed with this error as its
+        // `load_error`, so the refusal is answerable rather than a disappearance.
         if self.withdrawn_plugin.is_some() {
             return Err(ManifestError::WithdrawnLaunchField {
                 name: self.name.clone(),

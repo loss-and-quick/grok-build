@@ -1601,6 +1601,7 @@ mod tests {
             inline_mcp_servers: None,
             inline_lsp_servers: None,
             conflict: None,
+            load_error: None,
             sidecar: None,
         };
 
@@ -1671,6 +1672,7 @@ mod tests {
             mcp_config_path: None,
             lsp_config_path: None,
             conflict: None,
+            load_error: None,
         };
         crate::plugins::PluginRegistry::from_discovered(vec![dp], &[], &[name.to_string()])
     }
@@ -2362,6 +2364,7 @@ mod tests {
             inline_mcp_servers: None,
             inline_lsp_servers: None,
             conflict: None,
+            load_error: None,
             sidecar: None,
         }
     }

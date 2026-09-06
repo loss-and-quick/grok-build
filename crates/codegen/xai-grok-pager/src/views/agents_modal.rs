@@ -3424,6 +3424,7 @@ mod tests {
             mcp_config_path: None,
             lsp_config_path: None,
             conflict: None,
+            load_error: None,
         };
         PluginRegistry::from_discovered(vec![dp], &[], &["my-plugin".to_string()])
     }

@@ -2214,6 +2214,7 @@ mod extensions_action_target_tests {
             marketplace_source: None,
             origin: None,
             conflict: None,
+            load_error: None,
         }
     }
 
@@ -2973,6 +2974,7 @@ mod extensions_modal_confirmation_tests {
             marketplace_source: None,
             origin: None,
             conflict: None,
+            load_error: None,
         }
     }
 

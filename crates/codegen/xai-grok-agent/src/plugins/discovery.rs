@@ -158,6 +158,15 @@ pub struct DiscoveredPlugin {
     pub lsp_config_path: Option<PathBuf>,
     /// Warning message when this plugin won a name collision.
     pub conflict: Option<String>,
+    /// Why the manifest could not be loaded, for a candidate that exists on
+    /// disk but provides nothing.
+    ///
+    /// A directory holding a manifest is a plugin someone deployed on purpose,
+    /// so it stays in the list even when the manifest is unusable: it carries
+    /// no skills, commands, agents, hooks, MCP/LSP servers or sidecar, and this
+    /// message says why. Dropping it instead would answer "where did my plugin
+    /// go?" only in the log.
+    pub load_error: Option<String>,
 }
 
 impl DiscoveredPlugin {
@@ -628,7 +637,10 @@ fn collect_plugin(
         return;
     }
 
-    // Load manifest or derive from directory name
+    // Load manifest or derive from directory name. `load_error` is set when the
+    // manifest exists but cannot be used: the candidate is still recorded, with
+    // nothing resolved off it, so the reason has somewhere to be shown.
+    let mut load_error = None;
     let manifest = match load_manifest(plugin_root) {
         Ok(ManifestLoadResult::Found(m)) => *m,
         Ok(ManifestLoadResult::NotFound) => {
@@ -660,40 +672,30 @@ fn collect_plugin(
 
             PluginManifest {
                 name,
-                version: None,
-                description: None,
-                author: None,
-                homepage: None,
-                repository: None,
-                license: None,
-                keywords: vec![],
-                skills: None,
-                commands: None,
-                agents: None,
-                hooks: None,
-                mcp_servers: None,
-                lsp_servers: None,
-                withdrawn_plugin: None,
-                runtime: None,
-                exec: None,
-                network: None,
-                tools: None,
-                config: None,
-                oauth_label: None,
-                oauth_accounts: None,
+                ..Default::default()
             }
         }
         Err(e) => {
             // `error!`, not `warn!`: a directory with a manifest is a plugin
             // someone deployed on purpose, and one that fails to load
             // contributes nothing at all -- no skills, no hooks, no sidecar.
-            // The error text is the only place the reason is ever stated.
             tracing::error!(
                 path = %plugin_root.display(),
                 error = %e,
-                "failed to load plugin manifest; skipping the whole plugin"
+                "failed to load plugin manifest; the plugin loads nothing"
             );
-            return;
+            // Named after the directory, not after whatever name the unusable
+            // manifest claims: that name went unvalidated, and for
+            // `InvalidName` it is exactly what failed. Without a usable
+            // directory name there is nothing to list the failure under.
+            let Some(name) = name_from_dirname(plugin_root) else {
+                return;
+            };
+            load_error = Some(e.to_string());
+            PluginManifest {
+                name,
+                ..Default::default()
+            }
         }
     };
 
@@ -712,13 +714,24 @@ fn collect_plugin(
     // Build PluginId
     let id = PluginId::new(scope, &canonical, &manifest.name);
 
-    // Resolve component paths
-    let skill_dirs = manifest.skill_dirs(plugin_root);
-    let command_dirs = manifest.command_dirs(plugin_root);
-    let agent_dirs = manifest.agent_dirs(plugin_root);
-    let hooks_path = manifest.hooks_path(plugin_root);
-    let mcp_config_path = manifest.mcp_config_path(plugin_root);
-    let lsp_config_path = manifest.lsp_config_path(plugin_root);
+    // Resolve component paths. A candidate whose manifest failed is listed and
+    // nothing more: the conventional `skills/`, `agents/`, `hooks/hooks.json`
+    // and `.mcp.json` under its root would otherwise still be picked up off the
+    // empty stand-in manifest, and a plugin whose hooks run while its sidecar
+    // never starts is the half-loaded state the refusal exists to prevent.
+    let (skill_dirs, command_dirs, agent_dirs, hooks_path, mcp_config_path, lsp_config_path) =
+        if load_error.is_some() {
+            Default::default()
+        } else {
+            (
+                manifest.skill_dirs(plugin_root),
+                manifest.command_dirs(plugin_root),
+                manifest.agent_dirs(plugin_root),
+                manifest.hooks_path(plugin_root),
+                manifest.mcp_config_path(plugin_root),
+                manifest.lsp_config_path(plugin_root),
+            )
+        };
 
     candidates.push(DiscoveredPlugin {
         manifest,
@@ -735,6 +748,7 @@ fn collect_plugin(
         mcp_config_path,
         lsp_config_path,
         conflict: None,
+        load_error,
     });
 }
 
@@ -967,6 +981,54 @@ mod tests {
         assert_eq!(candidates[0].scope, PluginScope::CliOverride);
         assert_eq!(candidates[0].origin, PluginOrigin::CliOverride);
         assert!(candidates[0].trusted);
+    }
+
+    /// A manifest on the withdrawn `plugin` launch form is refused, and the
+    /// refusal has to be visible: before, the whole directory vanished from the
+    /// registry and only the log said why.
+    #[test]
+    fn unusable_manifest_is_listed_with_its_reason_and_nothing_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("legacy-tool");
+        std::fs::create_dir_all(plugin_dir.join("skills").join("demo")).unwrap();
+        std::fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+        std::fs::write(plugin_dir.join("hooks").join("hooks.json"), "{}").unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name": "legacy-tool", "plugin": "./index.ts", "runtime": "bun"}"#,
+        )
+        .unwrap();
+
+        let trust = TrustStore::load_from(tmp.path().join("trust"));
+        let mut seen = HashSet::new();
+        let mut candidates = Vec::new();
+        collect_plugin(
+            &plugin_dir,
+            PluginScope::User,
+            PluginOrigin::UserGrok,
+            &trust,
+            false,
+            &mut seen,
+            &mut candidates,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        let broken = &candidates[0];
+        assert_eq!(broken.plugin_name(), "legacy-tool");
+        let reason = broken.load_error.as_deref().expect("reason recorded");
+        assert!(
+            reason.contains("withdrawn") && reason.contains("exec"),
+            "the reason names the withdrawn field and its replacement: {reason}"
+        );
+        // Listed and inert: the conventional `skills/` and `hooks/hooks.json`
+        // under the root must not load off the stand-in manifest.
+        assert!(broken.skill_dirs.is_empty());
+        assert!(broken.command_dirs.is_empty());
+        assert!(broken.agent_dirs.is_empty());
+        assert!(broken.hooks_path.is_none());
+        assert!(broken.mcp_config_path.is_none());
+        assert!(broken.lsp_config_path.is_none());
+        assert!(broken.manifest.exec.is_none());
     }
 
     #[test]

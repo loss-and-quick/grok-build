@@ -128,6 +128,11 @@ pub struct LoadedPlugin {
     pub inline_lsp_servers: Option<serde_json::Value>,
     /// Warning if this plugin won a name collision with another plugin.
     pub conflict: Option<String>,
+    /// Why this plugin's manifest could not be loaded. `Some` means the entry
+    /// is a placeholder: every count above is zero, `sidecar` is `None`, and
+    /// this message is the only thing it has to offer. Surfaced by
+    /// `/plugins` — see [`crate::plugins::discovery::DiscoveredPlugin::load_error`].
+    pub load_error: Option<String>,
     /// Resolved sidecar invocation, when the manifest declares a `plugin` or
     /// `exec` entry that resolves. See [`LoadedPlugin::sidecar_spec`].
     pub sidecar: Option<SidecarSpec>,
@@ -299,6 +304,7 @@ impl PluginRegistry {
                 inline_mcp_servers,
                 inline_lsp_servers,
                 conflict: dp.conflict,
+                load_error: dp.load_error,
                 sidecar,
             };
 
@@ -798,6 +804,7 @@ mod tests {
             mcp_config_path: None,
             lsp_config_path: None,
             conflict: None,
+            load_error: None,
         }
     }
 
@@ -1426,6 +1433,7 @@ mod tests {
             mcp_config_path: None,
             lsp_config_path: None,
             conflict: None,
+            load_error: None,
         }
     }
 
@@ -1564,6 +1572,7 @@ mod tests {
             mcp_config_path: None,
             lsp_config_path: None,
             conflict: None,
+            load_error: None,
         };
         PluginRegistry::from_discovered(vec![dp], &[], &[name])
     }

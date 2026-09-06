@@ -315,6 +315,7 @@ pub(crate) fn test_plugin_info(
         marketplace_source: None,
         origin,
         conflict: None,
+        load_error: None,
     }
 }
 
@@ -2810,16 +2811,26 @@ pub fn render_extensions_modal(
                                 .unwrap_or_default();
                             entry_labels.push(format!("{}{}", plugin.name, version_str));
                             entry_right_labels.push(String::new());
-                            // Build description lines from components.
-                            let components = build_plugin_fields(plugin);
-                            if components.is_empty() {
-                                entry_desc_lines.push(vec![]);
+                            // Build description lines from components. A plugin
+                            // whose manifest failed has none, and the reason
+                            // takes their place: this list is where someone
+                            // comes to ask why a plugin stopped doing anything.
+                            if let Some(ref err) = plugin.load_error {
+                                entry_desc_lines.push(vec![err.clone()]);
                             } else {
-                                entry_desc_lines.push(vec![components.join("  ")]);
+                                let components = build_plugin_fields(plugin);
+                                if components.is_empty() {
+                                    entry_desc_lines.push(vec![]);
+                                } else {
+                                    entry_desc_lines.push(vec![components.join("  ")]);
+                                }
                             }
                             entry_summary_lines.push(vec![]);
                             // Fields for expanded view.
                             let mut fields = Vec::new();
+                            if let Some(ref err) = plugin.load_error {
+                                fields.push(("error".to_string(), err.clone()));
+                            }
                             if let Some(ref desc) = plugin.description
                                 && !desc.is_empty()
                             {
@@ -2828,20 +2839,21 @@ pub fn render_extensions_modal(
                             fields.push(("path".to_string(), plugin.root.clone()));
                             entry_fields.push(fields);
                             entry_is_header.push(false);
-                            entry_dimmed.push(!plugin.enabled);
+                            entry_dimmed.push(!plugin.enabled || plugin.load_error.is_some());
                             entry_indent.push(1);
                             entry_data_indices.push(Some(pi));
                             entry_group_keys.push(None);
-                            entry_badge_text.push(if !plugin.enabled {
-                                "[disabled]".into()
+                            // `[error]` outranks `[disabled]`: a plugin that
+                            // failed to load is not one a toggle can bring back.
+                            let (badge, badge_color) = if plugin.load_error.is_some() {
+                                ("[error]", Some(theme.accent_error))
+                            } else if !plugin.enabled {
+                                ("[disabled]", Some(theme.accent_error))
                             } else {
-                                String::new()
-                            });
-                            entry_badge_color.push(if !plugin.enabled {
-                                Some(theme.accent_error)
-                            } else {
-                                None
-                            });
+                                ("", None)
+                            };
+                            entry_badge_text.push(badge.to_string());
+                            entry_badge_color.push(badge_color);
                         }
                     }
                 } else if let TabDataState::Error(ref msg) = state.plugins_data {

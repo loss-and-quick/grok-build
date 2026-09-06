@@ -1239,6 +1239,7 @@ Authorization = "Bearer org2-token"
             mcp_config_path: Some(mcp_json),
             lsp_config_path: None,
             conflict: None,
+            load_error: None,
         };
         let registry = PluginRegistry::from_discovered(vec![dp], &[], &["sentry".to_string()]);
 
@@ -1315,6 +1316,7 @@ Authorization = "Bearer org2-token"
             mcp_config_path: Some(mcp_json),
             lsp_config_path: None,
             conflict: None,
+            load_error: None,
         };
         let registry = PluginRegistry::from_discovered(vec![dp], &[], &["sentry".to_string()]);
 
@@ -1397,6 +1399,7 @@ Authorization = "Bearer org2-token"
             mcp_config_path: Some(mcp_json),
             lsp_config_path: None,
             conflict: None,
+            load_error: None,
         };
         let registry = PluginRegistry::from_discovered(vec![dp], &[], &["slack".to_string()]);
 

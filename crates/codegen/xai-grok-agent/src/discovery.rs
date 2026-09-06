@@ -763,6 +763,7 @@ mod tests {
             inline_mcp_servers: None,
             inline_lsp_servers: None,
             conflict: None,
+            load_error: None,
             sidecar: None,
         };
 
@@ -787,6 +788,7 @@ mod tests {
             mcp_config_path: None,
             lsp_config_path: None,
             conflict: None,
+            load_error: None,
         };
         PluginRegistry::from_discovered(vec![discovered], &[], &[plugin_name.to_string()])
     }
