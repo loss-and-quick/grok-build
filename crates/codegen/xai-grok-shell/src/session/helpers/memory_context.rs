@@ -22,6 +22,33 @@ pub fn conversation_has_memory_context(items: &[ConversationItem]) -> bool {
     )
 }
 
+/// Read the injected `<memory-context>` block back out of the leading system
+/// message, with the number of results it carries.
+///
+/// Recovered from where it lives rather than re-searched, for the same reason
+/// [`conversation_has_memory_context`] exists: the search is one-shot and a
+/// second one would score differently, so a re-render would show `/context` a
+/// block the model was never sent. What is returned is the text the request
+/// actually carries.
+///
+/// Returns `None` for a non-system item, for a system message with no block,
+/// and for a block whose closing tag is missing — a half-block would be
+/// measured short and displayed truncated.
+pub fn injected_memory_context(item: &ConversationItem) -> Option<(String, usize)> {
+    let ConversationItem::System(sys) = item else {
+        return None;
+    };
+    let start = sys.content.find(MEMORY_CONTEXT_OPEN_TAG)?;
+    let rest = &sys.content[start..];
+    let end = rest.find(MEMORY_CONTEXT_CLOSE_TAG)? + MEMORY_CONTEXT_CLOSE_TAG.len();
+    let block = &rest[..end];
+    // `format_memory_reminder` writes one "### Result N" heading per result,
+    // each on its own line. Counting them beats threading a count through the
+    // system message, which stores text and nothing else.
+    let results = block.matches("\n### Result ").count();
+    Some((block.to_string(), results))
+}
+
 /// Format memory search results as a markdown section for system-reminder injection.
 ///
 /// Each result is formatted with score, source, file path, line range,
@@ -329,6 +356,54 @@ mod tests {
             reminder.is_none(),
             "empty results must produce None — injection_count must NOT increment"
         );
+    }
+
+    // ── reading the injected block back out ───────────────────────────
+
+    fn result(snippet: &str) -> xai_grok_tools::types::memory_backend::MemorySearchResult {
+        xai_grok_tools::types::memory_backend::MemorySearchResult {
+            chunk_id: "test:0".into(),
+            path: "/mem/MEMORY.md".into(),
+            start_line: 0,
+            end_line: 3,
+            score: 0.85,
+            snippet: snippet.into(),
+            source: "workspace".into(),
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn the_injected_block_is_recovered_whole_with_its_result_count() {
+        // The block sits inside a larger system prompt; `/context` must show
+        // the block, not the prompt it is embedded in.
+        let block = format_memory_reminder(&[result("first"), result("second")])
+            .expect("two results render a block");
+        let system = ConversationItem::system(format!("You are an agent.\n\n{block}\n\nEnd."));
+        let (recovered, results) =
+            injected_memory_context(&system).expect("the block is in the system message");
+        assert_eq!(recovered, block);
+        assert_eq!(results, 2);
+    }
+
+    #[test]
+    fn a_system_message_without_a_block_yields_nothing() {
+        let system = ConversationItem::system("You are an agent.");
+        assert!(injected_memory_context(&system).is_none());
+    }
+
+    #[test]
+    fn a_block_missing_its_closing_tag_is_refused() {
+        // Half a block would be measured short and displayed truncated; better
+        // to show no row than a row that under-reports.
+        let system = ConversationItem::system(format!("{MEMORY_CONTEXT_OPEN_TAG}\n## Relevant"));
+        assert!(injected_memory_context(&system).is_none());
+    }
+
+    #[test]
+    fn a_non_system_item_is_not_searched_for_a_block() {
+        let block = format_memory_reminder(&[result("first")]).expect("a block");
+        assert!(injected_memory_context(&ConversationItem::user(block)).is_none());
     }
 
     /// `format_memory_reminder` returns `Some(_)` for a non-empty result list.

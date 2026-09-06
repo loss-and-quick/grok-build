@@ -104,15 +104,19 @@ pub(crate) fn format_memory_index(scopes: &[IndexScope<'_>]) -> Option<String> {
 }
 
 impl SessionActor {
-    /// Read both scopes' indexes and render the block, or `None` when it
-    /// should not be injected.
+    /// Read both scopes' indexes and render the block with the number of
+    /// entries it points at, or `None` when it should not be injected.
+    ///
+    /// The count comes back alongside the text because `/context` reports it
+    /// and re-deriving it from the rendered block would have to parse back out
+    /// what this function already knows.
     ///
     /// Skipped when the session's tool catalog has no `memory_get`: an agent
     /// that cannot open an entry has no use for a list of entries, and the
     /// block would be dead weight in every one of its requests. This is the
     /// gate the out-of-tree memory plugin applies to its own injection, moved
     /// to the tool the injected text actually asks the model to call.
-    pub(super) async fn memory_index_block(&self) -> Option<String> {
+    pub(super) async fn memory_index_block(&self) -> Option<(String, usize)> {
         if !self.memory.index_injection_config.enabled {
             return None;
         }
@@ -165,7 +169,7 @@ impl SessionActor {
             block_chars = block.chars().count(),
             "MEMORY_INDEX_INJECT: folded the memory index into the session prefix"
         );
-        Some(block)
+        Some((block, entries))
     }
 
     /// Append the memory index to a freshly built `<user_info>` prefix,
@@ -177,7 +181,7 @@ impl SessionActor {
     /// `Initialize`, and appending at more than one consumption point would
     /// duplicate the block.
     pub(super) async fn with_memory_index(&self, prefix: String) -> String {
-        let Some(body) = self.memory_index_block().await else {
+        let Some((body, _)) = self.memory_index_block().await else {
             return prefix;
         };
         let tag = self.reminder_wrapper_tag();

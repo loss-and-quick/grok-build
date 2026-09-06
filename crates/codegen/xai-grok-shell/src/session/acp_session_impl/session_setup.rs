@@ -688,7 +688,7 @@ impl SessionActor {
         let tool_definitions_tokens = xai_chat_state::estimate_tool_definitions_tokens(&tool_defs);
         let message_count = self.chat_state_handle.get_conversation_len().await;
         let message_tokens = self.chat_state_handle.get_estimated_messages_tokens().await;
-        let usage_categories = self.usage_categories().await;
+        let usage_categories = self.usage_categories(system_message.as_ref()).await;
         let free_tokens = xai_token_estimation::free_tokens(context_window, total_tokens);
         let usage_pct = xai_token_estimation::usage_percentage_u8(total_tokens, context_window);
         let api_backend = config.as_ref().map(|c| format!("{:?}", c.api_backend));
@@ -727,15 +727,54 @@ impl SessionActor {
             },
         }
     }
-    /// Build the `/context` usage rows for the skills listing, the workflow
-    /// listing, and the MCP server listing (see [`TokenUsageCategory`]).
+    /// Build the `/context` rows for everything this session injects into the
+    /// prompt that is not the conversation (see [`TokenUsageCategory`]).
+    ///
+    /// Rows come out in request order — the memory-search block inside the
+    /// system message, then the blocks folded into or following the
+    /// `<user_info>` prefix — so reading the list top to bottom is reading the
+    /// prompt top to bottom.
+    ///
+    /// Each row carries the text it measured, and each gets that text from the
+    /// cheapest source that is still the real thing: the memory-search block is
+    /// read back out of `system_message` rather than re-searched, the
+    /// session-start body and the project instructions come from state the
+    /// session already holds, and only the memory index touches the disk (two
+    /// small index files). The three listing snapshots were already being
+    /// rendered here before this, so the added cost of the whole set is those
+    /// two reads plus string clones.
     ///
     /// Under templated sessions, the skills row estimates the mid-session
     /// envelope; the baseline lives in the first-message preamble with the
     /// same rows, so the difference is a few dozen tokens of envelope text.
-    pub(super) async fn usage_categories(&self) -> Vec<TokenUsageCategory> {
+    pub(super) async fn usage_categories(
+        &self,
+        system_message: Option<&xai_grok_sampling_types::ConversationItem>,
+    ) -> Vec<TokenUsageCategory> {
         let bridge = self.tool_bridge_handle();
         let mut rows = Vec::new();
+        if let Some((block, results)) = system_message
+            .and_then(crate::session::helpers::memory_context::injected_memory_context)
+        {
+            rows.push(TokenUsageCategory::memory_search(&block, results));
+        }
+        // Borrow scoped: `SessionActor` holds the agent in a `RefCell` and the
+        // rest of this function awaits.
+        let project_instructions = {
+            let agent = self.agent.borrow();
+            agent
+                .agents_md_user_reminder()
+                .map(|text| (text, agent.prompt_context().agents_md_files.len()))
+        };
+        if let Some((text, files)) = project_instructions {
+            rows.push(TokenUsageCategory::project_instructions(&text, files));
+        }
+        if let Some(body) = self.session_start_context.borrow().clone() {
+            rows.push(TokenUsageCategory::session_start_hooks(&body));
+        }
+        if let Some((block, entries)) = self.memory_index_block().await {
+            rows.push(TokenUsageCategory::memory_index(&block, entries));
+        }
         if let Some(listing) = bridge.skill_listing_snapshot().await {
             rows.push(TokenUsageCategory::skills_listing(
                 &listing.text,

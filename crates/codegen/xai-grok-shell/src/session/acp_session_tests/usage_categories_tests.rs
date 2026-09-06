@@ -51,7 +51,7 @@ async fn usage_categories_include_skills_and_mcp_with_counts() {
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             seed_skills(&actor, &["alpha", "beta"]).await;
             install_mcp_servers(&actor);
-            let rows = actor.usage_categories().await;
+            let rows = actor.usage_categories(None).await;
             assert_eq!(rows.len(), 2, "{rows:?}");
             let skills = &rows[0];
             assert_eq!(skills.label, "Skills");
@@ -76,7 +76,7 @@ async fn usage_categories_include_workflows_when_enabled() {
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             actor.background_workflows_enabled = true;
-            let rows = actor.usage_categories().await;
+            let rows = actor.usage_categories(None).await;
             let workflows = rows
                 .iter()
                 .find(|row| row.label == "Workflows")
@@ -248,6 +248,57 @@ async fn mcp_snapshot_matches_full_mode_injected_reminder() {
                 .and_then(|s| s.strip_suffix("\n</system-reminder>"))
                 .unwrap_or_else(|| panic!("unexpected wrapper: {injected}"));
             assert_eq!(body, snapshot.text);
+        })
+        .await;
+}
+
+/// The memory-search block is the one injection that lives inside the system
+/// message rather than the first user turn, and it is recovered from there
+/// rather than re-searched — so `/context` reports the block the model was
+/// actually sent, at the size it actually is.
+#[tokio::test(flavor = "current_thread")]
+async fn the_memory_search_block_is_read_back_out_of_the_system_message() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let block = crate::session::helpers::memory_context::format_memory_reminder(&[
+                xai_grok_tools::types::memory_backend::MemorySearchResult {
+                    chunk_id: "test:0".into(),
+                    path: "/mem/MEMORY.md".into(),
+                    start_line: 0,
+                    end_line: 3,
+                    score: 0.85,
+                    snippet: "Project uses Rust.".into(),
+                    source: "workspace".into(),
+                    created_at: None,
+                },
+            ])
+            .expect("one result renders a block");
+            let system = ConversationItem::system(format!("You are an agent.\n\n{block}"));
+
+            let rows = actor.usage_categories(Some(&system)).await;
+            let row = rows.first().expect("the memory row leads the list");
+            assert_eq!(row.label, "Memory search");
+            assert_eq!(row.detail.as_deref(), Some("1 result"));
+            assert_eq!(
+                row.text.as_deref(),
+                Some(block.as_str()),
+                "the row must carry the block itself, not the system prompt around it"
+            );
+            assert_eq!(
+                row.tokens,
+                xai_token_estimation::estimate_tokens(&block),
+                "the count must be of the text the row carries"
+            );
+
+            assert!(
+                actor.usage_categories(None).await.is_empty(),
+                "no system message means no memory row, not an empty one"
+            );
         })
         .await;
 }

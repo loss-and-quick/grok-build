@@ -393,15 +393,20 @@ pub struct RewindPointInfo {
 
 // ── Session info ────────────────────────────────────────────────────────
 
-/// Itemized token usage for one context category, shown as an
-/// informational row in `/context`, e.g. the skills listing or the
-/// MCP server listing.
+/// Itemized token usage for one block this session injects into the
+/// prompt: the project instructions, the memory index, the skills
+/// listing, the MCP server listing, and so on — everything in the request
+/// that is neither the system prompt nor something the user typed.
 ///
-/// Token counts come from rendering the current state (the skill set, the
-/// connected servers), never from parsing conversation text. Once
-/// injected, these rows overlap [`ContextInfo::message_tokens`]; a fresh
-/// session can show rows before the reminders are injected. Neither
-/// estimate counts the `<system-reminder>` wrapper added on injection.
+/// Token counts come from the block's own text, never from parsing
+/// conversation text or from inferring a share of a total. Once injected,
+/// most of these overlap [`ContextInfo::message_tokens`] — they land in
+/// the first user turn — while the memory-search block sits inside
+/// [`ContextInfo::system_prompt_tokens`]. Either way they are already
+/// counted in one of the bands the bar draws, which is why `/context`
+/// shows them below it rather than in it. A fresh session can show rows
+/// before the reminders are injected, and no estimate here counts the
+/// `<system-reminder>` wrapper added on injection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TokenUsageCategory {
@@ -414,37 +419,102 @@ pub struct TokenUsageCategory {
     /// across rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// The exact text `tokens` was measured over, so a client can show the
+    /// user what they are paying for instead of only how much.
+    ///
+    /// This is the block as it stands now. For the blocks with a snapshot
+    /// accessor that is a re-render of current state rather than a replay
+    /// of the bytes injected earlier in the session — the skills listing
+    /// accumulates incrementally, and the MCP announcement is injected as
+    /// deltas — so a long-running session can show text that differs from
+    /// what actually went out. It is the same text the count is taken
+    /// from, which is what keeps the two from disagreeing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 impl TokenUsageCategory {
+    /// Row for a block measured over its own rendered text.
+    fn measured(label: &str, text: &str, detail: Option<String>) -> Self {
+        Self {
+            label: label.to_string(),
+            tokens: xai_token_estimation::estimate_tokens(text),
+            detail,
+            text: Some(text.to_string()),
+        }
+    }
+
+    /// Row for the first-turn memory search. `text` is the
+    /// `<memory-context>` block as it sits in the leading system message —
+    /// read back out of the message rather than re-searched, because a
+    /// second search would score differently and report a block the model
+    /// never saw.
+    pub fn memory_search(text: &str, result_count: usize) -> Self {
+        Self::measured(
+            "Memory search",
+            text,
+            Some(count_detail(result_count as u64, "result")),
+        )
+    }
+
+    /// Row for the AGENTS.md / CLAUDE.md project instructions. `text` is
+    /// the re-render from the parsed files the agent still holds, so it is
+    /// byte-identical to what was injected.
+    pub fn project_instructions(text: &str, file_count: usize) -> Self {
+        Self::measured(
+            "Project instructions",
+            text,
+            Some(count_detail(file_count as u64, "file")),
+        )
+    }
+
+    /// Row for whatever this session's `session_start` hooks contributed.
+    /// `text` is the recorded body, so this is a replay, not a re-render.
+    pub fn session_start_hooks(text: &str) -> Self {
+        Self::measured("Session-start hooks", text, None)
+    }
+
+    /// Row for the memory index folded into the `<user_info>` prefix.
+    ///
+    /// Spells its own plural: [`count_detail`]'s naive `+ "s"` would render
+    /// "2 entrys".
+    pub fn memory_index(text: &str, entry_count: usize) -> Self {
+        let detail = if entry_count == 1 {
+            "1 entry".to_string()
+        } else {
+            format!("{entry_count} entries")
+        };
+        Self::measured("Memory index", text, Some(detail))
+    }
+
     /// Row for the skills listing. `text` is the canonical render from
     /// `SkillManager::listing_snapshot`.
     pub fn skills_listing(text: &str, skill_count: usize) -> Self {
-        Self {
-            label: "Skills".to_string(),
-            tokens: xai_token_estimation::estimate_tokens(text),
-            detail: Some(count_detail(skill_count as u64, "skill")),
-        }
+        Self::measured(
+            "Skills",
+            text,
+            Some(count_detail(skill_count as u64, "skill")),
+        )
     }
 
     /// Row for the workflow listing. `text` is the canonical model-facing
     /// catalog render.
     pub fn workflows_listing(text: &str, workflow_count: usize) -> Self {
-        Self {
-            label: "Workflows".to_string(),
-            tokens: xai_token_estimation::estimate_tokens(text),
-            detail: Some(count_detail(workflow_count as u64, "workflow")),
-        }
+        Self::measured(
+            "Workflows",
+            text,
+            Some(count_detail(workflow_count as u64, "workflow")),
+        )
     }
 
     /// Row for the MCP server announcement. `text` is the full reminder
     /// body for the current server set.
     pub fn mcp_servers(text: &str, server_count: usize) -> Self {
-        Self {
-            label: "MCP servers".to_string(),
-            tokens: xai_token_estimation::estimate_tokens(text),
-            detail: Some(count_detail(server_count as u64, "server")),
-        }
+        Self::measured(
+            "MCP servers",
+            text,
+            Some(count_detail(server_count as u64, "server")),
+        )
     }
 }
 
@@ -965,6 +1035,49 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let roundtripped: TokenUsageCategory = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtripped, original);
+
+        // A row from an older agent carries no text; the client must render
+        // the count without it rather than treat the row as malformed.
+        let textless: TokenUsageCategory =
+            serde_json::from_str(r#"{"label":"Skills","tokens":42}"#).unwrap();
+        assert_eq!(textless.text, None);
+    }
+
+    /// Every row must measure the text it carries, so a client showing the
+    /// block cannot show something other than what the number came from.
+    #[test]
+    fn every_row_counts_the_text_it_carries() {
+        let body = "x".repeat(400);
+        let rows = [
+            TokenUsageCategory::memory_search(&body, 6),
+            TokenUsageCategory::project_instructions(&body, 2),
+            TokenUsageCategory::session_start_hooks(&body),
+            TokenUsageCategory::memory_index(&body, 12),
+            TokenUsageCategory::skills_listing(&body, 21),
+            TokenUsageCategory::workflows_listing(&body, 3),
+            TokenUsageCategory::mcp_servers(&body, 4),
+        ];
+        for row in rows {
+            assert_eq!(row.text.as_deref(), Some(body.as_str()), "{row:?}");
+            assert_eq!(
+                row.tokens,
+                xai_token_estimation::estimate_tokens(&body),
+                "{row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_memory_index_row_spells_its_own_plural() {
+        // `count_detail` would render "2 entrys".
+        assert_eq!(
+            TokenUsageCategory::memory_index("x", 1).detail.as_deref(),
+            Some("1 entry")
+        );
+        assert_eq!(
+            TokenUsageCategory::memory_index("x", 12).detail.as_deref(),
+            Some("12 entries")
+        );
     }
 
     /// The storage mode a session runs under is otherwise invisible: `Local`
