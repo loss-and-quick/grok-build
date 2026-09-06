@@ -12,6 +12,7 @@ use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crate::input::key::RowWalk;
 use crate::key;
+use crate::scrollback::block::RenderBlock;
 use crate::views::modal::CancelTurnChoice;
 use crate::views::prompt_widget::{EnterOutcome, PromptEvent};
 use crate::views::question_view::QUESTION_VIEW_HPAD;
@@ -1264,6 +1265,57 @@ impl AgentView {
             trace: None,
         })
     }
+    /// Answer the agent's `x.ai/folder_trust/request` from the question card.
+    ///
+    /// Three outcomes, all of them visible in the scrollback so a session that
+    /// keeps running without its project scope says so:
+    /// - the trust option replies `"trust"` — the agent persists the grant and
+    ///   hot-reloads project MCP, plugins and hooks for every session on that
+    ///   workspace;
+    /// - the decline option replies `"reject"` — gated, and the agent keeps its
+    ///   dedup key so it does not re-ask for the rest of its lifetime;
+    /// - Esc (`skipped`), or a submit with no recognizable option, DROPS the
+    ///   sender instead of rejecting, so the agent releases the dedup key and
+    ///   the next session in that workspace asks again.
+    fn answer_folder_trust(
+        &mut self,
+        qv: &crate::views::question_view::QuestionViewState,
+        skipped: bool,
+        response_tx: tokio::sync::oneshot::Sender<
+            xai_acp_lib::AcpResult<agent_client_protocol::ExtResponse>,
+        >,
+    ) -> InputOutcome {
+        use crate::views::question_view::{
+            FOLDER_TRUST_OPTION_REJECT, FOLDER_TRUST_OPTION_TRUST, QuestionSelection,
+            send_folder_trust_outcome,
+        };
+        let chosen = match qv.selections.first() {
+            Some(QuestionSelection::Single(Some(idx))) => qv
+                .questions
+                .first()
+                .and_then(|q| q.options.get(*idx))
+                .and_then(|o| o.id.as_deref()),
+            _ => None,
+        };
+        let note = match (skipped, chosen) {
+            (false, Some(FOLDER_TRUST_OPTION_TRUST)) => {
+                send_folder_trust_outcome(response_tx, true);
+                "Folder trusted — project MCP servers, hooks, plugins and LSP are enabled for \
+                 this workspace."
+            }
+            (false, Some(FOLDER_TRUST_OPTION_REJECT)) => {
+                send_folder_trust_outcome(response_tx, false);
+                "Folder left untrusted — project MCP servers, hooks, plugins and LSP stay off \
+                 for this workspace."
+            }
+            // Esc, or an unrecognized option: answer nothing (fail-closed) and
+            // let the agent re-ask on the next session for this workspace.
+            _ => crate::app::acp_handler::FOLDER_TRUST_DISMISSED_NOTICE,
+        };
+        self.scrollback
+            .push_block(RenderBlock::system(note.to_owned()));
+        InputOutcome::Changed
+    }
     pub(super) fn submit_question_answers(&mut self, skipped: bool) -> InputOutcome {
         use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;
         self.swap_question_freeform();
@@ -1277,6 +1329,11 @@ impl AgentView {
         if let Some(kind) = qv.local_kind.take() {
             use crate::views::question_view::LocalQuestionKind;
             let outcome = match (skipped, kind) {
+                // Answers over ACP, not through an `Action`, so it needs
+                // `self` — and it must be reached on the skip path too.
+                (skipped, LocalQuestionKind::FolderTrust { response_tx }) => {
+                    self.answer_folder_trust(&qv, skipped, response_tx)
+                }
                 (true, LocalQuestionKind::DoctorFix { target, .. }) => {
                     InputOutcome::Action(Action::DoctorFixCancelled(target))
                 }

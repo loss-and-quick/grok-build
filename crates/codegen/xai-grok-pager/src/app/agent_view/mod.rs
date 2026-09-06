@@ -1945,6 +1945,11 @@ fn translate_local_submit(
                 "feedback report submits through submit_feedback_pane, which returns first"
             )
         }
+        LocalQuestionKind::FolderTrust { .. } => {
+            unreachable!(
+                "folder trust answers over ACP in answer_folder_trust, which returns first"
+            )
+        }
         LocalQuestionKind::FeedbackTrace { report, images } => {
             use crate::app::actions::FeedbackTraceChoice;
             use crate::views::question_view::{

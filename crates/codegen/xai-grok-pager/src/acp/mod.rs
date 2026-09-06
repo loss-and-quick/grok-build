@@ -173,6 +173,14 @@ pub struct ConnectFlags {
     /// Seed agent sessions with auto (classifier) permission mode.
     /// Ignored when `default_yolo_mode` is true.
     pub default_auto_mode: bool,
+    /// Whether this client can render and answer the agent's folder-trust card,
+    /// advertised as `x.ai/folderTrust.interactive`. Only a session root that is
+    /// NOT the launch dir is ever asked about over ACP — the launch dir is gated
+    /// client-side before the first frame — so without this every worktree (and
+    /// any other `session/new` cwd) resolves untrusted with no prompt and no
+    /// notice, silently dropping its project MCP servers, hooks, plugins, LSP
+    /// and permission rules.
+    pub interactive_trust: bool,
 }
 
 /// Connect to an agent: spawn, initialize, authenticate.
@@ -519,6 +527,10 @@ fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
         "x.ai/gitHeadChanged": true,
     });
     meta[xai_grok_status_line::STATUS_LINE_CAPABILITY] = flags.status_line.into();
+    // Parsed agent-side by `MvpAgent::parse_interactive_trust_capability`, which
+    // reads exactly `client_capabilities.meta["x.ai/folderTrust"]["interactive"]`
+    // and gates the whole `x.ai/folder_trust/request` round-trip on it.
+    meta["x.ai/folderTrust"] = serde_json::json!({ "interactive": flags.interactive_trust });
     meta
 }
 
@@ -1270,6 +1282,25 @@ mod tests {
                 ..Default::default()
             });
             assert_eq!(meta[key], wants_a_row, "status_line={wants_a_row}");
+        }
+    }
+
+    /// Regression: the agent asks a NON-launch-dir session root for trust only
+    /// when this exact key says so
+    /// (`MvpAgent::parse_interactive_trust_capability`). While no client claimed
+    /// it, a worktree session resolved untrusted with no prompt and no notice,
+    /// silently losing its project MCP servers, hooks, plugins and LSP.
+    #[test]
+    fn client_capabilities_meta_advertises_interactive_folder_trust() {
+        for can_prompt in [true, false] {
+            let meta = client_capabilities_meta(&ConnectFlags {
+                interactive_trust: can_prompt,
+                ..Default::default()
+            });
+            assert_eq!(
+                meta["x.ai/folderTrust"]["interactive"], can_prompt,
+                "interactive_trust={can_prompt}"
+            );
         }
     }
 

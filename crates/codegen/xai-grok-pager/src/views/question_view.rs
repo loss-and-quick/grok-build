@@ -85,8 +85,10 @@ pub enum QuestionFocus {
 /// driven by an ACP `x.ai/ask_user_question` request).
 ///
 /// Drives what `submit_question_answers` returns when the user submits.
-/// Mutually exclusive with `QuestionViewState.response_tx`: a local
-/// question never has an ACP sender.
+/// Mutually exclusive with `QuestionViewState.response_tx`, which is typed to
+/// the `AskUserQuestion` wire format: a local question never answers on THAT
+/// channel. [`LocalQuestionKind::FolderTrust`] is the one variant that still
+/// owes an ACP reply, so it carries its own sender for its own response shape.
 ///
 /// Each variant carries the data the local handler needs to translate the
 /// submitted selection into an [`crate::app::actions::Action`].
@@ -144,6 +146,54 @@ pub enum LocalQuestionKind {
         report: String,
         images: crate::views::prompt_widget::FeedbackImages,
     },
+    /// Folder-trust decision the AGENT asked for over
+    /// `x.ai/folder_trust/request`, for a session root the launch-dir gate
+    /// never covers (a worktree, or any `session/new` cwd that is not the
+    /// process cwd).
+    ///
+    /// Unlike every other variant this one answers over ACP rather than through
+    /// an [`crate::app::actions::Action`], because the agent is blocked on the
+    /// reverse-request for as long as the card is open.
+    FolderTrust {
+        /// Reverse-request reply channel. Dropping it WITHOUT answering is a
+        /// deliberate third outcome: the agent reads the closed channel as a
+        /// transport failure, stays gated (fail-closed) and releases its
+        /// per-workspace dedup key, so the next session in that workspace asks
+        /// again — where an explicit reject silences the prompt for the rest of
+        /// the agent process.
+        response_tx: tokio::sync::oneshot::Sender<AcpResult<agent_client_protocol::ExtResponse>>,
+    },
+}
+
+/// Option ids for the folder-trust question. The submit handler maps ids (never
+/// positions) back to an outcome, mirroring the trace-consent card.
+pub const FOLDER_TRUST_OPTION_TRUST: &str = "trust";
+pub const FOLDER_TRUST_OPTION_REJECT: &str = "reject";
+
+/// Reply to the agent's `x.ai/folder_trust/request`.
+///
+/// The wire shape is
+/// `xai_grok_shell::agent::mvp_agent::folder_trust_prompt::FolderTrustResponse`,
+/// which is fail-closed on its side: only the literal `"trust"` grants, and any
+/// other string (or an undecodable body) leaves the workspace gated.
+pub fn send_folder_trust_outcome(
+    response_tx: tokio::sync::oneshot::Sender<AcpResult<agent_client_protocol::ExtResponse>>,
+    trust: bool,
+) {
+    let outcome = if trust {
+        FOLDER_TRUST_OPTION_TRUST
+    } else {
+        FOLDER_TRUST_OPTION_REJECT
+    };
+    let Ok(raw) = serde_json::value::to_raw_value(&serde_json::json!({ "outcome": outcome }))
+    else {
+        // A one-string object cannot fail to serialize; on the impossible error
+        // drop the sender, which the agent already reads as "stay gated".
+        return;
+    };
+    response_tx
+        .send(Ok(agent_client_protocol::ExtResponse::new(raw.into())))
+        .ok();
 }
 
 /// Bare `/feedback` pane label (first paragraph of the question chrome).

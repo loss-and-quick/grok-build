@@ -99,7 +99,9 @@ use background::{
     route_bg_task_stdout,
 };
 use follow_ups::handle_follow_ups;
-pub(crate) use interactions::handle_ask_user_question;
+pub(crate) use interactions::{
+    FOLDER_TRUST_DISMISSED_NOTICE, handle_ask_user_question, handle_folder_trust_request,
+};
 use interactions::{handle_exit_plan_mode, handle_mcp_elicit};
 use mcp::{
     handle_mcp_elicit_complete, handle_mcp_init_progress, handle_mcp_server_status,
@@ -822,6 +824,7 @@ fn handle_ext_method(ext: xai_acp_lib::AcpArgs<acp::ExtRequest>, app: &mut AppVi
         "x.ai/ask_user_question" => handle_ask_user_question(ext, app),
         "x.ai/exit_plan_mode" => handle_exit_plan_mode(ext, app),
         "x.ai/mcp/elicit" => handle_mcp_elicit(ext, app),
+        "x.ai/folder_trust/request" => handle_folder_trust_request(ext, app),
         unknown => {
             tracing::warn!("Unknown ext_method: {unknown}");
             ext.response_tx

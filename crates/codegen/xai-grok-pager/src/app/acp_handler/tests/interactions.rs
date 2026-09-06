@@ -1078,3 +1078,123 @@
         );
     }
 
+    /// Build an `x.ai/folder_trust/request` reverse-request for `session_id`,
+    /// shaped exactly like the agent's `FolderTrustRequest`.
+    fn make_folder_trust_ext(
+        session_id: &str,
+        workspace: &str,
+    ) -> (
+        xai_acp_lib::AcpArgs<acp::ExtRequest>,
+        tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<acp::ExtResponse>>,
+    ) {
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": session_id,
+            "cwd": workspace,
+            "workspace": workspace,
+            "configKinds": ["mcp", "hooks"],
+        }))
+        .unwrap();
+        let request = acp::ExtRequest::new("x.ai/folder_trust/request", raw.into());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (
+            xai_acp_lib::AcpArgs { request, response_tx: tx },
+            rx,
+        )
+    }
+
+    /// Regression: a session whose root is NOT the launch dir must not end up
+    /// untrusted in silence.
+    ///
+    /// The launch dir is the only root the client-side gate
+    /// (`event_loop::seed_trust_state`) ever asks about; every other root — a
+    /// worktree under `~/.grok/worktrees`, or any `session/new` cwd — is
+    /// resolved by the agent with `allow_prompt = false`. The agent's
+    /// `x.ai/folder_trust/request` round-trip is the escape hatch, and it was
+    /// dormant because no client handled it: the pager answered
+    /// `method_not_found`, the session stayed gated, and nothing said so.
+    #[test]
+    fn folder_trust_request_opens_a_card_instead_of_silently_gating() {
+        use crate::views::question_view::LocalQuestionKind;
+        let mut app = make_app_with_agent("sess-worktree");
+        let (ext, mut rx) = make_folder_trust_ext("sess-worktree", "/home/u/.grok/worktrees/r/wt");
+
+        assert!(
+            handle_folder_trust_request(ext, &mut app),
+            "the card belongs to the active agent, so it must redraw"
+        );
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let qv = agent
+            .question_view
+            .as_ref()
+            .expect("an untrusted non-launch root must surface a decision, not degrade silently");
+        assert!(
+            matches!(qv.local_kind, Some(LocalQuestionKind::FolderTrust { .. })),
+            "the card must own the reverse-request's reply channel"
+        );
+        assert!(
+            qv.questions[0].question.contains("/home/u/.grok/worktrees/r/wt"),
+            "the card must name the workspace the grant would cover"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing may be answered before the user decides"
+        );
+
+        // Pick "Yes, trust this folder" and submit.
+        agent.question_view.as_mut().unwrap().select_option(0, 0);
+        agent.submit_question_answers_for_test(false);
+
+        let response = rx.try_recv().expect("submitting must answer the agent");
+        let body: serde_json::Value =
+            serde_json::from_str(response.expect("a decision is never an error").0.get()).unwrap();
+        assert_eq!(
+            body["outcome"], "trust",
+            "only the literal \"trust\" grants agent-side"
+        );
+    }
+
+    /// Esc leaves the workspace gated, but says so: the alternative is a session
+    /// that quietly runs without its project MCP servers, hooks and plugins.
+    #[test]
+    fn folder_trust_card_dismissed_stays_gated_and_says_so() {
+        let mut app = make_app_with_agent("sess-worktree");
+        let (ext, mut rx) = make_folder_trust_ext("sess-worktree", "/w");
+        handle_folder_trust_request(ext, &mut app);
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.submit_question_answers_for_test(true);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "Esc must not answer: dropping the channel releases the agent's dedup \
+             key so the next session in this workspace asks again"
+        );
+        assert!(
+            (0..agent.scrollback.len()).any(|i| agent
+                .scrollback
+                .entry(i)
+                .is_some_and(|e| format!("{:?}", e.block).contains("Folder trust left undecided"))),
+            "a session that keeps running without its project scope must say so"
+        );
+    }
+
+    /// A request for a session this client has no view of must not be answered:
+    /// the leader routes folder-trust driver-only (it is not one of the cached,
+    /// replayed interaction requests), so there is nothing to park it for.
+    #[test]
+    fn folder_trust_request_for_unknown_session_is_left_unanswered() {
+        let mut app = make_app_with_agent("sess-1");
+        // No local view, and the active agent already has a session id, so the
+        // race-window fallback in `find_session_match` cannot claim it.
+        let (ext, mut rx) = make_folder_trust_ext("sess-elsewhere", "/w");
+        assert!(!handle_folder_trust_request(ext, &mut app));
+        assert!(
+            app.agents[&AgentId(0)].question_view.is_none(),
+            "a stranger's request must not open a card here"
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed)),
+            "the sender must be dropped so the agent stays gated (fail-closed)"
+        );
+    }

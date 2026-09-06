@@ -859,6 +859,13 @@ pub async fn run(
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
         status_line: false,
+        // Same interactivity test `event_loop::seed_trust_state` applies to the
+        // launch dir: the TUI answers the card with crossterm keys, so a
+        // non-TTY stdin means this process cannot decide and must not claim it.
+        interactive_trust: {
+            use std::io::IsTerminal;
+            std::io::stdin().is_terminal()
+        },
     };
     let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;
     let alt_screen_config_mode = config_watcher.current().alt_screen;

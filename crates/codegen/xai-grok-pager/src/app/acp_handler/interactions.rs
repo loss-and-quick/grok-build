@@ -194,6 +194,15 @@ pub(crate) fn handle_ask_user_question(
                         "/doctor fix was cancelled because another question opened.".to_owned(),
                     ));
                 }
+                // Dropping `response_tx` with `kind` leaves the workspace gated
+                // and releases the agent's dedup key, so the next session in it
+                // asks again. Say so: the session keeps running WITHOUT its
+                // project-scoped servers, which is otherwise invisible.
+                LocalQuestionKind::FolderTrust { .. } => {
+                    agent.scrollback.push_block(RenderBlock::system(
+                        FOLDER_TRUST_DISMISSED_NOTICE.to_owned(),
+                    ));
+                }
                 kind => {
                     // The trace-consent and doctor-fix arms above own their
                     // variants; their labels here are graceful fallbacks.
@@ -208,6 +217,9 @@ pub(crate) fn handle_ask_user_question(
                             "/feedback"
                         }
                         LocalQuestionKind::DoctorFix { .. } => "/doctor fix",
+                        // Owned by the arm above; label kept so the outer
+                        // binding stays exhaustive.
+                        LocalQuestionKind::FolderTrust { .. } => "the folder-trust question",
                     };
                     agent.scrollback.push_block(RenderBlock::system(format!(
                         "{cmd} cancelled because another question opened."
@@ -388,6 +400,142 @@ pub(super) fn handle_exit_plan_mode(
 
     // Background-parked approval renders when the user switches to the session;
     // only the active view needs an immediate redraw.
+    is_active
+}
+
+/// Client-side mirror of the agent's `x.ai/folder_trust/request` payload
+/// (`xai_grok_shell::agent::mvp_agent::folder_trust_prompt::FolderTrustRequest`,
+/// which is crate-private there). Field names must stay in sync with it; only
+/// the fields the card renders are kept.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderTrustRequestParams {
+    session_id: String,
+    /// Display path of the workspace a grant would cover (the trust key), which
+    /// may sit above the session cwd — so the card names the grant's real scope.
+    workspace: String,
+    /// Repo-local config kinds that gated the folder (`mcp`, `hooks`, `lsp`, …).
+    #[serde(default)]
+    config_kinds: Vec<String>,
+}
+
+/// Shown wherever a folder-trust card goes away without a decision, so a
+/// session that keeps running without its project scope says so.
+pub(crate) const FOLDER_TRUST_DISMISSED_NOTICE: &str = "Folder trust left undecided — project MCP servers, hooks, plugins and LSP stay off for \
+     this session. You'll be asked again next time you open it.";
+
+/// Handle an `x.ai/folder_trust/request` ext_method request.
+///
+/// Only session roots OUTSIDE the launch directory reach here: the launch dir is
+/// gated before the first frame by `event_loop::seed_trust_state`, and once that
+/// grant is stored the agent's `prompt_warranted` no longer fires for it. Every
+/// other root (a worktree under `~/.grok/worktrees`, or any `session/new` cwd)
+/// used to resolve untrusted in silence.
+///
+/// Routed by the request's session id exactly like [`handle_ask_user_question`],
+/// and answered from the same question card — the two options map to
+/// `{"outcome": "trust" | "reject"}` on the reverse-request.
+pub(crate) fn handle_folder_trust_request(
+    ext: xai_acp_lib::AcpArgs<acp::ExtRequest>,
+    app: &mut AppView,
+) -> bool {
+    use crate::views::question_view::{
+        FOLDER_TRUST_OPTION_REJECT, FOLDER_TRUST_OPTION_TRUST, LocalQuestionKind, Question,
+        QuestionOption, QuestionViewState,
+    };
+
+    let params: FolderTrustRequestParams = match serde_json::from_str(ext.request.params.get()) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to parse FolderTrustRequestParams");
+            ext.response_tx
+                .send(Err(acp::Error::new(-32602, format!("Invalid params: {e}"))))
+                .ok();
+            return false;
+        }
+    };
+
+    let Some(id) = interaction_target_agent(app, &params.session_id) else {
+        // No local view for this session. Unlike the interaction modals this
+        // request is NOT cached and replayed by the leader (it is routed
+        // driver-only), so there is nothing to park it for: drop the sender.
+        // The agent stays gated and releases its dedup key, so the workspace is
+        // re-asked on the next session rather than silently trusted.
+        tracing::info!(
+            session_id = %params.session_id,
+            "folder trust request for a session with no local view; staying gated"
+        );
+        drop(ext.response_tx);
+        return false;
+    };
+    let is_active = is_matched_agent_active(app, id);
+    let Some(agent) = app.agents.get_mut(&id) else {
+        tracing::warn!("folder_trust: agent {id:?} not found");
+        drop(ext.response_tx);
+        return false;
+    };
+
+    // Never displace a question the user is already answering with a security
+    // prompt they did not ask for. Dropping the sender keeps the workspace
+    // gated and lets the agent re-ask on the next session for it.
+    if agent.question_view.is_some() {
+        tracing::info!("folder trust request arrived over an open question; staying gated");
+        agent.scrollback.push_block(RenderBlock::system(
+            FOLDER_TRUST_DISMISSED_NOTICE.to_owned(),
+        ));
+        drop(ext.response_tx);
+        return is_active;
+    }
+
+    let reasons = if params.config_kinds.is_empty() {
+        "This folder ships repo-local config that can run commands on your machine.".to_owned()
+    } else {
+        format!(
+            "This folder ships repo-local config that can run commands on your machine ({}).",
+            params.config_kinds.join(", ")
+        )
+    };
+    let question = Question {
+        question: format!("Trust the files in {}?", params.workspace),
+        id: None,
+        options: vec![
+            QuestionOption {
+                label: "Yes, trust this folder".into(),
+                description: reasons,
+                preview: None,
+                id: Some(FOLDER_TRUST_OPTION_TRUST.to_owned()),
+            },
+            QuestionOption {
+                label: "No, keep it untrusted".into(),
+                description:
+                    "Project MCP servers, hooks, plugins and LSP stay off for this workspace."
+                        .into(),
+                preview: None,
+                id: Some(FOLDER_TRUST_OPTION_REJECT.to_owned()),
+            },
+        ],
+        multi_select: Some(false),
+    };
+
+    let stashed = agent.prompt.stash();
+    agent.question_view = Some(
+        QuestionViewState::new(
+            format!("folder-trust-{}", uuid::Uuid::new_v4()),
+            vec![question],
+            stashed,
+        )
+        .with_local_kind(LocalQuestionKind::FolderTrust {
+            response_tx: ext.response_tx,
+        })
+        .with_no_freeform(),
+    );
+    agent.prompt.set_text("");
+    agent.last_active_at = Some(std::time::Instant::now());
+
+    tracing::info!(
+        target_active = is_active,
+        "Opened folder-trust question from ext_method"
+    );
     is_active
 }
 

@@ -493,6 +493,16 @@ fn is_scheduled_task_inject_prompt(json: &serde_json::Value) -> bool {
 /// reverse-requests (driver-only), these are **shared**: broadcast to every
 /// subscriber so any client can render + answer the modal, first-answer-wins.
 /// See `SHARED_INTERACTIVE_MODALS.md`.
+///
+/// `x.ai/folder_trust/request` is deliberately NOT here. The three behaviours
+/// this set buys all hang off a `toolCallId`: [`extract_interaction_tool_call_id`]
+/// gates the cache, and eviction needs a matching `interaction_resolved`
+/// notification — a folder-trust prompt is not a tool call and emits neither, so
+/// listing it would grant the broadcast alone, with no caching, no
+/// replay-on-attach and no way to retract the modal from the clients that lost
+/// the race. Broadcasting a durable security grant to every attached client is
+/// also the wrong default; driver-only routing keeps the decision with the
+/// client that opened the session.
 fn is_interaction_request(json: &serde_json::Value) -> bool {
     matches!(
         method_of(json),
