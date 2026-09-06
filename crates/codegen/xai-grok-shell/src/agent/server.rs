@@ -113,7 +113,14 @@ pub(crate) fn secret_matches(supplied: &str, expected: &str) -> bool {
 }
 
 /// Validate the bearer token from request headers or query parameters.
-fn validate_auth(headers: &HeaderMap, query: &WsQueryParams, expected_secret: &str) -> bool {
+///
+/// Shared with [`crate::agent::web_gateway`] so the gateway authenticates browsers on exactly these
+/// terms; a second copy would drift from the constant-time comparison above.
+pub(crate) fn validate_auth(
+    headers: &HeaderMap,
+    query: &WsQueryParams,
+    expected_secret: &str,
+) -> bool {
     if let Some(token) = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())

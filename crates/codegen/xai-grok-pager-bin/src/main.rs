@@ -172,6 +172,21 @@ fn print_serve_startup_info(bind_addr: SocketAddr, secret: &str) {
     );
     eprintln!();
 }
+fn print_gateway_startup_info(bind_addr: SocketAddr, secret: &str) {
+    eprintln!();
+    eprintln!("   Grok web gateway starting...");
+    eprintln!();
+    eprintln!("   Address:  {}:{}", bind_addr.ip(), bind_addr.port());
+    eprintln!("   Secret:   {}", secret);
+    eprintln!();
+    eprintln!(
+        "   WebSocket URL: ws://{}/ws?server-key={}",
+        bind_addr, secret
+    );
+    eprintln!();
+    eprintln!("   Each connection registers with the shared leader as its own client.");
+    eprintln!();
+}
 /// Entrypoint tag for `grok -p`; keys the quiet stderr default in `init_tracing_simple`.
 const HEADLESS_ENTRYPOINT: &str = "headless";
 /// Initialize simple tracing for non-TUI agent modes.
@@ -1158,7 +1173,13 @@ async fn run_agent_command(
     });
     if matches!(
         agent_args.mode,
-        Some(AgentCmd::Leader(_) | AgentCmd::Stdio | AgentCmd::Headless(_) | AgentCmd::Serve(_))
+        Some(
+            AgentCmd::Leader(_)
+                | AgentCmd::Stdio
+                | AgentCmd::Headless(_)
+                | AgentCmd::Serve(_)
+                | AgentCmd::Gateway(_)
+        )
     ) {
         xai_grok_shell::agent::app::suppress_otel();
     }
@@ -1284,10 +1305,15 @@ async fn run_agent_command(
         entrypoint: match &agent_args.mode {
             Some(AgentCmd::Stdio) => Entrypoint::Embedded,
             Some(AgentCmd::Leader(_)) => Entrypoint::Leader,
-            Some(AgentCmd::Serve(_)) => Entrypoint::Workspace,
+            Some(AgentCmd::Serve(_) | AgentCmd::Gateway(_)) => Entrypoint::Workspace,
             Some(AgentCmd::Headless(_)) | None => Entrypoint::Headless,
         },
-        leader: if use_leader || matches!(agent_args.mode, Some(AgentCmd::Leader(_))) {
+        // The gateway holds no agent of its own; every connection it serves lives in the leader.
+        leader: if use_leader
+            || matches!(
+                agent_args.mode,
+                Some(AgentCmd::Leader(_) | AgentCmd::Gateway(_))
+            ) {
             Attached
         } else {
             Standalone
@@ -1522,6 +1548,25 @@ async fn run_agent_command(
             };
             print_serve_startup_info(a.bind, &secret);
             xai_grok_shell::agent::run_agent_server(server_config, agent_config).await
+        }
+        Some(AgentCmd::Gateway(a)) => {
+            let mut agent_config = agent_config.clone();
+            apply_headless_args_to_config(&a.headless, &mut agent_config);
+            let secret = a.get_secret();
+            let gateway_config = xai_grok_shell::agent::GatewayConfig {
+                bind_addr: a.bind,
+                secret: secret.clone(),
+            };
+            // Same URLs the pager uses to pick a leader, so a browser lands on the leader the local
+            // TUI is already attached to rather than starting a second one.
+            let env_urls =
+                xai_grok_shell::leader::LeaderEnvUrls::from(&agent_config.grok_com_config);
+            print_gateway_startup_info(a.bind, &secret);
+            xai_grok_shell::agent::run_web_gateway(
+                gateway_config,
+                xai_grok_shell::agent::attach_via_discovery(env_urls),
+            )
+            .await
         }
         Some(AgentCmd::Leader(a)) => {
             let mut agent_config = agent_config.clone();

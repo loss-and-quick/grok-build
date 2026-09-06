@@ -241,6 +241,18 @@ impl LeaderClient {
         self.cancel.cancel();
     }
 
+    /// A clone of the token [`cancel`](Self::cancel) fires.
+    ///
+    /// [`into_channels`](Self::into_channels) drops the client, and dropping a `CancellationToken`
+    /// does not cancel it, so a caller that keeps only the channels loses every way to close the
+    /// registration. Its read task then blocks on the socket and its write task keeps sending
+    /// keepalive pings, so the leader still counts the client and still lists it as a session
+    /// subscriber. Take the token before decomposing when the connection is shorter-lived than the
+    /// process.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
     /// Get a receiver for the disconnect reason.
     ///
     /// The initial value is [`DisconnectReason::Connected`].

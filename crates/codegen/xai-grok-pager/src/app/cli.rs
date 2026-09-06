@@ -338,6 +338,8 @@ pub enum AgentCmd {
     Headless(HeadlessArgs),
     /// Run the agent as a WebSocket server
     Serve(ServeArgs),
+    /// Relay authenticated WebSocket clients onto the shared leader
+    Gateway(GatewayArgs),
     /// Run as the shared leader process for other clients
     Leader(LeaderArgs),
 }
@@ -389,6 +391,37 @@ fn generate_random_key(len: usize) -> String {
     use rand::distr::{Alphanumeric, SampleString};
     Alphanumeric.sample_string(&mut rand::rng(), len)
 }
+/// Arguments for the `agent gateway` subcommand.
+///
+/// Deliberately not folded into [`ServeArgs`]: `agent serve` owns its own agent and serves one
+/// client at a time, while the gateway owns no agent and gives every connection its own leader
+/// registration. Reusing the subcommand would change what `serve` does for its existing callers.
+#[derive(Debug, clap::Args, Clone)]
+pub struct GatewayArgs {
+    /// Address for the gateway to listen on.
+    ///
+    /// Loopback by default, like `agent serve`. The leader authenticates no one, so a gateway
+    /// bound off-box would hand the machine's agent to the network on one shared secret.
+    #[arg(long, default_value = "127.0.0.1:2420")]
+    pub bind: SocketAddr,
+    /// Secret token for client authentication (auto-generated if not provided)
+    #[arg(long, env = "GROK_AGENT_SECRET")]
+    pub secret: Option<String>,
+    /// Authentication and WebSocket URL overrides.
+    /// The WebSocket URL also selects which leader instance the gateway attaches to.
+    #[command(flatten)]
+    pub headless: HeadlessArgs,
+}
+
+impl GatewayArgs {
+    /// Get the secret, generating a random one if not provided.
+    pub fn get_secret(&self) -> String {
+        self.secret
+            .clone()
+            .unwrap_or_else(|| generate_random_key(GENERATED_SECRET_LEN))
+    }
+}
+
 /// Arguments for the `agent leader` subcommand.
 #[derive(Debug, clap::Args, Clone)]
 pub struct LeaderArgs {
@@ -1550,5 +1583,41 @@ mod tests {
             panic!("expected serve subcommand");
         };
         assert_eq!(serve.get_secret(), "hunter2");
+    }
+
+    /// The gateway fronts a leader that authenticates nobody, so its default bind must stay on
+    /// loopback and must not collide with `agent serve`'s.
+    #[test]
+    fn gateway_defaults_to_its_own_loopback_port() {
+        let args = PagerArgs::try_parse_from(["grok", "agent", "gateway"]).expect("gateway parses");
+        let Command::Agent(agent) = args.command.expect("agent subcommand") else {
+            panic!("expected agent subcommand");
+        };
+        let AgentCmd::Gateway(gateway) = agent.mode.expect("gateway subcommand") else {
+            panic!("expected gateway subcommand");
+        };
+        assert!(gateway.bind.ip().is_loopback());
+
+        let serve = PagerArgs::try_parse_from(["grok", "agent", "serve"]).expect("serve parses");
+        let Command::Agent(serve) = serve.command.expect("agent subcommand") else {
+            panic!("expected agent subcommand");
+        };
+        let AgentCmd::Serve(serve) = serve.mode.expect("serve subcommand") else {
+            panic!("expected serve subcommand");
+        };
+        assert_ne!(gateway.bind, serve.bind);
+    }
+
+    #[test]
+    fn gateway_takes_an_explicit_secret_verbatim() {
+        let args = PagerArgs::try_parse_from(["grok", "agent", "gateway", "--secret", "hunter2"])
+            .expect("--secret parses");
+        let Command::Agent(agent) = args.command.expect("agent subcommand") else {
+            panic!("expected agent subcommand");
+        };
+        let AgentCmd::Gateway(gateway) = agent.mode.expect("gateway subcommand") else {
+            panic!("expected gateway subcommand");
+        };
+        assert_eq!(gateway.get_secret(), "hunter2");
     }
 }

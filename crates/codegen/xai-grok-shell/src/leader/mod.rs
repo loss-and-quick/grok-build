@@ -878,6 +878,13 @@ impl LeaderConnection {
     pub fn registration(&self) -> &LeaderRegistration {
         self.client.registration()
     }
+    /// A clone of the token that closes this registration; see [`LeaderClient::cancel_token`].
+    ///
+    /// Take it before [`into_channels`](Self::into_channels) when the connection is shorter-lived
+    /// than the process, as it is for one browser tab behind the web gateway.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.client.cancel_token()
+    }
     /// Receive the next ACP message from the leader.
     ///
     /// Returns `None` if the connection is closed.

@@ -25,10 +25,12 @@ pub mod session_registry_client;
 pub(crate) mod subagent;
 pub(crate) mod subscription_check;
 pub(crate) mod update_chunk_merge;
+pub mod web_gateway;
 
 pub use mvp_agent::MvpAgent;
 pub use relay::{RelayConfig, RelayHandle, spawn_relay_connection};
 pub use server::{ServerConfig, run_agent_server};
+pub use web_gateway::{GatewayConfig, attach_via_discovery, run_web_gateway};
 
 #[cfg(test)]
 mod storage_client_tests;
