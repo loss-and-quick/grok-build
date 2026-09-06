@@ -2831,6 +2831,14 @@ pub fn render_extensions_modal(
                             if let Some(ref err) = plugin.load_error {
                                 fields.push(("error".to_string(), err.clone()));
                             }
+                            // A conflict is about a plugin that is not on this
+                            // list: this one loaded, and a same-named candidate
+                            // was shadowed or dropped. The note stays a field
+                            // rather than joining the description line, which
+                            // says what this plugin itself contributes.
+                            if let Some(ref conflict) = plugin.conflict {
+                                fields.push(("conflict".to_string(), conflict.clone()));
+                            }
                             if let Some(ref desc) = plugin.description
                                 && !desc.is_empty()
                             {
@@ -2845,10 +2853,16 @@ pub fn render_extensions_modal(
                             entry_group_keys.push(None);
                             // `[error]` outranks `[disabled]`: a plugin that
                             // failed to load is not one a toggle can bring back.
+                            // `[conflict]` ranks under both and is amber, not
+                            // error red: this plugin loaded and works, and the
+                            // badge is only here because the row that would
+                            // have carried the refusal is gone from the list.
                             let (badge, badge_color) = if plugin.load_error.is_some() {
                                 ("[error]", Some(theme.accent_error))
                             } else if !plugin.enabled {
                                 ("[disabled]", Some(theme.accent_error))
+                            } else if plugin.conflict.is_some() {
+                                ("[conflict]", Some(theme.warning))
                             } else {
                                 ("", None)
                             };
@@ -6664,6 +6678,74 @@ mod tests {
             buffer_count(&buf, "declares the withdrawn manifest field"),
             2,
             "the reason reads as both the row's description and its `error` field"
+        );
+    }
+
+    /// The loser of a name collision is off the list entirely, so the winner's
+    /// row is the only place the drop is stated. The winner loaded, though, and
+    /// must not be dressed as a failure.
+    #[test]
+    fn plugins_render_a_conflict_without_looking_broken() {
+        // Colour of the first cell of `needle` on the row that carries it.
+        fn text_fg(buf: &Buffer, needle: &str) -> Option<ratatui::style::Color> {
+            let area = *buf.area();
+            for y in area.top()..area.bottom() {
+                let cells: Vec<String> = (area.left()..area.right())
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect();
+                for i in 0..cells.len() {
+                    if cells[i..].concat().starts_with(needle) {
+                        return buf[(area.left() + i as u16, y)].style().fg;
+                    }
+                }
+            }
+            None
+        }
+
+        let mut plugin = make_plugin("shared-name");
+        plugin.conflict = Some(
+            "Ignored a \"shared-name\" at /proj/shared-name whose manifest failed: bad field"
+                .to_string(),
+        );
+        let mut state = plugins_modal_state(vec![plugin.clone()]);
+
+        // Collapsed: amber marks the row as worth opening; the error red of a
+        // plugin that did not load is reserved for plugins that did not load.
+        // The buffer is wide so the field value below reads on one line.
+        let buf = render_plugins_into_buffer(&mut state, 200, 40);
+        assert_eq!(buffer_count(&buf, "[conflict]"), 1);
+        assert_eq!(buffer_count(&buf, "[error]"), 0);
+        let theme = Theme::current();
+        assert_eq!(text_fg(&buf, "[conflict]"), Some(theme.warning));
+        assert_ne!(theme.warning, theme.accent_error);
+
+        // Expanded (entry 0 is the group header, 1 the plugin): the note reads
+        // once, as a field. The description line stays with what this plugin
+        // itself contributes.
+        state.picker_state.expanded.insert(1);
+        let buf = render_plugins_into_buffer(&mut state, 200, 40);
+        assert_eq!(buffer_count(&buf, "whose manifest failed: bad field"), 1);
+
+        // Both states describe this plugin itself, so both outrank the note --
+        // and two failed candidates leave the winner carrying an error as well.
+        let mut disabled = plugin.clone();
+        disabled.enabled = false;
+        let mut state = plugins_modal_state(vec![disabled]);
+        let buf = render_plugins_into_buffer(&mut state, 200, 40);
+        assert_eq!(buffer_count(&buf, "[disabled]"), 1);
+        assert_eq!(buffer_count(&buf, "[conflict]"), 0);
+
+        let mut failed = plugin;
+        failed.load_error = Some("bad field".to_string());
+        let mut state = plugins_modal_state(vec![failed]);
+        state.picker_state.expanded.insert(1);
+        let buf = render_plugins_into_buffer(&mut state, 200, 40);
+        assert_eq!(buffer_count(&buf, "[error]"), 1);
+        assert_eq!(buffer_count(&buf, "[conflict]"), 0);
+        assert_eq!(
+            buffer_count(&buf, "whose manifest failed: bad field"),
+            1,
+            "the note still reads on a row that also failed to load"
         );
     }
 
