@@ -279,7 +279,8 @@ pub fn project_plugin_dirs_in(chain_dirs: &[PathBuf]) -> Vec<PathBuf> {
 /// `project_trusted` is the folder-trust verdict for `cwd`; it gates
 /// `Project`-scope plugins (CLI/User/ConfigPath scopes are unaffected).
 /// Returns plugins deduplicated by canonical path, with name conflicts
-/// resolved by scope precedence.
+/// resolved in favour of the candidate whose manifest loaded, and by scope
+/// precedence between two of equal health.
 pub fn discover_plugins(
     cwd: Option<&Path>,
     config: &DiscoveryConfig,
@@ -754,8 +755,9 @@ fn collect_plugin(
 
 /// Resolve plugin_name conflicts across scopes.
 ///
-/// Within each name group, keep only the highest-priority candidate
-/// (lowest scope ordinal). Log warnings for dropped duplicates.
+/// Within each name group, keep only the highest-priority candidate: one
+/// whose manifest loaded beats one whose manifest failed, and scope ordinal
+/// decides between two of equal health. Log warnings for dropped duplicates.
 fn resolve_name_conflicts(candidates: &mut Vec<DiscoveredPlugin>) {
     let mut name_map: HashMap<String, usize> = HashMap::new();
     let mut to_remove: Vec<usize> = Vec::new();
@@ -764,47 +766,58 @@ fn resolve_name_conflicts(candidates: &mut Vec<DiscoveredPlugin>) {
 
     for (idx, candidate) in candidates.iter().enumerate() {
         let name = candidate.manifest.name.clone();
-        match name_map.get(&name) {
-            Some(&existing_idx) => {
-                let existing = &candidates[existing_idx];
-                // Lower scope ordinal = higher priority
-                if (candidate.scope as u8) < (existing.scope as u8) {
-                    // New candidate wins
-                    tracing::warn!(
-                        plugin_name = %name,
-                        winner = %candidate.root.display(),
-                        loser = %existing.root.display(),
-                        "plugin name collision resolved by scope precedence"
-                    );
-                    let msg = format!(
-                        "Name collision: shadowing \"{}\" from {}",
-                        name,
-                        existing.root.display()
-                    );
-                    conflict_msgs.push((idx, msg));
-                    to_remove.push(existing_idx);
-                    name_map.insert(name, idx);
-                } else {
-                    // Existing wins
-                    tracing::warn!(
-                        plugin_name = %name,
-                        winner = %existing.root.display(),
-                        loser = %candidate.root.display(),
-                        "plugin name collision resolved by scope precedence"
-                    );
-                    let msg = format!(
-                        "Name collision: shadowing \"{}\" from {}",
-                        name,
-                        candidate.root.display()
-                    );
-                    conflict_msgs.push((existing_idx, msg));
-                    to_remove.push(idx);
-                }
-            }
-            None => {
-                name_map.insert(name, idx);
-            }
-        }
+        let Some(&existing_idx) = name_map.get(&name) else {
+            name_map.insert(name, idx);
+            continue;
+        };
+        let existing = &candidates[existing_idx];
+        // A candidate whose manifest failed contributes nothing -- no skills,
+        // hooks, MCP or sidecar -- so it never shadows one that works, however
+        // high its scope. Winning on scope alone would let a project manifest
+        // left on the withdrawn form delete the working install it shares a
+        // name with, and the registry is keyed by name, so the loser is gone
+        // rather than demoted. Scope decides only between two loadable
+        // candidates, or between two failed ones.
+        let candidate_wins = match (
+            candidate.load_error.is_some(),
+            existing.load_error.is_some(),
+        ) {
+            (false, true) => true,
+            (true, false) => false,
+            _ => (candidate.scope as u8) < (existing.scope as u8),
+        };
+        let (winner_idx, loser_idx) = if candidate_wins {
+            (idx, existing_idx)
+        } else {
+            (existing_idx, idx)
+        };
+        let (winner, loser) = (&candidates[winner_idx], &candidates[loser_idx]);
+        tracing::warn!(
+            plugin_name = %name,
+            winner = %winner.root.display(),
+            loser = %loser.root.display(),
+            loser_failed = loser.load_error.is_some(),
+            "plugin name collision resolved"
+        );
+        // A dropped candidate that never loaded is a different story from a
+        // shadowed one that would have worked: say which, since the dropped
+        // row is the only place its error would have been stated.
+        let msg = match &loser.load_error {
+            Some(err) => format!(
+                "Ignored a \"{}\" at {} whose manifest failed: {}",
+                name,
+                loser.root.display(),
+                err
+            ),
+            None => format!(
+                "Name collision: shadowing \"{}\" from {}",
+                name,
+                loser.root.display()
+            ),
+        };
+        conflict_msgs.push((winner_idx, msg));
+        to_remove.push(loser_idx);
+        name_map.insert(name, winner_idx);
     }
 
     // Apply conflict messages to winners.
@@ -1468,6 +1481,100 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].scope, PluginScope::CliOverride);
+    }
+
+    #[test]
+    fn a_failed_manifest_never_shadows_a_working_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // The project copy is still on the withdrawn launch form, so it loads
+        // nothing; the user copy is a working install of the same name.
+        let project_plugin = tmp.path().join("project").join("foo");
+        std::fs::create_dir_all(&project_plugin).unwrap();
+        std::fs::write(
+            project_plugin.join("plugin.json"),
+            r#"{"name": "foo", "plugin": {"command": "foo-server"}}"#,
+        )
+        .unwrap();
+
+        let user_plugin = tmp.path().join("user").join("foo");
+        std::fs::create_dir_all(&user_plugin).unwrap();
+        std::fs::write(user_plugin.join("plugin.json"), r#"{"name": "foo"}"#).unwrap();
+
+        let trust = TrustStore::load_from(tmp.path().join("trust"));
+        let mut seen = HashSet::new();
+        let mut candidates = Vec::new();
+        // Project scope outranks user scope, and is scanned first.
+        collect_plugin(
+            &project_plugin,
+            PluginScope::Project,
+            PluginOrigin::ProjectGrok,
+            &trust,
+            true,
+            &mut seen,
+            &mut candidates,
+        );
+        collect_plugin(
+            &user_plugin,
+            PluginScope::User,
+            PluginOrigin::UserGrok,
+            &trust,
+            true,
+            &mut seen,
+            &mut candidates,
+        );
+        assert_eq!(candidates.len(), 2, "both roots are real candidates");
+        assert!(candidates[0].load_error.is_some(), "project copy is broken");
+
+        resolve_name_conflicts(&mut candidates);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].scope,
+            PluginScope::User,
+            "the working install must survive a broken one of higher scope"
+        );
+        assert!(candidates[0].load_error.is_none());
+        let conflict = candidates[0].conflict.as_deref().unwrap_or_default();
+        assert!(
+            conflict.contains("manifest failed") && conflict.contains("withdrawn manifest field"),
+            "the dropped candidate's reason has nowhere else to be stated: {conflict:?}"
+        );
+    }
+
+    #[test]
+    fn two_failed_manifests_still_fall_back_to_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut candidates = Vec::new();
+        let trust = TrustStore::load_from(tmp.path().join("trust"));
+        let mut seen = HashSet::new();
+        for (scope, origin, dir) in [
+            (PluginScope::Project, PluginOrigin::ProjectGrok, "project"),
+            (PluginScope::User, PluginOrigin::UserGrok, "user"),
+        ] {
+            let root = tmp.path().join(dir).join("foo");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join("plugin.json"),
+                r#"{"name": "foo", "runtime": "node"}"#,
+            )
+            .unwrap();
+            collect_plugin(
+                &root,
+                scope,
+                origin,
+                &trust,
+                true,
+                &mut seen,
+                &mut candidates,
+            );
+        }
+
+        resolve_name_conflicts(&mut candidates);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].scope, PluginScope::Project);
+        assert!(candidates[0].load_error.is_some());
     }
 
     #[test]
