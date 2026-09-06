@@ -98,6 +98,8 @@ pub(crate) fn test_app() -> AppView {
         models: ModelState::default(),
         registry: ActionRegistry::defaults(),
         settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
+        plugin_settings: std::collections::HashMap::new(),
+        plugin_settings_fingerprint: String::new(),
         current_ui: xai_grok_shell::agent::config::UiConfig::default(),
         status_line: Default::default(),
         cwd: std::path::PathBuf::from("/tmp"),

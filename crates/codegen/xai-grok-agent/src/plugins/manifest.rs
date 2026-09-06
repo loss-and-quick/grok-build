@@ -330,6 +330,15 @@ pub struct PluginManifest {
     #[serde(default)]
     pub config: Option<serde_json::Value>,
 
+    /// Preferences the plugin contributes to grok's settings modal
+    /// (`plugin.json`'s `settings`). Schema only: the *value* of each row is
+    /// stored by grok under `[plugins.<name>]` in config.toml — the same table
+    /// [`Self::config`] supplies defaults for, and the same object the sidecar
+    /// already receives at `initialize` and via `config_get`. See
+    /// [`PluginManifest::plugin_settings`].
+    #[serde(default)]
+    pub settings: Option<Vec<ManifestSettingSpec>>,
+
     /// Human-facing login label advertised when the plugin offers an
     /// interactive OAuth sign-in. When set AND the plugin subscribes to the
     /// `start_oauth_flow` hook event, the plugin becomes a selectable `/login`
@@ -379,6 +388,138 @@ fn is_valid_oauth_account_id(id: &str) -> bool {
         && id.len() <= MAX_OAUTH_ACCOUNT_ID_LEN
         && !id.contains('#')
         && !id.chars().any(|c| c.is_ascii_control())
+}
+
+/// One entry of a manifest's `settings` array: a preference the plugin
+/// contributes to grok's settings modal.
+///
+/// Schema only. The *value* never lives in the manifest — grok stores it under
+/// `[plugins.<name>]` in config.toml, the table the manifest's `config`
+/// supplies defaults for and the sidecar already receives at `initialize` and
+/// via `config_get`. A plugin therefore reads its own setting exactly the way
+/// it reads the rest of its config, and nothing new is needed on the wire.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestSettingSpec {
+    /// Key inside the plugin's `[plugins.<name>]` table.
+    pub key: String,
+    /// Row label in the settings modal. Defaults to `key`.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Row description. Defaults to empty.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// `bool` | `string` | `int` | `enum`. Inferred from `default` when absent.
+    #[serde(default, rename = "type")]
+    pub value_type: Option<String>,
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    /// Choices for an `enum` setting.
+    #[serde(default)]
+    pub choices: Option<Vec<ManifestSettingChoice>>,
+    /// Inclusive bounds for an `int` setting. Both are required: the modal's
+    /// stepper derives its step sizes from `max - min`, so an unbounded int row
+    /// has no usable interaction to offer.
+    #[serde(default)]
+    pub min: Option<i64>,
+    #[serde(default)]
+    pub max: Option<i64>,
+}
+
+/// One choice of an `enum` plugin setting.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestSettingChoice {
+    /// Value persisted into `[plugins.<name>]`.
+    pub value: String,
+    /// Display label. Defaults to `value`.
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// A validated choice of an `enum` plugin setting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginSettingChoice {
+    pub value: String,
+    pub label: String,
+    pub description: String,
+}
+
+/// The value shape of a validated plugin setting, carrying its default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginSettingKind {
+    Bool {
+        default: bool,
+    },
+    String {
+        default: String,
+    },
+    Int {
+        default: i64,
+        min: i64,
+        max: i64,
+    },
+    Enum {
+        default: String,
+        choices: Vec<PluginSettingChoice>,
+    },
+}
+
+/// A validated plugin-contributed setting, ready to become a settings row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginSettingSpec {
+    pub key: String,
+    pub label: String,
+    pub description: String,
+    pub kind: PluginSettingKind,
+}
+
+/// Max number of settings one plugin may contribute. The settings modal is a
+/// finite list a person scrolls; a plugin that wants more of it than this is
+/// not contributing rows, it is annexing the surface.
+const MAX_PLUGIN_SETTINGS: usize = 32;
+
+/// Max number of choices in an `enum` plugin setting. Matches the picker's own
+/// bound (`MAX_PICKER_CHOICES` in the settings modal).
+const MAX_PLUGIN_SETTING_CHOICES: usize = 32;
+
+/// Max length of a plugin setting key.
+const MAX_SETTING_KEY_LEN: usize = 64;
+
+/// Max length of plugin-supplied display text (label, description, choice text).
+const MAX_SETTING_TEXT_LEN: usize = 200;
+
+/// Whether `key` is a usable setting key: 1-64 chars of `[a-z0-9_-]`.
+///
+/// No `.`: the pager's registry key is `plugin.<plugin>.<key>`, and both plugin
+/// names and these keys being dot-free is what makes that split unambiguous.
+/// Lowercase for the same reason plugin names are, and because this is also the
+/// TOML key written under `[plugins.<name>]`.
+fn is_valid_setting_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= MAX_SETTING_KEY_LEN
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Trim plugin-supplied display text and cap its length.
+///
+/// Render safety (control/bidi scrubbing) is deliberately NOT done here: the
+/// surface that draws the row applies the one shared predicate every other
+/// untrusted-text site uses, and duplicating a weaker copy here would be the
+/// version that drifts.
+fn setting_text(raw: Option<&str>, fallback: &str) -> String {
+    let text = raw
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(fallback);
+    match text.char_indices().nth(MAX_SETTING_TEXT_LEN) {
+        Some((idx, _)) => text[..idx].to_string(),
+        None => text.to_string(),
+    }
 }
 
 /// One model-visible tool declared in a sidecar plugin's manifest (`tools`
@@ -661,6 +802,187 @@ impl PluginManifest {
             });
         }
         out
+    }
+
+    /// Validated preferences from the manifest's `settings` array.
+    ///
+    /// Follows the component-loading convention: an unusable entry (bad key,
+    /// duplicate key, a kind whose default does not match it, an `int` without
+    /// bounds, an `enum` without choices) is warned about and skipped rather
+    /// than failing the whole plugin.
+    ///
+    /// A `settings` array without a sidecar entry yields nothing, for the same
+    /// reason `tools` does: the value is delivered to the plugin as part of the
+    /// object `initialize` and `config_get` hand the sidecar, so with no
+    /// sidecar there is nothing that could ever read the row the user just set.
+    pub fn plugin_settings(&self) -> Vec<PluginSettingSpec> {
+        let Some(settings) = &self.settings else {
+            return Vec::new();
+        };
+        if !self.has_sidecar() {
+            if !settings.is_empty() {
+                tracing::warn!(
+                    plugin = %self.name,
+                    "manifest declares settings but no sidecar entry (`exec`); nothing would \
+                     read them, ignoring"
+                );
+            }
+            return Vec::new();
+        }
+        let mut out: Vec<PluginSettingSpec> = Vec::new();
+        for spec in settings {
+            if out.len() >= MAX_PLUGIN_SETTINGS {
+                tracing::warn!(
+                    plugin = %self.name,
+                    "manifest declares more than {MAX_PLUGIN_SETTINGS} settings; \
+                     ignoring the rest"
+                );
+                break;
+            }
+            if !is_valid_setting_key(&spec.key) {
+                tracing::warn!(
+                    plugin = %self.name,
+                    setting = %spec.key,
+                    "skipping plugin setting with invalid key (1-{MAX_SETTING_KEY_LEN} chars of \
+                     [a-z0-9_-])"
+                );
+                continue;
+            }
+            if out.iter().any(|s| s.key == spec.key) {
+                tracing::warn!(plugin = %self.name, setting = %spec.key,
+                    "skipping duplicate plugin setting declaration");
+                continue;
+            }
+            let Some(kind) = self.resolve_setting_kind(spec) else {
+                continue;
+            };
+            out.push(PluginSettingSpec {
+                label: setting_text(spec.label.as_deref(), &spec.key),
+                description: setting_text(spec.description.as_deref(), ""),
+                key: spec.key.clone(),
+                kind,
+            });
+        }
+        out
+    }
+
+    /// Resolve one `settings` entry's declared (or inferred) value shape.
+    /// `None` — with a warning — when the declaration does not describe a row
+    /// the modal could render.
+    fn resolve_setting_kind(&self, spec: &ManifestSettingSpec) -> Option<PluginSettingKind> {
+        let declared = spec.value_type.as_deref().map(str::trim);
+        // An absent `type` is inferred from `default`, so the common one-line
+        // declaration (`{"key": "verbose", "default": false}`) needs no type.
+        let resolved = match declared {
+            Some(t) => t.to_ascii_lowercase(),
+            None => match &spec.default {
+                Some(serde_json::Value::Bool(_)) => "bool".to_string(),
+                Some(serde_json::Value::Number(n)) if n.is_i64() => "int".to_string(),
+                Some(serde_json::Value::String(_)) if spec.choices.is_some() => "enum".to_string(),
+                Some(serde_json::Value::String(_)) => "string".to_string(),
+                _ => {
+                    tracing::warn!(plugin = %self.name, setting = %spec.key,
+                        "skipping plugin setting: no `type` and no `default` to infer one from");
+                    return None;
+                }
+            },
+        };
+        match resolved.as_str() {
+            "bool" | "boolean" => Some(PluginSettingKind::Bool {
+                default: spec
+                    .default
+                    .as_ref()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            }),
+            "string" => Some(PluginSettingKind::String {
+                default: spec
+                    .default
+                    .as_ref()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            }),
+            "int" | "integer" => {
+                let (Some(min), Some(max)) = (spec.min, spec.max) else {
+                    tracing::warn!(plugin = %self.name, setting = %spec.key,
+                        "skipping int plugin setting: both `min` and `max` are required");
+                    return None;
+                };
+                if min >= max {
+                    tracing::warn!(plugin = %self.name, setting = %spec.key,
+                        "skipping int plugin setting: `min` must be below `max`");
+                    return None;
+                }
+                let default = spec
+                    .default
+                    .as_ref()
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(min)
+                    .clamp(min, max);
+                Some(PluginSettingKind::Int { default, min, max })
+            }
+            "enum" => {
+                let choices = self.resolve_setting_choices(spec)?;
+                // An out-of-catalog default would render as a value the picker
+                // cannot select; the first choice is the one the plugin listed
+                // first, which is the closest thing to an intended default.
+                let declared_default = spec.default.as_ref().and_then(|v| v.as_str());
+                let default = declared_default
+                    .filter(|d| choices.iter().any(|c| c.value == *d))
+                    .unwrap_or(&choices[0].value)
+                    .to_string();
+                if declared_default.is_some_and(|d| d != default) {
+                    tracing::warn!(plugin = %self.name, setting = %spec.key,
+                        "enum plugin setting default is not one of its choices; \
+                         using the first choice");
+                }
+                Some(PluginSettingKind::Enum { default, choices })
+            }
+            other => {
+                tracing::warn!(plugin = %self.name, setting = %spec.key, kind = %other,
+                    "skipping plugin setting with unknown `type` \
+                     (bool | string | int | enum)");
+                None
+            }
+        }
+    }
+
+    /// Validated, de-duplicated choices of an `enum` setting. `None` when the
+    /// declaration leaves the picker with nothing to show.
+    fn resolve_setting_choices(
+        &self,
+        spec: &ManifestSettingSpec,
+    ) -> Option<Vec<PluginSettingChoice>> {
+        let mut out: Vec<PluginSettingChoice> = Vec::new();
+        for choice in spec.choices.iter().flatten() {
+            if out.len() >= MAX_PLUGIN_SETTING_CHOICES {
+                tracing::warn!(plugin = %self.name, setting = %spec.key,
+                    "enum plugin setting declares more than \
+                     {MAX_PLUGIN_SETTING_CHOICES} choices; ignoring the rest");
+                break;
+            }
+            let value = choice.value.trim();
+            if value.is_empty() || value.len() > MAX_SETTING_TEXT_LEN {
+                tracing::warn!(plugin = %self.name, setting = %spec.key,
+                    "skipping enum choice with an empty or over-long value");
+                continue;
+            }
+            if out.iter().any(|c| c.value == value) {
+                continue;
+            }
+            out.push(PluginSettingChoice {
+                label: setting_text(choice.label.as_deref(), value),
+                description: setting_text(choice.description.as_deref(), ""),
+                value: value.to_string(),
+            });
+        }
+        if out.is_empty() {
+            tracing::warn!(plugin = %self.name, setting = %spec.key,
+                "skipping enum plugin setting with no usable `choices`");
+            return None;
+        }
+        Some(out)
     }
 
     /// Resolve how this plugin's sidecar is launched, from the manifest's
@@ -1170,6 +1492,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            settings: None,
             oauth_accounts: None,
         };
         let dirs = manifest.skill_dirs(&root);
@@ -1205,6 +1528,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            settings: None,
             oauth_accounts: None,
         };
         let dirs = manifest.skill_dirs(&root);
@@ -1242,6 +1566,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            settings: None,
             oauth_accounts: None,
         };
         let dirs = manifest.skill_dirs(&root);
@@ -1279,6 +1604,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            settings: None,
             oauth_accounts: None,
         };
         let dirs = manifest.skill_dirs(&root);
@@ -1316,6 +1642,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            settings: None,
             oauth_accounts: None,
         };
         assert!(
@@ -1354,6 +1681,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            settings: None,
             oauth_accounts: None,
         };
         assert!(
@@ -1385,6 +1713,7 @@ mod tests {
             tools: None,
             config: None,
             oauth_label: None,
+            settings: None,
             oauth_accounts: None,
         }
     }
@@ -1553,6 +1882,142 @@ mod tests {
             manifest.sidecar_tools().is_empty(),
             "tools without a `plugin` sidecar entry have nothing to serve them"
         );
+    }
+
+    // ── Contributed settings (`settings`) ───────────────────────────────
+
+    #[test]
+    fn plugin_settings_parse_every_kind_and_infer_missing_types() {
+        let json = r#"{
+            "name": "council",
+            "exec": "./index.ts",
+            "settings": [
+                { "key": "verbose", "label": "Verbose logs", "default": false },
+                { "key": "endpoint", "type": "string", "default": "https://a.example" },
+                { "key": "rounds", "default": 3, "min": 1, "max": 10 },
+                {
+                    "key": "mode",
+                    "default": "fast",
+                    "choices": [
+                        { "value": "fast", "label": "Fast", "description": "Fewer rounds" },
+                        { "value": "thorough" }
+                    ]
+                }
+            ]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let settings = manifest.plugin_settings();
+        assert_eq!(settings.len(), 4);
+
+        assert_eq!(settings[0].key, "verbose");
+        assert_eq!(settings[0].label, "Verbose logs");
+        assert_eq!(settings[0].kind, PluginSettingKind::Bool { default: false });
+
+        assert_eq!(
+            settings[1].kind,
+            PluginSettingKind::String {
+                default: "https://a.example".to_string()
+            }
+        );
+        // Absent `label` falls back to the key.
+        assert_eq!(settings[1].label, "endpoint");
+
+        assert_eq!(
+            settings[2].kind,
+            PluginSettingKind::Int {
+                default: 3,
+                min: 1,
+                max: 10
+            }
+        );
+
+        let PluginSettingKind::Enum { default, choices } = &settings[3].kind else {
+            panic!("mode should infer as an enum from `choices`");
+        };
+        assert_eq!(default, "fast");
+        assert_eq!(choices.len(), 2);
+        // Absent choice `label` falls back to the value.
+        assert_eq!(choices[1].label, "thorough");
+    }
+
+    #[test]
+    fn plugin_settings_skip_unusable_declarations() {
+        let json = r#"{
+            "name": "sloppy",
+            "exec": "./index.ts",
+            "settings": [
+                { "key": "Bad.Key", "default": true },
+                { "key": "dupe", "default": true },
+                { "key": "dupe", "default": false },
+                { "key": "unbounded", "type": "int", "default": 1 },
+                { "key": "choiceless", "type": "enum", "default": "x" },
+                { "key": "mystery" },
+                { "key": "weird", "type": "colour", "default": "red" },
+                { "key": "ok", "default": true }
+            ]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let settings = manifest.plugin_settings();
+        let keys: Vec<&str> = settings.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["dupe", "ok"],
+            "an unusable entry is skipped, not fatal to the plugin"
+        );
+    }
+
+    #[test]
+    fn plugin_settings_without_sidecar_entry_are_ignored() {
+        let json = r#"{
+            "name": "no-sidecar",
+            "settings": [{ "key": "verbose", "default": true }]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(
+            manifest.plugin_settings().is_empty(),
+            "a settings row nothing can read is not a setting"
+        );
+    }
+
+    #[test]
+    fn plugin_settings_enum_default_outside_choices_falls_back_to_first() {
+        let json = r#"{
+            "name": "council",
+            "exec": "./index.ts",
+            "settings": [{
+                "key": "mode",
+                "type": "enum",
+                "default": "nonexistent",
+                "choices": [{ "value": "fast" }, { "value": "thorough" }]
+            }]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let settings = manifest.plugin_settings();
+        let PluginSettingKind::Enum { default, .. } = &settings[0].kind else {
+            panic!("expected an enum");
+        };
+        assert_eq!(default, "fast");
+    }
+
+    #[test]
+    fn plugin_settings_are_capped_per_plugin() {
+        let entries: Vec<String> = (0..MAX_PLUGIN_SETTINGS + 5)
+            .map(|i| format!(r#"{{ "key": "k{i}", "default": true }}"#))
+            .collect();
+        let json = format!(
+            r#"{{ "name": "greedy", "exec": "./index.ts", "settings": [{}] }}"#,
+            entries.join(",")
+        );
+        let manifest: PluginManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(manifest.plugin_settings().len(), MAX_PLUGIN_SETTINGS);
+    }
+
+    #[test]
+    fn manifest_without_settings_parses_unchanged() {
+        let json = r#"{ "name": "my-plugin", "exec": "./index.ts" }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.settings.is_none());
+        assert!(manifest.plugin_settings().is_empty());
     }
 
     // ── Manifest default config (`config`) ──────────────────────────────

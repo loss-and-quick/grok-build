@@ -316,6 +316,7 @@ pub(crate) fn test_plugin_info(
         origin,
         conflict: None,
         load_error: None,
+        settings: Vec::new(),
     }
 }
 

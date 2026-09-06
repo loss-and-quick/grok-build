@@ -1230,6 +1230,102 @@ fn every_setting_has_action_for_reset_arm() {
         }
     });
 }
+/// A plugin-contributed row goes the whole way: dispatch updates the pager's
+/// `[plugins.<name>]` mirror, emits one `Effect::PersistSetting` under the
+/// plugin key with the old value as rollback, and `d`-reset produces a
+/// dispatchable action like every other row.
+///
+/// The rows are discovered from plugin manifests at runtime, so the
+/// `every_setting_has_*_arm` sweeps above — which walk `defaults()` — can never
+/// see them; this is the equivalent guard for the generic arms they reach.
+#[test]
+fn plugin_row_dispatches_persists_and_resets() {
+    use xai_hooks_plugins_types::{
+        HookStatus, McpStatus, PluginInfo, PluginScope, PluginSettingInfo, PluginSettingKindInfo,
+    };
+
+    let plugin = PluginInfo {
+        name: "council".to_string(),
+        id: "user/deadbeef/council".to_string(),
+        root: "/plugins/council".to_string(),
+        scope: PluginScope::User,
+        trusted: true,
+        enabled: true,
+        version: None,
+        description: None,
+        skill_count: 0,
+        skill_names: vec![],
+        agent_count: 0,
+        agent_names: vec![],
+        hook_status: HookStatus::None,
+        hook_count: 0,
+        mcp_server_count: 0,
+        mcp_status: McpStatus::None,
+        marketplace_source: None,
+        origin: None,
+        conflict: None,
+        load_error: None,
+        settings: vec![PluginSettingInfo {
+            key: "verbose".to_string(),
+            label: "Verbose logs".to_string(),
+            description: String::new(),
+            kind: PluginSettingKindInfo::Bool { default: false },
+        }],
+    };
+
+    let mut app = test_app_with_agent();
+    app.settings_registry = std::sync::Arc::new(
+        crate::settings::SettingsRegistry::with_plugin_settings(std::slice::from_ref(&plugin)),
+    );
+    let key = "plugin.council.verbose";
+    let meta = app.settings_registry.find(key).expect("row is registered");
+    assert_eq!(
+        crate::settings::default_value_for(meta),
+        crate::settings::SettingValue::Bool(false)
+    );
+
+    let effects = dispatch(
+        Action::SetPluginSetting {
+            key,
+            value: crate::settings::SettingValue::Bool(true),
+        },
+        &mut app,
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::PersistSetting {
+                key: "plugin.council.verbose",
+                value: crate::settings::SettingValue::Bool(true),
+                rollback_value: crate::settings::SettingValue::Bool(false),
+            }]
+        ),
+        "expected one plugin PersistSetting, got {effects:?}"
+    );
+    assert_eq!(
+        app.plugin_settings.get(key),
+        Some(&crate::settings::SettingValue::Bool(true)),
+        "the mirror must move so the modal reads the new value"
+    );
+
+    // `d` on the row restores the manifest default through the same path.
+    let reset = action_for_reset(key, &crate::settings::SettingValue::Bool(false))
+        .expect("a plugin row must be resettable");
+    let _ = dispatch(reset, &mut app);
+    assert_eq!(
+        app.plugin_settings.get(key),
+        Some(&crate::settings::SettingValue::Bool(false))
+    );
+
+    // A failed disk write must land on a real rollback arm, not the catch-all.
+    apply_setting_rollback(&mut app, key, &crate::settings::SettingValue::Bool(true));
+    assert_eq!(
+        app.plugin_settings.get(key),
+        Some(&crate::settings::SettingValue::Bool(true)),
+        "rollback must restore the mirror instead of hitting the no-arm toast"
+    );
+}
+
 /// Every setting whose setter emits `Effect::PersistSetting` MUST have an
 /// `apply_setting_rollback` arm: a failed disk write rolls back through it,
 /// and a missing arm silently diverges in-memory state from `config.toml`.

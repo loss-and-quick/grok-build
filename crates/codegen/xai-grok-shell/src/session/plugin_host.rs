@@ -1749,6 +1749,7 @@ mod tests {
             tools: None,
             config: Some(serde_json::json!({ "participants": ["default"], "rounds": 1 })),
             oauth_label: None,
+            settings: None,
             oauth_accounts: None,
         };
 

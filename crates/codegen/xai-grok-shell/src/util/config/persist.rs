@@ -56,6 +56,7 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     }
     merge_section(table, "telemetry", &config.telemetry);
     merge_section(table, "features", &config.features);
+    merge_section(table, "plugins", &config.plugins);
     let toml_str = toml::to_string_pretty(&root)?;
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;

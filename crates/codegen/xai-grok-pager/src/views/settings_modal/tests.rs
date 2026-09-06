@@ -293,6 +293,51 @@ fn every_setting_has_action_for_bool_arm() {
     }
 }
 
+/// The same guard for plugin-contributed rows, which no compile-time arm can
+/// cover: every kind a plugin manifest can declare must produce a dispatchable
+/// `Action::SetPluginSetting`, or the modal would toggle a row that never
+/// reaches disk.
+#[test]
+fn every_plugin_setting_kind_has_a_dispatchable_action() {
+    use crate::settings::SettingValue;
+
+    assert!(matches!(
+        action_for_bool("plugin.council.verbose", true),
+        Some(Action::SetPluginSetting {
+            key: "plugin.council.verbose",
+            value: SettingValue::Bool(true),
+        }),
+    ));
+    assert!(matches!(
+        action_for_int("plugin.council.rounds", 3),
+        Some(Action::SetPluginSetting {
+            key: "plugin.council.rounds",
+            value: SettingValue::Int(3),
+        }),
+    ));
+    assert!(matches!(
+        action_for_enum_commit("plugin.council.mode", "fast"),
+        Some(Action::SetPluginSetting {
+            key: "plugin.council.mode",
+            value: SettingValue::Enum("fast"),
+        }),
+    ));
+    assert!(matches!(
+        action_for_string(
+            "plugin.council.endpoint",
+            "https://a.example".to_string(),
+            &PagerLocalSnapshot::default(),
+        ),
+        Some(Action::SetPluginSetting {
+            key: "plugin.council.endpoint",
+            value: SettingValue::String(v),
+        }) if v == "https://a.example"
+    ));
+    // A plugin row is committed, never previewed: previewing would mean
+    // persisting, and there is no live visual to revert.
+    assert!(action_for_enum("plugin.council.mode", "fast").is_none());
+}
+
 /// Mirror of `every_setting_has_action_for_bool_arm` for Enum
 /// settings: every preview-supporting registered Enum + every one
 /// of its canonical choices must have a matching `action_for_enum`
@@ -8243,6 +8288,75 @@ fn read_only_config_locks_the_rows_it_owns() {
     assert!(
         shown.ends_with(ROW_FROM_CONFIG_SUFFIX),
         "a locked row must say where its value comes from, got {shown:?}"
+    );
+}
+
+/// A plugin-contributed row is written to the same `config.toml`, so the
+/// read-only lock must catch it too.
+///
+/// This is the regression the plugin-settings design exists to prevent: a
+/// plugin row that stored its value on the plugin's side, or that was
+/// PAGER-owned to avoid writing `[ui]`, would render editable on a machine
+/// whose configuration is declarative — and the flip would either snap back or,
+/// worse, succeed into state grok's own lock says must not exist. Owning the
+/// value in `[plugins.<name>]` and marking the row SHELL-owned is what makes
+/// `row_lock` cover it with no plugin-specific case at all.
+#[test]
+fn read_only_config_locks_plugin_contributed_rows() {
+    use xai_hooks_plugins_types::{
+        HookStatus, McpStatus, PluginInfo, PluginScope, PluginSettingInfo, PluginSettingKindInfo,
+    };
+    let plugin = PluginInfo {
+        name: "council".to_string(),
+        id: "user/deadbeef/council".to_string(),
+        root: "/plugins/council".to_string(),
+        scope: PluginScope::User,
+        trusted: true,
+        enabled: true,
+        version: None,
+        description: None,
+        skill_count: 0,
+        skill_names: vec![],
+        agent_count: 0,
+        agent_names: vec![],
+        hook_status: HookStatus::None,
+        hook_count: 0,
+        mcp_server_count: 0,
+        mcp_status: McpStatus::None,
+        marketplace_source: None,
+        origin: None,
+        conflict: None,
+        load_error: None,
+        settings: vec![PluginSettingInfo {
+            key: "verbose".to_string(),
+            label: "Verbose logs".to_string(),
+            description: String::new(),
+            kind: PluginSettingKindInfo::Bool { default: false },
+        }],
+    };
+    let registry = Arc::new(SettingsRegistry::with_plugin_settings(&[plugin]));
+    let locked = SettingsModalState::new(
+        registry.clone(),
+        UiConfig::default(),
+        PagerLocalSnapshot {
+            config_read_only: true,
+            ..PagerLocalSnapshot::default()
+        },
+    );
+    assert_eq!(
+        locked.row_lock("plugin.council.verbose"),
+        Some(RowLock::ReadOnlyConfig),
+        "a plugin row is written to config.toml and must lock with it"
+    );
+    // The plugin's group row carries no value, so it stays navigable.
+    assert_eq!(locked.row_lock("plugin.council"), None);
+
+    let writable =
+        SettingsModalState::new(registry, UiConfig::default(), PagerLocalSnapshot::default());
+    assert_eq!(
+        writable.row_lock("plugin.council.verbose"),
+        None,
+        "the same row on a writable config must stay editable"
     );
 }
 

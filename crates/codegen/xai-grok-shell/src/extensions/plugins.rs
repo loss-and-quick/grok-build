@@ -5,7 +5,8 @@
 use agent_client_protocol as acp;
 use serde::Deserialize;
 use xai_hooks_plugins_types::{
-    HookStatus, McpStatus, PluginInfo, PluginOrigin, PluginScope, PluginsListResponse,
+    HookStatus, McpStatus, PluginInfo, PluginOrigin, PluginScope, PluginSettingChoiceInfo,
+    PluginSettingInfo, PluginSettingKindInfo, PluginsListResponse,
 };
 
 use crate::agent::MvpAgent;
@@ -72,6 +73,48 @@ pub(crate) fn loaded_plugin_to_info(plugin: &xai_grok_agent::plugins::LoadedPlug
         origin: Some(origin),
         conflict: plugin.conflict.clone(),
         load_error: plugin.load_error.clone(),
+        // A disabled plugin contributes no rows: `[plugins].disabled` already
+        // means "this plugin is not part of the session", and a settings row
+        // for it would offer to configure something that is not running.
+        // Untrusted plugins are already filtered upstream (`LoadedPlugin::settings`).
+        settings: if plugin.enabled {
+            plugin.settings.iter().map(setting_to_info).collect()
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+/// Map one validated manifest setting to its wire DTO.
+fn setting_to_info(spec: &xai_grok_agent::plugins::PluginSettingSpec) -> PluginSettingInfo {
+    use xai_grok_agent::plugins::PluginSettingKind;
+    let kind = match &spec.kind {
+        PluginSettingKind::Bool { default } => PluginSettingKindInfo::Bool { default: *default },
+        PluginSettingKind::String { default } => PluginSettingKindInfo::String {
+            default: default.clone(),
+        },
+        PluginSettingKind::Int { default, min, max } => PluginSettingKindInfo::Int {
+            default: *default,
+            min: *min,
+            max: *max,
+        },
+        PluginSettingKind::Enum { default, choices } => PluginSettingKindInfo::Enum {
+            default: default.clone(),
+            choices: choices
+                .iter()
+                .map(|c| PluginSettingChoiceInfo {
+                    value: c.value.clone(),
+                    label: c.label.clone(),
+                    description: c.description.clone(),
+                })
+                .collect(),
+        },
+    };
+    PluginSettingInfo {
+        key: spec.key.clone(),
+        label: spec.label.clone(),
+        description: spec.description.clone(),
+        kind,
     }
 }
 
@@ -218,6 +261,7 @@ mod tests {
             version: Some("1.0.0".to_string()),
             description: None,
             oauth_label: None,
+            settings: Vec::new(),
             oauth_accounts: Vec::new(),
             skill_dirs: vec![],
             command_dirs: vec![],

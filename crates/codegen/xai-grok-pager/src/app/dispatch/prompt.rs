@@ -468,6 +468,7 @@ pub(super) fn dispatch_send_prompt_inner(
     let mut tip_send_now_after_queue = false;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
+    let plugin_settings_from_app = app.plugin_settings.clone();
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
     let leader_mode = app.leader_mode;
     let Some(agent) = app.agents.get_mut(&id) else {
@@ -580,6 +581,7 @@ pub(super) fn dispatch_send_prompt_inner(
                     scheduler_background_loops: agent
                         .scheduler_background_loops
                         .unwrap_or(scheduler_background_loops_seed),
+                    plugin_settings: plugin_settings_from_app,
                 },
             };
 

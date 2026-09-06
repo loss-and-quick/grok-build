@@ -288,6 +288,59 @@ pub struct HooksListResponse {
 // Plugin types
 // ---------------------------------------------------------------------------
 
+/// One choice of an `enum` plugin setting. Wire form of
+/// `xai_grok_agent::plugins::PluginSettingChoice`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSettingChoiceInfo {
+    pub value: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// The value shape of a plugin setting, with its default. Wire form of
+/// `xai_grok_agent::plugins::PluginSettingKind`; externally tagged on `type`
+/// so a shell that learns a new kind is ignored rather than mis-read by an
+/// older pager (an unknown variant fails the row, not the response — see
+/// [`PluginInfo::settings`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum PluginSettingKindInfo {
+    Bool {
+        default: bool,
+    },
+    String {
+        default: String,
+    },
+    Int {
+        default: i64,
+        min: i64,
+        max: i64,
+    },
+    Enum {
+        default: String,
+        choices: Vec<PluginSettingChoiceInfo>,
+    },
+}
+
+/// One preference a plugin contributes to the settings modal.
+///
+/// Schema only. The value lives in grok's `[plugins.<name>]` config table; the
+/// pager reads it from there and writes it back through the same
+/// `update_config` chokepoint every other setting uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSettingInfo {
+    /// Key inside `[plugins.<name>]`.
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(flatten)]
+    pub kind: PluginSettingKindInfo,
+}
+
 /// A single plugin's metadata for display in the pager.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -342,6 +395,11 @@ pub struct PluginInfo {
     /// to show instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_error: Option<String>,
+    /// Preferences this plugin contributes to the settings modal, in manifest
+    /// declaration order. Empty when the plugin declares none, when it is
+    /// untrusted, or when an older shell sent this entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings: Vec<PluginSettingInfo>,
 }
 
 /// Response for `x.ai/plugins/list`.
@@ -867,6 +925,7 @@ mod tests {
             origin: Some(PluginOrigin::UserGrok),
             conflict: None,
             load_error: None,
+            settings: Vec::new(),
         };
         let json = serde_json::to_string(&plugin).unwrap();
         assert!(json.contains("skillCount"));
@@ -876,6 +935,64 @@ mod tests {
         assert!(json.contains("mcpStatus"));
         let parsed: PluginInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(plugin, parsed);
+    }
+
+    /// `settings` is `#[serde(default)]`, so a shell built before plugin
+    /// settings existed still deserializes — the pager must degrade to "this
+    /// plugin contributes no rows", not fail the whole plugins list.
+    #[test]
+    fn plugin_info_without_settings_field_still_parses() {
+        let json = r#"{
+            "name": "old-shell-plugin",
+            "id": "user/abc12345/old-shell-plugin",
+            "root": "/tmp/old-shell-plugin",
+            "scope": "user",
+            "trusted": true,
+            "enabled": true,
+            "version": null,
+            "description": null,
+            "skillCount": 0,
+            "agentCount": 0,
+            "hookStatus": "none",
+            "mcpServerCount": 0,
+            "mcpStatus": "none"
+        }"#;
+        let parsed: PluginInfo = serde_json::from_str(json).unwrap();
+        assert!(parsed.settings.is_empty());
+    }
+
+    #[test]
+    fn plugin_setting_kinds_round_trip_flattened_on_type() {
+        for kind in [
+            PluginSettingKindInfo::Bool { default: true },
+            PluginSettingKindInfo::String {
+                default: "x".into(),
+            },
+            PluginSettingKindInfo::Int {
+                default: 2,
+                min: 1,
+                max: 5,
+            },
+            PluginSettingKindInfo::Enum {
+                default: "fast".into(),
+                choices: vec![PluginSettingChoiceInfo {
+                    value: "fast".into(),
+                    label: "Fast".into(),
+                    description: String::new(),
+                }],
+            },
+        ] {
+            let setting = PluginSettingInfo {
+                key: "k".into(),
+                label: "K".into(),
+                description: String::new(),
+                kind,
+            };
+            let json = serde_json::to_string(&setting).unwrap();
+            assert!(json.contains("\"type\""), "kind must be tagged: {json}");
+            let parsed: PluginSettingInfo = serde_json::from_str(&json).unwrap();
+            assert_eq!(setting, parsed, "{json}");
+        }
     }
 
     #[test]

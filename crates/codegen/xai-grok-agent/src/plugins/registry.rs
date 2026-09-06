@@ -87,6 +87,17 @@ pub struct LoadedPlugin {
     /// declaration order. Empty means the plugin's sign-in is advertised once,
     /// without an account (the behaviour before accounts existed).
     pub oauth_accounts: Vec<super::manifest::OauthAccount>,
+    /// Validated preferences from the manifest `settings` field, in declaration
+    /// order — the rows this plugin contributes to grok's settings modal.
+    ///
+    /// Empty for an untrusted plugin. Trust is what decides whether a plugin's
+    /// *code* runs, and a setting row is not an exception to that: the value it
+    /// writes is only ever read by the sidecar, which an untrusted plugin does
+    /// not get to start, so the row would be inert. What it would not be is
+    /// harmless — plugin-authored label text would be sitting in the same list
+    /// as `permission_mode` and `coding_data_sharing`, which is a phishing
+    /// surface offered to exactly the plugins the user has not vouched for.
+    pub settings: Vec<super::manifest::PluginSettingSpec>,
     /// Resolved skill directories.
     pub skill_dirs: Vec<PathBuf>,
     pub command_dirs: Vec<PathBuf>,
@@ -256,6 +267,19 @@ impl PluginRegistry {
 
             // Capture inline data before consuming the manifest
             let oauth_accounts = dp.manifest.oauth_login_accounts();
+            // Trust gate, same one hooks and MCP servers sit behind: an
+            // untrusted plugin is listed, not run, and its settings rows would
+            // be plugin-authored text in the settings modal backed by a sidecar
+            // that never starts. See `LoadedPlugin::settings`.
+            let mut plugin_settings = dp.manifest.plugin_settings();
+            if !dp.trusted && !plugin_settings.is_empty() {
+                tracing::warn!(
+                    plugin = %name,
+                    count = plugin_settings.len(),
+                    "untrusted plugin declares settings; not contributing them"
+                );
+                plugin_settings.clear();
+            }
             let inline_hooks = dp.manifest.inline_hooks().cloned();
             let inline_mcp_servers = dp.manifest.inline_mcp_servers().cloned();
             let inline_lsp_servers = dp.manifest.inline_lsp_servers().cloned();
@@ -283,6 +307,7 @@ impl PluginRegistry {
                 description: dp.manifest.description,
                 oauth_label: dp.manifest.oauth_label,
                 oauth_accounts,
+                settings: plugin_settings,
                 skill_names,
                 agent_names,
                 skill_dirs: dp.skill_dirs,
@@ -784,6 +809,7 @@ mod tests {
                 tools: None,
                 config: None,
                 oauth_label: None,
+                settings: None,
                 oauth_accounts: None,
             },
             id: PluginId::new(scope, &root, name),
@@ -806,6 +832,46 @@ mod tests {
             conflict: None,
             load_error: None,
         }
+    }
+
+    /// An untrusted plugin's `settings` never reach the registry.
+    ///
+    /// Trust is what decides whether a plugin's code runs; a settings row backed
+    /// by a sidecar that will not start is inert, and its plugin-authored label
+    /// would be sitting in the same list as `permission_mode`. Without the gate
+    /// in `PluginRegistry::from_discovered`, a cloned repo's `.grok/plugins/`
+    /// entry could put its own text there before the user ever trusted it.
+    #[test]
+    fn untrusted_plugin_contributes_no_settings() {
+        let with_settings = |trusted: bool| {
+            let mut dp = make_discovered("council", PluginScope::Project, trusted);
+            dp.manifest.exec = Some(super::super::manifest::ExecEntry::Program(
+                "./plugin".to_string(),
+            ));
+            dp.manifest.settings = Some(vec![super::super::manifest::ManifestSettingSpec {
+                key: "verbose".to_string(),
+                label: Some("Verbose logs".to_string()),
+                description: None,
+                value_type: None,
+                default: Some(serde_json::json!(false)),
+                choices: None,
+                min: None,
+                max: None,
+            }]);
+            let enabled = vec![dp.id.0.clone()];
+            let registry = PluginRegistry::from_discovered(vec![dp], &[], &enabled);
+            registry.get("council").unwrap().settings.clone()
+        };
+
+        assert!(
+            with_settings(false).is_empty(),
+            "an untrusted plugin must not be able to define a settings row"
+        );
+        assert_eq!(
+            with_settings(true).len(),
+            1,
+            "the same manifest, once trusted, does contribute its row"
+        );
     }
 
     #[test]
@@ -1418,6 +1484,7 @@ mod tests {
                 }]),
                 config: Some(serde_json::json!({ "participants": ["alice"] })),
                 oauth_label: None,
+                settings: None,
                 oauth_accounts: None,
             },
             id: PluginId::new(PluginScope::User, root, name),

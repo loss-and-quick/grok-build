@@ -56,6 +56,22 @@ pub struct Config {
     pub telemetry: TelemetryPersistConfig,
     /// `[features]` — only the key the pager persists round-trips.
     pub features: FeaturesPersistConfig,
+    /// `[plugins]` — round-tripped so the settings modal can write the
+    /// per-plugin tables that back plugin-contributed rows.
+    pub plugins: PluginsPersistConfig,
+}
+
+/// The `[plugins]` slice the settings modal writes: one sub-table per plugin
+/// (`[plugins.<name>]`), holding the values of that plugin's contributed
+/// settings rows.
+///
+/// The flatten also captures `paths` / `disabled` / `enabled`, which round-trip
+/// unchanged; anything else under `[plugins]` is preserved by the deep merge in
+/// `save_config_locked`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct PluginsPersistConfig {
+    #[serde(flatten, default)]
+    pub config: std::collections::BTreeMap<String, toml::Value>,
 }
 
 /// The `[telemetry]` slice the pager is allowed to write back. Unmodeled

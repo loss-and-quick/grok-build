@@ -709,6 +709,14 @@ pub(super) fn handle_plugins_list_loaded(
     result: Result<xai_hooks_plugins_types::PluginsListResponse, String>,
 ) -> Vec<Effect> {
     use crate::views::extensions_modal::TabDataState;
+    // The `/plugins` refresh path also re-seeds the settings registry: a plugin
+    // enabled or disabled from that modal changes which rows exist, and this
+    // reply is the first the pager hears of it.
+    if let Ok(response) = &result
+        && app.apply_plugin_settings(&response.plugins)
+    {
+        crate::app::dispatch::refresh_open_settings_modals(app);
+    }
     if let Some(agent) = app.agents.get_mut(&agent_id)
         && let Some(ref mut modal) = agent.extensions_modal
     {

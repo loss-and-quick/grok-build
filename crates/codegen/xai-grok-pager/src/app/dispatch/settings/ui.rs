@@ -57,6 +57,12 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
+    let plugin_settings_from_app = app.plugin_settings.clone();
+    // The registry gains and loses rows at runtime (plugins load, unload, get
+    // disabled); a modal holding the registry it opened with would keep drawing
+    // rows for a plugin that is gone, and `rebuild_rows` below would rebuild
+    // from that stale copy.
+    let settings_registry_from_app = app.settings_registry.clone();
     for agent in app.agents.values_mut() {
         // Walk both `Settings` and `ResetSettingsConfirm` — the
         // confirm dialog embeds settings state that must stay fresh
@@ -69,6 +75,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
             _ => None,
         };
         if let Some(state) = state_opt {
+            state.registry = settings_registry_from_app.clone();
             state.rebuild_rows();
             state.ui_snapshot = ui_snapshot.clone();
             state.pager_snapshot = crate::settings::PagerLocalSnapshot {
@@ -99,6 +106,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 scheduler_background_loops: agent
                     .scheduler_background_loops
                     .unwrap_or(scheduler_background_loops_seed),
+                plugin_settings: plugin_settings_from_app.clone(),
             };
         }
     }
@@ -200,6 +208,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
+    let plugin_settings_from_app = app.plugin_settings.clone();
 
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
@@ -251,6 +260,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         scheduler_background_loops: agent
             .scheduler_background_loops
             .unwrap_or(scheduler_background_loops_seed),
+        plugin_settings: plugin_settings_from_app,
     };
     let mut state = Box::new(SettingsModalState::new(
         registry,
@@ -748,6 +758,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
         voice_stt_language: app.voice_config.language.clone(),
         scheduler_background_loops: agent_scheduler_background_loops(app),
+        plugin_settings: app.plugin_settings.clone(),
     }
 }
 
@@ -938,6 +949,15 @@ pub(in crate::app::dispatch) fn action_for_reset(
                 None
             }
         }
+        // Plugin rows reset by writing the manifest default explicitly, the
+        // same way `screen_mode` writes Fullscreen rather than clearing the
+        // key: the row's job is to make the value the user sees the value on
+        // disk, and an absent key would leave that up to whatever the plugin
+        // ships as a default next release.
+        (key, value) if crate::settings::is_plugin_key(key) => Some(Action::SetPluginSetting {
+            key,
+            value: value.clone(),
+        }),
 
         _ => None,
     }
@@ -1221,6 +1241,11 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
             } else {
                 set_auto_update_inner(app, *b);
             }
+        }
+        // Plugin rows: the mirror is a plain map keyed by registry key, so one
+        // arm covers every kind a plugin can declare.
+        (key, value) if crate::settings::is_plugin_key(key) => {
+            super::setters::set_plugin_setting_inner(app, key, value.clone());
         }
         // fork_secondary_model: empty rollback restores baseline default.
         ("fork_secondary_model", SettingValue::String(s)) => {

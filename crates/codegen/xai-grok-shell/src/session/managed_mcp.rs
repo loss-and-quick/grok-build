@@ -1221,6 +1221,7 @@ Authorization = "Bearer org2-token"
             tools: None,
             config: None,
             oauth_label: None,
+            settings: None,
             oauth_accounts: None,
         };
         let id = PluginId::new(PluginScope::User, &plugin_root, "sentry");
@@ -1298,6 +1299,7 @@ Authorization = "Bearer org2-token"
             tools: None,
             config: None,
             oauth_label: None,
+            settings: None,
             oauth_accounts: None,
         };
         let id = PluginId::new(PluginScope::User, &plugin_root, "sentry");
@@ -1381,6 +1383,7 @@ Authorization = "Bearer org2-token"
             tools: None,
             config: None,
             oauth_label: None,
+            settings: None,
             oauth_accounts: None,
         };
         let id = PluginId::new(PluginScope::User, &plugin_root, "slack");

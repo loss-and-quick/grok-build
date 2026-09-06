@@ -88,6 +88,55 @@ pub(in crate::app::dispatch) fn set_render_mermaid(
     }]
 }
 
+/// Mirror one plugin-contributed value into `app.plugin_settings` so
+/// `current_value_for` stays in sync. Called by the commit path AND by
+/// [`apply_setting_rollback`](super::ui::apply_setting_rollback).
+pub(super) fn set_plugin_setting_inner(
+    app: &mut AppView,
+    key: crate::settings::SettingKey,
+    value: crate::settings::SettingValue,
+) {
+    app.plugin_settings.insert(key, value);
+}
+
+/// Persist one plugin-contributed setting to `[plugins.<plugin>].<key>`.
+///
+/// No special-casing per plugin or per kind: the registry row already carries
+/// the shape, the mirror is a map, and the write goes through the same
+/// `Effect::PersistSetting` every other on-disk setting uses — which is also
+/// what puts a read-only `config.toml` in front of it.
+pub(in crate::app::dispatch) fn set_plugin_setting(
+    app: &mut AppView,
+    key: crate::settings::SettingKey,
+    value: crate::settings::SettingValue,
+) -> Vec<Effect> {
+    let Some(meta) = app.settings_registry.find(key) else {
+        // The plugin was unloaded between the keypress and the dispatch.
+        tracing::warn!(target: "settings", key, "plugin setting is no longer registered");
+        return vec![];
+    };
+    let label = meta.label;
+    let rollback_value = app
+        .plugin_settings
+        .get(key)
+        .cloned()
+        .unwrap_or_else(|| crate::settings::default_value_for(meta));
+    if rollback_value == value {
+        return vec![];
+    }
+    set_plugin_setting_inner(app, key, value.clone());
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key, "setting changed");
+    // The sidecar is handed its config at `initialize` and `config_get` answers
+    // from that snapshot, so this is honest rather than cautious.
+    app.show_toast(&format!("\u{2713} {label} (restart the plugin to apply)"));
+    vec![Effect::PersistSetting {
+        key,
+        value,
+        rollback_value,
+    }]
+}
+
 /// Mirror the canonical mode into `app.current_ui` so `current_value_for` stays
 /// in sync. Called by the commit path AND by [`apply_setting_rollback`](super::ui::apply_setting_rollback).
 pub(super) fn set_hunk_tracker_mode_inner(app: &mut AppView, canonical: &str) {

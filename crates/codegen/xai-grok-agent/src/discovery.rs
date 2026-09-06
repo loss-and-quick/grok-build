@@ -741,6 +741,7 @@ mod tests {
             version: Some("1.0.0".to_string()),
             description: Some(format!("Plugin {plugin_name}")),
             oauth_label: None,
+            settings: Vec::new(),
             oauth_accounts: Vec::new(),
             skill_dirs: vec![],
             command_dirs: vec![],

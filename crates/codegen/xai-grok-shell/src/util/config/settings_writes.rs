@@ -90,6 +90,46 @@ pub async fn set_compact_mode(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.compact_mode = value).await
 }
 
+/// Persist one key of a plugin's `[plugins.<plugin>]` table via `update_config`.
+///
+/// This is the *only* write path for a plugin-contributed setting, and it is
+/// deliberately the same `update_config` every other setting goes through: a
+/// plugin row is one more key in the user's `config.toml`, so it inherits that
+/// function's refusal on a config grok was not given to rewrite rather than
+/// getting a side door around it. See `super::readonly`.
+///
+/// `[plugins.<plugin>]` is not a new home invented for settings — it is the
+/// table `session::plugin_host` already shallow-merges over the manifest's
+/// `config` defaults before handing the result to the sidecar at `initialize`
+/// and via `config_get`.
+pub async fn set_plugin_setting(
+    plugin: String,
+    key: String,
+    value: serde_json::Value,
+) -> Result<()> {
+    // Plugin config is JSON everywhere it is used (manifest defaults, the
+    // sidecar's `config_get`); `config.toml` is where it stops being JSON.
+    let value = toml::Value::try_from(&value)
+        .map_err(|e| anyhow::anyhow!("cannot store `{plugin}.{key}` in config.toml: {e}"))?;
+    update_config(move |cfg| {
+        let table = cfg
+            .plugins
+            .config
+            .entry(plugin)
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        // A scalar or array parked under the plugin's name is not a config
+        // table; replacing it is the only way this key can be written at all,
+        // and leaving it would silently drop the user's edit.
+        if !table.is_table() {
+            *table = toml::Value::Table(toml::map::Map::new());
+        }
+        if let Some(obj) = table.as_table_mut() {
+            obj.insert(key, value);
+        }
+    })
+    .await
+}
+
 /// Persist `[ui].show_timestamps` via `update_config`. `UiConfig::show_timestamps`
 /// is `Option<bool>` — pager-side `None` means "use default" — so we wrap.
 pub async fn set_show_timestamps(value: bool) -> Result<()> {

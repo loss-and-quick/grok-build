@@ -43,10 +43,15 @@ pub enum SettingCategory {
     Models,
     Session,
     Advanced,
+    /// Rows contributed by plugins. Empty (and so unrendered) unless a loaded,
+    /// trusted plugin declares `settings` in its manifest.
+    Plugins,
 }
 
 impl SettingCategory {
-    /// Render order — Appearance first (most-touched), then Mouse, then the rest.
+    /// Render order — Appearance first (most-touched), then Mouse, then the
+    /// rest. Plugins last: the section only exists when a plugin put it there,
+    /// and grok's own preferences should not move down the list because one did.
     pub const ALL: &'static [Self] = &[
         Self::Appearance,
         Self::Mouse,
@@ -56,6 +61,7 @@ impl SettingCategory {
         Self::Models,
         Self::Session,
         Self::Advanced,
+        Self::Plugins,
     ];
 
     /// Section-header label as rendered in the modal.
@@ -69,6 +75,7 @@ impl SettingCategory {
             Self::Models => "Models",
             Self::Session => "Session",
             Self::Advanced => "Advanced",
+            Self::Plugins => "Plugins",
         }
     }
 }
@@ -369,6 +376,15 @@ pub struct PagerLocalSnapshot {
     /// `AppView::scheduler_background_loops_seed` before the session response
     /// lands. `/loop` reads it to describe where a scheduled fire runs.
     pub scheduler_background_loops: bool,
+    /// Current value of every plugin-contributed row, resolved from the
+    /// `[plugins]` config table against the registry (see
+    /// [`crate::settings::resolve_plugin_values`]).
+    ///
+    /// Snapshotted like every other read rather than probed per row, so the
+    /// modal stays a pure function of its inputs — and because these values
+    /// live in a section of `config.toml` the pager does not otherwise keep in
+    /// memory, unlike the `[ui]` fields `ui_snapshot` carries.
+    pub plugin_settings: std::collections::HashMap<SettingKey, SettingValue>,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -396,6 +412,7 @@ impl Default for PagerLocalSnapshot {
             voice_stt_language: xai_grok_voice::STT_LANGUAGE_DEFAULT.to_string(),
             // Matches `resolve_scheduler_background_loops`'s default.
             scheduler_background_loops: true,
+            plugin_settings: std::collections::HashMap::new(),
         }
     }
 }
@@ -490,6 +507,33 @@ impl SettingsRegistry {
     #[doc(hidden)]
     pub fn from_entries(entries: Vec<SettingMeta>) -> Self {
         assert_unique_keys(&entries);
+        Self { entries }
+    }
+
+    /// The default registry plus the rows contributed by `plugins`.
+    ///
+    /// Built fresh from the defaults each time rather than appended to an
+    /// existing registry, so a plugin that was disabled or uninstalled since
+    /// the last build loses its rows instead of accumulating them. Plugin rows
+    /// sort last because they are appended last and the modal renders
+    /// categories in [`SettingCategory::ALL`] order.
+    ///
+    /// A colliding plugin row is dropped rather than asserted on: every other
+    /// key in this registry is written by this repository, so a duplicate there
+    /// is a bug worth a panic, while a duplicate reaching us from a plugin
+    /// manifest is input — and taking the TUI down over bad input is not a
+    /// check, it is a denial of service with a stack trace.
+    pub fn with_plugin_settings(plugins: &[xai_hooks_plugins_types::PluginInfo]) -> Self {
+        let mut entries = crate::settings::defs::default_settings();
+        assert_unique_keys(&entries);
+        let mut seen: std::collections::HashSet<&str> = entries.iter().map(|m| m.key).collect();
+        for meta in crate::settings::plugin_setting_rows(plugins) {
+            if !seen.insert(meta.key) {
+                tracing::warn!(key = %meta.key, "dropping plugin settings row with a taken key");
+                continue;
+            }
+            entries.push(meta);
+        }
         Self { entries }
     }
 
@@ -786,6 +830,12 @@ pub fn current_value_for(
                     .unwrap_or_else(|| ui.fork_secondary_model.clone())
             }
         })),
+
+        // Plugin-contributed rows: the value lives in `[plugins.<name>]` and is
+        // resolved into the snapshot against the registry, because the kind
+        // (and, for an enum, the catalog a canonical must come from) is not
+        // knowable from the key alone.
+        key if crate::settings::is_plugin_key(key) => pager.plugin_settings.get(key).cloned(),
 
         _ => None,
     }

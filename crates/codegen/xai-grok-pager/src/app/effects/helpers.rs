@@ -1456,6 +1456,24 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        // Plugin-contributed rows: `plugin.<plugin>.<setting>` writes
+        // `[plugins.<plugin>].<setting>`. One arm rather than a helper per row,
+        // because the rows are discovered from plugin manifests at runtime and
+        // there is no compile-time set of them to write helpers for. The write
+        // still lands in `update_config`, which is what refuses it when the
+        // user's `config.toml` is not grok's to rewrite.
+        key if crate::settings::is_plugin_key(key) => {
+            let Some((plugin, setting)) = crate::settings::split_plugin_key(key) else {
+                return Err(format!("malformed plugin setting key: `{key}`"));
+            };
+            xai_grok_shell::util::config::set_plugin_setting(
+                plugin.to_string(),
+                setting.to_string(),
+                crate::settings::plugin_json_value(&value),
+            )
+            .await
+            .map_err(|e| e.to_string())
+        }
         other => Err(format!("unknown setting key for persist: `{other}`")),
     }
 }

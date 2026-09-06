@@ -925,6 +925,10 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "show_tips" => Some(Action::SetShowTips(new)),
         "auto_update" => Some(Action::SetAutoUpdate(new)),
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
+        key if crate::settings::is_plugin_key(key) => Some(Action::SetPluginSetting {
+            key,
+            value: SettingValue::Bool(new),
+        }),
         _ => None,
     }
 }
@@ -1003,6 +1007,10 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "default_selected_permission" => {
             Some(Action::SetDefaultSelectedPermission(choice.to_string()))
         }
+        key if crate::settings::is_plugin_key(key) => Some(Action::SetPluginSetting {
+            key,
+            value: SettingValue::Enum(choice),
+        }),
         _ => None,
     }
 }
@@ -1035,6 +1043,11 @@ pub(super) fn action_for_string(
             }
         }
 
+        key if crate::settings::is_plugin_key(key) => Some(Action::SetPluginSetting {
+            key,
+            value: SettingValue::String(value),
+        }),
+
         _ => {
             let _ = value;
             let _ = snapshot;
@@ -1049,6 +1062,10 @@ pub(super) fn action_for_int(key: SettingKey, value: i64) -> Option<Action> {
         "max_thoughts_width" => Some(Action::SetMaxThoughtsWidth(value)),
         "scroll_speed" => Some(Action::SetScrollSpeed(value)),
         "scroll_lines" => Some(Action::SetScrollLines(value)),
+        key if crate::settings::is_plugin_key(key) => Some(Action::SetPluginSetting {
+            key,
+            value: SettingValue::Int(value),
+        }),
         _ => None,
     }
 }

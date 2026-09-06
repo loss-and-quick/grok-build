@@ -1383,6 +1383,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
     // Dashboard commands run before any session exists, so the startup seed is
     // the only answer available here.
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
+    let plugin_settings_from_app = app.plugin_settings.clone();
 
     // Build the execution context from app-wide state. The dashboard
     // is session-less, so `session_id` is `None`. Offered session-less
@@ -1496,6 +1497,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                 voice_stt_language: voice_stt_language_from_app,
                 scheduler_background_loops: scheduler_background_loops_seed,
+                plugin_settings: plugin_settings_from_app,
             },
         };
         command.run(&mut ctx, invocation.args)

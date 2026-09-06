@@ -22,10 +22,19 @@
 //! The registry is built once in `main` and threaded through
 //! `AppView::settings_registry: Arc<SettingsRegistry>` (mirroring the
 //! existing `ActionRegistry` pattern). No `LazyLock`, no global state.
+//!
+//! Plugins contribute rows to the same registry: the schema comes from the
+//! plugin manifest, the value lives in grok's `[plugins.<name>]` config table.
+//! See `plugin_rows.rs`, which carries the rationale.
 
 pub mod defs;
+pub mod plugin_rows;
 pub mod registry;
 
+pub use plugin_rows::{
+    PLUGIN_KEY_PREFIX, is_plugin_key, plugin_json_value, plugin_setting_rows,
+    plugin_settings_fingerprint, resolve_plugin_values, split_plugin_key,
+};
 pub use registry::{
     CodingDataSharingLock, DynamicEnumSource, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot,
     RowLock, SettingCategory, SettingKey, SettingKind, SettingMeta, SettingOwner, SettingValue,

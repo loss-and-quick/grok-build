@@ -309,6 +309,10 @@ pub(super) fn handle_session_notification_with_origin(
         return false;
     }
     let mut plugins_changed_needs_skills_refetch = false;
+    // Plugin-contributed settings rows are rebuilt from this list after the
+    // borrow on `agent` ends: the registry is app-scoped, and the arm below
+    // holds a mutable borrow of one agent.
+    let mut plugins_for_settings: Option<Vec<xai_hooks_plugins_types::PluginInfo>> = None;
     let mut status_snapshot_applied = false;
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
     let mut deferred_subagent_finish: Option<SessionNotification> = None;
@@ -1014,6 +1018,11 @@ pub(super) fn handle_session_notification_with_origin(
             }
         }
         XaiSessionUpdate::PluginsChanged { plugins } => {
+            // The shell pushes this whenever it applies a plugin-registry
+            // snapshot, including at session start — which is how the settings
+            // registry learns about plugin rows without the pager ever
+            // re-running discovery of its own.
+            plugins_for_settings = Some(plugins.clone());
             if let Some(ref mut modal) = agent.extensions_modal {
                 use crate::views::extensions_modal::TabDataState;
                 modal.seed_plugin_groups_once(&plugins);
@@ -1318,10 +1327,7 @@ pub(super) fn handle_session_notification_with_origin(
         XaiSessionUpdate::InteractionResolved { tool_call_id } => {
             agent.dismiss_resolved_interaction(&tool_call_id)
         }
-        XaiSessionUpdate::PluginPanel {
-            plugin,
-            view_model,
-        } => {
+        XaiSessionUpdate::PluginPanel { plugin, view_model } => {
             if app.appearance.disable_plugins {
                 return false;
             }
@@ -1330,9 +1336,7 @@ pub(super) fn handle_session_notification_with_origin(
             // survives a wholesale re-publish.
             agent.apply_plugin_panel(plugin, view_model)
         }
-        XaiSessionUpdate::PanelClosed { plugin, id } => {
-            agent.remove_plugin_panel(&plugin, &id)
-        }
+        XaiSessionUpdate::PanelClosed { plugin, id } => agent.remove_plugin_panel(&plugin, &id),
         XaiSessionUpdate::SessionStatus(status) => {
             agent.status_context = Some(*status);
             status_snapshot_applied = true;
@@ -1348,6 +1352,12 @@ pub(super) fn handle_session_notification_with_origin(
         }
     };
     let mut changed = changed;
+    if let Some(plugins) = plugins_for_settings
+        && app.apply_plugin_settings(&plugins)
+    {
+        crate::app::dispatch::refresh_open_settings_modals(app);
+        changed = true;
+    }
     if status_snapshot_applied && is_active {
         app.refresh_status_line_now();
         changed |= app.status_line.take_changed();

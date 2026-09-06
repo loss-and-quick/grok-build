@@ -636,7 +636,18 @@ pub struct AppView {
     /// Keybinding definitions.
     pub registry: ActionRegistry,
     /// Settings registry — canonical metadata for user-tunable preferences.
+    /// Rebuilt when a session reports its plugins, so plugin-contributed rows
+    /// join it; see [`AppView::apply_plugin_settings`].
     pub settings_registry: Arc<crate::settings::SettingsRegistry>,
+    /// Live values of the plugin-contributed rows, keyed by registry key.
+    /// Mirrors `[plugins.<name>]` in `config.toml` the way `current_ui` mirrors
+    /// `[ui]`, and is copied into `PagerLocalSnapshot` for the modal.
+    pub plugin_settings:
+        std::collections::HashMap<crate::settings::SettingKey, crate::settings::SettingValue>,
+    /// Fingerprint of the plugin schema `settings_registry` was last built
+    /// from. A `PluginsChanged` that did not change any plugin's `settings`
+    /// leaves the registry (and its interned keys) alone.
+    pub plugin_settings_fingerprint: String,
     /// In-memory snapshot of the effective `UiConfig`. Seeded once at
     /// startup; updated synchronously by `set_X_inner` so dispatch
     /// stays sans-IO.
@@ -1544,6 +1555,48 @@ impl AppView {
                 .set_usage_command_visible(usage_cmd);
         }
     }
+    /// Rebuild the settings registry from the plugin list a session reported,
+    /// and reload the plugin rows' current values.
+    ///
+    /// Driven by the two paths that already carry plugin metadata to the pager
+    /// — the `PluginsChanged` session notification the shell pushes when it
+    /// applies a plugin-registry snapshot, and the `x.ai/plugins/list` reply —
+    /// so nothing here re-discovers plugins. The shell's registry stays the one
+    /// authority on which plugins are loaded and trusted.
+    ///
+    /// Returns whether anything changed, so callers can skip a refresh.
+    pub(crate) fn apply_plugin_settings(
+        &mut self,
+        plugins: &[xai_hooks_plugins_types::PluginInfo],
+    ) -> bool {
+        let fingerprint = crate::settings::plugin_settings_fingerprint(plugins);
+        if fingerprint == self.plugin_settings_fingerprint {
+            return false;
+        }
+        self.plugin_settings_fingerprint = fingerprint;
+        self.settings_registry = Arc::new(crate::settings::SettingsRegistry::with_plugin_settings(
+            plugins,
+        ));
+        self.reload_plugin_setting_values();
+        true
+    }
+
+    /// Re-read every plugin row's value from the `[plugins]` config table.
+    ///
+    /// One effective-config read, on the rare paths that need it (a registry
+    /// rebuild), rather than a probe per row per frame: the values live in a
+    /// section of `config.toml` the pager keeps no other mirror of, and the
+    /// commit path updates `plugin_settings` in place.
+    pub(crate) fn reload_plugin_setting_values(&mut self) {
+        let plugins_table = xai_grok_shell::config::load_effective_config()
+            .ok()
+            .and_then(|root| root.get("plugins").cloned())
+            .and_then(|table| serde_json::to_value(table).ok())
+            .unwrap_or(serde_json::Value::Null);
+        self.plugin_settings =
+            crate::settings::resolve_plugin_values(self.settings_registry.all(), &plugins_table);
+    }
+
     /// Force voice on for API-key sessions when only a remote rule left it off.
     /// Requirement / env / config pins still win.
     pub(crate) fn ensure_voice_for_api_key(&mut self) {
@@ -1576,6 +1629,8 @@ impl AppView {
             models,
             registry: ActionRegistry::defaults(),
             settings_registry: Arc::new(crate::settings::SettingsRegistry::defaults()),
+            plugin_settings: std::collections::HashMap::new(),
+            plugin_settings_fingerprint: String::new(),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             cwd_has_git_ancestor: std::env::current_dir()

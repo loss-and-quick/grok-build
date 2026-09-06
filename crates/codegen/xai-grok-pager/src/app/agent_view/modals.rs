@@ -2215,6 +2215,7 @@ mod extensions_action_target_tests {
             origin: None,
             conflict: None,
             load_error: None,
+            settings: Vec::new(),
         }
     }
 
@@ -2975,6 +2976,7 @@ mod extensions_modal_confirmation_tests {
             origin: None,
             conflict: None,
             load_error: None,
+            settings: Vec::new(),
         }
     }
 

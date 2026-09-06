@@ -542,6 +542,17 @@ pub enum Action {
     SetDefaultSelectedPermission(String),
     /// Set the hunk-tracker mode. Payload is the registry canonical string.
     SetHunkTrackerMode(String),
+    /// Set one plugin-contributed setting. `key` is the registry key
+    /// (`plugin.<plugin>.<setting>`); the value is written to
+    /// `[plugins.<plugin>].<setting>` via `Effect::PersistSetting`.
+    ///
+    /// One variant for every plugin row rather than one per row: the rows are
+    /// discovered at runtime from plugin manifests, so there is no set of them
+    /// to enumerate at compile time the way `SetCompactMode` and friends are.
+    SetPluginSetting {
+        key: crate::settings::SettingKey,
+        value: crate::settings::SettingValue,
+    },
     /// Set default screen mode (`fullscreen` | `minimal`); restart-required.
     SetScreenMode(String),
     /// Enable/disable the Ctrl+Space / F8 voice-dictation shortcut. SHELL-owned;
