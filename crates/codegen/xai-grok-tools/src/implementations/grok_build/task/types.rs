@@ -678,6 +678,24 @@ pub enum SubagentMessageOutcome {
 /// the final result, which reaches the parent anyway.
 pub const MAX_PARENT_MESSAGES_PER_SUBAGENT: u32 = 3;
 
+/// Hard ceiling on how many times one subagent may *attempt* a message to its
+/// parent, refunded sends included.
+///
+/// [`MAX_PARENT_MESSAGES_PER_SUBAGENT`] bounds what reaches a live parent, and
+/// a send that reached no parent at all is handed back rather than charged
+/// against it. That refund is right about the parent and wrong about the
+/// child: the child pays a tool call and a model turn per attempt whatever the
+/// transport answers, and a parent can be unreachable from the very first
+/// send — a child spawned with no parent mailbox has no other outcome — so a
+/// refund alone leaves a retrying child unbounded. This is the counter no
+/// refund touches.
+///
+/// Twice the live allowance. A child with a parent to talk to never reaches
+/// it, since it stops at three; a child talking to nobody learns so in the
+/// same number of turns it would have been allowed with a listener, and no
+/// more.
+pub const MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT: u32 = MAX_PARENT_MESSAGES_PER_SUBAGENT * 2;
+
 /// What became of a message a subagent sent up to the agent that spawned it.
 ///
 /// The mirror of [`SubagentMessageOutcome`], and deliberately not the same

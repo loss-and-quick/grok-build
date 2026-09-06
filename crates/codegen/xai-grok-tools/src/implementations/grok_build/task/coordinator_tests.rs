@@ -2,7 +2,8 @@ use super::*;
 use crate::implementations::grok_build::task::admission::{LimitBehavior, SubagentLimits};
 use crate::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
 use crate::implementations::grok_build::task::types::{
-    MAX_PARENT_MESSAGES_PER_SUBAGENT, ParentMessageOutcome,
+    MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT, MAX_PARENT_MESSAGES_PER_SUBAGENT,
+    ParentMessageOutcome,
 };
 use crate::implementations::grok_build::task::types::{
     SubagentCancelRequest, SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest,
@@ -2112,16 +2113,15 @@ async fn a_report_to_an_idle_parent_is_dropped_and_still_costs_budget() {
     harness.actor.abort();
 }
 
-/// A parent that cannot be reached at all costs the child nothing. The budget
-/// bounds an exchange between two live models; a gone channel produces no
-/// exchange to bound, so spending all three sends on it would only silence a
-/// child that might still reach a parent that comes back — and none of them
-/// ever can.
+/// A parent that cannot be reached at all costs the child none of the
+/// allowance meant for a live parent. The budget bounds an exchange between
+/// two live models; a gone channel produces no exchange to bound, so spending
+/// all three sends on it would only silence a child that might still reach a
+/// parent that comes back — and none of them ever can.
 ///
-/// It opens no free-retry hole either: unlike an idle parent, an unreachable
-/// one stays unreachable, so the repeat this makes free is a child talking to
-/// nobody — which the registry already answers for free when the child is
-/// cancelled or unknown.
+/// The retrying that refund frees is bounded by the attempt ceiling instead,
+/// which this stays under; see
+/// [`a_child_talking_to_nobody_runs_out_of_attempts`].
 #[tokio::test]
 async fn a_report_that_reaches_nothing_costs_the_child_no_budget() {
     let mut harness = harness_with_messaging(
@@ -2157,6 +2157,58 @@ async fn a_report_that_reaches_nothing_costs_the_child_no_budget() {
             Some("still here")
         );
     }
+
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+/// The refund is the parent's side of the ledger; the child pays too. A child
+/// whose parent mailbox was never there answers `Unreachable` to every send
+/// from the first one, so a refund with nothing behind it would buy unlimited
+/// tool calls to talk to nobody. The attempt ceiling is what ends it, and the
+/// child is told so in the terms it can act on: no more, put it in the result.
+#[tokio::test]
+async fn a_child_talking_to_nobody_runs_out_of_attempts() {
+    let mut harness = harness_with_messaging(
+        false,
+        false,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(60),
+            ..CoordinatorConfig::default()
+        },
+        SubagentMessageOutcome::Delivered,
+        false,
+        ParentReportDelivery::Unreachable,
+    );
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("no-mailbox", true)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("no-mailbox"));
+
+    let child = ChannelBackend::for_session(harness.backend.sender(), "no-mailbox");
+    for _ in 0..MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT {
+        assert_eq!(
+            child.message_parent("anyone").await,
+            ParentMessageOutcome::Unreachable,
+        );
+        assert_eq!(
+            harness.parent_reports.recv().await.as_deref(),
+            Some("anyone")
+        );
+    }
+    // Past the ceiling the send never reaches the transport again, so the
+    // child cannot keep buying turns with it.
+    for _ in 0..3 {
+        assert_eq!(
+            child.message_parent("anyone").await,
+            ParentMessageOutcome::BudgetExhausted {
+                limit: MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT
+            },
+        );
+    }
+    assert!(harness.parent_reports.try_recv().is_err());
 
     let _ = harness.finish.send(());
     assert!(spawn.await.unwrap().unwrap().success);

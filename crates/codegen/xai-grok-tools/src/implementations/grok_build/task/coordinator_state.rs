@@ -8,10 +8,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::types::{
-    ActiveSubagentSummary, MAX_PARENT_MESSAGES_PER_SUBAGENT, ParentMessageOutcome,
-    SubagentCompletionSummary, SubagentDescribeOutcome, SubagentInspection, SubagentMessageOutcome,
-    SubagentRequest, SubagentResult, SubagentResumeLookup, SubagentSnapshot,
-    SubagentSnapshotStatus, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
+    ActiveSubagentSummary, MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT,
+    MAX_PARENT_MESSAGES_PER_SUBAGENT, ParentMessageOutcome, SubagentCompletionSummary,
+    SubagentDescribeOutcome, SubagentInspection, SubagentMessageOutcome, SubagentRequest,
+    SubagentResult, SubagentResumeLookup, SubagentSnapshot, SubagentSnapshotStatus,
+    SubagentTypeDescriptor, SubagentValidateTypeOutcome,
 };
 
 /// Cap on retained completed-subagent entries before the oldest are evicted.
@@ -360,19 +361,35 @@ pub(super) struct ActiveChild<C> {
     /// with the registry entry so a resumed subagent — a new id, a new
     /// conversation — starts fresh rather than inheriting a spent budget.
     pub(super) parent_messages_sent: u32,
+    /// Every send this child has started, refunds included — the counter the
+    /// refund cannot touch. See
+    /// [`MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT`].
+    pub(super) parent_message_attempts: u32,
     pub(super) control: C,
 }
 
 impl<C> ActiveChild<C> {
     /// Spend one of this child's parent-message allowance, returning what is
-    /// left afterwards. `None` once the allowance is gone, and the only thing
-    /// that ever gives one back is [`Self::refund_parent_message_budget`].
-    pub(super) fn take_parent_message_budget(&mut self) -> Option<u32> {
+    /// left afterwards. `Err(limit)` once a cap is reached, naming the cap
+    /// that stopped it.
+    ///
+    /// Two caps, because the send has two payers. The refundable allowance is
+    /// the parent's: it bounds what one child may put into a live parent's
+    /// conversation ([`Self::refund_parent_message_budget`] hands back the
+    /// sends that reached no parent at all). The attempt ceiling is the
+    /// child's: every send is a tool call and a model turn whether or not it
+    /// lands, so the count that no refund touches is what stops a child from
+    /// spending its whole life talking to nobody.
+    pub(super) fn take_parent_message_budget(&mut self) -> Result<u32, u32> {
+        if self.parent_message_attempts >= MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT {
+            return Err(MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT);
+        }
         if self.parent_messages_sent >= MAX_PARENT_MESSAGES_PER_SUBAGENT {
-            return None;
+            return Err(MAX_PARENT_MESSAGES_PER_SUBAGENT);
         }
         self.parent_messages_sent += 1;
-        Some(MAX_PARENT_MESSAGES_PER_SUBAGENT - self.parent_messages_sent)
+        self.parent_message_attempts += 1;
+        Ok(MAX_PARENT_MESSAGES_PER_SUBAGENT - self.parent_messages_sent)
     }
 
     /// Give back a send whose delivery reached nothing at all.
@@ -384,6 +401,12 @@ impl<C> ActiveChild<C> {
     /// allowance on the one outcome that can never succeed. An idle parent is
     /// alive and will have turns again, so its send stays spent: a free retry
     /// there is the unbounded poll the cap exists to prevent.
+    ///
+    /// What comes back is the parent's allowance only. The attempt counter is
+    /// left alone: an unreachable parent may be unreachable from the child's
+    /// first send onward — a child spawned with no parent mailbox has no other
+    /// outcome — and a refund that also cleared the attempt would leave that
+    /// child free to retry forever.
     pub(super) fn refund_parent_message_budget(&mut self) {
         self.parent_messages_sent = self.parent_messages_sent.saturating_sub(1);
     }

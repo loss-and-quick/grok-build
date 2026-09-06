@@ -29,11 +29,10 @@ use super::coordinator_state::{
     workflow_outstanding,
 };
 use super::types::{
-    MAX_PARENT_MESSAGES_PER_SUBAGENT, ParentMessageOutcome, SpawnedSubagentRef,
-    SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome, SubagentEvent,
-    SubagentMessageOutcome, SubagentOutstandingReply, SubagentRegistryCounts, SubagentRequest,
-    SubagentResult, SubagentResumeLookup, SubagentResumeSource, SubagentTypeDescriptor,
-    SubagentValidateTypeOutcome,
+    ParentMessageOutcome, SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget,
+    SubagentDescribeOutcome, SubagentEvent, SubagentMessageOutcome, SubagentOutstandingReply,
+    SubagentRegistryCounts, SubagentRequest, SubagentResult, SubagentResumeLookup,
+    SubagentResumeSource, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
 };
 
 pub use super::coordinator_state::{
@@ -558,6 +557,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         worktree_path: child.worktree_path,
                         effective_model_id: child.effective_model_id,
                         parent_messages_sent: 0,
+                        parent_message_attempts: 0,
                         control: child.control,
                     },
                 );
@@ -903,13 +903,13 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         if child.cancellation.is_cancelled() {
             return Some((respond_to, ParentMessageOutcome::Unreachable));
         }
-        let Some(remaining) = child.take_parent_message_budget() else {
-            return Some((
-                respond_to,
-                ParentMessageOutcome::BudgetExhausted {
-                    limit: MAX_PARENT_MESSAGES_PER_SUBAGENT,
-                },
-            ));
+        let remaining = match child.take_parent_message_budget() {
+            Ok(remaining) => remaining,
+            // The limit reported is whichever cap stopped this send: the live
+            // allowance, or the ceiling on attempts that reached nobody.
+            Err(limit) => {
+                return Some((respond_to, ParentMessageOutcome::BudgetExhausted { limit }));
+            }
         };
         self.parent_messages.push(ParentReportReply {
             future: Box::pin(child.control.message_parent(text)),
@@ -923,14 +923,17 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     /// Answer a settled child→parent report, giving back a send that reached
     /// nothing.
     ///
-    /// The refund is the transport's `Unreachable` only, and it opens no free
-    /// retry the cap was closing: a parent whose channel is gone stays gone, so
-    /// every further send from this child resolves the same way, reaches no
-    /// model, and can draw no reply. That is a child talking to nobody, which
-    /// the registry already allows for free on its own `Unreachable` paths (a
-    /// cancelled child, a session it holds no entry for). What stays charged is
+    /// The refund is the transport's `Unreachable` only. What stays charged is
     /// every outcome a live parent can produce — `Buffered` and
-    /// `NoTurnRunning` — which is what bounds the exchange between two models.
+    /// `NoTurnRunning` — which is what bounds the exchange between two models,
+    /// and a channel that is gone stays gone, so charging for it would spend
+    /// the whole allowance on the one outcome that can never land.
+    ///
+    /// It gives back the parent's allowance and nothing else. The child still
+    /// pays a turn per attempt, and an unreachable parent can be unreachable
+    /// from the first send onward, so the attempt ceiling in
+    /// [`ActiveChild::take_parent_message_budget`] is what keeps a retrying
+    /// child from spending its life talking to nobody.
     fn settle_parent_message(&mut self, resolved: ResolvedParentReport) {
         if let Some(child_session_id) = resolved.refund
             && let Some(child) = self
