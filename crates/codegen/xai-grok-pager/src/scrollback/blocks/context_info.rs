@@ -1,4 +1,4 @@
-//! ContextInfoBlock — typed `/context` display rendered in scrollback.
+//! ContextInfoBlock: the typed `/context` display rendered in scrollback.
 //!
 //! Holds the [`ContextFacts`] resolved when the block was created, plus the
 //! active model name, and rebuilds the styled output on every `output()` call.
@@ -52,6 +52,7 @@ use xai_grok_shell::session::ContextInfo;
 ///
 /// ◈ Skills            2.4k tokens  (0.2%) · 21 skills
 /// ◈ MCP servers        320 tokens  (0.1%) ·  4 servers
+/// ◈ AGENTS.md          1.1k tokens  (0.1%) ·  2 files
 ///
 /// Auto-compact at 85% · ~812k tokens remaining
 ///
@@ -81,20 +82,17 @@ pub struct ContextInfoBlock {
     pub model: String,
 }
 
-/// Shape of the categorical bar — how the 100 cells are laid out.
+/// Shape of the categorical bar: how the 100 cells are laid out.
 ///
 /// Two layouts ship today:
 ///
-/// - `WIDE`: 5 rows × 20 cells = 100 cells, ~39 columns wide. The
-///   default when the terminal has room.
-/// - `NARROW`: 10 rows × 10 cells = 100 cells, ~19 columns wide. Used
-///   when terminal width drops below [`BarLayout::NARROW_BREAKPOINT`]
-///   so the bar still fits on narrow terminals (tmux split panes,
-///   small terminal windows, embedded shells).
+/// - `WIDE`: 5 rows × 20 cells = 100 cells, ~39 columns wide. The default when the terminal has room.
+/// - `NARROW`: 10 rows × 10 cells = 100 cells, ~19 columns wide.
+///   Selected when the terminal width drops below [`BarLayout::NARROW_BREAKPOINT`].
+///   The bar then still fits on narrow terminals (tmux split panes, small terminal windows, embedded shells).
 ///
-/// Both shapes hold the same 100 cells, so the visual breakdown
-/// (which categories occupy which share of the bar) is identical —
-/// only the aspect ratio changes.
+/// Both shapes hold the same 100 cells, so the visual breakdown (which categories occupy which share of the bar) is identical.
+/// Only the aspect ratio changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BarLayout {
     /// Cells per row.
@@ -104,15 +102,15 @@ struct BarLayout {
 }
 
 impl BarLayout {
-    /// 5 rows × 20 cells. Renders in ~39 columns (20 glyphs + 19
-    /// separator spaces).
+    /// 5 rows × 20 cells.
+    /// Renders in ~39 columns (20 glyphs + 19 separator spaces).
     const WIDE: Self = Self {
         row_len: 20,
         rows: 5,
     };
 
-    /// 10 rows × 10 cells. Renders in ~19 columns (10 glyphs + 9
-    /// separator spaces).
+    /// 10 rows × 10 cells.
+    /// Renders in ~19 columns (10 glyphs + 9 separator spaces).
     const NARROW: Self = Self {
         row_len: 10,
         rows: 10,
@@ -136,9 +134,8 @@ impl BarLayout {
         }
     }
 
-    /// Total cells in the bar. Always 100 for both shipped layouts;
-    /// kept as a method so future layouts with a different total cell
-    /// count don't silently misalign with the legend percentages.
+    /// Total cells in the bar; always 100 for both shipped layouts.
+    /// Kept as a method so a future layout with a different cell count doesn't silently misalign with the legend percentages.
     const fn total(self) -> usize {
         self.row_len * self.rows
     }
@@ -186,9 +183,8 @@ struct LegendRow {
     detail: Option<String>,
 }
 
-/// Column widths for the legend and informational rows, measured from the
-/// rows that actually render so token counts, percentages, and detail
-/// counts stay aligned no matter the labels or magnitudes.
+/// Column widths for the legend and informational rows, measured from the rows that actually render.
+/// Token counts, percentages, and detail counts then stay aligned no matter the labels or magnitudes.
 struct RowLayout {
     label_width: usize,
     tokens_width: usize,
@@ -197,8 +193,8 @@ struct RowLayout {
 }
 
 impl RowLayout {
-    /// Measure column widths over every row that will render. Widths are
-    /// in codepoints, not bytes.
+    /// Measure column widths over every row that will render.
+    /// Widths are in codepoints, not bytes.
     fn measure<'a>(rows: impl Iterator<Item = &'a LegendRow> + Clone, total: u64) -> Self {
         Self {
             label_width: rows
@@ -241,10 +237,8 @@ impl RowLayout {
         )
     }
 
-    /// The detail suffix with the leading count right-aligned so the nouns
-    /// line up: `" · 25 tools"` over `" ·  1 server"`. Details follow the
-    /// `TokenUsageCategory::detail` count-then-noun convention; text with
-    /// no space renders unaligned.
+    /// The detail suffix with the leading count right-aligned so the nouns line up: `" · 25 tools"` over `" ·  1 server"`.
+    /// Details follow the `TokenUsageCategory::detail` count-then-noun convention; text with no space renders unaligned.
     fn detail_suffix(&self, detail: &str) -> String {
         match detail.split_once(' ') {
             Some((count, rest)) => {
@@ -257,9 +251,9 @@ impl RowLayout {
         }
     }
 
-    /// Render one row. WIDE: a single column-aligned line. NARROW: glyph
-    /// and label on the first line, numeric data indented by one space on
-    /// the second so it clusters under the label.
+    /// Render one row.
+    /// WIDE: a single column-aligned line.
+    /// NARROW: glyph and label on the first line, numeric data indented by one space on the second so it clusters under the label.
     fn render(
         &self,
         row: &LegendRow,
@@ -403,15 +397,13 @@ impl ContextInfoBlock {
 
     /// Build the styled lines using the supplied theme and bar layout.
     ///
-    /// Called from `output()` on every redraw so theme switches take effect
-    /// without re-running `/context`. The theme is passed in (rather than
-    /// re-resolved here) so a single `Theme::current()` lookup in `output()`
-    /// is shared with the `max_lines` truncation branch.
+    /// Called from `output()` on every redraw so theme switches take effect without re-running `/context`.
+    /// The theme is passed in rather than re-resolved here.
+    /// A single `Theme::current()` lookup in `output()` is then shared with the `max_lines` truncation branch.
     ///
-    /// `bar` controls the shape of the categorical bar — the wide layout
-    /// (5×20) is the default; `output()` switches to the narrow layout
-    /// (10×10) when terminal width drops below `BarLayout::NARROW_BREAKPOINT`
-    /// so the bar still fits on column-constrained terminals.
+    /// `bar` controls the shape of the categorical bar; the wide layout (5×20) is the default.
+    /// `output()` switches to the narrow layout (10×10) when terminal width drops below `BarLayout::NARROW_BREAKPOINT`.
+    /// The bar then still fits on narrow terminals.
     fn build_lines(&self, theme: &Theme, bar: BarLayout) -> Vec<Line<'static>> {
         let facts = &self.facts;
         let model = &self.model;
@@ -424,25 +416,19 @@ impl ContextInfoBlock {
             .fg(theme.text_primary)
             .add_modifier(Modifier::BOLD);
 
-        // Per-category colors used in both the bar and the legend so the
-        // two visualizations are scannable side-by-side. Messages get the
-        // brightest treatment (primary) — they dominate the breakdown and
-        // are the conversation the user is actually steering. System
-        // prompt uses the same diamond glyph as messages but in muted
-        // gray so it reads as a quiet base layer.
+        // Per-category colors used in both the bar and the legend so the two visualizations are scannable side-by-side
+        // Messages get the brightest treatment (primary): they dominate the breakdown and are the conversation the user is actually steering
+        // System prompt uses the same diamond glyph as messages but in muted gray so it reads as a quiet base layer
         let system_color = quantize(theme.gray_bright); // gray
         let tools_color = quantize(theme.accent_skill); // teal / skill accent
         let messages_color = quantize(theme.text_primary); // primary (white)
         let empty_color = quantize(theme.gray_dim); // free / outline
         let overhead_color = quantize(theme.accent_verify);
 
-        // Categorical bar: 100 cells laid out as `bar.rows` rows of
-        // `bar.row_len` cells with one space between cells. Each category
-        // gets its own glyph + color so the bar reads as a stacked
-        // breakdown at a glance.
-        // Routed through `glyphs` so the diamonds degrade to CP437-safe
-        // stand-ins (`◆`→`♦`, `◇`→`○`) on legacy Windows consoles that
-        // can't render the U+25Cx diamonds.
+        // Categorical bar: 100 cells laid out as `bar.rows` rows of `bar.row_len` cells with one space between cells
+        // Each category gets its own glyph and color so the bar reads as a stacked breakdown at a glance
+        // Routed through `glyphs` so the diamonds degrade to CP437-safe stand-ins (`◆`→`♦`, `◇`→`○`)
+        // Legacy Windows consoles can't render the U+25Cx diamonds
         let system_glyph = crate::glyphs::diamond_filled(); // ◆ (gray)
         let messages_glyph = crate::glyphs::diamond_filled(); // ◆ (primary)
         let schemas_glyph = crate::glyphs::diamond_filled(); // ◆ (teal)
@@ -528,14 +514,11 @@ impl ContextInfoBlock {
             Line::from(Span::styled("Context", primary)),
             // Blank row between header and the at-a-glance summary
             Line::from(""),
-            // Sub-header: token totals + percent. Uses `text_secondary` for
-            // a touch more contrast than `muted` so the at-a-glance numbers
-            // stand apart from the breakdown/footer rows. Switches to "m"
-            // with one decimal place once a value reaches a million so wide
-            // context windows (e.g. 1m / 2m / 4m) read naturally. The
-            // percentage is recomputed from `used / total` so we get two
-            // decimal places of precision (the `usage_pct: u8` field on
-            // `ContextInfo` is pre-rounded to an integer).
+            // Sub-header: token totals and percent
+            // Uses `text_secondary` for a touch more contrast than `muted` so the at-a-glance numbers stand apart from the breakdown/footer rows
+            // Switches to "m" with one decimal place once a value reaches a million so wide context windows (e.g. 1m / 2m / 4m) read naturally.
+            // The percentage is recomputed from `used / total` so we get two decimal places of precision
+            // The `usage_pct: u8` field on `ContextInfo` is pre-rounded to an integer
             Line::from(Span::styled(
                 format!(
                     "{} / {} tokens ({:.2}%)",
@@ -545,8 +528,7 @@ impl ContextInfoBlock {
                 ),
                 Style::default().fg(theme.text_secondary),
             )),
-            // Model name (one step dimmer than the tokens line so it reads
-            // as a supporting caption rather than the primary number).
+            // Model name (one step dimmer than the tokens line so it reads as a supporting caption rather than the primary number)
             Line::from(Span::styled(
                 model.to_string(),
                 Style::default().fg(theme.gray_bright),
@@ -595,10 +577,8 @@ impl ContextInfoBlock {
                     Style::default().fg(quantize(theme.warning)),
                 )
             } else {
-                // Use `fmt_tok_big` (same as the header) so the remaining
-                // count rolls over to `m` for wide context windows — a 4m
-                // window at 60% reads `~1.0m tokens remaining`, not
-                // `~1000k tokens remaining`.
+                // Use `fmt_tok_big` (same as the header) so the remaining count rolls over to `m` for wide context windows
+                // A 4m window at 60% reads `~1.0m tokens remaining`, not `~1000k tokens remaining`
                 (
                     format!(
                         "Auto-compact at {threshold_percent}% \u{00b7} ~{} tokens remaining",
@@ -740,17 +720,13 @@ fn count_noun(n: u64, noun: &str) -> String {
 
 /// Format a token count compactly (`123`, `1.2k`, `999k`).
 ///
-/// The cutover from `{:.1}k` to plain `{}k` happens at 99_500 (not 100_000)
-/// to avoid a precision discontinuity: `{:.1}k` rounds `99.999` (n=99_999)
-/// up to `"100.0k"` (6 chars), and the next bucket then emits `"100k"` (4
-/// chars). The mismatch makes the value visually identical but two
-/// characters wider, which knocks the column-aligned `tw` width in
-/// `build_lines` off by one. Switching to integer-rounded `Nk` at 99_500
-/// keeps the output stable: 99_499 → `"99.5k"`, 99_500 → `"100k"`.
+/// The cutover from `{:.1}k` to plain `{}k` happens at 99_500 (not 100_000) to avoid a precision discontinuity.
+/// `{:.1}k` rounds `99.999` (n=99_999) up to `"100.0k"` (6 chars), and the next bucket then emits `"100k"` (4 chars).
+/// The mismatch makes the value visually identical but two characters wider, knocking the column-aligned `tw` width in `build_lines` off by one.
+/// Switching to integer-rounded `Nk` at 99_500 keeps the output stable: 99_499 formats as `"99.5k"`, 99_500 as `"100k"`.
 fn fmt_tok(n: u64) -> String {
     if n >= 99_500 {
-        // Round half-up to the nearest 1k; equivalent to `(n + 500) / 1000`
-        // for u64, which avoids the f64 rounding artifact described above.
+        // Round half-up to the nearest 1k; equivalent to `(n + 500) / 1000` for u64, which avoids the f64 rounding artifact described above
         format!("{}k", (n + 500) / 1000)
     } else if n >= 1_000 {
         format!("{:.1}k", n as f64 / 1000.0)
@@ -769,10 +745,8 @@ const _: () = {
 
 /// Like [`fmt_tok`] but rolls over to `1.0m` at one million.
 ///
-/// Used for the at-a-glance totals line so a 1M / 2M / 4M context window
-/// reads naturally as `1.0m` rather than `1000k`. Per-category legend rows
-/// stay on [`fmt_tok`] so a fractional-million breakdown still shows the
-/// finer-grained `k` resolution.
+/// Used for the at-a-glance totals line so a 1M / 2M / 4M context window reads naturally as `1.0m` rather than `1000k`.
+/// Per-category legend rows stay on [`fmt_tok`] so a fractional-million breakdown still shows the finer-grained `k` resolution.
 fn fmt_tok_big(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}m", n as f64 / 1_000_000.0)
@@ -798,8 +772,7 @@ fn percent_of_window(part: u64, total: u64) -> String {
 impl BlockContent for ContextInfoBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
         let theme = Theme::current();
-        // Responsive bar shape: narrow terminals get a 10×10 bar so the
-        // visualization doesn't get clipped or pushed under the legend.
+        // Responsive bar shape: narrow terminals get a 10×10 bar so it doesn't get clipped or pushed under the legend
         let bar = BarLayout::for_width(ctx.width);
         let styled_lines = self.build_lines(&theme, bar);
         let wrapped = word_wrap_lines(styled_lines, ctx.width as usize);
@@ -1031,7 +1004,7 @@ mod tests {
         assert_eq!(line_text(&lines, 1), "");
         let l2 = line_text(&lines, 2);
         assert!(l2.contains("tokens"));
-        // Percent now shows 2 decimal places (36.7k / 1m = 3.67%).
+        // Percent shows 2 decimal places (36.7k / 1m = 3.67%)
         assert!(l2.contains("(3.67%)"), "got: {l2:?}");
         assert_eq!(line_text(&lines, 3), "grok-4");
     }
@@ -1048,9 +1021,8 @@ mod tests {
 
     #[test]
     fn build_lines_includes_compaction_tip_in_warning_band() {
-        // 80..85 is the band where the tip appears: auto-compact is close
-        // enough to mention but not so close that the "triggers next turn"
-        // line is also showing.
+        // 80..85 is the band where the tip appears
+        // Auto-compact is close enough to mention but not so close that the "triggers next turn" line is also showing
         let mut snap = snapshot();
         snap.usage_pct = 80;
         let block = ContextInfoBlock::new(snap, &[], "grok-4");
@@ -1070,10 +1042,8 @@ mod tests {
 
     #[test]
     fn build_lines_omits_tip_at_or_above_threshold() {
-        // At/above the auto-compact threshold the "triggers next turn" line
-        // already says everything the tip would; the tip is suppressed to
-        // avoid stacking two warning-styled lines that contradict each
-        // other (manual /compact vs. auto-compact about to fire).
+        // At/above the auto-compact threshold the "triggers next turn" line already says everything the tip would
+        // The tip is suppressed to avoid stacking two contradicting warning-styled lines (manual /compact vs. auto-compact about to fire).
         let mut snap = snapshot();
         snap.usage_pct = 85; // the historical default (and value in snapshot() helper)
         let block = ContextInfoBlock::new(snap, &[], "grok-4");
@@ -1097,7 +1067,7 @@ mod tests {
     #[test]
     fn build_lines_auto_compact_eta_uses_millions_for_wide_windows() {
         // 4M window at 0% used: remaining = ceil(4_000_000 * 85 / 100) = 3_400_000.
-        // Should render via fmt_tok_big as "3.4m", not "3400k".
+        // Renders via fmt_tok_big as "3.4m", not "3400k"
         let mut snap = snapshot();
         snap.total = 4_000_000;
         snap.used = 0;
@@ -1139,10 +1109,9 @@ mod tests {
         assert_eq!(fmt_tok(0), "0");
         assert_eq!(fmt_tok(999), "999");
         assert_eq!(fmt_tok(1_000), "1.0k");
-        // 99_499 is the last value below the `{:.1}k` cutover; it formats
-        // with one decimal. 99_500 crosses into the integer-rounded branch
-        // and emits `100k` (4 chars) rather than `{:.1}k`'s round-up of
-        // `99.5` to `100.0k` (6 chars). See `fmt_tok` doc comment.
+        // 99_499 is the last value below the `{:.1}k` cutover; it formats with one decimal
+        // 99_500 crosses into the integer-rounded branch and emits `100k` (4 chars) rather than `{:.1}k`'s round-up of `99.5` to `100.0k` (6 chars)
+        // See `fmt_tok` doc comment
         assert_eq!(fmt_tok(99_499), "99.5k");
         assert_eq!(fmt_tok(99_500), "100k");
         assert_eq!(fmt_tok(99_999), "100k");
@@ -1182,11 +1151,9 @@ mod tests {
     // -------------------------------------------------------------------
     // Bar partition tests
     //
-    // The bar lives at line indices 5..(5+layout.rows) (after header /
-    // blank / tokens / model / blank). Each row is rendered as `glyph`
-    // spans separated by raw-space spans. To count cells per category,
-    // we walk the bar lines for the given layout and count spans whose
-    // content matches each category's glyph.
+    // The bar lives at line indices 5..(5+layout.rows) (after header / blank / tokens / model / blank)
+    // Each row is rendered as `glyph` spans separated by raw-space spans
+    // To count cells per category, we walk the bar lines for the given layout and count spans whose content matches each category's glyph
     // -------------------------------------------------------------------
 
     const SYSTEM_GLYPH_TEST: &str = "\u{25C6}";
@@ -1194,9 +1161,8 @@ mod tests {
     const MESSAGES_GLYPH_TEST: &str = "\u{25C6}"; // same as system; distinguished by color in real render
     const FREE_GLYPH_TEST: &str = "\u{25C7}";
 
-    /// `layout` tells the function how many bar rows to slice (5 for
-    /// WIDE, 10 for NARROW); without it the slice would be wrong for
-    /// the narrow layout and the assertions would fail spuriously.
+    /// `layout` tells the function how many bar rows to slice (5 for WIDE, 10 for NARROW).
+    /// Without it the slice would be wrong for the narrow layout and the assertions would fail spuriously.
     fn count_bar_glyphs(
         lines: &[Line<'static>],
         layout: BarLayout,
@@ -1280,8 +1246,7 @@ mod tests {
 
     #[test]
     fn bar_all_used_when_completely_full() {
-        // Fill the bar entirely with messages so we can count by glyph
-        // (system+messages share the diamond; tools and free are distinct).
+        // Fill the bar entirely with messages so we can count by glyph (system and messages share the diamond; tools and free are distinct)
         let mut snap = snapshot();
         snap.total = 1_000;
         snap.used = 1_000;
@@ -1413,6 +1378,7 @@ mod tests {
         snap.usage_categories = vec![
             TokenUsageCategory::skills_listing(&"x".repeat(9_600), 21),
             TokenUsageCategory::mcp_servers(&"y".repeat(1_200), 4),
+            TokenUsageCategory::agents_md(&"z".repeat(4_400), 2),
         ];
         let block = ContextInfoBlock::new(snap, &[], "grok-4");
         let theme = test_theme();
@@ -1426,13 +1392,16 @@ mod tests {
             all.contains("MCP servers") && all.contains("4 servers"),
             "mcp row missing:\n{all}"
         );
+        assert!(
+            all.contains("AGENTS.md") && all.contains("2 files"),
+            "agents.md row missing:\n{all}"
+        );
         assert!(all.contains("\u{00b7} 12 tools"), "tools count:\n{all}");
         let (_, tools, _, total) = count_bar_glyphs(&lines, BarLayout::WIDE);
         assert_eq!(total, 100);
         assert_eq!(tools, 0, "usage categories must never enter the bar");
 
-        // Token, percent, and count columns line up across all rows;
-        // single-digit counts are right-aligned ("·  4 servers").
+        // Token, percent, and count columns line up across all rows; single-digit counts are right-aligned ("·  4 servers")
         let is_row = |l: &&str| {
             (l.starts_with('\u{25C6}') || l.starts_with('\u{25C8}') || l.starts_with('\u{25C7}'))
                 && l.contains(" tokens ")
@@ -1458,7 +1427,7 @@ mod tests {
 
     #[test]
     fn percent_of_window_returns_dash_for_zero_total() {
-        // Exercised the `total == 0` early return — pct can't be computed.
+        // Exercised the `total == 0` early return: pct can't be computed
         assert_eq!(percent_of_window(100, 0), "-");
         assert_eq!(percent_of_window(0, 0), "-");
     }
@@ -1474,9 +1443,8 @@ mod tests {
     // -------------------------------------------------------------------
     // Responsive bar layout tests
     //
-    // The bar's shape (5×20 vs 10×10) is chosen by `BarLayout::for_width`
-    // based on terminal width, so narrow terminals get a square bar that
-    // still fits in their column budget.
+    // The bar's shape (5×20 vs 10×10) is chosen by `BarLayout::for_width` based on terminal width
+    // Narrow terminals thus get a square bar that still fits in their column budget
     // -------------------------------------------------------------------
 
     #[test]
@@ -1507,8 +1475,7 @@ mod tests {
 
     #[test]
     fn bar_layout_for_width_picks_narrow_below_breakpoint() {
-        // Below the breakpoint, the narrow layout is selected so the bar
-        // fits without being clipped.
+        // Below the breakpoint, the narrow layout is selected so the bar fits without being clipped
         assert_eq!(
             BarLayout::for_width(BarLayout::NARROW_BREAKPOINT - 1),
             BarLayout::NARROW
@@ -1523,15 +1490,15 @@ mod tests {
         let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::NARROW);
-        // The bar starts at index 5 (header / blank / tokens / model /
-        // blank). Each of the next 10 rows must be a non-empty bar row.
+        // The bar starts at index 5 (header / blank / tokens / model / blank)
+        // Each of the next 10 rows must be a non-empty bar row
         for (offset, line) in lines[5..15].iter().enumerate() {
             assert!(
                 !line.spans.is_empty(),
                 "narrow bar row {offset} must be non-empty"
             );
         }
-        // The line right after the bar should be the spacer blank.
+        // The line right after the bar is the spacer blank
         let after_bar: String = lines[15].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(after_bar, "", "expected blank line after narrow bar");
     }
@@ -1547,7 +1514,7 @@ mod tests {
 
     #[test]
     fn narrow_bar_each_row_has_at_most_10_cells() {
-        // Sanity: no single bar row should exceed the narrow row_len.
+        // Sanity: no single bar row exceeds the narrow row_len
         // We count cell glyphs (not separator spaces) per row.
         let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
@@ -1598,12 +1565,11 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Legend label color + responsive wrapping tests
+    // Legend label color and responsive wrapping tests
     // -------------------------------------------------------------------
 
-    /// Helper: find the legend row (or row 1, for the narrow layout)
-    /// whose label text starts with `label_prefix`. Returns the matching
-    /// `Line` so the caller can assert on its spans.
+    /// Helper: find the legend row (or row 1, for the narrow layout) whose label text starts with `label_prefix`.
+    /// Returns the matching `Line` so the caller can assert on its spans.
     fn find_legend_line<'a>(
         lines: &'a [Line<'static>],
         label_prefix: &str,
@@ -1697,8 +1663,7 @@ mod tests {
         let block = ContextInfoBlock::new(snapshot(), &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::NARROW);
-        // The data row for the first legend entry sits at index 17
-        // (16 = "System prompt" header row, 17 = its data row).
+        // The data row for the first legend entry sits at index 17 (16 is the "System prompt" header row, 17 its data row)
         let data_row = &lines[17];
         let first = data_row
             .spans

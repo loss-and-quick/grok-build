@@ -7,8 +7,9 @@ use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use super::coordinator::active_message::{ActiveChildGeneration, ActiveMessageLifecycle};
 use super::types::{
-    ActiveSubagentSummary, MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT,
+    ActiveAgentMessageDelivery, ActiveSubagentSummary, MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT,
     MAX_PARENT_MESSAGES_PER_SUBAGENT, ParentMessageOutcome, SubagentCompletionSummary,
     SubagentDescribeOutcome, SubagentInspection, SubagentMessageOutcome, SubagentRequest,
     SubagentResult, SubagentResumeLookup, SubagentSnapshot, SubagentSnapshotStatus,
@@ -50,6 +51,27 @@ pub enum ParentReportDelivery {
     Unreachable,
 }
 
+pub use super::active_message::ActiveMessageAdmission;
+
+/// Maximum host admissions retained for one active child.
+pub const MAX_ACTIVE_MESSAGE_ADMISSIONS_PER_CHILD: usize = 8;
+
+/// Default absolute active-message capacity for one coordinator.
+pub const MAX_ACTIVE_MESSAGE_ADMISSIONS: usize = 64;
+
+/// Maximum wait for a host to confirm or reject admission.
+pub const ACTIVE_MESSAGE_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Maximum wait for an owned spawning child to become active before a parked
+/// agent send is released. Session bootstrap routinely exceeds the admission
+/// timeout, so this backstop is separate and much longer.
+pub const ACTIVE_MESSAGE_SPAWN_READY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(120);
+
+/// Maximum wait for the coordinator to drain selected admissions.
+pub const ACTIVE_MESSAGE_FINALIZATION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(6);
+
 /// Runtime handle retained while a child is active.
 pub trait ChildControl: 'static {
     type ProgressFuture: Future<Output = SubagentProgress> + 'static;
@@ -57,6 +79,19 @@ pub trait ChildControl: 'static {
     type ParentReportFuture: Future<Output = ParentReportDelivery> + 'static;
 
     fn progress(&self) -> Self::ProgressFuture;
+
+    /// Admit a coordinator-authorized message to this child.
+    ///
+    /// `Admitted` is valid only when protected-row insertion succeeds inside
+    /// [`ActiveAgentMessageDelivery::commit_admission`]. The returned future
+    /// must be `Send` so multithreaded hosts can spawn the coordinator.
+    fn send_active_message(
+        &self,
+        _delivery: ActiveAgentMessageDelivery,
+    ) -> SendBoxFuture<ActiveMessageAdmission> {
+        Box::pin(std::future::ready(ActiveMessageAdmission::Unsupported))
+    }
+
     fn cancel(&self);
 
     /// Hand `text` up to the session that spawned this child, resolving as soon
@@ -293,6 +328,29 @@ impl<C: 'static> ChildReporter<C> {
         response_rx.await.unwrap_or(false)
     }
 
+    /// Close admission and wait a bounded interval for selected sends to settle.
+    pub async fn finalizing(&self) -> bool {
+        let Some(response_rx) = self.request_finalizing() else {
+            return false;
+        };
+        tokio::time::timeout(ACTIVE_MESSAGE_FINALIZATION_TIMEOUT, response_rx)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(false)
+    }
+
+    pub(super) fn request_finalizing(&self) -> Option<oneshot::Receiver<bool>> {
+        let (respond_to, response_rx) = oneshot::channel();
+        self.tx
+            .send(InternalEvent::Finalizing {
+                subagent_id: self.subagent_id.clone(),
+                respond_to,
+            })
+            .ok()
+            .map(|_| response_rx)
+    }
+
     /// Resolve an in-memory resume source without sharing coordinator state.
     pub async fn resume_source(
         &self,
@@ -321,6 +379,10 @@ pub(super) enum InternalEvent<C> {
         child: StartedChild<C>,
         respond_to: oneshot::Sender<bool>,
     },
+    Finalizing {
+        subagent_id: String,
+        respond_to: oneshot::Sender<bool>,
+    },
     ResumeSource {
         source_id: String,
         parent_session_id: String,
@@ -336,6 +398,9 @@ pub(super) struct PendingChild {
     pub(super) foreground_deadline: Option<tokio::time::Instant>,
     pub(super) handle_only: bool,
     pub(super) explicitly_killed: bool,
+    /// False when the record was synthesized for a spawn that never reached
+    /// the runner (admission reject, cancelled while queued).
+    pub(super) launched: bool,
 }
 
 pub(super) struct ActiveChild<C> {
@@ -365,6 +430,8 @@ pub(super) struct ActiveChild<C> {
     /// refund cannot touch. See
     /// [`MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT`].
     pub(super) parent_message_attempts: u32,
+    pub(super) generation: ActiveChildGeneration,
+    pub(super) active_messages: ActiveMessageLifecycle,
     pub(super) control: C,
 }
 
@@ -589,9 +656,13 @@ pub(super) struct ListRequest {
     pub(super) respond_to: oneshot::Sender<Vec<SubagentInspection>>,
 }
 
+// Both variants are boxed: each child record is several hundred bytes, and this
+// enum only exists to carry one out of the registry on completion — a rare
+// path, where one allocation is cheaper than moving the larger variant's bulk
+// through every `ChildRecord`.
 pub(super) enum ChildRecord<C> {
-    Pending(PendingChild),
-    Active(ActiveChild<C>),
+    Pending(Box<PendingChild>),
+    Active(Box<ActiveChild<C>>),
 }
 
 impl<C> ChildRecord<C> {
@@ -961,6 +1032,7 @@ pub fn completion_summary(
         subagent_id: request.id.clone(),
         subagent_type: request.subagent_type.clone(),
         description: request.description.clone(),
+        loop_task_id: request.runtime_overrides.loop_task_id.clone(),
         success: result.success && !result.cancelled,
         duration_ms: result.duration_ms,
         tool_calls: result.tool_calls,

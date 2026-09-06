@@ -60,6 +60,7 @@ impl ToolKind {
             ToolKind::MemoryWrite => "Memory Write",
             ToolKind::MemoryDelete => "Memory Delete",
             ToolKind::Task => "Subagent",
+            ToolKind::ActiveAgentMessage => "Send Subagent Message",
             ToolKind::EnterPlan => "Enter Plan Mode",
             ToolKind::ExitPlan => "Exit Plan Mode",
             ToolKind::AskUser => "Ask User",
@@ -110,6 +111,7 @@ impl ToolKind {
             | ToolKind::MessageParentAction
             | ToolKind::Skill
             | ToolKind::Task
+            | ToolKind::ActiveAgentMessage
             | ToolKind::ImageGen
             | ToolKind::VideoGen
             | ToolKind::ImageToVideo

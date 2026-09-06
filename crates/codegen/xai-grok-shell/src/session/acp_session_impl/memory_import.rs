@@ -42,12 +42,12 @@ impl SessionActor {
         let source = match source {
             // A slash command's argument arrives unexpanded, and `~` is how a
             // user writes a path under their home.
-            Some(path) => match path.strip_prefix("~/").zip(dirs::home_dir()) {
+            Some(path) => match path.strip_prefix("~/").zip(xai_dirs::home_dir()) {
                 Some((rest, home)) => home.join(rest),
                 None => std::path::PathBuf::from(path),
             },
             None => {
-                let Some(home) = dirs::home_dir() else {
+                let Some(home) = xai_dirs::home_dir() else {
                     return "Cannot locate your home directory, so there is nowhere to look \
                             for a Claude Code memory directory. Pass one: `/memory import \
                             <dir>`."

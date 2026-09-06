@@ -92,6 +92,7 @@ pub enum ToolKind {
     MemoryWrite,
     MemoryDelete,
     Task,
+    ActiveAgentMessage,
     EnterPlan,
     ExitPlan,
     AskUser,

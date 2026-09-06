@@ -16,8 +16,8 @@
 //!   compiler forces a new variant to be handled here (modeled on
 //!   `xai-grok-workspace`'s `hook_event_name_wire_covers_all_upstream_variants`).
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use xai_grok_hooks::event::{
@@ -119,6 +119,8 @@ fn all_payload_samples() -> Vec<HookPayload> {
             tool_input: serde_json::json!({ "command": "boom" }),
             tool_input_truncated: false,
             error: "exit 1".into(),
+            duration_ms: Some(1234),
+            is_interrupt: true,
             subagent_type: Some("explore".into()),
         },
         HookPayload::PermissionDenied {

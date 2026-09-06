@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 use xai_grok_agent::plugins::PluginRegistry;
 use xai_grok_hooks::config::{
-    DEFAULT_STOP_GATE_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, HandlerType, HookSpec,
+    DEFAULT_PROMPT_GATE_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, DEFAULT_VERIFICATION_GATE_TIMEOUT_MS,
+    HandlerType, HookSpec,
 };
 use xai_grok_hooks::event::{GateKind, HookEventName};
 use xai_grok_plugin_host::{PluginHost, PluginLaunch, RegisteredPlugin};
@@ -232,11 +233,15 @@ fn deny_child_network(
 /// quietly launching an unconfined child.
 #[cfg(target_os = "linux")]
 fn install_child_seccomp(cmd: &mut tokio::process::Command) -> Result<(), String> {
+    // The BPF program is built here, in the parent: a `pre_exec` closure runs
+    // between fork and exec, where allocating can deadlock on another
+    // thread's allocator lock.
+    let filter = xai_grok_sandbox::child_net::prebuilt_child_network_filter();
     // SAFETY: `install_child_network_filter` performs only async-signal-safe
-    // syscalls (prctl + seccomp install), the documented contract for a
-    // `pre_exec` hook.
+    // syscalls (prctl + seccomp install) against the parent-built program,
+    // the documented contract for a `pre_exec` hook.
     unsafe {
-        cmd.pre_exec(|| xai_grok_sandbox::child_net::install_child_network_filter());
+        cmd.pre_exec(move || xai_grok_sandbox::child_net::install_child_network_filter(filter));
     }
     Ok(())
 }
@@ -418,8 +423,15 @@ pub(crate) fn sidecar_plugin_hook_specs(
     SIDECAR_HOOK_EVENTS
         .iter()
         .map(|&event| {
+            // Mirrors `xai_grok_hooks::config::default_timeout_ms`, the
+            // authoritative table, so a sidecar hook gets the same deadline as
+            // the command/http runners for the same event. Upstream renamed the
+            // stop-gate bound to the verification bound and widened it to cover
+            // `PostTool`; without that, a sidecar `post_tool_use` would be
+            // killed at 5s while a command one is allowed 600s.
             let timeout_ms = match event.traits().gate {
-                GateKind::Stop => DEFAULT_STOP_GATE_TIMEOUT_MS,
+                GateKind::Stop | GateKind::PostTool => DEFAULT_VERIFICATION_GATE_TIMEOUT_MS,
+                GateKind::Prompt => DEFAULT_PROMPT_GATE_TIMEOUT_MS,
                 GateKind::Intercept => DEFAULT_INTERACTIVE_GATE_TIMEOUT_MS,
                 _ => DEFAULT_TIMEOUT_MS,
             };
@@ -639,6 +651,10 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
             .send(SubagentEvent::Spawn(SubagentSpawnRequest {
                 request: Box::new(request),
                 result_tx,
+                // Nothing here waits for the child to be recorded: the
+                // plugin polls its own result channel, so only the terminal
+                // reply above is observed.
+                registered_tx: None,
             }))
             .map_err(|_| "subagent coordinator unavailable (agent shutting down?)".to_string())?;
         Ok(xai_grok_plugin_host::SpawnedSubagent {
@@ -1161,7 +1177,7 @@ mod tests {
             .iter()
             .find(|s| s.event == HookEventName::Stop)
             .unwrap();
-        assert_eq!(stop.timeout_ms, DEFAULT_STOP_GATE_TIMEOUT_MS);
+        assert_eq!(stop.timeout_ms, DEFAULT_VERIFICATION_GATE_TIMEOUT_MS);
         let pre = specs
             .iter()
             .find(|s| s.event == HookEventName::PreToolUse)

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::config::HookSpec;
 use crate::event::HookEventEnvelope;
 use crate::invoker::{PluginHookRequest, PluginHookResponse};
-use crate::result::StopHookOutcome;
+use crate::result::{PostToolUseHookOutcome, StopHookOutcome};
 
 use super::{GateKind, HookRunnerResult, RunContext};
 
@@ -150,31 +150,53 @@ fn response_to_result(
                 reason: reason.unwrap_or_else(|| format!("denied by plugin hook '{hook_name}'")),
                 hook_name: hook_name.to_string(),
             },
-            PluginHookResponse::Decision { allow: true, .. } => {
-                HookRunnerResult::Allow { updated_input: None }
-            }
-            // Observe/Stop/Replace replies to a Tool gate carry no allow/deny
-            // signal: fail open (allow), warning on the clear gate mismatch.
-            PluginHookResponse::Observed { .. } => HookRunnerResult::Allow { updated_input: None },
+            // The wire `Decision` carries only allow/reason, so an allow has no
+            // model-facing text to hand on.
+            PluginHookResponse::Decision { allow: true, .. } => HookRunnerResult::Allow {
+                updated_input: None,
+                additional_context: None,
+            },
+            // Not a gate mismatch: the handler ran and declined to decide, which
+            // allows. Its `additional_context` is model-facing text and an allow
+            // carries exactly that, so it rides through rather than being
+            // dropped; blanks go, as on the observe gate.
+            PluginHookResponse::Observed { additional_context } => HookRunnerResult::Allow {
+                updated_input: None,
+                additional_context: additional_context.filter(|context| !context.trim().is_empty()),
+            },
+            // Stop/Replace replies to a Tool gate carry no allow/deny signal:
+            // fail open (allow), warning on the clear gate mismatch. What they
+            // carry belongs to another gate's vocabulary, so nothing is salvaged
+            // from them and the allow attaches no context.
             PluginHookResponse::Stop { .. } => {
                 tracing::warn!(
                     hook_name,
                     "plugin returned a stop decision for a tool gate; allowing"
                 );
-                HookRunnerResult::Allow { updated_input: None }
+                HookRunnerResult::Allow {
+                    updated_input: None,
+                    additional_context: None,
+                }
             }
             PluginHookResponse::Replace { .. } => {
                 tracing::warn!(
                     hook_name,
                     "plugin returned a replace payload for a tool gate; allowing"
                 );
-                HookRunnerResult::Allow { updated_input: None }
+                HookRunnerResult::Allow {
+                    updated_input: None,
+                    additional_context: None,
+                }
             }
             // Unreachable: the early return above answers `NotSubscribed` for
             // every gate. Spelled as the gate's own fail-open rather than a
             // panic so a future refactor that moves the short-circuit degrades
-            // to today's behaviour instead of killing the turn.
-            PluginHookResponse::NotSubscribed => HookRunnerResult::Allow { updated_input: None },
+            // to today's behaviour instead of killing the turn. Nothing ran, so
+            // there is no context to carry either.
+            PluginHookResponse::NotSubscribed => HookRunnerResult::Allow {
+                updated_input: None,
+                additional_context: None,
+            },
         },
         GateKind::Stop => match response {
             PluginHookResponse::Stop {
@@ -223,6 +245,71 @@ fn response_to_result(
             // Unreachable — see the Tool gate's arm for why this is a fail-open
             // rather than a panic.
             PluginHookResponse::NotSubscribed => HookRunnerResult::Stop(StopHookOutcome::default()),
+        },
+        // The post-tool outcome's other channels — the block and the tool-output
+        // replacement — have no wire representation (the replacement would also
+        // need a builtin/MCP kind the protocol cannot express), so the only
+        // signal a plugin can raise here is the model-facing text, which the
+        // outcome carries under the same name.
+        GateKind::PostTool => match response {
+            PluginHookResponse::Observed { additional_context } => HookRunnerResult::PostToolUse {
+                outcome: PostToolUseHookOutcome {
+                    additional_context: additional_context
+                        .filter(|context| !context.trim().is_empty()),
+                    ..PostToolUseHookOutcome::default()
+                },
+                failure: None,
+            },
+            // Decision/Stop/Replace replies belong to another gate's vocabulary
+            // and carry nothing this outcome can express: report an empty
+            // outcome (no block, no context), warning on the mismatch.
+            PluginHookResponse::Decision { .. }
+            | PluginHookResponse::Stop { .. }
+            | PluginHookResponse::Replace { .. } => {
+                tracing::warn!(
+                    hook_name,
+                    "plugin returned a decision/stop/replace for a post_tool_use gate; ignoring"
+                );
+                HookRunnerResult::PostToolUse {
+                    outcome: PostToolUseHookOutcome::default(),
+                    failure: None,
+                }
+            }
+            // Unreachable — see the Tool gate's arm for why this is an empty
+            // outcome rather than a panic.
+            PluginHookResponse::NotSubscribed => HookRunnerResult::PostToolUse {
+                outcome: PostToolUseHookOutcome::default(),
+                failure: None,
+            },
+        },
+        // A prompt gate decides block-or-not and nothing else: its reason is
+        // user-facing, never model context (the command runner's prompt document
+        // has no `additionalContext` either), so an observe reply's text has
+        // nowhere to go and is dropped rather than smuggled in as a block.
+        GateKind::Prompt => match response {
+            PluginHookResponse::Decision {
+                allow: false,
+                reason,
+            } => HookRunnerResult::Block {
+                reason: reason
+                    .filter(|r| !r.trim().is_empty())
+                    .unwrap_or_else(|| format!("Prompt blocked by plugin hook '{hook_name}'")),
+                hook_name: hook_name.to_string(),
+            },
+            PluginHookResponse::Decision { allow: true, .. }
+            | PluginHookResponse::Observed { .. } => HookRunnerResult::Success,
+            // Stop/Replace replies to a prompt gate carry no block signal: fail
+            // open (the prompt goes through), warning on the mismatch.
+            PluginHookResponse::Stop { .. } | PluginHookResponse::Replace { .. } => {
+                tracing::warn!(
+                    hook_name,
+                    "plugin returned a stop/replace for a prompt gate; allowing the prompt"
+                );
+                HookRunnerResult::Success
+            }
+            // Unreachable — see the Tool gate's arm for why this is a fail-open
+            // rather than a panic.
+            PluginHookResponse::NotSubscribed => HookRunnerResult::Success,
         },
         // Replace substitutes the payload; Intercept hands the operation to the
         // plugin and carries its outcome. Both use the same reply shape: a
@@ -404,8 +491,145 @@ mod tests {
         .await;
         assert!(matches!(
             result,
-            HookRunnerResult::Allow { updated_input: None }
+            HookRunnerResult::Allow {
+                updated_input: None,
+                additional_context: None
+            }
         ));
+    }
+
+    /// An observe reply to a tool gate allows, and its model-facing text rides
+    /// the allow instead of being dropped; a blank one is dropped.
+    #[tokio::test]
+    async fn observe_reply_on_a_tool_gate_allows_and_carries_its_context() {
+        for (context, expected) in [
+            (
+                Some("note for the model".to_string()),
+                Some("note for the model"),
+            ),
+            (Some("   ".to_string()), None),
+            (None, None),
+        ] {
+            let invoker = Arc::new(MockInvoker {
+                outcome: MockOutcome::Respond(PluginHookResponse::Observed {
+                    additional_context: context.clone(),
+                }),
+            });
+            let (result, _) = run_plugin_hook(
+                &plugin_spec(None),
+                &envelope(),
+                &ctx_with(Some(invoker)),
+                GateKind::Tool,
+                None,
+            )
+            .await;
+            match result {
+                HookRunnerResult::Allow {
+                    updated_input: None,
+                    additional_context,
+                } => assert_eq!(additional_context.as_deref(), expected, "for {context:?}"),
+                other => panic!("expected an allow, got {other:?}"),
+            }
+        }
+    }
+
+    /// The post_tool_use gate keeps an observe reply's text (the only signal a
+    /// plugin can express there); every other reply is an empty outcome.
+    #[tokio::test]
+    async fn post_tool_use_gate_carries_observed_context_only() {
+        let invoker = Arc::new(MockInvoker {
+            outcome: MockOutcome::Respond(PluginHookResponse::Observed {
+                additional_context: Some("the build is dirty".into()),
+            }),
+        });
+        let (result, _) = run_plugin_hook(
+            &plugin_spec(None),
+            &envelope(),
+            &ctx_with(Some(invoker)),
+            GateKind::PostTool,
+            None,
+        )
+        .await;
+        match result {
+            HookRunnerResult::PostToolUse { outcome, failure } => {
+                assert_eq!(failure, None);
+                assert_eq!(
+                    outcome.additional_context.as_deref(),
+                    Some("the build is dirty")
+                );
+                assert_eq!(outcome.block_reason, None);
+                assert!(outcome.output_replacement.is_none());
+            }
+            other => panic!("expected a post_tool_use outcome, got {other:?}"),
+        }
+
+        let invoker = Arc::new(MockInvoker {
+            outcome: MockOutcome::Respond(PluginHookResponse::Decision {
+                allow: false,
+                reason: Some("too late to deny".into()),
+            }),
+        });
+        let (result, _) = run_plugin_hook(
+            &plugin_spec(None),
+            &envelope(),
+            &ctx_with(Some(invoker)),
+            GateKind::PostTool,
+            None,
+        )
+        .await;
+        match result {
+            HookRunnerResult::PostToolUse { outcome, failure } => {
+                assert_eq!(failure, None);
+                assert!(
+                    outcome.is_empty(),
+                    "a tool decision must not block after the fact"
+                );
+            }
+            other => panic!("expected a post_tool_use outcome, got {other:?}"),
+        }
+    }
+
+    /// The prompt gate blocks on a deny and passes everything else through.
+    #[tokio::test]
+    async fn prompt_gate_blocks_on_a_deny_and_allows_otherwise() {
+        let invoker = Arc::new(MockInvoker {
+            outcome: MockOutcome::Respond(PluginHookResponse::Decision {
+                allow: false,
+                reason: Some("prompt mentions a secret".into()),
+            }),
+        });
+        let (result, _) = run_plugin_hook(
+            &plugin_spec(None),
+            &envelope(),
+            &ctx_with(Some(invoker)),
+            GateKind::Prompt,
+            None,
+        )
+        .await;
+        match result {
+            HookRunnerResult::Block { reason, hook_name } => {
+                assert_eq!(reason, "prompt mentions a secret");
+                assert_eq!(hook_name, "test-plugin-hook");
+            }
+            other => panic!("expected a block, got {other:?}"),
+        }
+
+        // An observe reply has nowhere to put its text on a prompt gate, so the
+        // prompt simply goes through.
+        let invoker = Arc::new(MockInvoker {
+            outcome: MockOutcome::Respond(PluginHookResponse::Observed {
+                additional_context: Some("dropped: the prompt gate has no context channel".into()),
+            }),
+        });
+        let (result, _) = run_plugin_hook(
+            &plugin_spec(None),
+            &envelope(),
+            &ctx_with(Some(invoker)),
+            GateKind::Prompt,
+            None,
+        )
+        .await;
+        assert!(matches!(result, HookRunnerResult::Success));
     }
 
     #[tokio::test]

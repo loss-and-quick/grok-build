@@ -1,5 +1,3 @@
-//! Responses API wire format.
-
 use super::*;
 
 /// Whether a terminal Responses API `Response` is a content refusal, and the
@@ -37,9 +35,8 @@ pub fn response_refusal(response: &rs::Response) -> Option<String> {
     refusal
 }
 
-/// Flatten `response.output` into `ConversationItem`s, preserving emission
-/// order. Replaying that order byte for byte on the next turn is what keeps
-/// the server-side prefix cache hot.
+/// Flatten `response.output` into `ConversationItem`s, preserving emission order.
+/// Replaying that order byte for byte on the next turn is what keeps the server-side prefix cache hot.
 pub fn response_to_conversation_items(response: rs::Response) -> Vec<ConversationItem> {
     let model_id = response.model.clone();
     let model_fingerprint = response
@@ -79,8 +76,7 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
                 }
             }
             rs::OutputItem::FunctionCall(fc) => {
-                // Tied to the assistant turn: a ToolResult must follow each
-                // one in conversation order, so they are not siblings.
+                // Tied to the assistant turn: a ToolResult must follow each one in conversation order, so they are not siblings
                 tool_calls.push(ToolCall {
                     id: Arc::<str>::from(fc.call_id),
                     name: fc.name,
@@ -90,8 +86,7 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
             rs::OutputItem::Reasoning(r) => {
                 items.push(ConversationItem::Reasoning(r));
             }
-            // Already run server-side; kept so later turns replay the same
-            // context.
+            // These calls already ran server-side; they are kept so later turns replay the same context
             rs::OutputItem::WebSearchCall(ws) => {
                 backend_tool_count += 1;
                 items.push(ConversationItem::BackendToolCall(BackendToolCallItem {
@@ -145,24 +140,24 @@ impl From<&ConversationRequest> for rs::CreateResponse {
         // OpenAI-compatible endpoint rejects `tool_choice` with no `tools`
         // (`required` most loudly). Same guard as the Chat Completions
         // conversion.
-        let tool_choice = req
-            .tool_choice
-            .as_ref()
-            .filter(|_| !tools.is_empty())
-            .map(|tc| match tc {
-                ConversationToolChoice::Auto => {
-                    rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Auto)
-                }
-                ConversationToolChoice::None => {
-                    rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::None)
-                }
-                ConversationToolChoice::Required => {
-                    rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Required)
-                }
-                ConversationToolChoice::Function(name) => {
-                    rs::ToolChoiceParam::Function(rs::ToolChoiceFunction { name: name.clone() })
-                }
-            });
+        let tool_choice =
+            req.tool_choice
+                .as_ref()
+                .filter(|_| !tools.is_empty())
+                .map(|tc| match tc {
+                    ConversationToolChoice::Auto => {
+                        rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Auto)
+                    }
+                    ConversationToolChoice::None => {
+                        rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::None)
+                    }
+                    ConversationToolChoice::Required => {
+                        rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Required)
+                    }
+                    ConversationToolChoice::Function(name) => {
+                        rs::ToolChoiceParam::Function(rs::ToolChoiceFunction { name: name.clone() })
+                    }
+                });
 
         let text = req
             .json_schema
@@ -236,8 +231,7 @@ impl From<&ConversationRequest> for rs::CreateResponse {
     }
 }
 
-/// Reasoning items stay top-level siblings rather than folding into the
-/// assistant, so the input replays the model's original order.
+/// Reasoning items stay top-level siblings rather than folding into the assistant, so the input replays the model's original order.
 pub(super) fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
     let mut items: Vec<rs::InputItem> = req
         .items
@@ -427,9 +421,8 @@ pub fn drop_unverifiable_reasoning(
 }
 
 /// Inject the `type: "reasoning_text"` discriminator the API requires.
-/// `async-openai`'s `ReasoningTextContent` has no `type` field, so it
-/// serializes to `{"text": ...}` and the API answers 400. Delete this once
-/// upstream grows the field.
+/// `async-openai`'s `ReasoningTextContent` has no `type` field, so it serializes to `{"text": ...}` and the API answers 400.
+/// Delete this once upstream grows the field.
 pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
     let Some(input) = body.get_mut("input").and_then(|v| v.as_array_mut()) else {
         return;
@@ -573,10 +566,11 @@ fn content_parts_to_easy_input_content(parts: &[ContentPart]) -> rs::EasyInputCo
     rs::EasyInputContent::ContentList(items)
 }
 
-/// The request's client function tools. A function tool whose name collides with a backend-hosted
-/// tool is dropped, because sending both is rejected as a duplicate, so the hosted tool wins.
+/// The request's client function tools.
+/// A function tool whose name collides with a backend-hosted tool is dropped: sending both is rejected as a duplicate, so the hosted tool wins.
 ///
-/// No hosted tool is emitted here. Both ride the raw-JSON [`extra_tool_entries`] channel instead.
+/// No hosted tool is emitted here.
+/// Both ride the raw-JSON [`extra_tool_entries`] channel instead.
 fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
     let tools: Vec<rs::Tool> = req
         .tools
@@ -604,12 +598,11 @@ fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
     tools
 }
 
-/// Every hosted tool as a raw JSON entry, which the sampler client splices into the serialized
-/// `tools` array. `x_search` rides this channel because it has no `rs::Tool` variant, and
-/// `web_search` rides it because async_openai's `rs::WebSearchToolFilters` models only
-/// `allowed_domains` and cannot carry `excluded_domains`. Emitting either as a typed `rs::Tool`
-/// as well would send it twice, which the API rejects as a duplicate; the JSON built here is
-/// byte-identical to the native `rs::Tool::WebSearch` for the no-filter and allowlist-only cases.
+/// Every hosted tool as a raw JSON entry, which the sampler client splices into the serialized `tools` array.
+/// `x_search` rides this channel because it has no `rs::Tool` variant.
+/// `web_search` rides it because async_openai's `rs::WebSearchToolFilters` models only `allowed_domains` and cannot carry `excluded_domains`.
+/// Emitting either as a typed `rs::Tool` as well would send it twice, which the API rejects as a duplicate.
+/// The JSON built here is byte-identical to the native `rs::Tool::WebSearch` for the no-filter and allowlist-only cases.
 pub fn extra_tool_entries(hosted_tools: &[HostedTool]) -> Vec<serde_json::Value> {
     let mut entries = Vec::new();
     for tool in hosted_tools {

@@ -425,6 +425,11 @@ pub struct PostToolUseFailurePayload {
     pub tool_input_truncated: bool,
     pub error: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null", optional = nullable)]
+    pub duration_ms: Option<u64>,
+    /// True when the failure was a cancellation rather than the tool erroring.
+    pub is_interrupt: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_type: Option<String>,
 }
 

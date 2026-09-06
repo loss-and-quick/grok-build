@@ -68,7 +68,12 @@ async fn encrypted_content_rejection_strips_the_reasoning_and_resubmits() {
             .await;
 
             let recovery = actor
-                .handle_sampling_failure(encrypted_content_error(), 0)
+                .handle_sampling_failure(
+                    encrypted_content_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                )
                 .await;
 
             assert!(
@@ -110,7 +115,12 @@ async fn encrypted_content_rejection_is_terminal_with_nothing_left_to_drop() {
             .await;
 
             let recovery = actor
-                .handle_sampling_failure(encrypted_content_error(), 0)
+                .handle_sampling_failure(
+                    encrypted_content_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                )
                 .await;
 
             assert!(

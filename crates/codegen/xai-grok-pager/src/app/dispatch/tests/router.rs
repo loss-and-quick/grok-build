@@ -654,10 +654,9 @@ fn shown_banner_id(app: &AppView) -> Option<String> {
     )
     .and_then(|a| a.id.clone())
 }
-/// `AnnouncementsOpenCta(surface)` re-resolves through the slot gate and opens
-/// the promo url (observed via the `GROK_TEST_OPEN_URL_FILE` seam, from every
-/// surface); a critical owning the slot — or no usable cta — makes it a silent
-/// no-op (no open, so a stale prior-frame click can't leak the promo url).
+/// `AnnouncementsOpenCta(surface)` re-resolves through the slot gate and opens the promo url from every surface.
+/// The opens are observed through the file named by `GROK_TEST_OPEN_URL_FILE`.
+/// A critical owning the slot, or no usable cta, makes it a silent no-op, so a stale prior-frame click cannot open the promo url.
 #[serial_test::serial(GROK_TEST_OPEN_URL_FILE)]
 #[test]
 fn announcements_open_cta_opens_promo_and_noops_under_critical() {
@@ -708,9 +707,8 @@ fn announcements_open_cta_opens_promo_and_noops_under_critical() {
     unsafe { std::env::remove_var("GROK_TEST_OPEN_URL_FILE") };
     let _ = std::fs::remove_file(&url_file);
 }
-/// `AnnouncementCtaShown` latches once per (announcement, surface): first
-/// frame with an armed CTA rect emits, later frames don't, and a NEW
-/// announcement id re-emits on the same surfaces.
+/// `AnnouncementCtaShown` latches once per (announcement, surface) pair.
+/// The first frame with an armed CTA rect emits, later frames don't, and a NEW announcement id re-emits on the same surfaces.
 #[test]
 fn cta_impressions_latch_once_per_surface_and_reemit_for_new_id() {
     use crate::app::app_view::ActiveView;
@@ -739,9 +737,8 @@ fn cta_impressions_latch_once_per_surface_and_reemit_for_new_id() {
     assert!(logged.contains(&("promo-b".to_string(), AnnouncementCtaSurface::Banner)));
     assert!(logged.contains(&("promo-b".to_string(), AnnouncementCtaSurface::Header)));
 }
-/// No impression without a painted button under a promo slot owner: a
-/// critical preempting the slot, a hidden promo, and cleared (unpainted)
-/// rects all emit nothing — the same gate the click dispatch resolves.
+/// No impression is logged without a painted button under a promo slot owner.
+/// A critical preempting the slot, a hidden promo, and cleared (unpainted) rects all emit nothing; this is the same gate the click dispatch resolves.
 #[test]
 fn cta_impressions_respect_slot_gate_and_paint() {
     use crate::app::app_view::ActiveView;
@@ -779,9 +776,8 @@ fn cta_impressions_respect_slot_gate_and_paint() {
     app.log_announcement_cta_impressions();
     assert!(app.announcement_cta_impressions_logged.is_empty());
 }
-/// Frame occluders (the goal-detail class) leave rects armed and block clicks
-/// at dispatch time — impressions mirror the OSC 8 drop-whole rule: an
-/// occluded CTA is not counted until an overlay-free frame shows it clean.
+/// Frame occluders (the goal-detail class) leave rects armed and block clicks at dispatch time.
+/// Impressions follow the same rule as OSC 8 links: an occluded CTA is not counted until an overlay-free frame shows it clean.
 #[test]
 fn cta_impressions_suppressed_while_rect_occluded() {
     use crate::app::app_view::ActiveView;
@@ -812,8 +808,7 @@ fn cta_impressions_suppressed_while_rect_occluded() {
     app.log_announcement_cta_impressions();
     assert_eq!(app.announcement_cta_impressions_logged.len(), 2);
 }
-/// The welcome hero and dashboard surfaces latch from their own armed rects
-/// (only the active view's rects are consulted).
+/// The welcome hero and dashboard surfaces latch from their own armed rects (only the active view's rects are consulted).
 #[test]
 fn cta_impressions_cover_welcome_and_dashboard_surfaces() {
     use crate::app::app_view::ActiveView;
@@ -867,9 +862,8 @@ fn dispatch_send_prompt_announcements_via_registry() {
         "expected usage message in scrollback"
     );
 }
-/// Hide records only the currently-SHOWN critical's id: with `[A, B]`,
-/// hiding A reveals B, hiding B closes the banner, and a later push with a
-/// new id (C) re-arms it without any user action.
+/// Hide records only the currently-SHOWN critical's id.
+/// With `[A, B]`: hiding A reveals B, hiding B closes the banner, and a later push with a new id (C) re-arms it without any user action.
 #[test]
 fn announcements_hide_is_per_id_so_new_critical_reappears() {
     let mut app = test_app();
@@ -899,8 +893,7 @@ fn announcements_hide_is_per_id_so_new_critical_reappears() {
         "new critical id must re-arm the banner"
     );
 }
-/// Show clears the hide keys of every live critical (stacked hides
-/// un-hide in one step) and leaves unrelated ids alone.
+/// Show clears the hide keys of every live critical (stacked hides un-hide in one step) and leaves unrelated ids alone.
 #[test]
 fn announcements_show_clears_visible_critical_ids_only() {
     let mut app = test_app();
@@ -927,8 +920,7 @@ fn announcements_show_clears_visible_critical_ids_only() {
     let effects = dispatch(Action::AnnouncementsHide, &mut app);
     assert!(effects.is_empty(), "expected no effects, got {effects:?}");
 }
-/// Hide targets the banner-slot item: the critical while one owns the slot,
-/// then the promo the slot reveals — each per-ID with a persist effect.
+/// Hide targets the banner-slot item: first the critical that owns the slot, then the promo the slot reveals, each per-ID with a persist effect.
 #[test]
 fn announcements_hide_targets_slot_owner_critical_then_promo() {
     let mut app = test_app();
@@ -960,9 +952,8 @@ fn announcements_hide_targets_slot_owner_critical_then_promo() {
     let effects = dispatch(Action::AnnouncementsHide, &mut app);
     assert!(effects.is_empty(), "expected no effects, got {effects:?}");
 }
-/// `dismissible: false` pins the slot owner: hide is a silent no-op (no key
-/// write, no persist effect, owner stays shown) — and a dismissible item
-/// owning the slot later still hides normally.
+/// `dismissible: false` pins the slot owner: hide is a silent no-op (no key write, no persist effect, owner stays shown).
+/// A dismissible item owning the slot later still hides normally.
 #[test]
 fn announcements_hide_noops_for_non_dismissible_owner() {
     let mut app = test_app();
@@ -1661,8 +1652,8 @@ fn request_bundle_status_emits_effect() {
     assert_eq!(effects.len(), 1);
     assert!(matches!(&effects[0], Effect::FetchBundleStatus));
 }
-/// Conversation-entry resume stamps LoadSession.chat_kind; process chat_mode
-/// alone does not set the entry bit (effects still stamp via SessionFlags).
+/// A resume from a conversation entry stamps LoadSession.chat_kind.
+/// Process-wide chat_mode alone does not set the entry bit (effects still stamp via SessionFlags).
 #[test]
 fn conversation_entry_load_sets_chat_kind_bit() {
     let mut app = test_app();
@@ -1705,8 +1696,8 @@ fn conversation_entry_load_sets_chat_kind_bit() {
         "conversation-entry --auto must refuse client-side, got {reset:?}"
     );
 }
-/// Process-wide `--chat` + non-conversation resume of a non-disk id still
-/// loads (gateway conversation) with agent chat_kind from sticky mode.
+/// Under process-wide `--chat`, resuming an id with no conversation-entry bit and no local disk row still loads as a gateway conversation.
+/// The agent's chat_kind comes from the sticky mode.
 #[test]
 fn chat_mode_resume_without_local_disk_loads_as_chat() {
     let mut app = test_app();
@@ -1755,9 +1746,8 @@ fn chat_mode_resume_without_local_disk_loads_as_chat() {
         "sticky --chat gateway resume rename must send kind=chat, got {rename:?}"
     );
 }
-/// Sticky `--chat` + history-bypass local-disk load stays Build for rename.
-/// Without the bypass flag this same disk row is refused (see
-/// `chat_mode_refuses_local_build_disk_load`).
+/// Under sticky `--chat`, a local disk row loaded through the history bypass stays Build for rename.
+/// Without the bypass flag this same disk row is refused (see `chat_mode_refuses_local_build_disk_load`).
 #[cfg(feature = "local-workspace")]
 #[test]
 fn load_sticky_chat_history_bypass_rename_kind_is_build() {
@@ -1883,8 +1873,7 @@ fn view_catalog_entry_emits_fetch_effect() {
 }
 /// End-to-end regression test for the "always re-asks" requirement.
 ///
-/// Drives the full user-visible production pipeline twice, with no
-/// manual modal poking between rounds:
+/// Drives the full user-visible production pipeline twice, with no manual modal poking between rounds:
 ///   round 1: dispatch(Action::Fork) -> modal opens.
 ///            select option 0 ("Yes") on the modal.
 ///            submit_question_answers(skipped=false)
@@ -1895,13 +1884,9 @@ fn view_catalog_entry_emits_fetch_effect() {
 ///            dispatch(Action::Fork) -> modal MUST re-open.
 ///
 /// This catches BOTH:
-///   (a) "no persistence in dispatch_fork" -- the only remaining
-///       source of truth for whether the modal opens is the absence
-///       of `args.worktree_override`; and
-///   (b) "submit_question_answers clears question_view" -- a future
-///       refactor that breaks the clear would also break "always
-///       re-asks" in production (open_fork_question refuses when a
-///       question is already on screen), so we exercise it here.
+///   (a) "no persistence in dispatch_fork": whether the modal opens is decided only by the absence of `args.worktree_override`; and
+///   (b) "submit_question_answers clears question_view": open_fork_question refuses while a question is already on screen.
+///       A future refactor that breaks the clear would therefore also break "always re-asks" in production, so we exercise it here.
 #[test]
 fn dispatch_fork_no_flag_always_reopens_modal_after_previous_answer() {
     use crate::views::question_view::QuestionSelection;
@@ -2133,12 +2118,8 @@ fn find_agent_by_session_id_finds_inactive_agent() {
         Some(acp::SessionId::new("sess-B"))
     );
 }
-/// Cross-setting smoke test.
-/// Verifies that the dispatcher routes each Action to the
-/// correct setter (catches a copy-paste registration bug
-/// where two setters were swapped). The original 5-setting
-/// matrix shrank to 2 after the user-feedback drop of
-/// `session_picker_grouped` / `load_envrc` / `use_leader`.
+/// Verifies that the dispatcher routes each Action to its own setter (catches a copy-paste registration bug where two setters were swapped).
+/// The original 5-setting matrix shrank to 2 after the user-feedback drop of `session_picker_grouped` / `load_envrc` / `use_leader`.
 #[test]
 fn pr13_each_setter_writes_to_its_own_mirror() {
     let mut app = test_app_with_agent();
@@ -2151,12 +2132,8 @@ fn pr13_each_setter_writes_to_its_own_mirror() {
     assert_eq!(app.auto_update, Some(false));
     assert_eq!(app.show_tips, Some(false));
 }
-/// Three-way alignment pin: the PAGER registry default must agree
-/// with `PagerLocalSnapshot::default()` (covered by
-/// `defaults_match_pager_state` in `registry::tests`) AND with
-/// `AgentView::new`'s runtime initializer. This is the third leg
-/// of the triangle that was previously missing — the
-/// registry test alone can't see `AgentView::new`'s constant.
+/// The PAGER registry default must agree with `PagerLocalSnapshot::default()` and with `AgentView::new`'s runtime initializer.
+/// `defaults_match_pager_state` in `registry::tests` covers the snapshot leg; the registry test alone can't see `AgentView::new`'s constant.
 #[test]
 fn pager_registry_default_matches_agent_view_new_initializer() {
     use crate::settings::{SettingKind, SettingOwner, SettingsRegistry};
@@ -2219,10 +2196,8 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
         }
     }
 }
-/// If the user picks the regular "Yes, proceed" option (NOT
-/// enable-always-approve), the dispatcher must behave exactly as
-/// before — no PersistPermissionMode effect, no YOLO flip. Pins
-/// that the new code path is gated strictly on the id check.
+/// Picking the regular "Yes, proceed" option (NOT enable-always-approve) must behave as before: no PersistPermissionMode effect, no YOLO flip.
+/// Pins that the always-approve code path is gated strictly on the id check.
 #[test]
 fn regular_allow_once_does_not_trigger_always_approve_persist() {
     use std::sync::Arc;
@@ -2248,9 +2223,8 @@ fn regular_allow_once_does_not_trigger_always_approve_persist() {
         "app.default_yolo must remain OFF when the regular AllowOnce option is picked",
     );
 }
-/// Launch-time blocked `--yolo` in the TUI: the one-shot notice is
-/// surfaced (toast + durable system line) on the first agent view and
-/// consumed so later switches stay quiet.
+/// When `--yolo` is blocked at launch, the first agent view shows the one-shot notice as a toast and a durable system line.
+/// The notice is consumed there, so later switches stay quiet.
 #[test]
 fn switch_to_agent_surfaces_launch_block_notice_once() {
     let mut app = test_app();
@@ -2290,10 +2264,8 @@ fn switch_to_agent_surfaces_launch_block_notice_once() {
     assert!(app.agents[&id2].toast.is_none());
     assert_eq!(app.agents[&id2].scrollback.iter_entries().count(), 0);
 }
-/// Switching to a non-auto/non-yolo agent re-anchors a stale global
-/// `"auto"` mirror (left by a different agent) to `"ask"`, so the cycle's
-/// `sync_active_auto_flag` derive can't copy that Auto onto the now-active
-/// agent.
+/// Switching to a non-auto/non-yolo agent re-anchors a stale global `"auto"` mirror (left by a different agent) to `"ask"`.
+/// The cycle's `sync_active_auto_flag` derive then can't copy that Auto onto the now-active agent.
 #[test]
 fn switch_to_agent_reanchors_stale_global_auto() {
     let mut app = test_app_with_agent();
@@ -2358,7 +2330,6 @@ fn show_tasks_no_active_agent_is_noop() {
     let effects = dispatch(Action::ShowTasks, &mut app);
     assert!(effects.is_empty(), "ShowTasks without an agent is a no-op");
 }
-/// classify_top_level decision matrix.
 #[test]
 fn classify_top_level_branches() {
     use crate::views::dashboard::{RowState, classify_top_level};
@@ -2373,10 +2344,8 @@ fn classify_top_level_branches() {
     assert_eq!(classify_top_level(agent), RowState::Working);
     agent.session.loading_replay = false;
 }
-/// For Idle rows, `last_change_at` is the
-/// frozen `last_active_at` anchor. Building the row twice in
-/// rapid succession against a fixed `last_active_at` yields
-/// nearly-identical `elapsed()` values (within tolerance).
+/// For Idle rows, `last_change_at` is the frozen `last_active_at` anchor.
+/// Building the row twice in rapid succession against a fixed `last_active_at` yields nearly-identical `elapsed()` values (within tolerance).
 #[test]
 fn build_rows_idle_anchor_is_frozen_last_active_at() {
     use crate::views::dashboard::build_rows;
@@ -2391,7 +2360,6 @@ fn build_rows_idle_anchor_is_frozen_last_active_at() {
         &app.agents,
         &std::collections::BTreeSet::new(),
         &[],
-        None,
         crate::views::dashboard::Grouping::State,
         &crate::views::dashboard::Filter::None,
         None,
@@ -2407,7 +2375,6 @@ fn build_rows_idle_anchor_is_frozen_last_active_at() {
         &app.agents,
         &std::collections::BTreeSet::new(),
         &[],
-        None,
         crate::views::dashboard::Grouping::State,
         &crate::views::dashboard::Filter::None,
         None,
@@ -2418,9 +2385,8 @@ fn build_rows_idle_anchor_is_frozen_last_active_at() {
         "idle anchor must stay frozen across rebuilds, got {elapsed2:?}",
     );
 }
-/// Working rows anchor at `turn_started_at` so
-/// the age column shows the LIVE elapsed time within the current
-/// turn rather than the time since the previous turn ended.
+/// Working rows anchor at `turn_started_at`.
+/// The age column then shows the LIVE elapsed time within the current turn rather than the time since the previous turn ended.
 #[test]
 fn build_rows_working_anchor_is_turn_started_at() {
     use crate::views::dashboard::build_rows;
@@ -2435,7 +2401,6 @@ fn build_rows_working_anchor_is_turn_started_at() {
         &app.agents,
         &std::collections::BTreeSet::new(),
         &[],
-        None,
         crate::views::dashboard::Grouping::State,
         &crate::views::dashboard::Filter::None,
         None,
@@ -2449,12 +2414,9 @@ fn build_rows_working_anchor_is_turn_started_at() {
         "expected ~5s (turn_started_at anchor), got {elapsed:?}",
     );
 }
-/// Defensive test for the fallback
-/// path when both `turn_started_at` and `last_active_at` are
-/// `None`. The row's `last_change_at` projects the *frozen*
-/// process-wide `fallback_epoch`, so two consecutive builds yield
-/// stable `last_change_at` values (within sampling jitter) rather
-/// than re-anchoring at `now` and showing "0s" every frame.
+/// Defensive test for the fallback path when both `turn_started_at` and `last_active_at` are `None`.
+/// The row's `last_change_at` projects the *frozen* process-wide `fallback_epoch`.
+/// Two consecutive builds therefore yield stable values (within sampling jitter) rather than re-anchoring at `now` and showing "0s" every frame.
 #[test]
 fn build_rows_fallback_anchor_is_frozen_when_last_active_at_is_none() {
     use crate::views::dashboard::build_rows;
@@ -2468,7 +2430,6 @@ fn build_rows_fallback_anchor_is_frozen_when_last_active_at_is_none() {
         &app.agents,
         &std::collections::BTreeSet::new(),
         &[],
-        None,
         crate::views::dashboard::Grouping::State,
         &crate::views::dashboard::Filter::None,
         None,
@@ -2477,7 +2438,6 @@ fn build_rows_fallback_anchor_is_frozen_when_last_active_at_is_none() {
         &app.agents,
         &std::collections::BTreeSet::new(),
         &[],
-        None,
         crate::views::dashboard::Grouping::State,
         &crate::views::dashboard::Filter::None,
         None,
@@ -2489,12 +2449,9 @@ fn build_rows_fallback_anchor_is_frozen_when_last_active_at_is_none() {
         "fallback anchor must be frozen across rebuilds, drifted {drift:?}",
     );
 }
-/// While the turn is IDLE the peek header label reflects the TYPE of the
-/// most recent agent block (Response / Edit / Thought / …) via the
-/// scrollback scan. The most recent block wins; a fresh user prompt is a
-/// turn boundary with no agent response after it → "Idle". (The RUNNING
-/// case follows live turn activity — see the `extract_response_type_*`
-/// tests.)
+/// While the turn is IDLE the scrollback scan gives the peek header label the TYPE of the most recent agent block (Response / Edit / Thought / …).
+/// The most recent block wins; a fresh user prompt is a turn boundary with no agent response after it yet, so the label is "Idle".
+/// (The RUNNING case follows live turn activity; see the `extract_response_type_*` tests.)
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn peek_label_reflects_last_response_type() {
@@ -2517,7 +2474,7 @@ fn peek_label_reflects_last_response_type() {
         .push_block(RenderBlock::user_prompt("do it"));
     assert_eq!(extract_last_response_type(agent), "Idle");
 }
-/// agent.question_view.is_some() → NeedsInput.
+/// agent.question_view.is_some() classifies as NeedsInput.
 #[test]
 fn classify_top_level_question_view_some_is_needs_input() {
     use crate::views::dashboard::{RowState, classify_top_level};
@@ -2531,8 +2488,7 @@ fn classify_top_level_question_view_some_is_needs_input() {
     ));
     assert_eq!(classify_top_level(agent), RowState::NeedsInput);
 }
-/// ANSI escapes in `display_name` are stripped at row
-/// build time.
+/// ANSI escapes in `display_name` are stripped at row build time.
 #[test]
 fn top_level_label_strips_control_characters() {
     use crate::views::dashboard::build_rows;
@@ -2543,7 +2499,6 @@ fn top_level_label_strips_control_characters() {
         &app.agents,
         &std::collections::BTreeSet::new(),
         &[],
-        None,
         crate::views::dashboard::Grouping::State,
         &crate::views::dashboard::Filter::None,
         None,
@@ -2556,7 +2511,6 @@ fn top_level_label_strips_control_characters() {
     );
     assert!(top.label.contains("evil"));
 }
-/// Build a synthetic MouseEvent for tests.
 fn mouse_event(
     kind: crossterm::event::MouseEventKind,
     col: u16,
@@ -2569,11 +2523,7 @@ fn mouse_event(
         modifiers: crossterm::event::KeyModifiers::NONE,
     }
 }
-/// Left-click on a row selects it (single click).
-/// Single left-click on a row attaches the
-/// conversation immediately (was: selects only, required
-/// double-click to attach). The user explicitly reported the
-/// previous click-to-select behaviour as unresponsive.
+/// A single left-click on a row selects it and attaches the conversation immediately.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn mouse_left_click_attaches_immediately() {
@@ -2599,11 +2549,9 @@ fn mouse_left_click_attaches_immediately() {
     }
     assert_eq!(d.selected, Some(id));
 }
-/// Every left-click attaches, including
-/// rapid repeated clicks. The previous design used a 500ms window
-/// to distinguish single (select) from double (attach) click;
-/// the new design makes every click attach so the user's mental
-/// model "click = open" always holds.
+/// Every left-click attaches, including rapid repeated clicks.
+/// The previous design used a 500ms window to distinguish single (select) from double (attach) click.
+/// Now every click attaches, so the user's mental model "click = open" always holds.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn mouse_repeated_click_keeps_attaching() {
@@ -2636,9 +2584,8 @@ fn mouse_repeated_click_keeps_attaching() {
         other => panic!("expected DashboardAttach on second click, got {other:?}"),
     }
 }
-/// Clicks after the previous 500ms-double-click
-/// window also attach (the previous test asserted single-click
-/// behaviour for >500ms-apart clicks; now every click attaches).
+/// Clicks after the previous 500ms double-click window also attach.
+/// (The previous test asserted single-click behaviour for clicks more than 500ms apart; now every click attaches.)
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn mouse_click_after_long_pause_still_attaches() {
@@ -2722,7 +2669,7 @@ fn pick_content_session_in_worktree_refuses_conversation_row() {
     );
     assert!(read_toast(&app).contains("worktree"));
 }
-/// Delete acts on local disk + registry; conversation rows have neither.
+/// Delete acts on local disk and registry; conversation rows have neither.
 #[test]
 fn delete_session_refuses_conversation_row() {
     let mut app = test_app_with_agent();
@@ -2741,8 +2688,7 @@ fn delete_session_refuses_conversation_row() {
     );
     assert!(read_toast(&app).contains("isn't supported"));
 }
-/// Expanding a conversation card must not read `chat_history.jsonl`
-/// (it doesn't exist); the row still toggles open.
+/// Expanding a conversation card must not read `chat_history.jsonl` (it doesn't exist); the row still toggles open.
 #[test]
 fn expand_conversation_card_skips_detail_load() {
     use crate::views::modal::ActiveModal;
@@ -2782,9 +2728,10 @@ fn expand_build_card_still_loads_detail() {
         "expected LoadCardDetail, got {effects:?}"
     );
 }
-/// Welcome-screen variants of the conversation-card expand exemption.
+/// Welcome-screen variants of the conversation-card expand exemption, plus the welcome card-detail round trip.
+/// The expand stamps the welcome picker's identity, a stale-seq result is dropped, and a current one lands on the welcome entry.
 #[test]
-fn welcome_expand_conversation_card_skips_detail_load() {
+fn welcome_expand_skips_conversation_and_routes_build_card_detail() {
     let mut app = test_app();
     app.session_picker_entries = Some(vec![make_conversation_entry("conv-exp-w1")]);
     let effects = dispatch(
@@ -2811,12 +2758,69 @@ fn welcome_expand_conversation_card_skips_detail_load() {
         },
         &mut app,
     );
-    assert!(
-        matches!(&effects[..], [Effect::LoadCardDetail { .. }]),
-        "expected LoadCardDetail, got {effects:?}"
+    let [
+        Effect::LoadCardDetail {
+            host: SessionPickerHost::Welcome,
+            generation,
+            session_id,
+            seq,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected a welcome-stamped LoadCardDetail, got {effects:?}");
+    };
+    assert_eq!(*generation, app.session_picker_generation);
+    assert_eq!(*seq, app.session_picker_detail_seq);
+    assert_eq!(session_id, "local-exp-w1");
+    let stamped_seq = *seq;
+    let _ = dispatch(Action::CycleSessionSourceFilter, &mut app);
+    let detail = crate::app::app_view::CardDetail {
+        turn_count: 3,
+        tool_call_count: 1,
+        first_prompt_preview: "hello".into(),
+    };
+    let welcome_detail = |generation, seq, detail| {
+        Action::TaskComplete(TaskResult::CardDetailLoaded {
+            host: SessionPickerHost::Welcome,
+            generation,
+            source: "local".into(),
+            session_id: "local-exp-w1".into(),
+            seq,
+            detail,
+        })
+    };
+    let welcome_card_detail = |app: &AppView| {
+        app.session_picker_entries.as_ref().and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.id == "local-exp-w1")
+                .and_then(|entry| entry.card_detail.as_ref().map(|d| d.turn_count))
+        })
+    };
+    let _ = dispatch(
+        welcome_detail(app.session_picker_generation, stamped_seq, detail.clone()),
+        &mut app,
+    );
+    assert_eq!(
+        welcome_card_detail(&app),
+        None,
+        "a stale-seq welcome card detail must be dropped"
+    );
+    let _ = dispatch(
+        welcome_detail(
+            app.session_picker_generation,
+            app.session_picker_detail_seq,
+            detail,
+        ),
+        &mut app,
+    );
+    assert_eq!(
+        welcome_card_detail(&app),
+        None,
+        "Headless must not resurrect a cleared Grok row from card detail"
     );
 }
-/// Collect the active agent's system-block texts.
 fn system_texts(app: &AppView, id: AgentId) -> Vec<String> {
     app.agents[&id]
         .scrollback

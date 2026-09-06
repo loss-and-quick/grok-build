@@ -283,7 +283,13 @@ fn stop_envelope() -> HookEventEnvelope {
 fn deny_reason(result: &xai_grok_hooks::dispatcher::PreToolUseResult) -> Option<String> {
     match &result.decision {
         xai_grok_hooks::result::HookDecision::Deny { reason, .. } => Some(reason.clone()),
-        xai_grok_hooks::result::HookDecision::Allow => None,
+        // Neither is a denial: `Ask` hands the call to the user's prompt and
+        // `Defer` hands the verdict to the next decider, so neither carries a
+        // deny reason. The deny assertions still fail loudly if a gate that
+        // must deny answers with one of these instead.
+        xai_grok_hooks::result::HookDecision::Allow
+        | xai_grok_hooks::result::HookDecision::Ask { .. }
+        | xai_grok_hooks::result::HookDecision::Defer { .. } => None,
     }
 }
 

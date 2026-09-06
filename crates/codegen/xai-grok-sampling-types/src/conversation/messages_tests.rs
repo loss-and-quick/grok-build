@@ -1,5 +1,3 @@
-//! Tests for the Messages API conversion.
-
 use super::test_support::*;
 use super::*;
 
@@ -382,7 +380,6 @@ fn test_btw_cross_api_messages_no_regressions() {
         "top-level thinking must be absent; got: {json:#}",
     );
 
-    // Temperature must be absent (not hardcoded).
     assert!(
         json.get("temperature").is_none()
             || json.pointer("/temperature").is_some_and(|v| v.is_null()),
@@ -447,8 +444,7 @@ fn test_tool_result_with_images_to_anthropic() {
 
     let messages_req = build_messages_request(&req, None);
 
-    // Find the user message that contains the tool result
-    // (the Messages API wraps tool results in user messages)
+    // Find the user message that contains the tool result (the Messages API wraps tool results in user messages)
     let tool_result_msg = messages_req
         .messages
         .iter()
@@ -477,7 +473,6 @@ fn test_tool_result_with_images_to_anthropic() {
         })
         .unwrap();
 
-    // Should be Blocks variant with text + image, not Text
     let crate::messages::ToolResultContent::Blocks(inner) = tool_result_block else {
         panic!("Expected ToolResultContent::Blocks, got Text");
     };
@@ -493,7 +488,7 @@ fn test_tool_result_with_images_to_anthropic() {
 #[test]
 fn upgrade_legacy_reasoning_singular_anthropic_no_id() {
     // Messages streaming sets id = "" (see stream/messages.rs:340).
-    // The upgrader must still emit a sibling carrying text + signature.
+    // The upgrader must still emit a sibling carrying text and signature
     let raw = serde_json::json!({
         "type": "assistant",
         "content": "answer",
@@ -680,5 +675,3 @@ fn test_messages_request_keeps_thinking_signed_by_this_backend() {
         "got: {json:#}",
     );
 }
-
-

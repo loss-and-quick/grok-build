@@ -29,4 +29,3 @@ account = "other@example.com"
     let reparsed: ConsentConfig = toml::from_str(&emitted).unwrap();
     assert_eq!(reparsed, consent);
 }
-

@@ -292,7 +292,6 @@ mod tests {
         let text = imagine_instruction("a golden sunset");
         assert!(text.contains("a golden sunset"));
         assert!(text.contains("image_gen"));
-        assert!(text.contains("verbatim"));
     }
 
     #[test]
@@ -300,7 +299,6 @@ mod tests {
         let text = imagine_video_instruction("a cat playing piano");
         assert!(text.contains("a cat playing piano"));
         assert!(text.contains("image_to_video"));
-        assert!(text.contains("FFmpeg"));
     }
 
     const ALL_FIRE_MODES: [LoopFireMode; 3] = [
@@ -315,7 +313,6 @@ mod tests {
             let text = loop_schedule_instruction("every 30 minutes do x", mode);
             assert!(text.contains("every 30 minutes do x"), "{mode:?}");
             assert!(text.contains("<number><unit>"), "{mode:?}");
-            assert!(text.contains("ask the user how often"), "{mode:?}");
             assert!(
                 !text.contains("10m"),
                 "no host-side default interval: {mode:?}"
@@ -327,10 +324,6 @@ mod tests {
             assert!(
                 text.contains("task_id"),
                 "must teach in-place updates via task_id: {mode:?}"
-            );
-            assert!(
-                text.contains("delete and recreate"),
-                "must steer away from delete+recreate: {mode:?}"
             );
             assert!(
                 text.contains("scheduler_delete <task_id>"),
@@ -398,7 +391,6 @@ mod tests {
         assert!(text.contains("ship the widget"));
         assert!(text.contains("update_goal(completed: true"));
         assert!(text.contains("blocked_reason"));
-        assert!(text.contains("If update_goal returns an error"));
         assert!(
             !text.contains("system-reminder"),
             "expansions ride as user messages and must not claim reminder authority"

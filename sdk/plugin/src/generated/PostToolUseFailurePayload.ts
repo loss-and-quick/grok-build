@@ -3,4 +3,4 @@
 /**
  * `post_tool_use_failure` payload.
  */
-export type PostToolUseFailurePayload = { toolName: string, toolUseId: string, toolInput: unknown, toolInputTruncated: boolean, error: string, subagentType?: string | null, };
+export type PostToolUseFailurePayload = { toolName: string, toolUseId: string, toolInput: unknown, toolInputTruncated: boolean, error: string, durationMs?: number | null, isInterrupt: boolean, subagentType?: string | null, };

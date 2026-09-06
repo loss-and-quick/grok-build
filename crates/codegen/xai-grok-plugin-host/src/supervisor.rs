@@ -839,6 +839,13 @@ fn event_gate(event: &str) -> GateKindDto {
             GateKind::Stop => GateKindDto::Stop,
             GateKind::Replace => GateKindDto::Replace,
             GateKind::Intercept => GateKindDto::Intercept,
+            // Upstream split these two out of `Observe`; the plugin wire
+            // vocabulary has no counterpart, and both events were `Observe` to
+            // plugins before the split. Reporting `Observe` keeps the contract
+            // a plugin was written against rather than changing it as a side
+            // effect of a sync. Widening `GateKindDto` is a deliberate protocol
+            // change, and would need the TS SDK regenerated with it.
+            GateKind::PostTool | GateKind::Prompt => GateKindDto::Observe,
         },
         Err(_) => GateKindDto::Observe,
     }

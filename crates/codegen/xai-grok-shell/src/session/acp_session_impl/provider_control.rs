@@ -25,8 +25,8 @@ use xai_grok_hooks::discovery::HookRegistry;
 use xai_grok_hooks::event::{HookEventEnvelope, HookEventName, HookPayload};
 use xai_grok_hooks::invoker::PluginHookInvoker;
 use xai_grok_sampler::{
-    ErrorDirective, RequestInterceptor, RequestReplacement, RequestView, SamplerConfig,
-    SeamFuture, SharedRequestInterceptor,
+    ErrorDirective, RequestInterceptor, RequestReplacement, RequestView, SamplerConfig, SeamFuture,
+    SharedRequestInterceptor,
 };
 use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
 
@@ -455,9 +455,8 @@ impl SessionActor {
         {
             // The tolerant `Deserialize` on `ErrorDirective` fails open to
             // `Passthrough` on any shape it does not recognize.
-            Some(value) => {
-                serde_json::from_value::<ErrorDirective>(value).unwrap_or(ErrorDirective::Passthrough)
-            }
+            Some(value) => serde_json::from_value::<ErrorDirective>(value)
+                .unwrap_or(ErrorDirective::Passthrough),
             None => ErrorDirective::Passthrough,
         }
     }
@@ -622,7 +621,8 @@ impl SessionActor {
             FailoverDirectiveOutcome::UseModel(model) => model,
             FailoverDirectiveOutcome::UseChain => {
                 // 2) Built-in chain.
-                let (target, cooldown) = self.builtin_fallback_target(current_model, error_class)?;
+                let (target, cooldown) =
+                    self.builtin_fallback_target(current_model, error_class)?;
                 if cooldown > std::time::Duration::ZERO {
                     self.arm_fallback_cooldown(current_model, &target);
                 }
@@ -640,6 +640,13 @@ impl SessionActor {
                 reason: format!(
                     "Provider error ({error_class}); falling back to model {switched_model}"
                 ),
+                // `error_class` is the failover-chain vocabulary
+                // (`rate_limit`, `network`, `5xx`, `overloaded`, …), not the
+                // `SamplingErrorKind` strings this field carries. Forwarding
+                // it would parse to an unknown kind on the client, which
+                // suppresses the text recovery an absent kind still allows —
+                // and the reason above already names the class.
+                error_type: None,
             },
         ))
         .await;
@@ -875,7 +882,11 @@ mod tests {
 
                 // Wrong model / unlisted error class → no match.
                 assert!(actor.builtin_fallback_target("other", "5xx").is_none());
-                assert!(actor.builtin_fallback_target("primary", "rate_limit").is_none());
+                assert!(
+                    actor
+                        .builtin_fallback_target("primary", "rate_limit")
+                        .is_none()
+                );
 
                 // Match → first target, with the configured cooldown.
                 let (target, cooldown) = actor
@@ -1172,16 +1183,28 @@ mod tests {
         apply_tool_call_renames(&mut response, &renames);
 
         // The dispatched-tool-call view observes the real names.
-        let via_tool_calls: Vec<&str> =
-            response.tool_calls().iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(via_tool_calls, vec!["read_file", "write_file", "already_clear"]);
+        let via_tool_calls: Vec<&str> = response
+            .tool_calls()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(
+            via_tool_calls,
+            vec!["read_file", "write_file", "already_clear"]
+        );
 
         // The assistant item recorded to history observes the SAME real names —
         // proving the double-write is a single shared source, not two copies.
         let assistant = response.assistant().expect("assistant item present");
-        let via_assistant: Vec<&str> =
-            assistant.tool_calls.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(via_assistant, vec!["read_file", "write_file", "already_clear"]);
+        let via_assistant: Vec<&str> = assistant
+            .tool_calls
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(
+            via_assistant,
+            vec!["read_file", "write_file", "already_clear"]
+        );
 
         // The unmapped call kept its original name.
         assert_eq!(assistant.tool_calls[2].name, "already_clear");
@@ -1196,7 +1219,8 @@ mod tests {
 
         let mut response = ConversationResponse {
             items: vec![ConversationItem::assistant_tool_calls(vec![tool_call(
-                "call_a", "masked_read",
+                "call_a",
+                "masked_read",
             )])],
             stop_reason: None,
             usage: None,
