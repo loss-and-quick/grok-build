@@ -306,10 +306,16 @@ pub fn handle_usage_modal_key(
             state.step_tab(false);
             UsageModalOutcome::Changed
         }
-        KeyCode::Char(c @ '1'..='3') => {
-            state.set_tab(UsageInfoTab::from_index(c as usize - '1' as usize));
-            UsageModalOutcome::Changed
-        }
+        // Bounded by `ALL.len()` rather than a literal last digit, so adding a
+        // tab needs no edit here. A digit past the last tab is ignored instead
+        // of clamping onto the first, which would read as a wrong jump.
+        KeyCode::Char(c @ '1'..='9') => match c as usize - '1' as usize {
+            i if i < UsageInfoTab::ALL.len() => {
+                state.set_tab(UsageInfoTab::from_index(i));
+                UsageModalOutcome::Changed
+            }
+            _ => UsageModalOutcome::Unchanged,
+        },
         KeyCode::Up | KeyCode::Char('k') => {
             state.scroll_to(state.scroll.saturating_sub(1));
             UsageModalOutcome::Changed
@@ -1072,6 +1078,23 @@ mod tests {
         assert_eq!(state.active_tab, UsageInfoTab::ContextUsage, "wraps");
         handle_usage_modal_key(&mut state, &key(KeyCode::BackTab));
         assert_eq!(state.active_tab, UsageInfoTab::SessionInfo, "wraps back");
+    }
+
+    #[test]
+    fn digit_keys_cover_every_tab_and_stop_at_the_last() {
+        let mut state = state_with_session();
+        for (i, tab) in UsageInfoTab::ALL.iter().enumerate() {
+            let digit = char::from_digit(i as u32 + 1, 10).expect("tab count fits one digit");
+            handle_usage_modal_key(&mut state, &key(KeyCode::Char(digit)));
+            assert_eq!(state.active_tab, *tab, "{digit} should open {tab:?}");
+        }
+        let past_end =
+            char::from_digit(UsageInfoTab::ALL.len() as u32 + 1, 10).expect("still one digit");
+        assert_eq!(
+            handle_usage_modal_key(&mut state, &key(KeyCode::Char(past_end))),
+            UsageModalOutcome::Unchanged
+        );
+        assert_eq!(state.active_tab, *UsageInfoTab::ALL.last().unwrap());
     }
 
     #[test]
