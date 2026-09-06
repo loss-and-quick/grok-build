@@ -54,14 +54,15 @@ the first SDK, not the boundary.
 
 ### What's here now
 
-- `plugin.json` gains a `"plugin": "./index.ts"` sidecar entry. The runtime is
-  auto-discovered in preference order **bun → node (>=22) → deno**, or pinned
-  explicitly via a `"runtime"` field. No vendoring, no embedded JS engine.
-- Or `"exec"`, for a plugin in any language: `"exec": "./plugin"` runs a
-  program that ships with the plugin, `"exec": ["python3",
-  "${GROK_PLUGIN_ROOT}/plugin.py"]` runs it under an interpreter found on
-  `PATH`. Same wire contract, same supervision, same confinement — only the
-  argv differs.
+- `plugin.json` gains an `"exec"` sidecar entry, in whatever language the
+  plugin is written: `"exec": "./plugin"` runs a program that ships with it,
+  `"exec": ["python3", "${GROK_PLUGIN_ROOT}/plugin.py"]` runs it under an
+  interpreter found on `PATH`. The host knows nothing about the program beyond
+  its argv.
+- A TypeScript plugin names the SDK launcher,
+  `"exec": ["${GROK_PLUGIN_ROOT}/_sdk/run", "index.ts"]`, which discovers a
+  runtime in preference order **bun → node (>=22) → deno** and `exec`s the
+  entry under it. No vendoring, no embedded JS engine, no build step.
 - All 15 hook events bridged from the core's hook dispatcher are available to
   TS plugins, each with its typed gate semantics: **Observe** (acknowledged,
   no control), **Tool** (allow/deny a tool call, with a reason), or **Stop**
@@ -87,8 +88,8 @@ the first SDK, not the boundary.
     refusal to start it.
 
   Both mechanisms are keyed on the manifest flag alone and are inherited across
-  `exec`, so an `exec` plugin is confined exactly as a TypeScript one is and
-  neither can be shed by spawning a child.
+  `exec`, so a plugin that execs its way into a JS runtime is confined exactly
+  as a compiled one is, and neither can be shed by spawning a child.
 
   The sidecar is also told the flag directly, as `GROK_PLUGIN_NETWORK=1` or
   `=0` in its environment, so a launcher that runs the plugin under a runtime
@@ -129,7 +130,7 @@ A plugin is a directory with a `plugin.json` and an entry file:
 ```json
 {
   "name": "my-plugin",
-  "plugin": "./index.ts"
+  "exec": ["${GROK_PLUGIN_ROOT}/_sdk/run", "index.ts"]
 }
 ```
 

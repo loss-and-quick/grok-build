@@ -2,8 +2,7 @@
   "name": "demo-hooks",
   "version": "0.1.0",
   "description": "Demo: a TypeScript sidecar plugin exercising the PreToolUse / Stop / SessionStart hooks plus one model-visible tool.",
-  "plugin": "./index.ts",
-  "runtime": "auto",
+  "exec": ["${GROK_PLUGIN_ROOT}/_sdk/run", "index.ts"],
   "network": false,
   "tools": [
     {

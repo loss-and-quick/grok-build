@@ -308,10 +308,10 @@ for editor/typecheck support) are devDependencies only.
 
 ## Launcher (`_sdk/run`)
 
-A plugin manifest launches a sidecar either as `plugin` + `runtime` (the host
-finds a JS runtime and builds the argv for a TypeScript entry) or as `exec` (the
-host runs a program verbatim). `src/run` lets a TypeScript plugin use the
-generic `exec` form: it is the runtime-finding step, moved to the SDK.
+A plugin manifest launches a sidecar with `exec`: the host runs the program the
+manifest names, verbatim, and knows nothing about JavaScript. `src/run` is what
+makes a TypeScript plugin fit that form — the runtime-finding step, living in
+the SDK next to the TypeScript authors.
 
 ```json
 { "exec": ["${GROK_PLUGIN_ROOT}/_sdk/run", "index.ts"] }
@@ -328,25 +328,24 @@ the manifest layer rejects a non-executable `exec` program.
 run [--runtime=auto|bun|node|deno] [--net] [--] <entry.ts> [args...]
 ```
 
-- **Discovery** is `bun → node (>=22) → deno`, first found wins, matching the
-  host. For node it probes `node --version` to decide whether
+- **Discovery** is `bun → node (>=22) → deno`, first found wins. For node it
+  probes `node --version` to decide whether
   `--experimental-strip-types` is needed (unflagged from 23.6) and to reject a
   node too old to strip types at all; in the `auto` chain a too-old node is
   skipped so deno still gets a turn, and only an explicit `--runtime=node` makes
   it fatal. An unparseable or failed probe keeps the flag, which is safe on the
   22 line.
-- **`--runtime=`** pins a runtime, standing in for the manifest's `runtime`
-  field, which the `exec` form has no room for. `$GROK_PLUGIN_RUNTIME` is the
-  fallback; the flag wins.
-- **The entry is resolved against the plugin root**, i.e. the parent of the
-  launcher's own directory — *not* the working directory. A sidecar's cwd is the
-  workspace root, so a bare `index.ts` would otherwise be looked up in the
-  user's project. Absolute entries pass through. Everything after the entry is
-  forwarded to it.
+- **`--runtime=`** pins a runtime instead of probing. `$GROK_PLUGIN_RUNTIME` is
+  the fallback; the flag wins.
+- **The entry is resolved against the plugin root**, which the host exports as
+  `$GROK_PLUGIN_ROOT` (falling back to the parent of the launcher's own
+  directory) — *not* the working directory. A sidecar's cwd is the workspace
+  root, so a bare `index.ts` would otherwise be looked up in the user's project.
+  Absolute entries pass through. Everything after the entry is forwarded to it.
 - **Deno** gets `--no-prompt` and `--allow-read=`/`--allow-write=` scoped to the
   workspace root, which the launcher reads from its own working directory —
   that is the one place the host's `workspace_root` reaches this side of `exec`.
-  `--allow-net` is added only for `--net`.
+  `--allow-net` is added only when the plugin is allowed the network.
 - **Failure is loud**: no usable runtime, or a missing entry, exits 127 with a
   diagnostic on stderr naming what was looked for and the `PATH` it searched.
   A usage error exits 2. Nothing is ever written to stdout, which is the
@@ -354,17 +353,18 @@ run [--runtime=auto|bun|node|deno] [--net] [--] <entry.ts> [args...]
 - **`exec`, not fork**: the runtime replaces the launcher process, so the host
   supervises and signals the plugin's own pid with no shell in between.
 
-### `--net` is a second declaration, unavoidably
+### Network: read, not restated
 
-Whether a plugin may reach the network is a manifest field the host reads, and
-it reaches the child in no form at all — not argv, not the environment, and not
-the `initialize` handshake, which happens long after argv is fixed. A launcher
-on this side of `exec` therefore cannot know it, and deno's `--allow-net` has to
-be restated with `--net` alongside the manifest's `"network": true`. Without the
-flag it fails closed, matching the manifest default. On Linux the enforcement
-that actually matters for `"network": false` is the host's per-child seccomp
-filter, which applies to the launcher and every descendant regardless of what
-deno was told.
+Whether a plugin may reach the network is a manifest field, and the host states
+it to the child as `GROK_PLUGIN_NETWORK` (`1` or `0`, always set). The launcher
+reads that and lines deno's `--allow-net` up with it, so the decision is never
+spelled twice in two places that can drift. `--net` remains for running the
+launcher by hand; absent both, it fails closed, matching the manifest default.
+
+None of that is the enforcement. On Linux what actually holds `"network":
+false` is the host's per-child seccomp filter, which applies to the launcher and
+every descendant regardless of what deno was told; on macOS it is a
+`sandbox-exec` Seatbelt profile.
 
 ### Cost
 

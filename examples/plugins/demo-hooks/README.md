@@ -31,17 +31,19 @@ equivalent command hook produces byte-identical values.
 
 ```
 demo-hooks/
-  plugin.json   # manifest: "plugin": "./index.ts" marks it a TS sidecar
+  plugin.json   # manifest: "exec" names the program that speaks the protocol
   index.ts      # definePlugin({ tools: { ... }, hooks: { ... } })
+  _sdk/         # the SDK, including the `run` launcher `exec` points at
   README.md
 ```
 
 `plugin.json` declares:
 
-- `"plugin": "./index.ts"` — the sidecar entry (its presence is what makes this
-  a TS sidecar plugin).
-- `"runtime": "auto"` — the host probes `bun → node (>=22) → deno` and runs the
-  first found. No build step; the runtime executes the `.ts` source directly.
+- `"exec": ["${GROK_PLUGIN_ROOT}/_sdk/run", "index.ts"]` — the sidecar entry.
+  A plugin is a program that speaks the protocol; the host runs this argv and
+  knows nothing about JavaScript. `_sdk/run` is the SDK launcher: it probes
+  `bun → node (>=22) → deno` and `exec`s the entry under the first found. No
+  build step; the runtime executes the `.ts` source directly.
 - `"network": false` — the sidecar child is denied the network by whatever this
   platform provides (a seccomp filter on Linux, a `sandbox-exec` Seatbelt
   profile on macOS), applied by the shell-injected spawn hardener. Nothing
@@ -58,7 +60,8 @@ import { definePlugin, deny, observed } from "@grok-build/plugin";
 ```
 
 This in-repo example has **no `node_modules`**, so `index.ts` instead imports the
-SDK source directly by relative path:
+SDK source directly by relative path (`_sdk/` is a symlink to the same tree,
+which is what a packaged plugin gets as a real copy):
 
 ```ts
 import { definePlugin, deny, observed } from "../../../sdk/plugin/src/index.ts";
