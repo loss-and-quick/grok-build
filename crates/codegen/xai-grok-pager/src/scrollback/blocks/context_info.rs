@@ -43,9 +43,13 @@ use xai_grok_shell::session::ContextInfo;
 ///
 /// ◆ System prompt     1.2k tokens  (0.1%)   (gray)
 /// ◆ Messages         29.9k tokens    (3%)
+/// ◆ Tool schemas      5.6k tokens  (0.6%) · 12 tools   (teal)
+/// ◆ Unattributed      3.3k tokens  (0.3%)              (violet)
 /// ◇ Free              963k tokens   (96%)
 ///
-/// ◈ Tool definitions  5.6k tokens  (0.6%) · 12 tools
+/// Unattributed: reasoning, per-request scaffolding, and the gap between
+/// this estimate and the provider's tokenizer.
+///
 /// ◈ Skills            2.4k tokens  (0.2%) · 21 skills
 /// ◈ MCP servers        320 tokens  (0.1%) ·  4 servers
 ///
@@ -60,10 +64,14 @@ use xai_grok_shell::session::ContextInfo;
 /// ```
 ///
 /// The bar is a categorical breakdown: each cell uses its category's glyph
-/// and color. System (gray ◆), messages (primary ◆), and reasoning/overhead
-/// (violet ◆) fill left-to-right in legend order, and the remainder renders
-/// as muted ◇ outlines for free capacity. The ◈ informational rows never
-/// enter the bar.
+/// and color. System (gray ◆), messages (primary ◆), tool schemas (teal ◆)
+/// and the unattributed remainder (violet ◆) fill left-to-right in legend
+/// order, and the rest renders as muted ◇ outlines for free capacity.
+///
+/// Every ◆ band is a partition of `used`; the ◈ rows below are informational
+/// — their tokens are already counted inside one of the bands above, so they
+/// never enter the bar. The glyph is the whole distinction: ◆ adds up to the
+/// window, ◈ does not.
 #[derive(Debug, Clone)]
 pub struct ContextInfoBlock {
     /// Facts resolved when the block was created. Held rather than the raw
@@ -135,6 +143,20 @@ impl BarLayout {
         self.row_len * self.rows
     }
 }
+
+/// What the unattributed row is actually made of, printed under the legend.
+///
+/// Pre-split into short lines rather than word-wrapped at render time: the
+/// usage modal deliberately does not wrap (one row per logical line is what
+/// keeps its scroll clamp exact), so a single long line would be clipped
+/// there. Each line stays under [`BarLayout::NARROW_BREAKPOINT`] columns so
+/// the note survives the narrowest layout the block draws.
+const UNATTRIBUTED_NOTE: [&str; 4] = [
+    "Unattributed = used minus what can be measured",
+    "here: reasoning, per-request scaffolding, and the",
+    "drift between this client's bytes/4 estimate and",
+    "the provider's tokenizer.",
+];
 
 /// One legend or informational row, before column formatting.
 struct LegendRow {
@@ -331,10 +353,14 @@ impl ContextInfoBlock {
         // stand-ins (`◆`→`♦`, `◇`→`○`) on legacy Windows consoles that
         // can't render the U+25Cx diamonds.
         let system_glyph = crate::glyphs::diamond_filled(); // ◆ (gray)
-        let tools_glyph = crate::glyphs::diamond_dotted(); // ◈
         let messages_glyph = crate::glyphs::diamond_filled(); // ◆ (primary)
+        let schemas_glyph = crate::glyphs::diamond_filled(); // ◆ (teal)
         let free_glyph = crate::glyphs::diamond_hollow(); // ◇
         let overhead_glyph = crate::glyphs::diamond_filled(); // ◆ (violet)
+        // ◈ is reserved for rows that do NOT partition the window, so a reader
+        // can tell at a glance which rows sum to `used` and which are already
+        // counted inside one of them.
+        let info_glyph = crate::glyphs::diamond_dotted(); // ◈
 
         // The partition is resolved against `BarPartition::CELLS`; the layout
         // only chooses how those cells are wrapped into rows. `LAYOUTS_HOLD_A
@@ -348,7 +374,10 @@ impl ContextInfoBlock {
         for _ in 0..partition.messages {
             cells.push((messages_glyph, messages_color));
         }
-        for _ in 0..partition.overhead {
+        for _ in 0..partition.tools {
+            cells.push((schemas_glyph, tools_color));
+        }
+        for _ in 0..partition.unattributed {
             cells.push((overhead_glyph, overhead_color));
         }
         for _ in 0..partition.free {
@@ -373,19 +402,19 @@ impl ContextInfoBlock {
             bar_lines.push(Line::from(spans));
         }
 
-        // Legend rows fill the bar; informational rows sit below it
-        // because their tokens are already counted in its categories:
-        // tool definitions surface in Reasoning/overhead, and the usage
-        // categories overlap Messages.
+        // Legend rows fill the bar; informational rows sit below it because
+        // their tokens are already counted in one of the bands — the injected
+        // blocks land in the first user turn, so they overlap Messages.
         // Kinds carry no styling of their own — the resolver never names a
         // glyph or a color — so the mapping to chrome lives here.
         let chrome = |kind: ContributorKind| -> (&'static str, Color) {
             match kind {
                 ContributorKind::SystemPrompt => (system_glyph, system_color),
                 ContributorKind::Messages => (messages_glyph, messages_color),
-                ContributorKind::Overhead => (overhead_glyph, overhead_color),
+                ContributorKind::ToolSchemas => (schemas_glyph, tools_color),
+                ContributorKind::Unattributed => (overhead_glyph, overhead_color),
                 ContributorKind::Free => (free_glyph, empty_color),
-                ContributorKind::Itemized => (tools_glyph, tools_color),
+                ContributorKind::Itemized => (info_glyph, tools_color),
             }
         };
         let to_row = |c: &crate::acp::context_facts::Contributor| {
@@ -439,9 +468,26 @@ impl ContextInfoBlock {
         for row in &legend_rows {
             lines.extend(layout.render(row, bar, total, label_style, muted));
         }
-        lines.push(Line::from(""));
-        for row in &info_rows {
-            lines.extend(layout.render(row, bar, total, label_style, muted));
+        // Say what the remainder is made of rather than letting a one-word
+        // label imply the client knows. Only when the row is actually there:
+        // a footnote to an absent row is noise.
+        if facts
+            .contributors
+            .iter()
+            .any(|c| c.kind == ContributorKind::Unattributed)
+        {
+            lines.push(Line::from(""));
+            lines.extend(
+                UNATTRIBUTED_NOTE
+                    .iter()
+                    .map(|l| Line::from(Span::styled(*l, muted))),
+            );
+        }
+        if !info_rows.is_empty() {
+            lines.push(Line::from(""));
+            for row in &info_rows {
+                lines.extend(layout.render(row, bar, total, label_style, muted));
+            }
         }
         lines.push(Line::from(""));
 
@@ -1065,7 +1111,7 @@ mod tests {
         layout: BarLayout,
     ) -> (usize, usize, usize, usize) {
         let mut diamonds = 0usize;
-        let mut tools = 0usize;
+        let mut dotted = 0usize;
         let mut free = 0usize;
         let bar_start = 5; // header / blank / tokens / model / blank
         let bar_end = bar_start + layout.rows;
@@ -1073,16 +1119,21 @@ mod tests {
             for span in &line.spans {
                 let c = span.content.as_ref();
                 if c == SYSTEM_GLYPH_TEST || c == MESSAGES_GLYPH_TEST {
-                    // SYSTEM_GLYPH_TEST == MESSAGES_GLYPH_TEST; counted together.
+                    // Every band that partitions `used` draws the filled
+                    // diamond and is separated only by color, so the bar-cell
+                    // counts here are of the used band as a whole. The
+                    // per-band split is asserted on `facts.bar` instead.
                     diamonds += 1;
                 } else if c == TOOLS_GLYPH_TEST {
-                    tools += 1;
+                    // ◈ — reserved for rows that do not partition the window,
+                    // so finding one inside the bar is itself the failure.
+                    dotted += 1;
                 } else if c == FREE_GLYPH_TEST {
                     free += 1;
                 }
             }
         }
-        (diamonds, tools, free, diamonds + tools + free)
+        (diamonds, dotted, free, diamonds + dotted + free)
     }
 
     #[test]
@@ -1159,7 +1210,7 @@ mod tests {
     }
 
     #[test]
-    fn bar_used_band_excludes_tools_and_never_overshoots() {
+    fn tool_schemas_take_their_own_band_without_overshooting() {
         let mut snap = snapshot();
         snap.total = 1_000;
         snap.used = 1_000;
@@ -1171,15 +1222,24 @@ mod tests {
         let block = ContextInfoBlock::new(snap, &[], "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
-        let (diamonds, tools, free, total) = count_bar_glyphs(&lines, BarLayout::WIDE);
+        let (diamonds, dotted, free, total) = count_bar_glyphs(&lines, BarLayout::WIDE);
         assert_eq!(total, 100, "bar must always render exactly 100 cells");
-        assert_eq!(tools, 0, "tool definitions must never enter the bar");
+        assert_eq!(dotted, 0, "informational rows must never enter the bar");
+        // The measured parts claim 1_305 tokens of a 1_000-token `used`; the
+        // used band still fills exactly the bar and the remainder absorbs it.
         assert_eq!(diamonds, 100, "used band fills the bar at 100% usage");
         assert_eq!(free, 0, "no free cells at 100% usage");
+        assert_eq!(
+            block.facts.bar.tools, 49,
+            "tools clamped into the used band"
+        );
+        assert_eq!(block.facts.bar.unattributed, 0);
     }
 
     #[test]
-    fn bar_and_legend_reconcile_used_with_overhead_excluding_tools() {
+    fn tool_schemas_are_a_legend_row_and_shrink_the_remainder() {
+        // A real grok-build shape: a wide toolset that used to disappear into
+        // an "overhead" row larger than the toolset itself.
         let snap = ContextInfo {
             used: 100_000,
             total: 500_000,
@@ -1202,19 +1262,58 @@ mod tests {
 
         let all = all_text(&lines);
         assert!(
-            all.contains("Reasoning/overhead") && all.contains("70.0k"),
-            "overhead row (70.0k) missing:\n{all}"
+            !all.contains("Reasoning/overhead"),
+            "the everything-else bucket must be gone:\n{all}"
         );
         assert!(
-            all.contains("Tool definitions") && all.contains("190 tools"),
-            "tools row must be shown with its count:\n{all}"
+            !all.contains("Unattributed = "),
+            "nothing is left over here, so the note must not print:\n{all}"
+        );
+        assert!(
+            all.contains("Tool schemas") && all.contains("75.0k"),
+            "tool schemas must be a legend row carrying their measured size:\n{all}"
+        );
+        assert!(
+            all.contains("190 tools"),
+            "the tool count is the actionable half of the row:\n{all}"
         );
 
-        let (diamonds, tools, free, total) = count_bar_glyphs(&lines, BarLayout::WIDE);
+        let (diamonds, dotted, free, total) = count_bar_glyphs(&lines, BarLayout::WIDE);
         assert_eq!(total, 100);
-        assert_eq!(tools, 0, "tool definitions excluded from the bar");
+        assert_eq!(dotted, 0, "informational rows excluded from the bar");
         assert_eq!(diamonds, 20, "used band must equal used/total");
         assert_eq!(free, 80);
+        // 75k of the 100k used is tool schemas; the band is clamped to the 14
+        // cells the measured rows above it leave inside the 20-cell used band.
+        assert_eq!(block.facts.bar.tools, 14);
+    }
+
+    #[test]
+    fn the_remainder_prints_what_it_is_made_of() {
+        let mut snap = snapshot();
+        snap.used = 40_000; // 3.3k more than the measured parts account for
+        let block = ContextInfoBlock::new(snap, &[], "grok-4");
+        let all = all_text(&block.build_lines(&test_theme(), BarLayout::WIDE));
+        assert!(
+            all.contains("Unattributed"),
+            "remainder row missing:\n{all}"
+        );
+        assert!(
+            all.contains("bytes/4 estimate"),
+            "a one-word label must not be left implying the client knows:\n{all}"
+        );
+    }
+
+    #[test]
+    fn every_note_line_fits_the_narrowest_layout() {
+        // The usage modal does not wrap; a line wider than the narrow bar's
+        // breakpoint would be clipped there rather than reflowed.
+        for line in UNATTRIBUTED_NOTE {
+            assert!(
+                line.chars().count() < BarLayout::NARROW_BREAKPOINT as usize,
+                "note line too wide to survive the modal: {line:?}"
+            );
+        }
     }
 
     #[test]
@@ -1474,7 +1573,7 @@ mod tests {
         let categories = [
             ("System prompt", "1.2k"),
             ("Messages", "29.9k"),
-            ("Reasoning/overhead", "5.6k"),
+            ("Tool schemas", "5.6k"),
             ("Free", "963k"),
         ];
         let mut idx = 16;
@@ -1541,8 +1640,8 @@ mod tests {
         );
         let l13 = row_text(13);
         assert!(
-            l13.contains("Reasoning/overhead") && l13.contains("5.6k"),
-            "wide legend should show reasoning/overhead on one line, got: {l13:?}"
+            l13.contains("Tool schemas") && l13.contains("5.6k"),
+            "wide legend should keep label + tokens on one line, got: {l13:?}"
         );
         let l14 = row_text(14);
         assert!(

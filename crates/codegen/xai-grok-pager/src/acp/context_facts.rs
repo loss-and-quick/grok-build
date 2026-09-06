@@ -20,9 +20,21 @@ pub enum ContributorKind {
     SystemPrompt,
     /// Conversation items — user, assistant and tool responses.
     Messages,
-    /// The part of `used` that neither the system prompt nor the conversation
-    /// accounts for: tool schemas, reasoning, and any per-request scaffolding.
-    Overhead,
+    /// The tool definitions sent with every request.
+    ///
+    /// Measured, not inferred: the shell serializes the exact definition list
+    /// the turn sends and counts its bytes. This is the one part of the former
+    /// overhead bucket a user can act on, by changing the agent's toolset.
+    ToolSchemas,
+    /// What is left of `used` once the measured parts are subtracted.
+    ///
+    /// Deliberately not named after a mechanism. It holds at least three
+    /// things this client cannot separate: reasoning tokens the provider
+    /// billed but did not itemize, per-request scaffolding, and the drift
+    /// between the client's bytes/4 estimate and the provider's tokenizer.
+    /// Splitting it further would need per-part counts nothing on the wire
+    /// carries, so it stays a labelled remainder rather than a guess.
+    Unattributed,
     /// Unused capacity.
     Free,
     /// A row that itemizes tokens already counted inside another contributor.
@@ -58,7 +70,8 @@ impl Contributor {
 pub struct BarPartition {
     pub system: usize,
     pub messages: usize,
-    pub overhead: usize,
+    pub tools: usize,
+    pub unattributed: usize,
     pub free: usize,
 }
 
@@ -67,7 +80,7 @@ impl BarPartition {
     /// being 100 is what keeps a cell readable as one percent.
     pub const CELLS: usize = 100;
 
-    fn resolve(used: u64, total: u64, system: u64, messages: u64) -> Self {
+    fn resolve(used: u64, total: u64, system: u64, messages: u64, tools: u64) -> Self {
         if total == 0 {
             return Self {
                 free: Self::CELLS,
@@ -78,23 +91,30 @@ impl BarPartition {
             ((tokens as f64 / total as f64) * Self::CELLS as f64).round() as usize
         };
         // `used` is the authority for how much of the bar is filled; the
-        // per-category estimates only decide how that band is divided. Without
-        // the clamps a system+messages estimate exceeding `used` would push the
-        // bands past the used band and overflow the hundred cells.
+        // per-category figures only decide how that band is divided. Without
+        // the clamps a system+messages+tools figure exceeding `used` would push
+        // the bands past the used band and overflow the hundred cells.
+        //
+        // Clamping in legend order means the measured bands keep their true
+        // width and the unattributed remainder is what gets squeezed — which is
+        // the right way round, since the remainder is the one band that has no
+        // measurement of its own to defend.
         let used_cells = cells_for(used).min(Self::CELLS);
         let system = cells_for(system).min(used_cells);
         let messages = cells_for(messages).min(used_cells - system);
+        let tools = cells_for(tools).min(used_cells - system - messages);
         Self {
             system,
             messages,
-            overhead: used_cells - system - messages,
+            tools,
+            unattributed: used_cells - system - messages - tools,
             free: Self::CELLS - used_cells,
         }
     }
 
     /// Cells standing for consumed capacity.
     pub fn used(&self) -> usize {
-        self.system + self.messages + self.overhead
+        self.system + self.messages + self.tools + self.unattributed
     }
 }
 
@@ -197,11 +217,12 @@ pub struct ContextFacts {
     /// comparison only, so the two can never be mistaken for each other.
     pub usage_pct: f64,
     /// Rows that partition the window: the contributors to `used`, then the
-    /// free remainder. Overhead is present only when it is non-zero.
+    /// free remainder. The tool-schema and unattributed rows are present only
+    /// when non-zero.
     pub contributors: Vec<Contributor>,
-    /// Rows itemizing tokens already counted inside `contributors` — tool
-    /// definitions, plus whatever the shell itemized in `usage_categories`.
-    /// Adding these to `contributors` would double-count.
+    /// Rows itemizing tokens already counted inside `contributors` — whatever
+    /// the shell itemized in `usage_categories`. Adding these to
+    /// `contributors` would double-count.
     pub itemized: Vec<Contributor>,
     pub bar: BarPartition,
     pub auto_compact: AutoCompact,
@@ -220,9 +241,14 @@ impl ContextFacts {
         let total = snapshot.total;
         let system = snapshot.system_prompt_tokens;
         let messages = snapshot.message_tokens;
-        // Saturating because the two categories are independent estimates over
-        // the same conversation and can together exceed the server's `used`.
-        let overhead = used.saturating_sub(system.saturating_add(messages));
+        let tools = snapshot.tool_definitions_tokens;
+        // Saturating because these are independently measured over the same
+        // request and can together exceed the server's `used` — most obviously
+        // before the first response, when `used` is itself a local estimate
+        // that has not yet been replaced by a provider count that includes the
+        // tool schemas.
+        let unattributed =
+            used.saturating_sub(system.saturating_add(messages).saturating_add(tools));
 
         let mut contributors = vec![
             Contributor {
@@ -238,11 +264,26 @@ impl ContextFacts {
                 detail: None,
             },
         ];
-        if overhead > 0 {
+        // Tool schemas are a contributor, not an informational row: they are a
+        // measured slice of `used` in their own right, and the only reason they
+        // used to sit below the bar is that the bucket above them was called
+        // "overhead" and swallowed them whole.
+        if tools > 0 {
             contributors.push(Contributor {
-                kind: ContributorKind::Overhead,
-                label: "Reasoning/overhead".to_string(),
-                tokens: overhead,
+                kind: ContributorKind::ToolSchemas,
+                label: "Tool schemas".to_string(),
+                tokens: tools,
+                detail: Some(xai_grok_shell::session::count_detail(
+                    snapshot.tool_definitions_count,
+                    "tool",
+                )),
+            });
+        }
+        if unattributed > 0 {
+            contributors.push(Contributor {
+                kind: ContributorKind::Unattributed,
+                label: "Unattributed".to_string(),
+                tokens: unattributed,
                 detail: None,
             });
         }
@@ -253,22 +294,16 @@ impl ContextFacts {
             detail: None,
         });
 
-        let itemized = std::iter::once(Contributor {
-            kind: ContributorKind::Itemized,
-            label: "Tool definitions".to_string(),
-            tokens: snapshot.tool_definitions_tokens,
-            detail: Some(xai_grok_shell::session::count_detail(
-                snapshot.tool_definitions_count,
-                "tool",
-            )),
-        })
-        .chain(snapshot.usage_categories.iter().map(|c| Contributor {
-            kind: ContributorKind::Itemized,
-            label: c.label.clone(),
-            tokens: c.tokens,
-            detail: c.detail.clone(),
-        }))
-        .collect();
+        let itemized = snapshot
+            .usage_categories
+            .iter()
+            .map(|c| Contributor {
+                kind: ContributorKind::Itemized,
+                label: c.label.clone(),
+                tokens: c.tokens,
+                detail: c.detail.clone(),
+            })
+            .collect();
 
         Self {
             used,
@@ -276,7 +311,7 @@ impl ContextFacts {
             usage_pct: xai_token_estimation::usage_percentage(used, total),
             contributors,
             itemized,
-            bar: BarPartition::resolve(used, total, system, messages),
+            bar: BarPartition::resolve(used, total, system, messages, tools),
             auto_compact: AutoCompact::resolve(snapshot),
             turn_count: snapshot.turn_count,
             tool_call_count: snapshot.tool_call_count,
@@ -347,30 +382,66 @@ mod tests {
     // ── contributors ───────────────────────────────────────────────────
 
     #[test]
-    fn overhead_is_used_minus_system_and_messages() {
+    fn tool_schemas_are_a_contributor_carrying_the_measured_count() {
+        // Their bytes are counted from the definitions the turn serializes, so
+        // the row reports a measurement rather than a share of a remainder.
         let facts = ContextFacts::resolve(&snapshot(), &[]);
-        // 36_700 - (1_200 + 29_900) = 5_600.
-        assert_eq!(facts.tokens_for(ContributorKind::Overhead), Some(5_600));
+        let tools = facts
+            .contributors
+            .iter()
+            .find(|c| c.kind == ContributorKind::ToolSchemas)
+            .expect("tool schema row");
+        assert_eq!(tools.label, "Tool schemas");
+        assert_eq!(tools.tokens, 5_600);
+        assert_eq!(tools.detail.as_deref(), Some("12 tools"));
     }
 
     #[test]
-    fn overhead_row_is_absent_when_the_categories_account_for_everything() {
+    fn tool_schema_row_is_absent_when_the_snapshot_carries_no_count() {
+        // A partial snapshot leaves the breakdown fields at zero; an empty row
+        // would read as "this agent has no tools".
         let mut snap = snapshot();
-        snap.used = 31_100; // exactly system + messages
+        snap.tool_definitions_tokens = 0;
+        snap.tool_definitions_count = 0;
         let facts = ContextFacts::resolve(&snap, &[]);
-        assert_eq!(facts.tokens_for(ContributorKind::Overhead), None);
+        assert_eq!(facts.tokens_for(ContributorKind::ToolSchemas), None);
     }
 
     #[test]
-    fn overhead_saturates_when_estimates_exceed_used() {
-        // The two categories are independent estimates over the same
-        // conversation and can together exceed the server's `used`.
+    fn unattributed_is_used_minus_every_measured_part() {
+        let mut snap = snapshot();
+        snap.used = 40_000;
+        let facts = ContextFacts::resolve(&snap, &[]);
+        // 40_000 - (1_200 + 29_900 + 5_600) = 3_300.
+        assert_eq!(
+            facts.tokens_for(ContributorKind::Unattributed),
+            Some(3_300),
+            "the remainder must shrink by the tool schemas it used to hide"
+        );
+    }
+
+    #[test]
+    fn unattributed_row_is_absent_when_the_measured_parts_account_for_everything() {
+        // The fixture's `used` is exactly system + messages + tool schemas.
+        let facts = ContextFacts::resolve(&snapshot(), &[]);
+        assert_eq!(facts.tokens_for(ContributorKind::Unattributed), None);
+    }
+
+    #[test]
+    fn unattributed_saturates_when_the_measured_parts_exceed_used() {
+        // Before the first response `used` is itself a local estimate that does
+        // not yet include the tool schemas, so the measured parts can outrun it.
         let mut snap = snapshot();
         snap.used = 10_000;
         snap.system_prompt_tokens = 8_000;
         snap.message_tokens = 5_000;
         let facts = ContextFacts::resolve(&snap, &[]);
-        assert_eq!(facts.tokens_for(ContributorKind::Overhead), None);
+        assert_eq!(facts.tokens_for(ContributorKind::Unattributed), None);
+        assert_eq!(
+            facts.tokens_for(ContributorKind::ToolSchemas),
+            Some(5_600),
+            "the measured row keeps its measurement; the remainder absorbs the clash"
+        );
     }
 
     #[test]
@@ -403,24 +474,15 @@ mod tests {
     // ── itemized rows ──────────────────────────────────────────────────
 
     #[test]
-    fn tool_definitions_are_itemized_not_a_contributor() {
-        // Their tokens already sit inside overhead; a contributor row would
-        // count them twice.
+    fn tool_schemas_do_not_also_appear_as_an_itemized_row() {
+        // They partition `used` now; leaving the old informational row in place
+        // would show the same 5.6k twice under two different headings.
         let facts = ContextFacts::resolve(&snapshot(), &[]);
-        assert!(
-            facts
-                .contributors
-                .iter()
-                .all(|c| c.label != "Tool definitions")
-        );
-        let tools = &facts.itemized[0];
-        assert_eq!(tools.label, "Tool definitions");
-        assert_eq!(tools.tokens, 5_600);
-        assert_eq!(tools.detail.as_deref(), Some("12 tools"));
+        assert!(facts.itemized.is_empty());
     }
 
     #[test]
-    fn shell_usage_categories_follow_tool_definitions_verbatim() {
+    fn shell_usage_categories_are_carried_verbatim() {
         let mut snap = snapshot();
         snap.usage_categories = vec![
             TokenUsageCategory::skills_listing(&"x".repeat(9_600), 21),
@@ -428,9 +490,9 @@ mod tests {
         ];
         let facts = ContextFacts::resolve(&snap, &[]);
         let labels: Vec<&str> = facts.itemized.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(labels, vec!["Tool definitions", "Skills", "MCP servers"]);
-        assert_eq!(facts.itemized[1].detail.as_deref(), Some("21 skills"));
-        assert_eq!(facts.itemized[2].detail.as_deref(), Some("4 servers"));
+        assert_eq!(labels, vec!["Skills", "MCP servers"]);
+        assert_eq!(facts.itemized[0].detail.as_deref(), Some("21 skills"));
+        assert_eq!(facts.itemized[1].detail.as_deref(), Some("4 servers"));
     }
 
     // ── bar partition ──────────────────────────────────────────────────
@@ -476,12 +538,14 @@ mod tests {
         snap.message_tokens = 5_000;
         snap.free_tokens = 90_000;
         let bar = ContextFacts::resolve(&snap, &[]).bar;
-        // system+messages estimate 13% of a window that is 10% used; the used
-        // band stays at 10 cells and the categories are clamped into it.
+        // system+messages+tools claim 13.6% of a window that is 10% used; the
+        // used band stays at 10 cells and the bands are clamped into it, in
+        // legend order, until nothing is left for the remainder.
         assert_eq!(bar.used(), 10);
         assert_eq!(bar.system, 8);
         assert_eq!(bar.messages, 2);
-        assert_eq!(bar.overhead, 0);
+        assert_eq!(bar.tools, 0);
+        assert_eq!(bar.unattributed, 0);
         assert_eq!(bar.free, 90);
     }
 
