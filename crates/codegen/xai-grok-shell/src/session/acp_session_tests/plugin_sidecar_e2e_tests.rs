@@ -65,20 +65,71 @@ fn sdk_launcher() -> PathBuf {
     repo_root().join("sdk/plugin/src/run")
 }
 
+/// Oldest node the SDK launcher will run a TypeScript plugin under, from
+/// `probe_node` in `sdk/plugin/src/run`. Below it `try_node` fails, and an
+/// `auto` chain with nothing else on `PATH` exits 127 with "no JavaScript
+/// runtime for this plugin" — so the gate has to reject the same versions the
+/// launcher does, or the test hard-fails where it should skip.
+const MIN_NODE_MAJOR: u32 = 22;
+
+/// `bin --version`'s stdout, or `None` when it cannot be run.
+fn version_output(bin: &str) -> Option<String> {
+    let out = std::process::Command::new(bin)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Major version from a `node --version` line, parsed the way `probe_node`
+/// parses it: trim, drop a leading `v`, take everything before the first `.`
+/// and require it to be all digits. `None` is the launcher's *unparseable*
+/// case, which it warns about and treats as usable rather than as too old.
+fn node_major(raw: &str) -> Option<u32> {
+    let trimmed = raw.trim();
+    let version = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    let major = version.split('.').next().unwrap_or_default();
+    if major.is_empty() || !major.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    major.parse().ok()
+}
+
 /// `true` when the SDK launcher can run (it is a POSIX `sh` script) and at
-/// least one of the runtimes it probes for is on `PATH`. Same candidates, same
-/// order as the launcher's own `auto` chain.
+/// least one of the runtimes it probes for is on `PATH` *and acceptable to it*.
+/// Same candidates as the launcher's own `auto` chain (`try_bun || try_node ||
+/// try_deno`) and the same verdict on each: bun and deno need only be present,
+/// while node is version-gated on [`MIN_NODE_MAJOR`].
 fn runtime_available() -> bool {
-    cfg!(unix)
-        && ["bun", "node", "deno"].iter().any(|bin| {
-            std::process::Command::new(bin)
-                .arg("--version")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-        })
+    if !cfg!(unix) {
+        return false;
+    }
+    if version_output("bun").is_some() || version_output("deno").is_some() {
+        return true;
+    }
+    version_output("node")
+        .is_some_and(|raw| node_major(&raw).is_none_or(|major| major >= MIN_NODE_MAJOR))
+}
+
+/// The gate is only worth having if it reads a version the way the launcher
+/// does; these are the cases `probe_node` singles out.
+#[test]
+fn node_major_is_read_the_way_the_launcher_reads_it() {
+    assert_eq!(node_major("v18.20.4\n"), Some(18));
+    assert_eq!(node_major(" v22.0.0 \n"), Some(22));
+    assert_eq!(node_major("v23.6.1\n"), Some(23));
+    assert_eq!(node_major("24\n"), Some(24));
+    // The launcher warns on an unparseable version and carries on, so neither
+    // side may read one as "too old".
+    assert_eq!(node_major("nightly\n"), None);
+    assert_eq!(node_major("v\n"), None);
+    assert_eq!(node_major(""), None);
+    // The version the launcher rejects, which the old gate accepted.
+    assert!(node_major("v18.20.4\n").is_some_and(|major| major < MIN_NODE_MAJOR));
 }
 
 /// Build a real `PluginHost` with the demo plugin registered. `workspace_root`
@@ -241,7 +292,7 @@ async fn demo_plugin_and_command_hook_reach_identical_outcomes() {
     if !runtime_available() {
         eprintln!(
             "SKIP demo_plugin_and_command_hook_reach_identical_outcomes: \
-             no JS runtime (bun/node/deno) on PATH"
+             no JS runtime the SDK launcher accepts (bun, deno or node >=22) on PATH"
         );
         return;
     }
@@ -429,7 +480,7 @@ async fn demo_plugin_tool_invoke_round_trips_with_call_context() {
     if !runtime_available() {
         eprintln!(
             "SKIP demo_plugin_tool_invoke_round_trips_with_call_context: \
-             no JS runtime (bun/node/deno) on PATH"
+             no JS runtime the SDK launcher accepts (bun, deno or node >=22) on PATH"
         );
         return;
     }
