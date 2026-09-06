@@ -1631,6 +1631,15 @@ mod tests {
         root: &Path,
         skill_dirs: Vec<PathBuf>,
     ) -> crate::plugins::PluginRegistry {
+        make_registry_with_dirs(name, root, skill_dirs, vec![])
+    }
+
+    fn make_registry_with_dirs(
+        name: &str,
+        root: &Path,
+        skill_dirs: Vec<PathBuf>,
+        command_dirs: Vec<PathBuf>,
+    ) -> crate::plugins::PluginRegistry {
         use crate::plugins::discovery::{DiscoveredPlugin, PluginId};
         use crate::plugins::manifest::PluginManifest;
 
@@ -1666,7 +1675,7 @@ mod tests {
             origin: crate::plugins::PluginOrigin::UserGrok,
             trusted: true,
             skill_dirs,
-            command_dirs: vec![],
+            command_dirs,
             agent_dirs: vec![],
             hooks_path: None,
             mcp_config_path: None,
@@ -1675,6 +1684,70 @@ mod tests {
             load_error: None,
         };
         crate::plugins::PluginRegistry::from_discovered(vec![dp], &[], &[name.to_string()])
+    }
+
+    /// A plugin contributes slash commands by shipping `commands/*.md`, the
+    /// same file shape a user drops in `.grok/commands`. Identity comes from
+    /// the file stem, so `stamp_plugin_fields` must not re-key these to the
+    /// containing directory the way it re-keys a `SKILL.md`'s parent — that
+    /// would name every command in the directory `commands` and collapse them
+    /// into one.
+    #[test]
+    fn collect_plugin_skills_loads_command_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = tmp.path().join("commands");
+        fs::create_dir_all(&commands).unwrap();
+        fs::write(
+            commands.join("deploy.md"),
+            "---\ndescription: Ship it\nargument-hint: <env>\n---\n\nDeploy to $ARGUMENTS.\n",
+        )
+        .unwrap();
+        fs::write(commands.join("rollback.md"), "Roll the last deploy back.\n").unwrap();
+
+        let registry = make_registry_with_dirs("infra", tmp.path(), vec![], vec![commands]);
+        let mut skills = collect_plugin_skills(&registry);
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["deploy", "rollback"], "{names:?}");
+        assert_eq!(skills[0].description, "Ship it");
+        assert_eq!(skills[0].argument_hint.as_deref(), Some("<env>"));
+        assert_eq!(skills[0].dedup_key(), "infra:deploy");
+        assert!(skills.iter().all(|s| s.display_name.is_none()));
+        assert!(
+            skills
+                .iter()
+                .all(|s| s.plugin_name.as_deref() == Some("infra")
+                    && s.plugin_root.as_deref() == Some(tmp.path().to_str().unwrap()))
+        );
+
+        // A frontmatter-less command file still lands, described by its body.
+        assert_eq!(skills[1].description, "Roll the last deploy back.");
+        assert!(skills.iter().all(|s| s.user_invocable));
+    }
+
+    /// A plugin's `skills/` and `commands/` can name the same thing; the skill
+    /// wins the bare name, matching the native ordering in `list_skills_with_options`.
+    #[test]
+    fn plugin_skill_beats_plugin_command_of_the_same_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills_dir = tmp.path().join("skills");
+        write_skill_md(&skills_dir.join("deploy"), "deploy");
+        let commands = tmp.path().join("commands");
+        fs::create_dir_all(&commands).unwrap();
+        fs::write(
+            commands.join("deploy.md"),
+            "---\ndescription: command version\n---\n",
+        )
+        .unwrap();
+
+        let registry =
+            make_registry_with_dirs("infra", tmp.path(), vec![skills_dir], vec![commands]);
+        let merged = merge_skills_with_plugins(vec![], collect_plugin_skills(&registry));
+
+        let deploy: Vec<_> = merged.iter().filter(|s| s.name == "deploy").collect();
+        assert_eq!(deploy.len(), 1, "{merged:?}");
+        assert!(deploy[0].path.ends_with("SKILL.md"), "{:?}", deploy[0].path);
     }
 
     #[test]
