@@ -243,12 +243,9 @@ impl LeaderClient {
 
     /// A clone of the token [`cancel`](Self::cancel) fires.
     ///
-    /// [`into_channels`](Self::into_channels) drops the client, and dropping a `CancellationToken`
-    /// does not cancel it, so a caller that keeps only the channels loses every way to close the
-    /// registration. Its read task then blocks on the socket and its write task keeps sending
-    /// keepalive pings, so the leader still counts the client and still lists it as a session
-    /// subscriber. Take the token before decomposing when the connection is shorter-lived than the
-    /// process.
+    /// Only needed to close a registration *early*, while still holding the decomposed channels.
+    /// Closing one at teardown needs no token: the sender returned by
+    /// [`into_channels`](Self::into_channels) owns the registration and ends it when dropped.
     pub fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
     }
@@ -262,23 +259,20 @@ impl LeaderClient {
         self.disconnect_rx.clone()
     }
 
+    /// Decompose this client into raw channels.
+    ///
+    /// The returned sender owns the registration: dropping its last clone closes the connection, so
+    /// a caller whose connection is shorter-lived than the process cannot leak a registration by
+    /// forgetting to cancel. A caller that wants the connection for the whole process keeps the
+    /// sender for the whole process, which the pager already does.
     pub fn into_channels(
         self,
     ) -> (
         mpsc::UnboundedSender<String>,
         mpsc::UnboundedReceiver<String>,
     ) {
-        let outbound = self.outbound_tx;
-        let acp_rx = self.acp_rx;
-        let (acp_tx, mut local_rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            while let Some(payload) = local_rx.recv().await {
-                if outbound.send(ClientMessage::Acp { payload }).is_err() {
-                    break;
-                }
-            }
-        });
-        (acp_tx, acp_rx)
+        let acp_tx = spawn_acp_relay(self.outbound_tx, self.cancel);
+        (acp_tx, self.acp_rx)
     }
 
     /// Decompose into raw channels plus the disconnect reason receiver.
@@ -291,19 +285,33 @@ impl LeaderClient {
         mpsc::UnboundedReceiver<String>,
         watch::Receiver<DisconnectReason>,
     ) {
-        let outbound = self.outbound_tx;
-        let acp_rx = self.acp_rx;
-        let disconnect_rx = self.disconnect_rx;
-        let (acp_tx, mut local_rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            while let Some(payload) = local_rx.recv().await {
-                if outbound.send(ClientMessage::Acp { payload }).is_err() {
-                    break;
-                }
-            }
-        });
-        (acp_tx, acp_rx, disconnect_rx)
+        let acp_tx = spawn_acp_relay(self.outbound_tx, self.cancel);
+        (acp_tx, self.acp_rx, self.disconnect_rx)
     }
+}
+
+/// Relay ACP payloads from the returned sender onto `outbound`, holding the registration open for
+/// exactly as long as that sender lives.
+///
+/// The relay task owns `cancel` through a [`DropGuard`](tokio_util::sync::DropGuard), so the last
+/// sender clone going away cancels the connection. Dropping the channels alone would not: the write
+/// task `select!`s on `outbound_rx` and a keepalive tick, so a closed `outbound_rx` merely disables
+/// that branch and the task pings on forever, leaving the leader counting the client and listing it
+/// as a subscriber of every session it viewed.
+fn spawn_acp_relay(
+    outbound: mpsc::UnboundedSender<ClientMessage>,
+    cancel: CancellationToken,
+) -> mpsc::UnboundedSender<String> {
+    let (acp_tx, mut local_rx) = mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        let _close_registration_on_drop = cancel.drop_guard();
+        while let Some(payload) = local_rx.recv().await {
+            if outbound.send(ClientMessage::Acp { payload }).is_err() {
+                break;
+            }
+        }
+    });
+    acp_tx
 }
 
 async fn connect_with_retry<P: AsRef<Path>>(socket_path: P) -> Result<LeaderStream, ClientError> {

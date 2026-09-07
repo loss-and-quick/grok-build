@@ -2471,6 +2471,57 @@ mod tests {
         );
         handle.cancel.cancel();
     }
+    /// Dropping a short-lived connection must end its registration.
+    ///
+    /// The channels alone used to be inert on drop: the write task `select!`s on `outbound_rx` and
+    /// a keepalive tick, so a closed `outbound_rx` merely disabled that branch and the task pinged
+    /// on forever with the leader still counting the client.
+    #[tokio::test]
+    async fn dropping_decomposed_channels_ends_the_registration() {
+        use std::sync::atomic::Ordering;
+
+        let temp = TempDir::new().unwrap();
+        let sock_path = temp.path().join("test.sock");
+        let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let client = LeaderClient::connect(
+            sock_path,
+            "test",
+            ClientMode::Stdio,
+            ClientCapabilities::default(),
+        )
+        .await
+        .unwrap();
+        let (tx, rx) = client.into_channels();
+        assert!(
+            tx.send(r#"{"jsonrpc":"2.0","method":"test","id":1}"#.into())
+                .is_ok()
+        );
+        for _ in 0..100 {
+            if handle.client_count.load(Ordering::Relaxed) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(handle.client_count.load(Ordering::Relaxed), 1);
+
+        // No `cancel()`: the caller simply lets the connection go, as a browser tab does.
+        drop(tx);
+        drop(rx);
+        for _ in 0..100 {
+            if handle.client_count.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            handle.client_count.load(Ordering::Relaxed),
+            0,
+            "leader still counts a client whose connection was dropped"
+        );
+        handle.cancel.cancel();
+    }
     #[tokio::test]
     async fn reconnector_status_transitions_on_failure_then_success() {
         let (status_tx, mut status_rx) = LeaderReconnector::status_channel();

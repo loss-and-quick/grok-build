@@ -97,13 +97,12 @@ pub struct LeaderAttachment {
     /// Latest `ServerMessage::ShuttingDown` reason, if the leader announced one.
     /// The leader client consumes those frames itself; they never reach the browser as ACP.
     shutting_down: watch::Receiver<Option<ShutdownReason>>,
-    /// Teardown for the registration.
+    /// Teardown for the registration, for closing it while the attachment is still held.
     ///
-    /// Dropping the channels is **not** enough: the leader client's write task selects on
-    /// `outbound_rx.recv()` and a keepalive tick (`leader/client.rs`), so a closed `outbound_rx`
-    /// merely disables that branch and the task keeps pinging — the registration would outlive the
-    /// browser. Cancelling makes it write `ClientMessage::Disconnect` and exit, which is what lets
-    /// the leader drop the subscriber, hand the session driver to another client, or evict the
+    /// Dropping `to_leader` closes the registration on its own (`leader/client.rs`), so this is no
+    /// longer what keeps a departed browser from outliving itself. It still buys promptness:
+    /// cancelling makes the write task send `ClientMessage::Disconnect` and exit right away, which
+    /// lets the leader drop the subscriber, hand the session driver to another client, or evict the
     /// session when nobody is left (`leader/server.rs`, `ServerEvent::Disconnected`).
     cancel: CancellationToken,
 }
