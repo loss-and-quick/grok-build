@@ -377,6 +377,10 @@ async fn provider_expiry_source_precedence() {
         jwt_with_exp(chrono::Utc::now().timestamp() + 7200)
     }
     fn jwt_with_exp(exp: i64) -> String {
+        // `jsonwebtoken` needs a process-level CryptoProvider, and the workspace enables both of
+        // its backends, so it cannot pick one itself. The first unguarded sign caches a panicking
+        // stub in a process-wide `OnceLock`, which every later JWT test in the binary then hits.
+        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
         jsonwebtoken::encode(
             &jsonwebtoken::Header::default(),
             &serde_json::json!({ "exp": exp }),
