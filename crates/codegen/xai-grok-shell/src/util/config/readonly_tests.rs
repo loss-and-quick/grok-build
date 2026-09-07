@@ -81,13 +81,18 @@ fn env_override_parses_both_directions() {
 /// The refusal has to survive `scrub_error_for_toast`, which replaces
 /// anything over 120 bytes with "server error (see logs for details)" — the
 /// exact opposite of what this message is for.
+///
+/// Measured against the rendered path a user sees rather than
+/// `readonly_config_clause`'s live one: the process's own grok home is a temp
+/// directory under test, so the live path would make this assert about the
+/// length of `$TMPDIR` instead of about the wording.
 #[test]
 fn notice_fits_a_toast() {
     let subject = "Follow-up behavior";
     for source in [ConfigReadOnly::FileMode, ConfigReadOnly::Env] {
         let notice = format!(
             "{subject} is set in {} — change it there",
-            readonly_config_clause(source)
+            clause_for_display("~/.grok/config.toml", source)
         );
         assert!(
             notice.len() <= 120,

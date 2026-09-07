@@ -156,8 +156,15 @@ async fn skills_list_without_a_session_still_honours_cwd() {
 /// `marketplace add ./x` names a directory in the user's session, not in the
 /// leader's launch directory. The assertion is on the rejected path rather than
 /// on a successful add so the test never writes the global source list.
-/// Serial because the read-only-config probe reads `GROK_HOME`, which this test
-/// points at an empty tree so it never consults the developer's own config.
+///
+/// Serial because the add consults the managed-settings tier, which resolves
+/// `~/.claude` from `HOME` on every call; this test points it at an empty tree.
+/// `GROK_HOME` is set for the same reason but does not carry the config probe:
+/// `readonly_config_notice` resolves `config.toml` through the process-cached
+/// `grok_home()`, so before the pre-main pin in `test_support` this case read
+/// whichever home won the race — on a machine with a declaratively generated
+/// `~/.grok/config.toml` that is a read-only file, and the add came back
+/// `unsupported` instead of the `validation_error` asserted below.
 #[tokio::test]
 #[serial_test::serial]
 async fn marketplace_add_resolves_a_relative_source_against_the_session_root() {

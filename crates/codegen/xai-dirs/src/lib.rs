@@ -9,6 +9,7 @@
 //! - [`resolve_grok_home`]: a fresh, uncached resolve.
 //! - [`resolve_grok_home_with_source`]: [`resolve_grok_home`] plus where the path came from.
 //! - [`home_dir`]: the home directory itself, for sibling dot dirs (`~/.claude`, `~/.agents`, ...).
+//! - [`redirect_grok_home_for_tests`]: pre-main pin that keeps a test binary off the real `~/.grok`.
 //!
 //! TODO: collapse these getters by threading the path through config as an
 //! explicit value.
@@ -81,10 +82,19 @@ pub fn default_grok_home() -> PathBuf {
     grok_home_in(&home_dir().unwrap_or_else(|| PathBuf::from(".")))
 }
 
+/// The process's grok home, resolved at most once (see [`grok_home`]).
+///
+/// Module-scoped rather than function-local so [`redirect_grok_home_for_tests`]
+/// can claim it before anything else resolves it.
+static GROK_HOME: OnceLock<PathBuf> = OnceLock::new();
+
 /// The grok home, created if missing and cached for the process; falls back to
 /// [`default_grok_home`] when neither `$GROK_HOME` nor a home resolves.
+///
+/// The cache is process-wide, so in a test binary the first caller fixes the
+/// path for every later one and a per-test `$GROK_HOME` override does nothing.
+/// Test binaries install [`redirect_grok_home_for_tests`] pre-main instead.
 pub fn grok_home() -> PathBuf {
-    static GROK_HOME: OnceLock<PathBuf> = OnceLock::new();
     GROK_HOME
         .get_or_init(|| {
             let home = resolve_grok_home().unwrap_or_else(default_grok_home);
@@ -92,6 +102,53 @@ pub fn grok_home() -> PathBuf {
                 tracing::warn!(path = %home.display(), %err, "failed to create grok home");
             }
             home
+        })
+        .clone()
+}
+
+/// Claim [`grok_home`] for a fresh, owner-only directory under the system temp
+/// dir, so a test binary cannot read or write the developer's real `~/.grok`.
+///
+/// A test that sets `$GROK_HOME` is isolated only if nothing in the same binary
+/// resolved the home first, which no test can arrange: libtest runs cases in
+/// parallel in an unspecified order. Whichever case loses that race gets the
+/// real home, and the writers behind it are the live folder-trust store, the
+/// session index and the worktree database. Claiming the cache pre-main, before
+/// any test thread exists, is the only ordering that holds.
+///
+/// `$GROK_HOME` is deliberately left alone, so the uncached resolvers
+/// ([`resolve_grok_home`], [`default_grok_home`]) keep answering from the
+/// environment: a per-test override still means what it says, and a case that
+/// simulates "no home resolves" still can. The cost is that callers resolving
+/// fresh — the worktree database, grove pins — are not covered here and still
+/// need a `$GROK_HOME` guard of their own.
+///
+/// Runtime-activated rather than feature-gated: Bazel compiles production and
+/// test targets with one shared feature set, so a feature would leak into
+/// production builds.
+///
+/// Returns the home now pinned for the process: the new directory, or the
+/// already-resolved one if a caller got there first. The non-recursive
+/// `create_dir` fails rather than adopting a pre-planted directory or symlink
+/// in the world-writable temp dir, and the panic is deliberate — falling back
+/// silently would hand the binary the very home this exists to keep it off.
+pub fn redirect_grok_home_for_tests() -> PathBuf {
+    GROK_HOME
+        .get_or_init(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir =
+                std::env::temp_dir().join(format!("grok-home-test-{}-{nanos}", std::process::id()));
+            std::fs::create_dir(&dir)
+                .unwrap_or_else(|err| panic!("test grok home {}: {err}", dir.display()));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
+            dir
         })
         .clone()
 }
@@ -150,6 +207,26 @@ mod tests {
         let home = default_grok_home();
         assert!(!home.to_string_lossy().starts_with(r"\\?\"));
         assert!(home.ends_with(".grok"));
+    }
+
+    /// The redirect has to win over the environment, or a test binary that
+    /// installs it still resolves the developer's `~/.grok`.
+    ///
+    /// Sound as a `#[test]` only because nothing else in this crate's test
+    /// binary calls [`grok_home`]: the first caller wins the `OnceLock`, which
+    /// is the whole reason the redirect runs pre-main everywhere else.
+    #[test]
+    fn redirect_claims_the_home_ahead_of_the_environment() {
+        let redirected = redirect_grok_home_for_tests();
+        assert!(redirected.is_dir());
+        assert_ne!(redirected, default_grok_home());
+        assert_eq!(grok_home(), redirected);
+        assert_eq!(
+            redirect_grok_home_for_tests(),
+            redirected,
+            "a second call must not mint a second home"
+        );
+        std::fs::remove_dir_all(&redirected).expect("clean up the redirected home");
     }
 
     #[test]

@@ -122,7 +122,15 @@ fn display_path(path: &Path) -> String {
 /// The file and why it is off-limits, as a sentence fragment the callers
 /// below build on.
 fn readonly_config_clause(source: ConfigReadOnly) -> String {
-    let path = display_path(&config_path());
+    clause_for_display(&display_path(&config_path()), source)
+}
+
+/// [`readonly_config_clause`] for an already-rendered path.
+///
+/// Split out so the toast-budget test measures the wording against the path
+/// the user actually sees (`~/.grok/config.toml`) instead of against wherever
+/// the running process resolved its home to.
+fn clause_for_display(path: &str, source: ConfigReadOnly) -> String {
     match source {
         ConfigReadOnly::FileMode => format!("{path}, which is read-only"),
         ConfigReadOnly::Env => format!("{path}, held read-only by {CONFIG_READONLY_ENV}"),
