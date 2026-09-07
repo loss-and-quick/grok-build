@@ -1,0 +1,6 @@
+[test]
+# Panel rendering is the headline requirement, so it is tested against a real
+# DOM rather than a stub. `happy-dom` is the only runtime dependency this
+# package has, it is a devDependency, and bun installs it — no second package
+# manager and no bundler-plus-browser test rig.
+preload = ["./test/setup.ts"]

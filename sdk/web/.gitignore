@@ -1,0 +1,3 @@
+# Build output. `bun run build` regenerates it, and a committed bundle is a
+# second copy of the source that nothing checks.
+public/bundle.js
