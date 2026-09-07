@@ -40,7 +40,15 @@ fn build_side_question_attempt(base: &ConversationRequest) -> ConversationReques
 impl SessionActor {
     /// Answers a `/btw` side question with one model call over the parent session's context.
     /// The exchange is saved to `btw_history.jsonl` under a new btw session ID.
-    /// Client tool calls are dropped rather than run, hosted search still runs, and transient failures retry on a short budget.
+    /// Client tool calls are dropped rather than run and transient failures retry on a short budget.
+    ///
+    /// Hosted search runs only on the Responses backend. It is the one mapping that puts
+    /// `hosted_tools` on the wire (`extra_tool_entries`, spliced in `conversation_stream_responses`);
+    /// the ChatCompletions, Messages and Gemini request builders have no field for them and drop
+    /// them in translation. Attaching them below is therefore prompt-cache alignment everywhere
+    /// else, not a search the answer can use — and `hosted_tools_for_turn` already returns nothing
+    /// unless the model entry declares `supports_backend_search`, so nothing is quietly promised
+    /// to a user who never enabled it.
     pub(super) async fn handle_side_question(
         &self,
         question: &str,
