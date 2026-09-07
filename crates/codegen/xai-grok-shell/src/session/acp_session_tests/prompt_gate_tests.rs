@@ -237,11 +237,10 @@ async fn flushed_interjection_stays_parked_under_hold() {
 
 /// A synthetic (auto-wake) origin is observe-only: the same blocking hook must not cancel the turn.
 /// The turn proceeds toward the sampler, so the test watches for the not-enforced annotation and then aborts the turn.
-#[tokio::test(flavor = "current_thread")]
-async fn synthetic_prompt_ignores_hook_block() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn synthetic_prompt_ignores_hook_block() {
+    on_session_stack(|| {
+        block_on_local(async {
             let (gateway_tx, _gateway_rx) =
                 mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
@@ -299,16 +298,15 @@ async fn synthetic_prompt_ignores_hook_block() {
                 "an unenforced block must not arm the queue hold"
             );
             turn.abort();
-        })
-        .await;
+        });
+    });
 }
 
 /// A real user prompt on a subagent session is observe-only: subagent sessions never enforce prompt blocks (`should_enforce_prompt_block`).
-#[tokio::test(flavor = "current_thread")]
-async fn subagent_session_ignores_hook_block() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn subagent_session_ignores_hook_block() {
+    on_session_stack(|| {
+        block_on_local(async {
             let (gateway_tx, _gateway_rx) =
                 mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
@@ -366,8 +364,8 @@ async fn subagent_session_ignores_hook_block() {
                 "an unenforced block must not arm the queue hold"
             );
             turn.abort();
-        })
-        .await;
+        });
+    });
 }
 
 /// No-op queue mutations report `false`/unmutated, so the run loop keeps the hook-block hold: a stale or foreign request is not user re-engagement.
@@ -634,11 +632,10 @@ async fn non_hook_cancel_does_not_hold_queue() {
 /// The observe-only scope must not inherit the storage boundary.
 /// A blocking hook on a synthetic (auto-wake) origin still commits the wake text to chat state.
 /// The turn proceeds toward the sampler, so the test watches for the commit and then aborts the turn.
-#[tokio::test(flavor = "current_thread")]
-async fn synthetic_prompt_commits_despite_blocking_hook() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn synthetic_prompt_commits_despite_blocking_hook() {
+    on_session_stack(|| {
+        block_on_local(async {
             let (gateway_tx, _gateway_rx) =
                 mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
@@ -691,17 +688,16 @@ async fn synthetic_prompt_commits_despite_blocking_hook() {
                 "an observe-only block must not stop the wake text from committing"
             );
             turn.abort();
-        })
-        .await;
+        });
+    });
 }
 
 /// Storage boundary: a blocked prompt never enters conversation history, so no later turn can carry it as context.
 /// The allow path still commits before the sampler runs.
-#[tokio::test(flavor = "current_thread")]
-async fn blocked_prompt_never_enters_chat_state() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn blocked_prompt_never_enters_chat_state() {
+    on_session_stack(|| {
+        block_on_local(async {
             let (gateway_tx, _gateway_rx) =
                 mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
@@ -772,8 +768,8 @@ async fn blocked_prompt_never_enters_chat_state() {
                 serialized.contains("a clean prompt"),
                 "the allow path must still commit the prompt: {serialized}"
             );
-        })
-        .await;
+        });
+    });
 }
 
 /// Serialize every content-bearing persistence message (updates, summary content chunks, chat items).
@@ -812,11 +808,10 @@ fn spawn_persistence_capture(
 /// That covers the user-echo `updates.jsonl` stream, the `summary.json` content feed, and chat items.
 /// Chat-history rebuilds and resume scrollback replay both read the `updates.jsonl` stream.
 /// An allowed prompt's echo is the control proving the capture sees persistence traffic.
-#[tokio::test(flavor = "current_thread")]
-async fn blocked_prompt_never_reaches_persistence() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn blocked_prompt_never_reaches_persistence() {
+    on_session_stack(|| {
+        block_on_local(async {
             let (gateway_tx, _gateway_rx) =
                 mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
@@ -885,8 +880,8 @@ async fn blocked_prompt_never_reaches_persistence() {
                 seen.iter().any(|s| s.contains("a clean visible prompt")),
                 "the allow path must persist the user echo: {seen:?}"
             );
-        })
-        .await;
+        });
+    });
 }
 
 /// The caller's persist barrier resolves even though a blocked prompt is never pushed or flushed.
@@ -1032,11 +1027,10 @@ async fn blocked_turn_preserves_redirect_marker() {
 
 /// A blocked turn consumes no prompt index: `prompt_index == prompt_texts.len()` is a rewind invariant.
 /// A gap would put rewind preview and edit-and-retry out of sync for every later prompt.
-#[tokio::test(flavor = "current_thread")]
-async fn blocked_prompt_consumes_no_prompt_index() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn blocked_prompt_consumes_no_prompt_index() {
+    on_session_stack(|| {
+        block_on_local(async {
             let (gateway_tx, _gateway_rx) =
                 mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
@@ -1096,6 +1090,6 @@ async fn blocked_prompt_consumes_no_prompt_index() {
                 before + 1,
                 "an allowed prompt consumes exactly one index"
             );
-        })
-        .await;
+        });
+    });
 }

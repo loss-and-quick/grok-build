@@ -210,11 +210,10 @@ async fn run_parent_turn(actor: &Arc<SessionActor>, request: TurnInputRequest) -
         .expect("parent turn timed out")
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn human_non_slash_runs_dynamic_preparation_but_model_non_slash_does_not() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn human_non_slash_runs_dynamic_preparation_but_model_non_slash_does_not() {
+    on_session_stack(|| {
+        block_on_local(async {
             let server = MockInferenceServer::start()
                 .await
                 .expect("mock inference server");
@@ -282,15 +281,14 @@ async fn human_non_slash_runs_dynamic_preparation_but_model_non_slash_does_not()
                 after_model.command_availability,
                 after_human.command_availability
             );
-        })
-        .await;
+        });
+    });
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn runtime_control_slash_stays_inert_without_dynamic_catalogs() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn runtime_control_slash_stays_inert_without_dynamic_catalogs() {
+    on_session_stack(|| {
+        block_on_local(async {
             let server = MockInferenceServer::start()
                 .await
                 .expect("mock inference server");
@@ -320,15 +318,14 @@ async fn runtime_control_slash_stays_inert_without_dynamic_catalogs() {
                 policy_recorder.0.get(),
                 Some(InputAuthority::RuntimeControl)
             );
-        })
-        .await;
+        });
+    });
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn parent_compact_and_available_skill_execute_but_other_slashes_stay_inert() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn parent_compact_and_available_skill_execute_but_other_slashes_stay_inert() {
+    on_session_stack(|| {
+        block_on_local(async {
             let server = MockInferenceServer::start()
                 .await
                 .expect("mock inference server");
@@ -418,10 +415,7 @@ async fn parent_compact_and_available_skill_execute_but_other_slashes_stay_inert
                 crate::session::slash_authority::dynamic_resolution_calls();
             run_parent_turn(
                 &actor,
-                parent_request(
-                    "/dynamic-authority-skill unavailable",
-                    Vec::new(),
-                ),
+                parent_request("/dynamic-authority-skill unavailable", Vec::new()),
             )
             .await
             .expect("skill without a child loader stays inert model input");
@@ -477,15 +471,15 @@ async fn parent_compact_and_available_skill_execute_but_other_slashes_stay_inert
             let calls_before_skill = crate::session::slash_authority::dynamic_resolution_calls();
             run_parent_turn(
                 &actor,
-                parent_request(
-                    "/dynamic-authority-skill preserve auth",
-                    Vec::new(),
-                ),
+                parent_request("/dynamic-authority-skill preserve auth", Vec::new()),
             )
             .await
             .expect("available child skill reaches the model");
             let calls_after_skill = crate::session::slash_authority::dynamic_resolution_calls();
-            assert_eq!(calls_after_skill.skill_catalog, calls_before_skill.skill_catalog + 1);
+            assert_eq!(
+                calls_after_skill.skill_catalog,
+                calls_before_skill.skill_catalog + 1
+            );
             assert_eq!(
                 calls_after_skill.command_availability,
                 calls_before_skill.command_availability + 1
@@ -499,9 +493,9 @@ async fn parent_compact_and_available_skill_execute_but_other_slashes_stay_inert
                 .expect("skill request body")
                 .to_string();
             assert!(skill_request.contains("dynamic skill body for preserve auth"));
-            assert!(skill_request.contains(
-                xai_chat_state::compaction_utils::AGENT_MESSAGE_MODEL_LABEL
-            ));
+            assert!(
+                skill_request.contains(xai_chat_state::compaction_utils::AGENT_MESSAGE_MODEL_LABEL)
+            );
             assert_eq!(
                 actor.active_skill.lock().as_deref(),
                 Some("dynamic-authority-skill")
@@ -618,15 +612,14 @@ async fn parent_compact_and_available_skill_execute_but_other_slashes_stay_inert
                 actor.permissions.is_yolo_mode(),
                 "model-authored /always-approve off must remain inert"
             );
-        })
-        .await;
+        });
+    });
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn parent_skill_lookup_matches_advertised_gated_collision_and_skill_only_loader() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn parent_skill_lookup_matches_advertised_gated_collision_and_skill_only_loader() {
+    on_session_stack(|| {
+        block_on_local(async {
             let server = MockInferenceServer::start()
                 .await
                 .expect("mock inference server");
@@ -715,8 +708,8 @@ async fn parent_skill_lookup_matches_advertised_gated_collision_and_skill_only_l
                 .to_string();
             assert!(inert_request.contains("/local:flush qualified-only"));
             assert!(!inert_request.contains("flush skill body for qualified-only"));
-        })
-        .await;
+        });
+    });
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -740,11 +733,10 @@ async fn shared_command_availability_syncs_classic_goal_harness() {
         .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn parent_bash_metadata_and_placeholder_path_cannot_reach_host_routes() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn parent_bash_metadata_and_placeholder_path_cannot_reach_host_routes() {
+    on_session_stack(|| {
+        block_on_local(async {
             let server = MockInferenceServer::start()
                 .await
                 .expect("mock inference server");
@@ -812,6 +804,6 @@ async fn parent_bash_metadata_and_placeholder_path_cannot_reach_host_routes() {
             let bodies = server.request_bodies();
             let rendered = serde_json::to_string(&bodies).unwrap();
             assert!(!rendered.contains("data:image/"), "{rendered}");
-        })
-        .await;
+        });
+    });
 }

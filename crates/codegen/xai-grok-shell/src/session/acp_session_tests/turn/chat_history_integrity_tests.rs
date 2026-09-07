@@ -70,17 +70,15 @@ fn tool_results_by_call_id(conv: &[ConversationItem]) -> HashMap<String, Vec<Str
 ///
 /// The regression: the nudge was pushed after the assistant `tool_use` was committed and before `execute_tool_calls`.
 /// Integrity repair then wrote a cancel result and the real result landed beside it under the same id.
-#[tokio::test(flavor = "current_thread")]
-async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let server = MockInferenceServer::start().await.expect("mock inference server");
+#[test]
+fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id() {
+    on_session_stack(|| {
+        block_on_local(async {
+            let server = MockInferenceServer::start()
+                .await
+                .expect("mock inference server");
             for i in 1..=SCRIPTED_IDENTICAL_CALLS {
-                server.enqueue_response(
-                    "/v1/responses",
-                    tool_call_sse(&format!("stat-call-{i}")),
-                );
+                server.enqueue_response("/v1/responses", tool_call_sse(&format!("stat-call-{i}")));
             }
             server.enqueue_response(
                 "/v1/responses",
@@ -178,10 +176,7 @@ async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_us
             )
             .await
             .expect("turn must finish within timeout");
-            assert!(
-                outcome.is_ok(),
-                "turn must not error: {outcome:?}"
-            );
+            assert!(outcome.is_ok(), "turn must not error: {outcome:?}");
 
             let conv = actor.chat_state_handle.get_conversation().await;
             let by_id = tool_results_by_call_id(&conv);
@@ -197,8 +192,8 @@ async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_us
             // Fewer executed than scripted proves the harness stopped the run at the tight tier's limit
             // `todo_write` resolved to a problematically repeating kind rather than falling through to the looser thresholds
             assert!(
-                by_id.len() <= super::turn::MAX_CONSECUTIVE_IDENTICAL_PROBLEMATIC_TOOL_CALLS
-                    as usize,
+                by_id.len()
+                    <= super::turn::MAX_CONSECUTIVE_IDENTICAL_PROBLEMATIC_TOOL_CALLS as usize,
                 "`todo_write` must be classified in the problematically-repeating tier, so \
                  the run stops at its hard limit; executed {} of {SCRIPTED_IDENTICAL_CALLS} \
                  scripted calls",
@@ -236,6 +231,6 @@ async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_us
                  run; deleting the nudge is not a valid fix for chat-history corruption. \
                  conversation={conv:#?}"
             );
-        })
-        .await;
+        });
+    });
 }

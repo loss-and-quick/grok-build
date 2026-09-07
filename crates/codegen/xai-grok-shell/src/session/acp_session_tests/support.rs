@@ -1,5 +1,34 @@
 #![allow(dead_code)]
 use super::*;
+
+/// Runs `test` on a thread with the stack a session gets in production.
+///
+/// A turn future is sized for that stack: `spawn_session_thread` gives every session thread
+/// `SESSION_THREAD_STACK_SIZE` (8 MiB, `acp_session_impl/spawn.rs`), and one unoptimized
+/// `process_conversation_turn` poll frame is already a few hundred KiB. A libtest thread gets the
+/// 2 MiB default, so a test that drives a real turn — `handle_prompt`, `handle_turn_input`,
+/// `process_conversation_turn*` — has to supply the session stack itself or abort the whole test
+/// binary on overflow.
+pub(crate) fn on_session_stack(test: impl FnOnce() + Send + 'static) {
+    const SESSION_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+    std::thread::Builder::new()
+        .stack_size(SESSION_THREAD_STACK_SIZE)
+        .spawn(test)
+        .expect("spawn session-sized test thread")
+        .join()
+        .expect("test thread panicked");
+}
+
+/// Drives `fut` the way `#[tokio::test(flavor = "current_thread")]` plus a `LocalSet` would, so a
+/// test moved onto [`on_session_stack`] keeps `spawn_local` and the single-threaded scheduler.
+pub(crate) fn block_on_local<F: std::future::Future>(fut: F) -> F::Output {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    tokio::task::LocalSet::new().block_on(&rt, fut)
+}
+
 pub(crate) fn completion_identity(actor: &SessionActor) -> std::rc::Rc<()> {
     actor
         .state
