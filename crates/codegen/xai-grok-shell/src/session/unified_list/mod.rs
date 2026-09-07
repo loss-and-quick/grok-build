@@ -945,7 +945,9 @@ mod tests {
         );
         assert!(result.rows.is_empty());
     }
-    /// Desktop env lane stays env-gated; process chat mode is feature-gated.
+    /// `conversations_lane_enabled` is hard-`false` in this build, so the desktop
+    /// env var cannot turn the conversations lane on however it is set. It stays a
+    /// matrix so the gate is pinned across every setting, not just the default one.
     #[test]
     #[serial_test::serial]
     fn conversations_lane_env_gating_matrix() {
@@ -962,7 +964,9 @@ mod tests {
             assert!(!conversations_lane_enabled());
         }
     }
-    /// Truth table for `conversations_lane_active`: desktop env lane OR process chat mode, hard-off in release builds.
+    /// `conversations_lane_active` is `conversations_lane_enabled() || process_chat_mode_enabled()`.
+    /// Both are hard-`false` in this build, so the truth table is degenerate: no
+    /// combination of the two env vars turns the lane on, and that is the claim.
     #[test]
     #[serial_test::serial]
     fn conversations_lane_active_truth_table() {
@@ -983,66 +987,77 @@ mod tests {
             let _chat = xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1");
             assert!(
                 !conversations_lane_active(),
-                "process chat mode must enable the lane (chat feature only)"
+                "process chat mode is compiled out: GROK_CHAT_MODE cannot enable the lane"
             );
         }
     }
-    /// `parse_list_req` forces the conversations-only `kind` exactly when process chat mode is on; otherwise the client request is untouched.
+    /// `parse_list_req` leaves the client's `kind` facet exactly as sent, because
+    /// `crate::agent::chat_modes::process_chat_mode_enabled` is hard-`false` here:
+    /// `GROK_CHAT_MODE` cannot turn the lane on, so the force-rewrite it guards is
+    /// unreachable and every input survives verbatim — including the empty, null and
+    /// unrecognized `kind` values a live rewrite would have replaced.
+    ///
+    /// So this pins the stub, not the rewrite. `force_kind_chat` itself stays covered
+    /// by `forced_kind_replaces_client_build_filter` and its neighbours, which call
+    /// it directly; what no test can exercise in this build is `parse_list_req` ever
+    /// reaching it. Re-enable the lane and this test fails, which is the point: the
+    /// behaviour change becomes loud instead of silent.
     #[test]
     #[serial_test::serial]
-    fn parse_list_req_forces_kind_under_process_chat_mode_only() {
-        use crate::agent::chat_modes::GROK_CHAT_MODE_ENV;
-        let raw = serde_json::json!({
-            "_meta": { "x.ai/facetFilters": { "kind": ["build"], "starred": [true] } },
-        })
-        .to_string();
-        {
-            let _off = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_MODE_ENV);
-            let req = parse_list_req(&raw).expect("parse");
-            let parsed = ParsedMeta::parse(req.meta.as_ref());
-            assert_eq!(
-                parsed.facet_filters.get(KIND_FACET_KEY),
-                Some(&vec![serde_json::json!("build")]),
-                "non-chat: client kind filter untouched"
-            );
-        }
-        {
-            let _on = xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1");
-            let req = parse_list_req(&raw).expect("parse");
-            let parsed = ParsedMeta::parse(req.meta.as_ref());
-            let expected_build = Some(&vec![serde_json::json!("build")]);
-            assert_eq!(
-                parsed.facet_filters.get(KIND_FACET_KEY),
-                expected_build,
-                "client kind=build under process chat mode"
-            );
-            assert_eq!(
-                parsed.facet_filters.get("starred"),
-                Some(&vec![serde_json::json!(true)]),
-                "other facets pass through"
-            );
-            let req = parse_list_req("{}").expect("parse");
-            let parsed = ParsedMeta::parse(req.meta.as_ref());
-            let expected = None;
-            assert_eq!(
-                parsed.facet_filters.get(KIND_FACET_KEY),
-                expected,
-                "absent client kind still forces chat under process chat mode"
-            );
-            for bad in [
+    fn parse_list_req_forces_nothing_while_chat_mode_is_hard_off() {
+        use crate::agent::chat_modes::{GROK_CHAT_MODE_ENV, process_chat_mode_enabled};
+        assert!(
+            !process_chat_mode_enabled(),
+            "premise: the lane is compiled out, so nothing rewrites `kind`"
+        );
+        // Each case pairs a request with the `kind` facet the client put in it.
+        let cases = [
+            (
+                serde_json::json!({
+                    "_meta": { "x.ai/facetFilters": { "kind": ["build"], "starred": [true] } },
+                }),
+                Some(vec![serde_json::json!("build")]),
+            ),
+            (serde_json::json!({}), None),
+            (
                 serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": [] } } }),
+                Some(vec![]),
+            ),
+            (
                 serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": null } } }),
+                Some(vec![serde_json::json!(null)]),
+            ),
+            (
                 serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": ["other"] } } }),
-            ] {
-                let req = parse_list_req(&bad.to_string()).expect("parse");
+                Some(vec![serde_json::json!("other")]),
+            ),
+        ];
+        // The env var is inert, so both settings must give the same answers.
+        // Guards are built inside the loop: two in one array would both be live at once.
+        for chat_mode_on in [false, true] {
+            let _chat = if chat_mode_on {
+                xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1")
+            } else {
+                xai_grok_test_support::EnvGuard::unset(GROK_CHAT_MODE_ENV)
+            };
+            for (raw, expected) in &cases {
+                let req = parse_list_req(&raw.to_string()).expect("parse");
                 let parsed = ParsedMeta::parse(req.meta.as_ref());
                 assert_eq!(
                     parsed.facet_filters.get(KIND_FACET_KEY),
-                    expected,
-                    "empty/null/unknown kind must still force chat: {bad}"
+                    expected.as_ref(),
+                    "GROK_CHAT_MODE={chat_mode_on}: kind must survive verbatim: {raw}"
                 );
             }
         }
+        // Neighbouring facets were never the rewrite's business and are untouched too.
+        let req = parse_list_req(&cases[0].0.to_string()).expect("parse");
+        let parsed = ParsedMeta::parse(req.meta.as_ref());
+        assert_eq!(
+            parsed.facet_filters.get("starred"),
+            Some(&vec![serde_json::json!(true)]),
+            "other facets pass through"
+        );
     }
     /// Wire pin for the cross-crate `x.ai/partial` envelope the pager parses: the serialized reason strings must not drift.
     /// The pager maps unknown reasons to a generic retry notice, masking a rename.
