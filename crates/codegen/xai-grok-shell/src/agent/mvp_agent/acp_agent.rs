@@ -1345,7 +1345,12 @@ impl acp::Agent for MvpAgent {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .or_else(|| self.cfg.borrow().client_version.clone());
-            let plugin_registry = self.plugin_registry_snapshot();
+            // This session's own root: a leader hosts sessions in several, and
+            // the prompt's plugin metadata must describe the one this prompt runs in.
+            let plugin_registry = match self.get_session_cwd(&arguments.session_id) {
+                Some(cwd) => self.plugin_registry_for_root(&cwd),
+                None => self.plugin_registry_snapshot(),
+            };
             let prompt_images: Vec<agent_client_protocol::ImageContent> = arguments
                 .prompt
                 .iter()

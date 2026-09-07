@@ -277,20 +277,9 @@ struct ReloadAfterGrant<'a> {
 /// LSP is baked in at bridge build and applies on the next session open (see module docs).
 /// The caller must have granted and recorded trust first.
 async fn reload_project_servers_after_grant(ctx: ReloadAfterGrant<'_>) {
-    let plugin_snapshot = ctx.plugin_handle.snapshot();
-
     for target in ctx.targets {
         // Per-session cwd: a sibling session in a subdir of the granted workspace must get its own project config, not the prompt's
         let session_cwd = target.cwd.as_path();
-        // MCP: `merge_managed_mcp_servers` re-reads disk and runs `filter_untrusted_project_mcp`
-        // The filter now keeps project servers because the cached verdict was flipped to trusted (same workspace key)
-        let _ = crate::session::managed_mcp::merge_and_send_managed_mcp_update(
-            &target.cmd_tx,
-            session_cwd,
-            target.initial_client_mcp_servers,
-            plugin_snapshot.as_deref(),
-            ctx.compat,
-        );
         // Plugins (and plugin-contributed hooks) are built for this session's own cwd on the folder-trust verdict
         // This mirrors `broadcast_plugin_registry_to_sessions`
         // The grant and `resolve_and_record` above flipped the cached verdict to trusted
@@ -301,6 +290,21 @@ async fn reload_project_servers_after_grant(ctx: ReloadAfterGrant<'_>) {
         let registry =
             ctx.plugin_handle
                 .build_for_cwd(session_cwd, &disk_cfg, &[], project_trusted);
+        // The grant is the one thing that changes a root's discovery without a
+        // plugin reload, so drop the entry memoized under the old, untrusted
+        // verdict; the next reader rebuilds it with the project plugins the
+        // grant just admitted.
+        ctx.plugin_handle.release_root(session_cwd);
+        // MCP: `merge_managed_mcp_servers` re-reads disk and runs `filter_untrusted_project_mcp`
+        // The filter now keeps project servers because the cached verdict was flipped to trusted (same workspace key)
+        // Fed this session's own freshly built registry, so a sibling root's plugin MCP servers never leak in
+        let _ = crate::session::managed_mcp::merge_and_send_managed_mcp_update(
+            &target.cmd_tx,
+            session_cwd,
+            target.initial_client_mcp_servers,
+            registry.as_deref(),
+            ctx.compat,
+        );
         let _ = target
             .cmd_tx
             .send(crate::session::SessionCommand::ReloadPlugins { registry });
