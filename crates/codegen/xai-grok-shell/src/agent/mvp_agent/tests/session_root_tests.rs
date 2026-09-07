@@ -153,3 +153,48 @@ async fn skills_list_without_a_session_still_honours_cwd() {
         "a sessionless request keeps the old contract, got {names:?}"
     );
 }
+/// `marketplace add ./x` names a directory in the user's session, not in the
+/// leader's launch directory. The assertion is on the rejected path rather than
+/// on a successful add so the test never writes the global source list.
+/// Serial because the read-only-config probe reads `GROK_HOME`, which this test
+/// points at an empty tree so it never consults the developer's own config.
+#[tokio::test]
+#[serial_test::serial]
+async fn marketplace_add_resolves_a_relative_source_against_the_session_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home = EnvGuard::set("HOME", &home);
+    let _userprofile = EnvGuard::set("USERPROFILE", &home);
+    let _grok = EnvGuard::set("GROK_HOME", &home);
+
+    let root_b = tmp.path().join("b");
+    std::fs::create_dir_all(&root_b).unwrap();
+
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("marketplace-root-sess");
+    let mut handle = make_test_handle("test-model", false, None);
+    handle.info = Info {
+        id: sid.clone(),
+        cwd: root_b.to_string_lossy().into_owned(),
+    };
+    agent.insert_resident(&sid, handle);
+
+    let result = ext_result(
+        &agent,
+        "x.ai/marketplace/action",
+        serde_json::json!({
+            "sessionId": sid.0.as_ref(),
+            "action": { "type": "add_source", "url": "./no-such-marketplace" },
+        }),
+    )
+    .await;
+
+    assert_eq!(result["status"], "validation_error", "{result}");
+    let expected = root_b.join("no-such-marketplace");
+    let message = result["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&expected.to_string_lossy().into_owned()),
+        "the source must resolve against the session's root, got {message:?}"
+    );
+}

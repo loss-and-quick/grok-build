@@ -138,7 +138,15 @@ async fn handle_action(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             source_url_or_path,
             plugin_relative_path,
         } => handle_uninstall(agent, &sid, &source_url_or_path, &plugin_relative_path).await,
-        MarketplaceAction::AddSource { url } => handle_add_source(&url).await,
+        MarketplaceAction::AddSource { url } => {
+            // A relative source is written by the user in their session, not by
+            // the leader in its launch directory; those are different trees and
+            // the resolved path is what lands in the global source list.
+            let cwd = agent
+                .get_session_cwd(&sid)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            handle_add_source(&url, &cwd).await
+        }
         MarketplaceAction::RemoveSource { source_url_or_path } => {
             handle_remove_source(&source_url_or_path).await
         }
@@ -785,7 +793,13 @@ fn to_plugin_entry(
 }
 
 /// Add a new git or local-path marketplace source to `~/.grok/config.toml`.
-async fn handle_add_source(url: &str) -> xai_hooks_plugins_types::ActionOutcome {
+///
+/// `cwd` is the requesting session's root, the directory a relative source is
+/// written against.
+async fn handle_add_source(
+    url: &str,
+    cwd: &std::path::Path,
+) -> xai_hooks_plugins_types::ActionOutcome {
     use crate::plugin::{self, MarketplaceAddInput};
     use xai_hooks_plugins_types::{ActionOutcome, OutcomeStatus};
 
@@ -813,8 +827,7 @@ async fn handle_add_source(url: &str) -> xai_hooks_plugins_types::ActionOutcome 
         };
     }
 
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let input = plugin::classify_marketplace_add_input(url, &cwd);
+    let input = plugin::classify_marketplace_add_input(url, cwd);
 
     // Fail fast on a missing local path: stored as a git URL, it would only error after network clone attempts
     if let MarketplaceAddInput::LocalPath(path) = &input
