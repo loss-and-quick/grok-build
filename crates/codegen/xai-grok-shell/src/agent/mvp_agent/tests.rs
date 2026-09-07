@@ -2315,15 +2315,25 @@ mod session_resume_close_tests;
 // the agent-level host that closes it, and the preference for a live session's
 // own host when one does exist.
 
-/// A plugin dir discovery accepts, with a TS sidecar entry on disk (the
-/// manifest's `plugin` field only resolves to a sidecar spec when the file
-/// really exists) and the `oauthLabel` that makes it a `/login` provider.
+/// A plugin dir discovery accepts, with a sidecar entry on disk and the
+/// `oauthLabel` that makes it a `/login` provider.
+///
+/// The sidecar is declared through `exec`, the one way a sidecar launches.
+/// `sidecar_exec_command` resolves that entry against the plugin root and drops
+/// it unless the file both exists and is executable, so a manifest alone leaves
+/// the plugin shipping no sidecar at all.
 fn sidecar_plugin_dir(name: &str, sidecar: bool) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let mut manifest = serde_json::json!({ "name": name, "oauthLabel": "Acme" });
     if sidecar {
-        std::fs::write(dir.path().join("index.ts"), "export default {};").unwrap();
-        manifest["plugin"] = serde_json::json!("./index.ts");
+        let program = dir.path().join("plugin");
+        std::fs::write(&program, "#!/bin/sh\nexec cat\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        manifest["exec"] = serde_json::json!("./plugin");
     }
     std::fs::write(
         dir.path().join("plugin.json"),
