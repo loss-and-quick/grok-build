@@ -232,6 +232,7 @@ export function createGateway() {
         mcpServers: [],
       })) as NewSessionResponse;
       await refreshRoster();
+      say(`created ${created.sessionId}`);
       return created.sessionId;
     } catch (e) {
       say(`could not create a session: ${String(e)}`);

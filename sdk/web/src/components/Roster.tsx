@@ -1,4 +1,4 @@
-import { A } from "@solidjs/router";
+import { A, useNavigate } from "@solidjs/router";
 import { For, Show, type JSX } from "solid-js";
 
 import type { Gateway } from "../gateway.ts";
@@ -18,6 +18,15 @@ import type { RosterEntry } from "../wire.ts";
  */
 export function Roster(props: { gateway: Gateway; current: string | undefined }): JSX.Element {
   const groups = () => props.gateway.roster.groups();
+  const navigate = useNavigate();
+
+  // Creating a session and opening it are one gesture, but only the route
+  // opens it: navigating is what attaches, so a new session arrives at a URL
+  // that can be reloaded like any other.
+  const createAndOpen = async (cwd: string): Promise<void> => {
+    const sessionId = await props.gateway.createSession(cwd);
+    if (sessionId) navigate(`/s/${sessionId}`);
+  };
 
   return (
     <div class="roster-list">
@@ -40,7 +49,7 @@ export function Roster(props: { gateway: Gateway; current: string | undefined })
                 // `x.ai/fs/list` — which resolves against the leader's launch
                 // directory, not the session's. So this client can only offer
                 // roots the roster already names.
-                onClick={() => void props.gateway.createSession(group.cwd)}
+                onClick={() => void createAndOpen(group.cwd)}
               >
                 + session here
               </button>
