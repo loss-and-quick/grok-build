@@ -1,5 +1,8 @@
 import { For, Match, Show, Switch, type JSX } from "solid-js";
 
+import { blendToward, createTick, waveBrightness } from "../animation.ts";
+import { ACCENT_BAR, BULLET, PROMPT_ARROW, spinnerFrame } from "../glyphs.ts";
+
 import type { Gateway } from "../gateway.ts";
 import { sessionLabel } from "../roster.ts";
 import type { TranscriptEntry } from "../transcript.ts";
@@ -16,6 +19,7 @@ import { PermissionCard } from "./PermissionCard.tsx";
  */
 export function Session(props: { gateway: Gateway }): JSX.Element {
   let composer: HTMLTextAreaElement | undefined;
+  const tick = createTick();
 
   const send = (): void => {
     const text = composer?.value.trim() ?? "";
@@ -55,11 +59,14 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
           </div>
 
           <div class="transcript">
-            <For each={current().transcript.entries}>{(entry) => <Entry entry={entry} />}</For>
+            <For each={current().transcript.entries}>
+              {(entry) => <Entry entry={entry} tick={tick} />}
+            </For>
           </div>
 
           <form
             class="composer"
+            classList={{ running: props.gateway.status() === "running…" }}
             onSubmit={(event) => {
               event.preventDefault();
               send();
@@ -87,13 +94,20 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
   );
 }
 
-function Entry(props: { entry: TranscriptEntry }): JSX.Element {
+function Entry(props: { entry: TranscriptEntry; tick: () => number }): JSX.Element {
   return (
     <Switch>
       <Match when={props.entry.kind === "message" ? props.entry : null}>
         {(message) => (
           <article class={`message message-${message().role}`}>
-            <div class="message-role">{message().role}</div>
+            {/* The pager marks a user turn with the same prompt arrow the
+                composer shows, and leaves the agent's own messages unprefixed —
+                the rail carries the role instead. */}
+            <Show when={message().role === "user"}>
+              <span class="message-arrow" aria-hidden="true">
+                {PROMPT_ARROW}
+              </span>
+            </Show>
             <div class="message-text">{message().text}</div>
           </article>
         )}
@@ -101,8 +115,35 @@ function Entry(props: { entry: TranscriptEntry }): JSX.Element {
       <Match when={props.entry.kind === "tool_call" ? props.entry : null}>
         {(call) => (
           <article class={`tool tool-${call().status}`}>
+            {/* The accent rail waves while the call runs — the pager's own
+                curve, speed and phase — and freezes flat when it finishes. */}
+            <span
+              class="tool-rail"
+              aria-hidden="true"
+              style={
+                call().status === "in_progress"
+                  ? {
+                      color: blendToward(
+                        "var(--grok-bg-base)",
+                        "var(--grok-accent-running)",
+                        waveBrightness(props.tick(), 0),
+                      ),
+                    }
+                  : undefined
+              }
+            >
+              {ACCENT_BAR}
+            </span>
             <div class="tool-title">
-              {call().title} — {call().status}
+              <span class="tool-bullet" aria-hidden="true">
+                {BULLET}
+              </span>
+              {call().title}
+              <Show when={call().status === "in_progress"}>
+                <span class="tool-spinner" aria-hidden="true">
+                  {spinnerFrame(props.tick())}
+                </span>
+              </Show>
             </div>
             <Show when={call().output}>
               <pre class="tool-output">{call().output}</pre>

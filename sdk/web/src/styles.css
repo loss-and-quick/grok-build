@@ -173,74 +173,86 @@ button:disabled {
   opacity: var(--grok-muted-opacity, 1);
 }
 
+/* A user turn carries the same prompt arrow the composer shows, in the accent
+ * column, over the pager's slightly raised band. The agent's own messages get
+ * no prefix — the pager leaves them flush and lets the content speak. */
 .message {
+  display: grid;
+  grid-template-columns: 1.25rem 1fr;
   margin-bottom: 0.75rem;
-  padding-left: 0.6rem;
-  border-left: 2px solid var(--grok-prompt-border, canvastext);
 }
 
-.message-role {
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.message-text {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.message-user .message-role,
-.message-user {
-  border-left-color: var(--grok-accent-user, canvastext);
+.message-arrow {
   color: var(--grok-accent-user, canvastext);
 }
 
-.message-user .message-text {
+.message-user {
+  padding: 0.15rem 0;
+  background: var(--grok-bg-light, canvas);
+}
+
+.message-text {
+  grid-column: 2;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   color: var(--grok-text-primary, canvastext);
 }
 
-.message-assistant {
-  border-left-color: var(--grok-accent-assistant, canvastext);
+/* Reasoning is blended toward the background in the pager rather than dimmed
+ * outright (`bg_blend`, 0.7), so it reads as muted without going flat grey. */
+.message-thought .message-text {
+  color: color-mix(in srgb, var(--grok-text-primary, canvastext) 70%, var(--grok-bg-base, canvas));
 }
 
-.message-assistant .message-role {
-  color: var(--grok-accent-assistant, canvastext);
-}
-
-.message-thought {
-  border-left-color: var(--grok-accent-thinking, canvastext);
-  color: var(--grok-gray-bright, canvastext);
-  opacity: var(--grok-muted-opacity, 1);
-}
-
-.message-thought .message-role {
-  color: var(--grok-accent-thinking, canvastext);
-}
-
+/* A tool call: accent rail in its own column, then the bullet and title —
+ * the pager's accent + pad + content geometry. */
 .tool {
+  display: grid;
+  grid-template-columns: 1.25rem 1fr;
   margin-bottom: 0.75rem;
-  padding-left: 0.6rem;
-  border-left: 2px solid var(--grok-accent-tool, canvastext);
+}
+
+.tool-rail {
+  color: var(--grok-accent-tool, canvastext);
+  line-height: 1.2;
+}
+
+.tool-completed .tool-rail {
+  color: var(--grok-accent-success, canvastext);
+}
+
+.tool-failed .tool-rail {
+  color: var(--grok-accent-error, canvastext);
+}
+
+.tool-bullet {
+  margin-right: 0.4rem;
+  color: var(--grok-gray-bright, canvastext);
+}
+
+.tool-completed .tool-bullet {
+  color: var(--grok-accent-success, canvastext);
+}
+
+.tool-failed .tool-bullet {
+  color: var(--grok-accent-error, canvastext);
+}
+
+.tool-spinner {
+  margin-left: 0.4rem;
+  color: var(--grok-accent-running, canvastext);
 }
 
 .tool-title {
-  color: var(--grok-accent-tool, canvastext);
+  color: var(--grok-text-secondary, canvastext);
 }
 
 .tool-failed .tool-title {
   color: var(--grok-accent-error, canvastext);
 }
 
-.tool-completed .tool-title {
-  color: var(--grok-accent-success, canvastext);
-}
-
-.tool-in_progress .tool-title {
-  color: var(--grok-accent-running, canvastext);
-}
-
 .tool-output {
+  grid-column: 2;
   margin: 0.25rem 0 0;
   padding: 0.4rem;
   max-height: 18rem;
@@ -267,6 +279,12 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  /* The pager docks panels in their own region rather than letting them push
+   * scrollback off screen. As an `auto` grid row a tall panel would starve the
+   * `1fr` transcript to zero height, so the dock is capped and scrolls itself. */
+  max-height: 40vh;
+  overflow-y: auto;
+  flex: 0 0 auto;
 }
 
 .grok-panel {
@@ -498,4 +516,61 @@ button:disabled {
 .roster-cwd:hover,
 .roster-cwd:focus-visible {
   color: var(--grok-text-primary, canvastext);
+}
+
+/* -- pager chrome --------------------------------------------------------- */
+
+.permission-diamond {
+  margin-right: 0.4rem;
+}
+
+/* The pager numbers each option and marks the cursor with a filled dot. */
+.permission-option {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: baseline;
+}
+
+.permission-key {
+  color: var(--grok-accent-user, canvastext);
+}
+
+.permission-marker {
+  color: var(--grok-gray, canvastext);
+}
+
+/* The prompt box is the pager's rounded frame (╭ ╮ ╰ ╯), which in CSS is a
+ * border-radius rather than glyphs. Its two states are the same two roles:
+ * `prompt_border` idle, `prompt_border_active` focused. */
+.composer {
+  align-items: end;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--grok-prompt-border, canvastext);
+  border-radius: 6px;
+}
+
+.composer:focus-within {
+  border-color: var(--grok-prompt-border-active, canvastext);
+}
+
+.prompt-input {
+  border: none;
+  background: transparent;
+  padding-left: 0;
+}
+
+.prompt-input:focus {
+  outline: none;
+}
+
+/* `❯ `, the prompt arrow, in the accent column — `glyphs::prompt_arrow()`. */
+.composer::before {
+  content: "❯";
+  align-self: start;
+  padding-top: 0.15rem;
+  color: var(--grok-accent-user, canvastext);
+}
+
+.composer {
+  grid-template-columns: 1.25rem 1fr auto;
 }
