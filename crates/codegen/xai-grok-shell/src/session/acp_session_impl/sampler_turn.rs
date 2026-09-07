@@ -1582,9 +1582,12 @@ impl SessionActor {
         // The estimate heuristic never fires for kinds naming a non-overflow cause
         // Auth failures refresh-and-resubmit below (the resubmit IS the continuation; budgeted children instead fail their grant closed)
         // Rate limits keep their terminal notification, and the deterministic encrypted-content 400 keeps its friendly arm
+        // The shared detector, never a local `contains`: providers write this 400 in prose and
+        // spell the noun both ways, so a literal `encrypted_content` match misses "the encrypted
+        // content for item rs_..." and the turn dies instead of dropping the blob and resubmitting.
         let encrypted_content_mismatch = matches!(error.kind, SamplingErrorKind::Api)
             && error.status_code == Some(400)
-            && error.message.contains("encrypted_content");
+            && xai_grok_sampling_types::is_encrypted_content_message(&error.message);
         let quiet_mid_salvage = mid_salvage_continuation
             && (error.kind == SamplingErrorKind::MaxTokensTruncation
                 || xai_grok_sampling_types::is_context_length_error(&error.message)
