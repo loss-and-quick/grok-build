@@ -109,14 +109,20 @@ pub struct SkillsConfigResponse {
 }
 
 /// Reload skills using the current config for the given working directory.
+///
+/// The handle is resolved to a registry here rather than by the caller: a leader
+/// hosts sessions in several roots, a project plugin lives in exactly one of
+/// them, and `cwd` is the only thing that says which. Resolving before the
+/// request was parsed answered every root with the launch directory's plugins.
 #[tracing::instrument(skip_all, fields(cwd))]
 async fn reload_skills(
     cwd: &str,
-    plugin_registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
+    plugin_registry: &xai_grok_agent::plugins::SharedPluginRegistryHandle,
     compat: CompatConfig,
 ) -> Vec<SkillInfo> {
     let config = cli_config::load_config().await.skills;
-    let discovery = list_skills_with_plugins(Some(cwd), &config, plugin_registry, compat);
+    let registry = plugin_registry.registry_for_root(std::path::Path::new(cwd));
+    let discovery = list_skills_with_plugins(Some(cwd), &config, registry.as_deref(), compat);
     match tokio::time::timeout(std::time::Duration::from_secs(5), discovery).await {
         Ok(skills) => skills,
         Err(_) => {
@@ -264,7 +270,7 @@ fn extra_skill_dirs_from_config() -> Vec<String> {
 pub async fn handle(
     agent: &crate::agent::mvp_agent::MvpAgent,
     args: &acp::ExtRequest,
-    plugin_registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
+    plugin_registry: &xai_grok_agent::plugins::SharedPluginRegistryHandle,
     compat: CompatConfig,
 ) -> ExtResult {
     match args.method.as_ref() {
@@ -623,6 +629,106 @@ mod tests {
             std::path::PathBuf::from(&resolved),
             expected,
             "resolved={resolved}"
+        );
+    }
+
+    /// A `skills/list` rooted at `/b` must answer with `/b`'s own plugin
+    /// skills, never another root's.
+    ///
+    /// The registry used to be resolved from the process-wide snapshot before
+    /// the request was parsed, so a leader hosting sessions in several roots
+    /// merged every root's filesystem skills with the launch directory's
+    /// plugin skills — and `skills/toggle` then wrote against that wrong set.
+    ///
+    /// Serial because plugin discovery reads `HOME`/`GROK_HOME` for
+    /// user-scope plugins and this test has to point them somewhere empty.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skills_list_uses_the_requested_roots_plugins() {
+        use xai_grok_agent::plugins::SharedPluginRegistryHandle;
+        use xai_grok_agent::plugins::discovery::DiscoveryConfig;
+        use xai_grok_test_support::env::EnvGuard;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _home = EnvGuard::set("HOME", &home);
+        let _userprofile = EnvGuard::set("USERPROFILE", &home);
+        let _grok = EnvGuard::set("GROK_HOME", &home);
+
+        // Each root carries a project plugin of its own, contributing one skill.
+        let plant = |root_name: &str, plugin: &str, skill: &str| -> std::path::PathBuf {
+            let plugin_dir = tmp.path().join(root_name).join("plugins").join(plugin);
+            std::fs::create_dir_all(plugin_dir.join("skills").join(skill)).unwrap();
+            std::fs::write(
+                plugin_dir.join("plugin.json"),
+                format!(r#"{{"name":"{plugin}"}}"#),
+            )
+            .unwrap();
+            std::fs::write(
+                plugin_dir.join("skills").join(skill).join("SKILL.md"),
+                "body",
+            )
+            .unwrap();
+            dunce::canonicalize(tmp.path().join(root_name)).unwrap()
+        };
+        let root_a = plant("a", "alpha", "alpha-skill");
+        let root_b = plant("b", "beta", "beta-skill");
+
+        // The resolver the shell installs, in miniature: a root's discovery
+        // config names the plugins found in that tree and no other.
+        let handle = SharedPluginRegistryHandle::new(None, vec![]);
+        {
+            let (a, b) = (root_a.clone(), root_b.clone());
+            handle.set_root_context_resolver(std::sync::Arc::new(move |root: &std::path::Path| {
+                let config_paths = if root == a {
+                    vec![a.join("plugins").join("alpha")]
+                } else if root == b {
+                    vec![b.join("plugins").join("beta")]
+                } else {
+                    vec![]
+                };
+                (
+                    DiscoveryConfig {
+                        config_paths,
+                        ..Default::default()
+                    },
+                    true,
+                )
+            }));
+        }
+
+        // `/a` is the launch directory, so it is `/a` that populates the shared
+        // snapshot — the cell this extension used to read for every root.
+        handle.reload(
+            Some(&root_a),
+            &DiscoveryConfig {
+                config_paths: vec![root_a.join("plugins").join("alpha")],
+                ..Default::default()
+            },
+            true,
+            false,
+        );
+
+        let skills =
+            reload_skills(&root_b.to_string_lossy(), &handle, CompatConfig::default()).await;
+
+        let plugins: Vec<&str> = skills
+            .iter()
+            .filter_map(|s| s.plugin_name.as_deref())
+            .collect();
+        assert!(
+            plugins.contains(&"beta"),
+            "the requested root's own plugin skills must be listed: {plugins:?}"
+        );
+        assert!(
+            !plugins.contains(&"alpha"),
+            "another root's plugin skills must not be listed: {plugins:?}"
+        );
+        assert!(
+            skills.iter().any(|s| s.name == "beta-skill"),
+            "expected beta-skill among {:?}",
+            skills.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
     }
 

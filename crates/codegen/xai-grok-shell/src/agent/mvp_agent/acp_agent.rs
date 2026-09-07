@@ -2784,10 +2784,12 @@ impl acp::Agent for MvpAgent {
             }
             s if s.starts_with("x.ai/skills/") || s == "x.ai/workflows/list" => {
                 let compat = self.cfg.borrow().compat_resolved;
+                // The handle, not a registry: every skills arm parses its own
+                // `cwd`, and only it knows which root's plugins to answer with.
                 crate::extensions::skills::handle(
                         self,
                         &args,
-                        self.plugin_registry_handle.snapshot().as_deref(),
+                        &self.plugin_registry_handle,
                         compat,
                     )
                     .await
