@@ -570,14 +570,8 @@ pub(crate) mod tests {
         assert!(auth_manager.current().is_some());
     }
 
-    /// jsonwebtoken needs a process-level CryptoProvider; tests that encode JWTs can't rely on another test having installed it first.
-    fn ensure_crypto_provider() {
-        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
-    }
-
     #[test]
     fn build_auth_seeds_team_metadata_from_access_token() {
-        ensure_crypto_provider();
         let temp_dir = tempfile::tempdir().unwrap();
         let grok_home = temp_dir.path().join(".grok");
         std::fs::create_dir_all(&grok_home).unwrap();
@@ -651,7 +645,6 @@ pub(crate) mod tests {
 
     /// `build_auth` with `token_principal` must fail with `expected_err` and persist nothing.
     fn assert_build_auth_rejected(cfg: GrokComConfig, token_principal: &str, expected_err: &str) {
-        ensure_crypto_provider();
         let temp_dir = tempfile::tempdir().unwrap();
         let grok_home = temp_dir.path().join(".grok");
         std::fs::create_dir_all(&grok_home).unwrap();
@@ -683,7 +676,6 @@ pub(crate) mod tests {
     /// A different team's token is therefore accepted.
     #[test]
     fn build_auth_does_not_enforce_legacy_oauth2_principal_id() {
-        ensure_crypto_provider();
         let cfg = GrokComConfig {
             oauth2: Some(crate::auth::OAuth2ProviderConfig {
                 issuer: "http://localhost:22255".into(),

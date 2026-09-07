@@ -372,12 +372,6 @@ pub async fn run_login_flow_with_config(
 ) -> anyhow::Result<(GrokAuth, bool)> {
     tracing::info!(issuer = %oidc.issuer, client_id = %oidc.client_id, "OIDC: starting login flow");
 
-    // Ensure jsonwebtoken CryptoProvider is installed (required for JWT validation).
-    jsonwebtoken::crypto::CryptoProvider::install_default(
-        &jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER,
-    )
-    .ok();
-
     let discovery = discover(&oidc.issuer).await?;
     let pkce = generate_pkce();
     let state = uuid::Uuid::now_v7().to_string();

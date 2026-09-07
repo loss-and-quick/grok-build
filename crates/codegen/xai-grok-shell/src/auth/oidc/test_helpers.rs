@@ -12,7 +12,6 @@ pub(super) fn test_nonce() -> String {
 pub(super) const TEST_CLIENT_ID: &str = "test-client-id";
 pub(super) fn ensure_crypto_provider() {
     xai_grok_extra_ca::ensure_default_crypto_provider();
-    let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
 }
 pub(super) fn generate_test_rsa_key() -> (String, String, String) {
     use rsa::pkcs8::EncodePrivateKey;
@@ -45,8 +44,6 @@ pub(super) async fn mock_idp_token() -> (String, String, Discovery, tokio::task:
     (issuer, id_token, discovery, handle)
 }
 pub(super) async fn start_mock_idp() -> (String, tokio::task::JoinHandle<()>) {
-    // Guarded where the signing happens, not at each caller: one unguarded sign caches a panicking
-    // stub as the process-wide provider and takes every later JWT test in the binary down with it.
     ensure_crypto_provider();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let issuer = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());

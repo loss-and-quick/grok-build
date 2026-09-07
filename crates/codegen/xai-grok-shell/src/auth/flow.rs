@@ -1031,8 +1031,7 @@ mod tests {
         );
     }
     /// A login that never reached the network is not a transport failure.
-    /// The positive path needs a real `reqwest::Error`, but building a client here flips `jsonwebtoken` into its "no CryptoProvider" panic.
-    /// That breaks unrelated auth tests, so classification is covered in `xai-grok-http`.
+    /// The positive path needs a real `reqwest::Error`, which this crate has no way to construct, so classification is covered in `xai-grok-http`.
     #[test]
     fn non_http_login_failures_are_not_reported() {
         let abandoned = anyhow::anyhow!("Login timed out after 10 minutes. Please try again.");
@@ -1570,11 +1569,7 @@ mod tests {
             &cfg,
         ));
     }
-    fn ensure_crypto_provider() {
-        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
-    }
     fn team_jwt(principal_id: &str) -> String {
-        ensure_crypto_provider();
         jsonwebtoken::encode(
             &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
             &serde_json::json!({

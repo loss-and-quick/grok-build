@@ -3166,13 +3166,8 @@ async fn enrich_auth_inline_unreachable_server_leaves_auth_unchanged() {
     assert_eq!(auth.user_id, before.user_id);
     assert!(!auth.is_data_collection_disabled());
 }
-/// `jsonwebtoken` needs a process-level CryptoProvider; tests that encode JWTs can't rely on another test having installed it first.
-fn ensure_crypto_provider() {
-    let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
-}
 /// A signed (HS256) access token carrying a `Team` principal, matching the shape `peek_access_token_principal` extracts in production.
 fn team_jwt(principal_id: &str) -> String {
-    ensure_crypto_provider();
     jsonwebtoken::encode(
         &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
         &serde_json::json!({
@@ -3187,7 +3182,6 @@ fn team_jwt(principal_id: &str) -> String {
 }
 /// An access token carrying `principal_id` but NO `principal_type`.
 fn principal_id_only_jwt(principal_id: &str) -> String {
-    ensure_crypto_provider();
     jsonwebtoken::encode(
         &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
         &serde_json::json!({
