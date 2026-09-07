@@ -21,8 +21,10 @@
 //! See `plugin_rows.rs`, which carries the rationale.
 
 pub mod defs;
+pub(crate) mod intern;
 pub mod plugin_rows;
 pub mod registry;
+pub mod wire;
 
 pub use plugin_rows::{
     PLUGIN_KEY_PREFIX, is_plugin_key, plugin_json_value, plugin_setting_rows,
@@ -30,8 +32,8 @@ pub use plugin_rows::{
 };
 pub use registry::{
     CodingDataSharingLock, DynamicEnumSource, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot,
-    RowLock, SettingCategory, SettingKey, SettingKind, SettingMeta, SettingOwner, SettingValue,
-    SettingsRegistry, StringValidator, canonical_hunk_tracker_mode, canonical_screen_mode,
-    canonical_voice_capture_mode, canonical_voice_stt_language, current_value_for,
-    default_value_for, dynamic_enum_choices, is_consent_chooser,
+    RowLock, SettingCategory, SettingKey, SettingKind, SettingMeta, SettingOwner, SettingSurface,
+    SettingValue, SettingsRegistry, StringValidator, canonical_hunk_tracker_mode,
+    canonical_screen_mode, canonical_voice_capture_mode, canonical_voice_stt_language,
+    current_value_for, default_value_for, dynamic_enum_choices, is_consent_chooser,
 };

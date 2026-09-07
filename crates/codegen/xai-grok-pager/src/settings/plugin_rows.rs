@@ -51,51 +51,19 @@
 //! lifecycle, not something a plugin author is in a position to promise.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
 
 use xai_hooks_plugins_types::{PluginInfo, PluginSettingInfo, PluginSettingKindInfo};
 
+use super::intern::{intern, intern_choices, intern_strs};
 use super::registry::{
-    EnumChoice, SettingCategory, SettingKey, SettingKind, SettingMeta, SettingOwner, SettingValue,
-    StringValidator,
+    EnumChoice, SettingCategory, SettingKey, SettingKind, SettingMeta, SettingOwner,
+    SettingSurface, SettingValue, StringValidator,
 };
 
-/// Prefix of every plugin-contributed registry key: `plugin.<plugin>.<setting>`.
-///
-/// Plugin names are `[a-z0-9-]` and setting keys `[a-z0-9_-]` (both enforced in
-/// the manifest parser), so neither half carries a `.` and the split below is
-/// unambiguous.
-pub const PLUGIN_KEY_PREFIX: &str = "plugin.";
-
-/// Split a plugin registry key into `(plugin, setting_key)`.
-/// `None` for the group row `plugin.<plugin>` and for non-plugin keys.
-pub fn split_plugin_key(key: &str) -> Option<(&str, &str)> {
-    key.strip_prefix(PLUGIN_KEY_PREFIX)?.split_once('.')
-}
-
-/// Whether `key` names a plugin-contributed row (including its group row).
-pub fn is_plugin_key(key: &str) -> bool {
-    key.starts_with(PLUGIN_KEY_PREFIX)
-}
-
-/// Intern a runtime string as `&'static str`.
-///
-/// `SettingKey` and every text field of [`SettingMeta`] are `&'static str`: the
-/// registry is a compile-time catalog that plugin rows are joining, and widening
-/// the whole type to `String` to accommodate them would cost every core row an
-/// allocation. Interning bounds what that costs instead — a plugin reload that
-/// re-sends the same schema leaks nothing the second time.
-fn intern(s: &str) -> &'static str {
-    static POOL: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
-    let pool = POOL.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(existing) = pool.get(s) {
-        return existing;
-    }
-    let leaked: &'static str = Box::leak(s.to_string().into_boxed_str());
-    pool.insert(leaked);
-    leaked
-}
+// The key namespace and how it splits are wire facts — the shell routes a write
+// by them — so they are defined once, in the wire crate, and re-exported here
+// for the call sites that already name them.
+pub use xai_grok_settings_types::{PLUGIN_KEY_PREFIX, is_plugin_key, split_plugin_key};
 
 /// Strip characters that must never reach a rendered row.
 ///
@@ -176,6 +144,10 @@ pub fn plugin_setting_rows(plugins: &[PluginInfo]) -> Vec<SettingMeta> {
             // written to disk — the same reason the registry's other group rows
             // are not locked by a read-only config.
             owner: SettingOwner::Pager,
+            // A plugin author is in no position to say a preference is a
+            // terminal concept, and nothing in a manifest can express it, so
+            // every contributed row is offered to every client.
+            surface: SettingSurface::Any,
             label: intern(&scrub(&plugin.name)),
             description: intern(&scrub(
                 plugin
@@ -183,11 +155,9 @@ pub fn plugin_setting_rows(plugins: &[PluginInfo]) -> Vec<SettingMeta> {
                     .as_deref()
                     .unwrap_or("Settings contributed by this plugin."),
             )),
-            keywords: Box::leak(
-                vec![intern("plugin"), intern(&scrub(&plugin.name))].into_boxed_slice(),
-            ),
+            keywords: intern_strs(&[intern("plugin"), intern(&scrub(&plugin.name))]),
             kind: SettingKind::Group {
-                children: Box::leak(children.into_boxed_slice()),
+                children: intern_strs(&children),
             },
             restart_required: false,
             hidden_in_minimal: false,
@@ -234,7 +204,7 @@ fn plugin_row(plugin: &str, setting: &PluginSettingInfo) -> Option<SettingMeta> 
                 .canonical;
             SettingKind::Enum {
                 default,
-                choices: Box::leak(choices.into_boxed_slice()),
+                choices: intern_choices(&choices),
                 // Previewing a plugin's value would mean persisting it — there
                 // is no live visual to preview and no way to revert what the
                 // sidecar may already have acted on.
@@ -246,16 +216,14 @@ fn plugin_row(plugin: &str, setting: &PluginSettingInfo) -> Option<SettingMeta> 
         key: intern(&format!("{PLUGIN_KEY_PREFIX}{plugin}.{}", setting.key)),
         category: SettingCategory::Plugins,
         owner: SettingOwner::Shell,
+        surface: SettingSurface::Any,
         label: intern(&scrub(&setting.label)),
         description: intern(&scrub(&setting.description)),
-        keywords: Box::leak(
-            vec![
-                intern("plugin"),
-                intern(&scrub(plugin)),
-                intern(&setting.key),
-            ]
-            .into_boxed_slice(),
-        ),
+        keywords: intern_strs(&[
+            intern("plugin"),
+            intern(&scrub(plugin)),
+            intern(&setting.key),
+        ]),
         kind,
         // See the module docs: the sidecar takes its config at `initialize`.
         restart_required: true,

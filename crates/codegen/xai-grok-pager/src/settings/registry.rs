@@ -79,8 +79,28 @@ impl SettingCategory {
     }
 }
 
+/// Which clients a setting is meant for.
+///
+/// Parity between the TUI and any other client is about *function*, not about
+/// every client drawing every row: a browser has no alternate screen buffer to
+/// enter and no scroll wheel to invert. Marking those rows here — and carrying
+/// the mark on the wire — is the difference between a client skipping a row
+/// because it was told to and a client skipping a row because someone taught it
+/// a list of key names. The second one is how the two views drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingSurface {
+    /// Every client renders it.
+    Any,
+    /// The row configures the terminal front-end itself: the alternate screen,
+    /// the mouse, a key chord, a column width, the frame cadence.
+    Terminal,
+}
+
 /// One choice in an `Enum` setting.
-#[derive(Debug, Clone, Copy)]
+///
+/// `Eq`/`Hash` so a choice catalog raised from the wire can be interned by
+/// content rather than leaked afresh each time (see [`super::intern`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EnumChoice {
     /// Canonical persisted value (e.g. `"groknight"`).
     pub canonical: &'static str,
@@ -202,6 +222,10 @@ pub struct SettingMeta {
     pub key: SettingKey,
     pub category: SettingCategory,
     pub owner: SettingOwner,
+    /// Which clients the row is meant for. Declared per row rather than derived
+    /// from the category or guessed from the key, because a guess is knowledge
+    /// the wire never handed out — see [`SettingSurface`].
+    pub surface: SettingSurface,
     pub label: &'static str,
     pub description: &'static str,
     /// Free-form keywords for the search filter.
@@ -476,8 +500,17 @@ pub struct SettingsRegistry {
 
 impl SettingsRegistry {
     /// Build the default registry from `crate::settings::defs::default_settings()`.
+    ///
+    /// The const table is lowered onto the wire and raised back rather than
+    /// used directly. That is not ceremony: it is what makes "the pager renders
+    /// the wire representation" true instead of aspirational. A row that has no
+    /// wire form does not reach the modal at all, in this build, on the first
+    /// run — rather than reaching a second client as a row that quietly is not
+    /// there. See [`crate::settings::wire`].
     pub fn defaults() -> Self {
-        let entries = crate::settings::defs::default_settings();
+        let entries = crate::settings::wire::raise_rows(&crate::settings::wire::catalog_from(
+            &crate::settings::defs::default_settings(),
+        ));
         assert_unique_keys(&entries);
         Self { entries }
     }
@@ -505,10 +538,17 @@ impl SettingsRegistry {
     /// manifest is input — and taking the TUI down over bad input is not a
     /// check, it is a denial of service with a stack trace.
     pub fn with_plugin_settings(plugins: &[xai_hooks_plugins_types::PluginInfo]) -> Self {
-        let mut entries = crate::settings::defs::default_settings();
+        // Through the wire, like `defaults`: a plugin row that could not be
+        // represented is a row no client renders, including this one.
+        let mut entries = crate::settings::wire::raise_rows(&crate::settings::wire::catalog_from(
+            &crate::settings::defs::default_settings(),
+        ));
         assert_unique_keys(&entries);
         let mut seen: std::collections::HashSet<&str> = entries.iter().map(|m| m.key).collect();
-        for meta in crate::settings::plugin_setting_rows(plugins) {
+        let contributed = crate::settings::wire::raise_rows(&crate::settings::wire::catalog_from(
+            &crate::settings::plugin_setting_rows(plugins),
+        ));
+        for meta in contributed {
             if !seen.insert(meta.key) {
                 tracing::warn!(key = %meta.key, "dropping plugin settings row with a taken key");
                 continue;
@@ -1663,6 +1703,7 @@ mod tests {
             key: "synthetic_int",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Any,
             label: "Synthetic Int",
             description: "Test fixture.",
             keywords: &["test"],

@@ -1,0 +1,1673 @@
+{
+  "version": 1,
+  "categories": [
+    {
+      "id": "appearance",
+      "label": "Appearance"
+    },
+    {
+      "id": "mouse",
+      "label": "Mouse"
+    },
+    {
+      "id": "editor",
+      "label": "Editor & Input"
+    },
+    {
+      "id": "agent",
+      "label": "Agent & Approval"
+    },
+    {
+      "id": "privacy",
+      "label": "Privacy"
+    },
+    {
+      "id": "models",
+      "label": "Models"
+    },
+    {
+      "id": "session",
+      "label": "Session"
+    },
+    {
+      "id": "advanced",
+      "label": "Advanced"
+    },
+    {
+      "id": "plugins",
+      "label": "Plugins"
+    }
+  ],
+  "rows": [
+    {
+      "key": "compact_mode",
+      "category": "appearance",
+      "owner": "shellCached",
+      "surface": "any",
+      "label": "Compact mode",
+      "description": "Reduce padding around messages for more content density. Auto-enabled while the terminal is 20 rows or shorter.",
+      "keywords": [
+        "compact",
+        "density",
+        "padding",
+        "tight",
+        "small",
+        "screen",
+        "auto"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "screen_mode",
+      "category": "appearance",
+      "owner": "shell",
+      "surface": "terminal",
+      "label": "Default screen mode",
+      "description": "How plain grok opens next time: Fullscreen (default when unset) or Minimal. Writes [ui] screen_mode in config.toml. Restart required. Switch this session only with /minimal or /fullscreen.",
+      "keywords": [
+        "screen",
+        "mode",
+        "minimal",
+        "fullscreen",
+        "full",
+        "scrollback",
+        "native",
+        "alt-screen",
+        "render",
+        "default"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "fullscreen",
+        "choices": [
+          {
+            "canonical": "fullscreen",
+            "display": "Fullscreen",
+            "description": "Open plain grok in the standard fullscreen TUI. Default when unset."
+          },
+          {
+            "canonical": "minimal",
+            "display": "Minimal",
+            "description": "Open plain grok in scrollback-native (minimal) mode."
+          }
+        ],
+        "supports_preview": false
+      },
+      "restartRequired": true,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "show_timestamps",
+      "category": "appearance",
+      "owner": "shellCached",
+      "surface": "any",
+      "label": "Show timestamps",
+      "description": "Show clock time next to user messages and agent responses.",
+      "keywords": [
+        "timestamps",
+        "time",
+        "clock",
+        "date"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "show_timeline",
+      "category": "appearance",
+      "owner": "shellCached",
+      "surface": "any",
+      "label": "Timeline sidebar",
+      "description": "Per-turn tick rail in place of the scrollbar: hover previews a turn, click jumps to it.",
+      "keywords": [
+        "timeline",
+        "sidebar",
+        "ticks",
+        "turns",
+        "navigator",
+        "rail"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": true
+    },
+    {
+      "key": "page_flip_on_send",
+      "category": "appearance",
+      "owner": "shellCached",
+      "surface": "any",
+      "label": "Snap prompt to top on send",
+      "description": "When you send a prompt, scroll it to the top of the screen so the response starts on a fresh page (default). Turn off to leave the scroll position unchanged when you send.",
+      "keywords": [
+        "page",
+        "flip",
+        "send",
+        "prompt",
+        "scroll",
+        "top",
+        "jump",
+        "auto",
+        "snap"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": true
+    },
+    {
+      "key": "combine_queued_prompts",
+      "category": "editor",
+      "owner": "shellCached",
+      "surface": "any",
+      "label": "Combine queued prompts",
+      "description": "Merge consecutive plain follow-ups into one model turn (TUI shows one bubble each). Stops at bash, slash commands, cron, expanded skills, image follow-ups, or a row under edit. Default off; applies on local drain and shell promote.",
+      "keywords": [
+        "queue",
+        "combine",
+        "batch",
+        "follow-up",
+        "merge",
+        "pending"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "follow_up_behavior",
+      "category": "editor",
+      "owner": "shellCached",
+      "surface": "any",
+      "label": "Follow-up behavior",
+      "description": "What to do with messages you send while a turn is running. Queue waits for the turn to finish; Steer injects them mid-turn at the next tool batch or model step. Default: Queue.",
+      "keywords": [
+        "queue",
+        "steer",
+        "interject",
+        "follow-up",
+        "followup",
+        "send",
+        "immediate"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "queue",
+        "choices": [
+          {
+            "canonical": "queue",
+            "display": "Queue",
+            "description": "Hold follow-ups until the current turn finishes."
+          },
+          {
+            "canonical": "steer",
+            "display": "Steer",
+            "description": "Inject follow-ups mid-turn at the next tool or model step."
+          }
+        ],
+        "supports_preview": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "confirm_before_rewind",
+      "category": "editor",
+      "owner": "shellCached",
+      "surface": "any",
+      "label": "Confirm before rewind",
+      "description": "Ask before rewinding conversation history. Turn off to rewind immediately when you pick a turn.",
+      "keywords": [
+        "rewind",
+        "confirm",
+        "undo",
+        "history",
+        "ask",
+        "prompt"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "simple_mode",
+      "category": "appearance",
+      "owner": "shellCached",
+      "surface": "terminal",
+      "label": "Disable vim input mode",
+      "description": "Use plain readline-style input instead of vim keys in the prompt. Experimental.",
+      "keywords": [
+        "simple",
+        "ascii",
+        "minimal",
+        "plain",
+        "vim",
+        "readline",
+        "experimental",
+        "editor",
+        "input",
+        "prompt"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "vim_mode",
+      "category": "appearance",
+      "owner": "shell",
+      "surface": "terminal",
+      "label": "Vim scrollback navigation",
+      "description": "Enable vim keys (h/j/k/l, gg/G, /) for navigating the scrollback. Does not affect the input prompt.",
+      "keywords": [
+        "vim",
+        "scrollback",
+        "navigation",
+        "hjkl",
+        "keys",
+        "keybindings",
+        "scroll"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "theme",
+      "category": "appearance",
+      "owner": "shellCached",
+      "surface": "any",
+      "label": "Theme",
+      "description": "Color theme for the pager UI.",
+      "keywords": [
+        "theme",
+        "color",
+        "colour",
+        "palette",
+        "appearance",
+        "dark",
+        "light"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "groknight",
+        "choices": [
+          {
+            "canonical": "auto",
+            "display": "Auto",
+            "description": "Follow system dark/light appearance."
+          },
+          {
+            "canonical": "groknight",
+            "display": "Grok Night",
+            "description": "Neutral dark with magenta accent."
+          },
+          {
+            "canonical": "grokday",
+            "display": "Grok Day",
+            "description": "Light theme for bright environments."
+          },
+          {
+            "canonical": "tokyonight",
+            "display": "Tokyo Night",
+            "description": "Dark + blue-tinted; needs truecolor."
+          },
+          {
+            "canonical": "rosepine-moon",
+            "display": "Rose Pine Moon",
+            "description": "Muted dark with mauve accents; needs truecolor."
+          },
+          {
+            "canonical": "oscura-midnight",
+            "display": "Oscura Midnight",
+            "description": "Deep dark with warm accents; needs truecolor."
+          }
+        ],
+        "supports_preview": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": true
+    },
+    {
+      "key": "auto_dark_theme",
+      "category": "appearance",
+      "owner": "shellCached",
+      "surface": "any",
+      "label": "Auto dark theme",
+      "description": "Theme to use when the system is in dark mode (only with theme=auto).",
+      "keywords": [
+        "auto",
+        "dark",
+        "theme",
+        "system",
+        "appearance",
+        "night"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "groknight",
+        "choices": [
+          {
+            "canonical": "groknight",
+            "display": "Grok Night",
+            "description": "Neutral dark with magenta accent."
+          },
+          {
+            "canonical": "grokday",
+            "display": "Grok Day",
+            "description": "Light theme for bright environments."
+          },
+          {
+            "canonical": "tokyonight",
+            "display": "Tokyo Night",
+            "description": "Dark + blue-tinted; needs truecolor."
+          },
+          {
+            "canonical": "rosepine-moon",
+            "display": "Rose Pine Moon",
+            "description": "Muted dark with mauve accents; needs truecolor."
+          },
+          {
+            "canonical": "oscura-midnight",
+            "display": "Oscura Midnight",
+            "description": "Deep dark with warm accents; needs truecolor."
+          }
+        ],
+        "supports_preview": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": true
+    },
+    {
+      "key": "auto_light_theme",
+      "category": "appearance",
+      "owner": "shellCached",
+      "surface": "any",
+      "label": "Auto light theme",
+      "description": "Theme to use when the system is in light mode (only with theme=auto).",
+      "keywords": [
+        "auto",
+        "light",
+        "theme",
+        "system",
+        "appearance",
+        "day"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "grokday",
+        "choices": [
+          {
+            "canonical": "groknight",
+            "display": "Grok Night",
+            "description": "Neutral dark with magenta accent."
+          },
+          {
+            "canonical": "grokday",
+            "display": "Grok Day",
+            "description": "Light theme for bright environments."
+          },
+          {
+            "canonical": "tokyonight",
+            "display": "Tokyo Night",
+            "description": "Dark + blue-tinted; needs truecolor."
+          },
+          {
+            "canonical": "rosepine-moon",
+            "display": "Rose Pine Moon",
+            "description": "Muted dark with mauve accents; needs truecolor."
+          },
+          {
+            "canonical": "oscura-midnight",
+            "display": "Oscura Midnight",
+            "description": "Deep dark with warm accents; needs truecolor."
+          }
+        ],
+        "supports_preview": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": true
+    },
+    {
+      "key": "render_mermaid",
+      "category": "appearance",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Render Mermaid diagrams",
+      "description": "How ```mermaid code blocks are shown: auto/on add a clickable row to open the rendered diagram; off shows the raw source.",
+      "keywords": [
+        "mermaid",
+        "diagram",
+        "diagrams",
+        "render",
+        "flowchart",
+        "graph",
+        "chart"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "auto",
+        "choices": [
+          {
+            "canonical": "auto",
+            "display": "Auto",
+            "description": "Show diagrams with a clickable row to open/copy the rendered image."
+          },
+          {
+            "canonical": "on",
+            "display": "On",
+            "description": "Same as auto: always show the clickable affordance row."
+          },
+          {
+            "canonical": "off",
+            "display": "Off",
+            "description": "Always show the raw Mermaid source as a code block."
+          }
+        ],
+        "supports_preview": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "permission_mode",
+      "category": "agent",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Permission mode",
+      "description": "Default uses the agent's built-in behavior; Ask prompts for each tool action; Auto uses an LLM classifier for risky tools; Always approve grants all permissions automatically.",
+      "keywords": [
+        "permission",
+        "approve",
+        "yolo",
+        "agent",
+        "always",
+        "ask",
+        "auto",
+        "classifier",
+        "tool",
+        "danger"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "ask",
+        "choices": [
+          {
+            "canonical": "default",
+            "display": "Default",
+            "description": "Use the agent's default permission behavior (currently equivalent to Ask)."
+          },
+          {
+            "canonical": "ask",
+            "display": "Ask",
+            "description": "Prompt for permission before tool actions."
+          },
+          {
+            "canonical": "auto",
+            "display": "Auto",
+            "description": "LLM classifier approves safe tools; dangerous actions may still prompt or deny."
+          },
+          {
+            "canonical": "always-approve",
+            "display": "Always approve",
+            "description": "Auto-approve every tool action. Skips ALL permission prompts."
+          }
+        ],
+        "supports_preview": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "remember_tool_approvals",
+      "category": "agent",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Remember tool approvals",
+      "description": "Show \"Always allow\" options in permission prompts so you can stop being re-asked about a specific command or tool. Applies in ask and auto; Always-approve still skips all prompts. Restart required.",
+      "keywords": [
+        "permission",
+        "approve",
+        "approval",
+        "always",
+        "allow",
+        "remember",
+        "tool",
+        "command",
+        "kubectl",
+        "ask",
+        "again",
+        "whitelist"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": true,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "multiline_mode",
+      "category": "editor",
+      "owner": "client",
+      "surface": "any",
+      "label": "Multiline",
+      "description": "When on, Enter inserts a newline and Shift+Enter sends. Resets each session.",
+      "keywords": [
+        "multiline",
+        "newline",
+        "input",
+        "editor",
+        "enter"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "default_model",
+      "category": "models",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Default model",
+      "description": "Model used for new sessions. Changing this also switches the active session. Pick `(no override)` to clear.",
+      "keywords": [
+        "model",
+        "default",
+        "agent",
+        "llm",
+        "grok",
+        "switch"
+      ],
+      "kind": {
+        "type": "dynamicEnum",
+        "default": "",
+        "source": "activeModelCatalog",
+        "supports_preview": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "max_thoughts_width",
+      "category": "appearance",
+      "owner": "shellCached",
+      "surface": "terminal",
+      "label": "Max thoughts width",
+      "description": "Column width budget for the agent's thoughts panel (40-500, default 120).",
+      "keywords": [
+        "thoughts",
+        "width",
+        "max",
+        "thinking",
+        "panel",
+        "reasoning",
+        "columns"
+      ],
+      "kind": {
+        "type": "int",
+        "default": 120,
+        "min": 40,
+        "max": 500
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "show_thinking_blocks",
+      "category": "appearance",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Show thinking blocks",
+      "description": "Show agent thinking/reasoning blocks in the scrollback while streaming.",
+      "keywords": [
+        "thinking",
+        "reasoning",
+        "thoughts",
+        "blocks",
+        "show",
+        "hide"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "prompt_suggestions",
+      "category": "editor",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Prompt suggestions",
+      "description": "After each turn, predict your likely next prompt and show it as ghost text in the input (Tab to accept). Uses a small model call per turn.",
+      "keywords": [
+        "prompt",
+        "suggestion",
+        "suggestions",
+        "autocomplete",
+        "ghost",
+        "tab",
+        "predict",
+        "next"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "respect_manual_folds",
+      "category": "appearance",
+      "owner": "client",
+      "surface": "any",
+      "label": "Respect manual folds",
+      "description": "Keep manually folded blocks as-is while streaming and stop auto-scroll when expanding a block. Experimental.",
+      "keywords": [
+        "fold",
+        "pin",
+        "collapse",
+        "expand",
+        "thinking",
+        "follow",
+        "scroll"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "group_tool_verbs",
+      "category": "appearance",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Group tool calls",
+      "description": "Fold consecutive read/search/list tool calls and subagent rows into one summary row; finished thoughts fold into the group too.",
+      "keywords": [
+        "group",
+        "tool",
+        "verbs",
+        "fold",
+        "collapse",
+        "read",
+        "search",
+        "summary",
+        "thinking",
+        "subagent"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "collapsed_edit_blocks",
+      "category": "appearance",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Collapsed edit blocks",
+      "description": "Show edits as one-line +N/-M diffstat summaries and merge back-to-back edits to the same file into one block; expand a row to see the diffs.",
+      "keywords": [
+        "edit",
+        "edits",
+        "diff",
+        "diffstat",
+        "collapse",
+        "collapsed",
+        "summary",
+        "expand",
+        "one-line",
+        "merge",
+        "coalesce"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "display_refresh_auto_cadence",
+      "category": "appearance",
+      "owner": "shell",
+      "surface": "terminal",
+      "label": "Match display refresh rate",
+      "description": "On high-refresh displays, the TUI will stream/scroll faster to match the display. Off keeps the classic ~60 Hz cadence. Restart required.",
+      "keywords": [
+        "display",
+        "refresh",
+        "rate",
+        "hz",
+        "cadence",
+        "fps",
+        "smooth",
+        "scroll",
+        "stream",
+        "high",
+        "120",
+        "144"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": true,
+      "hiddenInMinimal": true
+    },
+    {
+      "key": "scroll_speed",
+      "category": "mouse",
+      "owner": "shell",
+      "surface": "terminal",
+      "label": "Scroll speed",
+      "description": "Mouse-wheel and trackpad scroll speed multiplier (1-100). Higher = faster.",
+      "keywords": [
+        "scroll",
+        "speed",
+        "mouse",
+        "wheel",
+        "trackpad",
+        "fast",
+        "slow"
+      ],
+      "kind": {
+        "type": "int",
+        "default": 50,
+        "min": 1,
+        "max": 100
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "scroll_mode",
+      "category": "mouse",
+      "owner": "shell",
+      "surface": "terminal",
+      "label": "Scroll input",
+      "description": "Force wheel or trackpad scroll behavior when auto-detection misreads your device.",
+      "keywords": [
+        "scroll",
+        "mode",
+        "wheel",
+        "trackpad",
+        "mouse",
+        "detect",
+        "force",
+        "input"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "auto",
+        "choices": [
+          {
+            "canonical": "auto",
+            "display": "Auto-detect",
+            "description": "Detect wheel vs trackpad per gesture from event timing. Default."
+          },
+          {
+            "canonical": "wheel",
+            "display": "Mouse wheel",
+            "description": "Always treat scrolling as wheel notches (fixed lines per tick)."
+          },
+          {
+            "canonical": "trackpad",
+            "display": "Trackpad",
+            "description": "Always treat scrolling as a trackpad (fractional accumulation)."
+          }
+        ],
+        "supports_preview": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "scroll_lines",
+      "category": "mouse",
+      "owner": "shell",
+      "surface": "terminal",
+      "label": "Scroll lines",
+      "description": "Lines per scroll tick for both wheel and trackpad (1-10). Until set, each terminal's own profile applies.",
+      "keywords": [
+        "scroll",
+        "lines",
+        "tick",
+        "notch",
+        "wheel",
+        "trackpad",
+        "mouse"
+      ],
+      "kind": {
+        "type": "int",
+        "default": 3,
+        "min": 1,
+        "max": 10
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "invert_scroll",
+      "category": "mouse",
+      "owner": "shell",
+      "surface": "terminal",
+      "label": "Invert scroll",
+      "description": "Reverse vertical scroll direction (natural scrolling).",
+      "keywords": [
+        "invert",
+        "scroll",
+        "natural",
+        "direction",
+        "reverse",
+        "mouse",
+        "trackpad"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "keep_text_selection",
+      "category": "mouse",
+      "owner": "shell",
+      "surface": "terminal",
+      "label": "Text selection",
+      "description": "How long in-app selection stays on screen and what double-click does (fold vs. select & copy a word). For your terminal or multiplexer's own selection, hold Shift while dragging (native copy).",
+      "keywords": [
+        "selection",
+        "drag",
+        "copy",
+        "flash",
+        "hold",
+        "shift",
+        "native",
+        "mouse",
+        "tmux",
+        "double",
+        "double-click",
+        "word",
+        "terminal"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "flash",
+        "choices": [
+          {
+            "canonical": "flash",
+            "display": "Flash after copy",
+            "description": "Brief highlight on mouse-up, then clear. Double-click toggles fold. Default."
+          },
+          {
+            "canonical": "hold",
+            "display": "Hold until dismissed",
+            "description": "Keep the selection visible until Esc, click, or scroll. Double-click toggles fold."
+          },
+          {
+            "canonical": "word_select",
+            "display": "Word select (terminal-like)",
+            "description": "Double-click selects & copies a word, triple-click a paragraph; selection stays until dismissed."
+          }
+        ],
+        "supports_preview": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "coding_data_sharing",
+      "category": "privacy",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Coding data, retention, and training",
+      "description": "Opt-in to provide SpaceXAI the ability to retain and train on coding data, e.g., prompts, traces, & metrics, for training and debugging purposes. We may still collect simple user metrics, e.g. how many times you use the product or a feature.",
+      "keywords": [
+        "privacy",
+        "data",
+        "sharing",
+        "coding",
+        "retention",
+        "training",
+        "opt-in",
+        "opt-out"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "opt-out",
+        "choices": [
+          {
+            "canonical": "opt-in",
+            "display": "Opt in",
+            "description": ""
+          },
+          {
+            "canonical": "opt-out",
+            "display": "Opt out",
+            "description": ""
+          }
+        ],
+        "supports_preview": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "default_selected_permission",
+      "category": "agent",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Default selected permission",
+      "description": "Which row the cursor preselects on permission prompts.",
+      "keywords": [
+        "permission",
+        "approval",
+        "cursor",
+        "preselect",
+        "default",
+        "sticky",
+        "last",
+        "used",
+        "yes",
+        "no",
+        "reject",
+        "allow"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "always_allow_all_sessions",
+        "choices": [
+          {
+            "canonical": "always_allow_all_sessions",
+            "display": "Always allow on all sessions",
+            "description": ""
+          },
+          {
+            "canonical": "allow_command_always",
+            "display": "Always allow this command",
+            "description": ""
+          },
+          {
+            "canonical": "allow_once",
+            "display": "Allow once",
+            "description": ""
+          },
+          {
+            "canonical": "reject",
+            "display": "Reject",
+            "description": ""
+          }
+        ],
+        "supports_preview": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "toolset.ask_user_question.timeout_enabled",
+      "category": "agent",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Ask-Question timeout",
+      "description": "When on, the ask_user_question tool will time out after a set period of time instead of infinitely blocking.",
+      "keywords": [
+        "ask",
+        "question",
+        "questionnaire",
+        "timeout",
+        "ask_user_question",
+        "block",
+        "wait",
+        "forever",
+        "tool"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": true,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "plan_mode",
+      "category": "agent",
+      "owner": "client",
+      "surface": "any",
+      "label": "Plan mode",
+      "description": "When on, the agent summarises a plan before running tools or making edits.",
+      "keywords": [
+        "plan",
+        "mode",
+        "agent",
+        "summary",
+        "approval",
+        "review",
+        "session"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "off",
+        "choices": [
+          {
+            "canonical": "off",
+            "display": "Off",
+            "description": "Agent runs tools and edits files directly (default)."
+          },
+          {
+            "canonical": "on",
+            "display": "On",
+            "description": "Agent summarises a plan and asks for approval before running tools."
+          }
+        ],
+        "supports_preview": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "show_tips",
+      "category": "advanced",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Show tips",
+      "description": "Show the tip-of-the-day banner on startup. Restart required.",
+      "keywords": [
+        "tips",
+        "tip",
+        "show",
+        "banner",
+        "welcome",
+        "startup",
+        "launch"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": true,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "contextual_hints",
+      "category": "advanced",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Show contextual hints",
+      "description": "Show brief, in-context keyboard hints as you work; toggle each one individually.",
+      "keywords": [
+        "contextual",
+        "hints",
+        "tips",
+        "undo",
+        "plan",
+        "nudge",
+        "image",
+        "clipboard",
+        "ephemeral",
+        "send",
+        "interject",
+        "queue",
+        "ctrl+z",
+        "draft",
+        "wipe",
+        "mode",
+        "shift+tab",
+        "paste",
+        "input",
+        "enter",
+        "follow-up",
+        "small",
+        "screen",
+        "compact",
+        "ssh",
+        "wrap",
+        "remote"
+      ],
+      "kind": {
+        "type": "group",
+        "children": [
+          "contextual_hints.undo",
+          "contextual_hints.plan_mode",
+          "contextual_hints.image_input",
+          "contextual_hints.send_now",
+          "contextual_hints.small_screen",
+          "contextual_hints.word_select",
+          "contextual_hints.export_copy",
+          "contextual_hints.ssh_wrap"
+        ]
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "auto_update",
+      "category": "advanced",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Auto-update",
+      "description": "Automatically download and install pager updates on startup. Restart required.",
+      "keywords": [
+        "auto",
+        "update",
+        "updates",
+        "upgrade",
+        "version",
+        "install",
+        "channel"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": true,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "hunk_tracker_mode",
+      "category": "advanced",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Hunk tracker",
+      "description": "Which file changes the agent tracks as hunks. Off disables tracking (and LOC stats) entirely. Restart required.",
+      "keywords": [
+        "hunk",
+        "tracker",
+        "tracking",
+        "diff",
+        "changes",
+        "git",
+        "loc",
+        "off",
+        "disable"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "off",
+        "choices": [
+          {
+            "canonical": "agent_only",
+            "display": "Agent only",
+            "description": "Track only files the agent edits."
+          },
+          {
+            "canonical": "all_dirty",
+            "display": "All dirty",
+            "description": "Track every git-dirty file, including external edits."
+          },
+          {
+            "canonical": "off",
+            "display": "Off",
+            "description": "Disable hunk tracking entirely (default). Also disables LOC tracking."
+          }
+        ],
+        "supports_preview": false
+      },
+      "restartRequired": true,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "voice_keybind_enabled",
+      "category": "editor",
+      "owner": "shell",
+      "surface": "terminal",
+      "label": "Voice shortcut",
+      "description": "Enable the Ctrl+Space / F8 shortcut for voice dictation. When off, the keys are ignored; /voice still starts dictation.",
+      "keywords": [
+        "voice",
+        "dictation",
+        "mic",
+        "microphone",
+        "speech",
+        "stt",
+        "keybinding",
+        "hotkey",
+        "ctrl+space",
+        "f8",
+        "disable"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "voice_capture_mode",
+      "category": "editor",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Voice capture",
+      "description": "How the voice chord (Ctrl+Space / F8) behaves: Toggle (press to start/stop) or Hold to talk (hold to record, release to stop; needs a Kitty-protocol terminal).",
+      "keywords": [
+        "voice",
+        "dictation",
+        "dictate",
+        "mic",
+        "microphone",
+        "speech",
+        "stt",
+        "toggle",
+        "hold",
+        "ctrl+space",
+        "f8",
+        "push-to-talk"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "hold",
+        "choices": [
+          {
+            "canonical": "toggle",
+            "display": "Toggle",
+            "description": "Ctrl+Space / F8 starts dictation; press again (or Esc/Enter) to stop."
+          },
+          {
+            "canonical": "hold",
+            "display": "Hold to talk",
+            "description": "Hold Ctrl+Space / F8 to record, release to stop. Needs a Kitty-protocol terminal."
+          }
+        ],
+        "supports_preview": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "voice_stt_language",
+      "category": "editor",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Voice language",
+      "description": "Speech-to-text language for voice dictation (Grok STT). English by default; System uses your locale when supported. Sets formatting language for numbers and currencies.",
+      "keywords": [
+        "voice",
+        "language",
+        "locale",
+        "dictation",
+        "stt",
+        "speech"
+      ],
+      "kind": {
+        "type": "enum",
+        "default": "en",
+        "choices": [
+          {
+            "canonical": "en",
+            "display": "English",
+            "description": ""
+          },
+          {
+            "canonical": "auto",
+            "display": "System",
+            "description": "Use the system locale when it is a supported STT language; otherwise English."
+          },
+          {
+            "canonical": "ar",
+            "display": "Arabic",
+            "description": ""
+          },
+          {
+            "canonical": "cs",
+            "display": "Czech",
+            "description": ""
+          },
+          {
+            "canonical": "da",
+            "display": "Danish",
+            "description": ""
+          },
+          {
+            "canonical": "nl",
+            "display": "Dutch",
+            "description": ""
+          },
+          {
+            "canonical": "fil",
+            "display": "Filipino",
+            "description": ""
+          },
+          {
+            "canonical": "fr",
+            "display": "French",
+            "description": ""
+          },
+          {
+            "canonical": "de",
+            "display": "German",
+            "description": ""
+          },
+          {
+            "canonical": "hi",
+            "display": "Hindi",
+            "description": ""
+          },
+          {
+            "canonical": "id",
+            "display": "Indonesian",
+            "description": ""
+          },
+          {
+            "canonical": "it",
+            "display": "Italian",
+            "description": ""
+          },
+          {
+            "canonical": "ja",
+            "display": "Japanese",
+            "description": ""
+          },
+          {
+            "canonical": "ko",
+            "display": "Korean",
+            "description": ""
+          },
+          {
+            "canonical": "mk",
+            "display": "Macedonian",
+            "description": ""
+          },
+          {
+            "canonical": "ms",
+            "display": "Malay",
+            "description": ""
+          },
+          {
+            "canonical": "fa",
+            "display": "Persian",
+            "description": ""
+          },
+          {
+            "canonical": "pl",
+            "display": "Polish",
+            "description": ""
+          },
+          {
+            "canonical": "pt",
+            "display": "Portuguese",
+            "description": ""
+          },
+          {
+            "canonical": "ro",
+            "display": "Romanian",
+            "description": ""
+          },
+          {
+            "canonical": "ru",
+            "display": "Russian",
+            "description": ""
+          },
+          {
+            "canonical": "es",
+            "display": "Spanish",
+            "description": ""
+          },
+          {
+            "canonical": "sv",
+            "display": "Swedish",
+            "description": ""
+          },
+          {
+            "canonical": "th",
+            "display": "Thai",
+            "description": ""
+          },
+          {
+            "canonical": "tr",
+            "display": "Turkish",
+            "description": ""
+          },
+          {
+            "canonical": "vi",
+            "display": "Vietnamese",
+            "description": ""
+          }
+        ],
+        "supports_preview": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "contextual_hints.undo",
+      "category": "advanced",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Undo",
+      "description": "Remind you that Ctrl+Z restores the prompt after you clear it.",
+      "keywords": [
+        "undo",
+        "ctrl+z",
+        "draft",
+        "wipe",
+        "hint"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "contextual_hints.plan_mode",
+      "category": "advanced",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Plan mode",
+      "description": "Suggest plan mode (Shift+Tab) when your prompt looks like a planning request.",
+      "keywords": [
+        "plan",
+        "mode",
+        "nudge",
+        "shift+tab",
+        "hint"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "contextual_hints.image_input",
+      "category": "advanced",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Image input",
+      "description": "Offer to paste an image when one is on the clipboard and the model accepts images.",
+      "keywords": [
+        "image",
+        "clipboard",
+        "paste",
+        "input",
+        "hint"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "contextual_hints.send_now",
+      "category": "advanced",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Send now",
+      "description": "After you queue a follow-up mid-turn, remind you that Enter on an empty prompt sends the top queued item now.",
+      "keywords": [
+        "send",
+        "now",
+        "interject",
+        "queue",
+        "follow-up",
+        "enter",
+        "empty",
+        "hint"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "contextual_hints.small_screen",
+      "category": "advanced",
+      "owner": "shell",
+      "surface": "terminal",
+      "label": "Small screen",
+      "description": "Suggest /compact-mode once per run when the terminal is short on rows.",
+      "keywords": [
+        "small",
+        "screen",
+        "compact",
+        "space",
+        "rows",
+        "hint"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "contextual_hints.word_select",
+      "category": "advanced",
+      "owner": "shell",
+      "surface": "terminal",
+      "label": "Word select",
+      "description": "After double-clicking conversation text while Text selection is fold/nav, remind you that Word select lives in Settings.",
+      "keywords": [
+        "word",
+        "select",
+        "double",
+        "double-click",
+        "click",
+        "fold",
+        "selection",
+        "settings",
+        "hint"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "contextual_hints.export_copy",
+      "category": "advanced",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Copy and export",
+      "description": "After three nearby drag-copies of conversation text, remind you that /copy and /export exist.",
+      "keywords": [
+        "copy",
+        "export",
+        "transcript",
+        "clipboard",
+        "hint"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "contextual_hints.ssh_wrap",
+      "category": "advanced",
+      "owner": "shell",
+      "surface": "terminal",
+      "label": "SSH wrap",
+      "description": "Show a `/doctor` tip when an SSH session is not using `grok wrap`.",
+      "keywords": [
+        "ssh",
+        "wrap",
+        "remote",
+        "clipboard",
+        "restore",
+        "startup",
+        "hint"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "fork_secondary_model",
+      "category": "models",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Fork secondary model",
+      "description": "Model used for the secondary agent when forking. Pick `(no override)` to clear.",
+      "keywords": [
+        "fork",
+        "secondary",
+        "model",
+        "agent",
+        "subagent",
+        "branch",
+        "models"
+      ],
+      "kind": {
+        "type": "dynamicEnum",
+        "default": "",
+        "source": "activeModelCatalog",
+        "supports_preview": false
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": false
+    }
+  ]
+}

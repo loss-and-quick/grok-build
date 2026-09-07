@@ -11,6 +11,7 @@ mod permissions;
 mod persist;
 mod readonly;
 mod resolve;
+mod settings_apply;
 mod settings_writes;
 mod tips;
 mod worktree;
@@ -29,6 +30,7 @@ pub(crate) use mcp_reenable::reenableable_disabled_stubs;
 pub use permissions::*;
 pub use persist::*;
 pub use readonly::*;
+pub use settings_apply::{SettingWrite, persist_setting};
 // These types live in `xai-grok-config-types`; the re-export keeps `crate::util::config::{RemoteSettings, GoalRoleModel}` working
 pub use resolve::*;
 pub use settings_writes::*;

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use xai_grok_pager::app::actions::Action;
 use xai_grok_pager::settings::{
     EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKind, SettingMeta, SettingOwner,
-    SettingValue, SettingsRegistry,
+    SettingSurface, SettingValue, SettingsRegistry,
 };
 use xai_grok_pager::views::settings_modal::{
     RowEntry, SettingsKeyOutcome, SettingsModalMode, SettingsModalState, handle_settings_key,
@@ -2405,6 +2405,7 @@ fn pr3_esc_in_picker_reverts_to_original() {
         key: "test_enum",
         category: SettingCategory::Appearance,
         owner: SettingOwner::Shared,
+        surface: SettingSurface::Any,
         label: "Test enum",
         description: "Synthetic Enum entry for PR 3 picker revert path.",
         keywords: &["test"],

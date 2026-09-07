@@ -5,6 +5,7 @@
 
 use super::registry::{
     DynamicEnumSource, EnumChoice, SettingCategory, SettingKind, SettingMeta, SettingOwner,
+    SettingSurface,
 };
 use crate::appearance::ScrollMode;
 use crate::appearance::TextSelection;
@@ -523,6 +524,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "compact_mode",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Any,
             label: "Compact mode",
             description: "Reduce padding around messages for more content density. \
                           Auto-enabled while the terminal is 20 rows or shorter.",
@@ -539,6 +541,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "screen_mode",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Terminal,
             label: "Default screen mode",
             description: "How plain grok opens next time: Fullscreen (default when unset) or \
                           Minimal. Writes [ui] screen_mode in config.toml. Restart required. \
@@ -567,6 +570,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "show_timestamps",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Any,
             label: "Show timestamps",
             description: "Show clock time next to user messages and agent responses.",
             keywords: &["timestamps", "time", "clock", "date"],
@@ -581,6 +585,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "show_timeline",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Any,
             label: "Timeline sidebar",
             description: "Per-turn tick rail in place of the scrollbar: hover previews a turn, click jumps to it.",
             keywords: &["timeline", "sidebar", "ticks", "turns", "navigator", "rail"],
@@ -596,6 +601,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "page_flip_on_send",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Any,
             label: "Snap prompt to top on send",
             description: "When you send a prompt, scroll it to the top of the screen so the \
                           response starts on a fresh page (default). Turn off to leave the scroll \
@@ -613,6 +619,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "combine_queued_prompts",
             category: SettingCategory::Editor,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Any,
             label: "Combine queued prompts",
             description: "Merge consecutive plain follow-ups into one model turn \
                           (TUI shows one bubble each). Stops at bash, slash commands, \
@@ -629,6 +636,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "follow_up_behavior",
             category: SettingCategory::Editor,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Any,
             label: "Follow-up behavior",
             description: "What to do with messages you send while a turn is \
                           running. Queue waits for the turn to finish; Steer \
@@ -655,6 +663,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "confirm_before_rewind",
             category: SettingCategory::Editor,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Any,
             label: "Confirm before rewind",
             description: "Ask before rewinding conversation history. Turn off to rewind \
                           immediately when you pick a turn.",
@@ -671,6 +680,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "simple_mode",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Terminal,
             label: "Disable vim input mode",
             description: "Use plain readline-style input instead of vim keys in the prompt. Experimental.",
             keywords: &[
@@ -699,6 +709,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "vim_mode",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Terminal,
             label: "Vim scrollback navigation",
             description: "Enable vim keys (h/j/k/l, gg/G, /) for navigating the scrollback. Does not affect the input prompt.",
             keywords: &[
@@ -721,6 +732,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "theme",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Any,
             label: "Theme",
             description: "Color theme for the pager UI.",
             keywords: &[
@@ -745,6 +757,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "auto_dark_theme",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Any,
             label: "Auto dark theme",
             description: "Theme to use when the system is in dark mode (only with theme=auto).",
             keywords: &["auto", "dark", "theme", "system", "appearance", "night"],
@@ -761,6 +774,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "auto_light_theme",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Any,
             label: "Auto light theme",
             description: "Theme to use when the system is in light mode (only with theme=auto).",
             keywords: &["auto", "light", "theme", "system", "appearance", "day"],
@@ -779,6 +793,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "render_mermaid",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Render Mermaid diagrams",
             description: "How ```mermaid code blocks are shown: auto/on add a clickable row to \
                           open the rendered diagram; off shows the raw source.",
@@ -805,6 +820,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "permission_mode",
             category: SettingCategory::Agent,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Permission mode",
             description: "Default uses the agent's built-in behavior; \
                           Ask prompts for each tool action; \
@@ -836,6 +852,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "remember_tool_approvals",
             category: SettingCategory::Agent,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Remember tool approvals",
             description: "Show \"Always allow\" options in permission prompts so you can stop \
                           being re-asked about a specific command or tool. Applies in ask and \
@@ -866,6 +883,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "multiline_mode",
             category: SettingCategory::Editor,
             owner: SettingOwner::Pager,
+            surface: SettingSurface::Any,
             label: "Multiline",
             description: "When on, Enter inserts a newline and Shift+Enter sends. Resets each session.",
             keywords: &["multiline", "newline", "input", "editor", "enter"],
@@ -879,6 +897,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "default_model",
             category: SettingCategory::Models,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Default model",
             description: "Model used for new sessions. Changing this also switches the active session. Pick `(no override)` to clear.",
             keywords: &["model", "default", "agent", "llm", "grok", "switch"],
@@ -896,6 +915,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: MAX_THOUGHTS_WIDTH_KEY,
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
+            surface: SettingSurface::Terminal,
             label: "Max thoughts width",
             description: "Column width budget for the agent's thoughts panel (40-500, default 120).",
             keywords: &[
@@ -920,6 +940,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "show_thinking_blocks",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Show thinking blocks",
             description: "Show agent thinking/reasoning blocks in the scrollback while streaming.",
             keywords: &[
@@ -942,6 +963,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "prompt_suggestions",
             category: SettingCategory::Editor,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Prompt suggestions",
             description: "After each turn, predict your likely next prompt and show it as \
                           ghost text in the input (Tab to accept). Uses a small model call \
@@ -969,6 +991,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "respect_manual_folds",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Pager,
+            surface: SettingSurface::Any,
             label: "Respect manual folds",
             description: "Keep manually folded blocks as-is while streaming and stop \
                           auto-scroll when expanding a block. Experimental.",
@@ -986,6 +1009,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "group_tool_verbs",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Group tool calls",
             description: "Fold consecutive read/search/list tool calls and subagent rows into \
                           one summary row; finished thoughts fold into the group too.",
@@ -1005,6 +1029,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "collapsed_edit_blocks",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Collapsed edit blocks",
             description: "Show edits as one-line +N/-M diffstat summaries and merge \
                           back-to-back edits to the same file into one block; expand a \
@@ -1033,6 +1058,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "display_refresh_auto_cadence",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Terminal,
             label: "Match display refresh rate",
             description: "On high-refresh displays, the TUI will stream/scroll faster \
                           to match the display. Off keeps the classic ~60 Hz cadence. \
@@ -1056,6 +1082,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "scroll_speed",
             category: SettingCategory::Mouse,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Terminal,
             label: "Scroll speed",
             description: "Mouse-wheel and trackpad scroll speed multiplier (1-100). Higher = faster.",
             keywords: &[
@@ -1074,6 +1101,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "scroll_mode",
             category: SettingCategory::Mouse,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Terminal,
             label: "Scroll input",
             description: "Force wheel or trackpad scroll behavior when auto-detection \
                           misreads your device.",
@@ -1100,6 +1128,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "scroll_lines",
             category: SettingCategory::Mouse,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Terminal,
             label: "Scroll lines",
             description: "Lines per scroll tick for both wheel and trackpad (1-10). \
                           Until set, each terminal's own profile applies.",
@@ -1119,6 +1148,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "invert_scroll",
             category: SettingCategory::Mouse,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Terminal,
             label: "Invert scroll",
             description: "Reverse vertical scroll direction (natural scrolling).",
             keywords: &[
@@ -1143,6 +1173,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "keep_text_selection",
             category: SettingCategory::Mouse,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Terminal,
             label: "Text selection",
             description: "How long in-app selection stays on screen and what double-click does (fold vs. select & copy a word). For your terminal or multiplexer's own selection, hold Shift while dragging (native copy).",
             keywords: &[
@@ -1178,6 +1209,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "coding_data_sharing",
             category: SettingCategory::Privacy,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Coding data, retention, and training",
             description: "Opt-in to provide SpaceXAI the ability to retain and train on \
                           coding data, e.g., prompts, traces, & metrics, for training and \
@@ -1209,6 +1241,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "default_selected_permission",
             category: SettingCategory::Agent,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Default selected permission",
             description: "Which row the cursor preselects on permission prompts.",
             keywords: &[
@@ -1242,6 +1275,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "toolset.ask_user_question.timeout_enabled",
             category: SettingCategory::Agent,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Ask-Question timeout",
             description: "When on, the ask_user_question tool will time out after a set period \
                           of time instead of infinitely blocking.",
@@ -1268,6 +1302,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "plan_mode",
             category: SettingCategory::Agent,
             owner: SettingOwner::Pager,
+            surface: SettingSurface::Any,
             label: "Plan mode",
             description: "When on, the agent summarises a plan before running tools or making edits.",
             keywords: &[
@@ -1287,6 +1322,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "show_tips",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Show tips",
             description: "Show the tip-of-the-day banner on startup. Restart required.",
             keywords: &[
@@ -1302,6 +1338,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "contextual_hints",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Show contextual hints",
             description: "Show brief, in-context keyboard hints as you work; \
                           toggle each one individually.",
@@ -1347,6 +1384,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "auto_update",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Auto-update",
             description: "Automatically download and install pager updates on startup. \
                           Restart required.",
@@ -1362,6 +1400,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "hunk_tracker_mode",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Hunk tracker",
             description: "Which file changes the agent tracks as hunks. \
                           Off disables tracking (and LOC stats) entirely. \
@@ -1383,6 +1422,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "voice_keybind_enabled",
             category: SettingCategory::Editor,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Terminal,
             label: "Voice shortcut",
             description: "Enable the Ctrl+Space / F8 shortcut for voice dictation. \
                           When off, the keys are ignored; /voice still starts \
@@ -1413,6 +1453,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "voice_capture_mode",
             category: SettingCategory::Editor,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Voice capture",
             description: "How the voice chord (Ctrl+Space / F8) behaves: Toggle \
                           (press to start/stop) or Hold to talk (hold to record, \
@@ -1446,6 +1487,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "voice_stt_language",
             category: SettingCategory::Editor,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Voice language",
             description: "Speech-to-text language for voice dictation (Grok STT). \
                           English by default; System uses your locale when supported. \
@@ -1465,6 +1507,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "contextual_hints.undo",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Undo",
             description: "Remind you that Ctrl+Z restores the prompt after you clear it.",
             keywords: &["undo", "ctrl+z", "draft", "wipe", "hint"],
@@ -1478,6 +1521,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "contextual_hints.plan_mode",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Plan mode",
             description: "Suggest plan mode (Shift+Tab) when your prompt looks like a \
                           planning request.",
@@ -1492,6 +1536,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "contextual_hints.image_input",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Image input",
             description: "Offer to paste an image when one is on the clipboard and the \
                           model accepts images.",
@@ -1506,6 +1551,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "contextual_hints.send_now",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Send now",
             description: "After you queue a follow-up mid-turn, remind you that Enter \
                           on an empty prompt sends the top queued item now.",
@@ -1529,6 +1575,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "contextual_hints.small_screen",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Terminal,
             label: "Small screen",
             description: "Suggest /compact-mode once per run when the terminal \
                           is short on rows.",
@@ -1543,6 +1590,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "contextual_hints.word_select",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Terminal,
             label: "Word select",
             description: "After double-clicking conversation text while Text selection \
                           is fold/nav, remind you that Word select lives in Settings.",
@@ -1567,6 +1615,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "contextual_hints.export_copy",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Copy and export",
             description: "After three nearby drag-copies of conversation text, \
                           remind you that /copy and /export exist.",
@@ -1581,6 +1630,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "contextual_hints.ssh_wrap",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Terminal,
             label: "SSH wrap",
             description: "Show a `/doctor` tip when an SSH session is not using `grok wrap`.",
             keywords: &[
@@ -1610,6 +1660,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "fork_secondary_model",
             category: SettingCategory::Models,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Fork secondary model",
             description: "Model used for the secondary agent when forking. Pick `(no override)` to clear.",
             keywords: &[

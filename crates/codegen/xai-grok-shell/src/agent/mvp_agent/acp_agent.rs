@@ -2741,6 +2741,9 @@ impl acp::Agent for MvpAgent {
             s if s.starts_with("x.ai/plugins/") => {
                 crate::extensions::plugins::handle(self, &args).await
             }
+            s if s.starts_with("x.ai/settings/") => {
+                crate::extensions::settings::handle(self, &args).await
+            }
             s if s.starts_with("x.ai/marketplace/") => {
                 crate::extensions::marketplace::handle(self, &args).await
             }
