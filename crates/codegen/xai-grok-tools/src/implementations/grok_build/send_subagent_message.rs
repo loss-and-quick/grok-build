@@ -190,17 +190,28 @@ impl xai_tool_runtime::Tool for SendSubagentMessageTool {
         input: SendSubagentMessageInput,
     ) -> Result<SendSubagentMessageOutput, xai_tool_runtime::ToolError> {
         let resources = crate::types::tool_metadata::shared_resources(&ctx)?;
-        let (depth, backend) = {
+        let (depth, max_depth, backend) = {
             let res = resources.lock().await;
             (
                 res.get::<SubagentDepthCounter>().map(|value| value.0),
+                crate::implementations::grok_build::task::effective_max_subagent_depth(&res),
                 res.get::<SubagentBackendResource>().cloned(),
             )
         };
 
-        let (Some(0), Some(backend)) = (depth, backend) else {
+        let (Some(depth), Some(backend)) = (depth, backend) else {
             return Ok(SendSubagentMessageOutput::Unsupported);
         };
+        // Spawning is what mints the ids this tool acts on, so the agents that
+        // may steer are exactly the agents that may spawn — the same
+        // `depth < max` test the spawn path makes for `allow_nested_subagents`.
+        // Upstream gates on `depth == 0` instead; at the default max depth of 1
+        // the two agree, and they part only where nesting is actually allowed,
+        // which is this fork's configuration. A depth-1 agent owns children of
+        // its own and has no other way to correct one it already started.
+        if depth >= max_depth {
+            return Ok(SendSubagentMessageOutput::Unsupported);
+        }
         let operation = if input.queue {
             ActiveAgentMessageOperation::Queue
         } else {

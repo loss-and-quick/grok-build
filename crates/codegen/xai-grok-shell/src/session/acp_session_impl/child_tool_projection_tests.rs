@@ -159,3 +159,59 @@ fn verbatim_mirror_path_strips_ask_user_and_active_message() {
             && t.name != "relay_to_subagent"
     }));
 }
+
+/// A child that may spawn keeps the active-message tool.
+///
+/// The fork's divergence, and the narrow half of it: the strip is kept for every
+/// child that cannot spawn, because such a child can never hold an id to point
+/// the tool at. A child holding `task` owns children of its own, and taking the
+/// tool from it would leave it able to start work it cannot then correct.
+#[test]
+fn a_child_that_can_spawn_keeps_the_active_message_tool() {
+    fn kind_with_task(name: &str) -> Option<ToolKind> {
+        match name {
+            "relay_to_subagent" => Some(ToolKind::ActiveAgentMessage),
+            "task" => Some(ToolKind::Task),
+            _ => None,
+        }
+    }
+    let mut with_task = specs();
+    with_task.push(tool("task", Some("spawn"), serde_json::json!({})));
+
+    for projection in [
+        ChildToolProjection::Rebuilt,
+        ChildToolProjection::VerbatimMirror,
+    ] {
+        let projected = child_safe_tool_specs(with_task.clone(), projection, kind_with_task);
+        assert!(
+            projected.iter().any(|s| s.name == "relay_to_subagent"),
+            "a spawning child keeps its way to steer: {:?}",
+            projected.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            projected.len(),
+            with_task.len(),
+            "nothing else may be dropped on this path"
+        );
+    }
+}
+
+/// And the strip still bites when the child cannot spawn, by canonical name as
+/// well as by kind — the case a renamed-tool test would miss.
+#[test]
+fn a_child_that_cannot_spawn_still_loses_the_tool_by_canonical_name() {
+    let mut without_task = specs();
+    without_task.push(tool(
+        SEND_SUBAGENT_MESSAGE_TOOL_NAME,
+        Some("steer"),
+        serde_json::json!({}),
+    ));
+
+    let projected = child_safe_tool_specs(without_task, ChildToolProjection::Rebuilt, |_| None);
+    assert!(
+        !projected
+            .iter()
+            .any(|s| s.name == SEND_SUBAGENT_MESSAGE_TOOL_NAME),
+        "a child with no spawner must not keep it"
+    );
+}

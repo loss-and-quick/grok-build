@@ -808,26 +808,6 @@ impl AgentBuilder {
             }
             ensure_plan_mode_tools(&mut tool_config);
         }
-        let active_agent_message = xai_grok_tools::registry::types::ToolConfig::for_tool::<
-            xai_grok_tools::implementations::grok_build::SendSubagentMessageTool,
-        >();
-        let is_active_agent_message = |tool: &xai_grok_tools::registry::types::ToolConfig| {
-            tool.kind == Some(ToolKind::ActiveAgentMessage) || tool.id == active_agent_message.id
-        };
-        let can_inject_active_agent_message = self.active_agent_messages_enabled
-            && self.prompt_audience == PromptAudience::Primary
-            && definition.inject_default_tools;
-        if can_inject_active_agent_message {
-            if !tool_config.tools.iter().any(is_active_agent_message) {
-                tool_config.tools.push(active_agent_message);
-            }
-        } else if !self.active_agent_messages_enabled
-            || self.prompt_audience != PromptAudience::Primary
-        {
-            tool_config
-                .tools
-                .retain(|tool| !is_active_agent_message(tool));
-        }
         if self.memory_backend.is_none() {
             let grok_build_ns = xai_grok_tools::types::tool::ToolNamespace::GrokBuild.to_string();
             use xai_grok_tools::implementations::memory;
@@ -888,6 +868,38 @@ impl AgentBuilder {
             {
                 task_tc.description_override = Some(build_task_description(&subagents));
             }
+        }
+        // Deliberately after the `task` strips above, not before them. Whether
+        // this agent may spawn is only settled there — subagents off, or no
+        // subagent definitions discovered, both remove `task` — and spawning is
+        // what mints the ids the active-message tool acts on.
+        //
+        // Injection is upstream's rule untouched: the root session, defaults on.
+        // The strip is where this fork differs. Upstream removes the tool from
+        // every non-root audience, which is right while only the root spawns;
+        // at `subagents.max_depth = 3` a depth-1 agent owns children of its own,
+        // so it keeps the tool when it kept `task`, and still loses it when it
+        // did not.
+        let active_agent_message = xai_grok_tools::registry::types::ToolConfig::for_tool::<
+            xai_grok_tools::implementations::grok_build::SendSubagentMessageTool,
+        >();
+        let is_active_agent_message = |tool: &xai_grok_tools::registry::types::ToolConfig| {
+            tool.kind == Some(ToolKind::ActiveAgentMessage) || tool.id == active_agent_message.id
+        };
+        let can_spawn = tool_config.tools.iter().any(|tc| tc.id == task_tool_id);
+        let can_inject_active_agent_message = self.active_agent_messages_enabled
+            && self.prompt_audience == PromptAudience::Primary
+            && definition.inject_default_tools;
+        if can_inject_active_agent_message {
+            if !tool_config.tools.iter().any(is_active_agent_message) {
+                tool_config.tools.push(active_agent_message);
+            }
+        } else if !self.active_agent_messages_enabled
+            || (self.prompt_audience != PromptAudience::Primary && !can_spawn)
+        {
+            tool_config
+                .tools
+                .retain(|tool| !is_active_agent_message(tool));
         }
         if let xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig::Enabled {
             ref params,
@@ -1487,9 +1499,20 @@ mod tests {
             child.contains(&"message_parent".to_string()),
             "a subagent must keep its way back up: {child:?}"
         );
+        // Not "root-only": this fork gives the downward tool to any agent that
+        // may spawn, because it only ever acts on ids `task` mints. Subagents
+        // are disabled in this build, so `task` does not survive here and the
+        // steering tool goes with it — which is the rule, stated as the premise
+        // rather than assumed.
+        assert!(
+            !child
+                .iter()
+                .any(|name| name == "task" || name == "spawn_subagent"),
+            "premise: this build discovers no subagents, so nothing mints ids: {child:?}"
+        );
         assert!(
             !child.contains(&"send_subagent_message".to_string()),
-            "the downward tool stays root-only: {child:?}"
+            "with no spawner there is nothing to steer: {child:?}"
         );
 
         let root = names(

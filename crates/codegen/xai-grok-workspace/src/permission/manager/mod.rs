@@ -2210,6 +2210,27 @@ pub fn spawn_permission_manager_with_pin(
                                 )
                             }
                         }
+                        // Steering a child is strictly weaker than spawning it:
+                        // an agent holding `task` already chose that child's
+                        // prompt, its toolset and its lifetime, and can cancel
+                        // it outright. Asking a human to approve the weaker act
+                        // while the stronger one is ungated is incoherent, and
+                        // in a nested run there is usually nobody at the prompt,
+                        // so it would fail closed in exactly the setups that
+                        // want the capability. Ownership is the real invariant
+                        // and the subagent coordinator enforces it on every
+                        // send: a sender may only name a child its own session
+                        // started.
+                        //
+                        // A root session still prompts, exactly as upstream has
+                        // it — the user is present there and the prompt means
+                        // something. This is a default verdict, not an
+                        // exemption: an explicit Ask/Deny rule is matched above
+                        // and still wins, and the decision is still emitted to
+                        // telemetry with the caller's subagent type attached.
+                        AccessKind::AgentMessage { .. } if request_subagent_type.is_some() => {
+                            Some((Decision::Allow, reasons::SAFE_COMMAND))
+                        }
                         AccessKind::AgentMessage { .. } => None,
                         AccessKind::WebFetch(url) => match url::Url::parse(url) {
                             Ok(parsed_url) => {
@@ -4117,6 +4138,73 @@ mod tests {
                 transport.seen.lock().unwrap().len(),
                 3,
                 "agent-message approval must not create message or edit grants"
+            );
+        }))
+        .await;
+    }
+
+    /// A subagent steering a child it owns is allowed without a prompt; the root
+    /// session still prompts.
+    ///
+    /// Steering is strictly weaker than spawning — the caller already chose that
+    /// child's prompt, toolset and lifetime, and can cancel it — so gating the
+    /// weaker act on a human while the stronger one is ungated is incoherent,
+    /// and in a nested run there is usually nobody at the prompt to answer.
+    /// Ownership is the real invariant and the subagent coordinator enforces it
+    /// on every send.
+    ///
+    /// It is a default verdict, not an exemption: this runs after policy, so an
+    /// explicit rule still wins, and the decision is still emitted as an event.
+    #[tokio::test]
+    async fn a_subagent_steering_its_own_child_is_allowed_without_prompting() {
+        let local = tokio::task::LocalSet::new();
+        agent_message_completes(local.run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            let transport = fake_hub(serde_json::json!({ "outcome": "approve" }));
+            let (mgr, mut events) = test_manager_with_hub(&cwd, transport.clone());
+
+            let mut request = PermissionRequest::new(
+                AccessKind::AgentMessage {
+                    subagent_id: "sub-1".into(),
+                },
+                tool_call(),
+            );
+            request.subagent_type = Some("worker".into());
+            assert_eq!(
+                agent_message_completes(mgr.request(request)).await.decision,
+                Decision::Allow
+            );
+            assert!(
+                transport.seen.lock().unwrap().is_empty(),
+                "a nested caller must not be sent to a human that may not be there"
+            );
+
+            // Still auditable: the event names the tool, the access kind and the
+            // caller, so a default-allow is not an invisible one.
+            let event = agent_message_completes(events.recv())
+                .await
+                .expect("permission event");
+            assert_eq!(event.tool_name, "send_subagent_message");
+            assert_eq!(event.access_kind, "agent_message");
+            assert_eq!(event.subagent_type.as_deref(), Some("worker"));
+
+            // The root case is upstream's, unchanged: the user is present, so ask.
+            assert_eq!(
+                agent_message_completes(decide(
+                    &mgr,
+                    AccessKind::AgentMessage {
+                        subagent_id: "sub-1".into(),
+                    },
+                    tool_call()
+                ))
+                .await,
+                Decision::Allow
+            );
+            assert_eq!(
+                transport.seen.lock().unwrap().len(),
+                1,
+                "a root session's steering still reaches the prompt"
             );
         }))
         .await;

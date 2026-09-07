@@ -8,8 +8,9 @@ use crate::implementations::grok_build::task::coordinator::{
     SubagentProgress,
 };
 use crate::implementations::grok_build::task::types::{
-    ActiveAgentMessageOutcome, MAX_ACTIVE_AGENT_MESSAGE_BYTES, SubagentDepthCounter,
-    SubagentDescribeOutcome, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
+    ActiveAgentMessageOutcome, MAX_ACTIVE_AGENT_MESSAGE_BYTES, MaxSubagentDepth,
+    SubagentDepthCounter, SubagentDescribeOutcome, SubagentTypeDescriptor,
+    SubagentValidateTypeOutcome,
 };
 use crate::types::resources::{Resources, SharedResources};
 use crate::types::tool_metadata::test_ctx;
@@ -431,4 +432,63 @@ async fn closed_coordinator_ingress_maps_to_channel_closed() {
         .await,
         SendSubagentMessageOutput::ChannelClosed
     );
+}
+
+/// A nested agent that may still spawn may still steer.
+///
+/// This is the fork's divergence from upstream's root-only gate, and the reason
+/// it is safe: the tool acts only on ids `task` mints, so "may spawn" is the
+/// honest test and "is root" was a proxy for it that stops being true once
+/// nesting is allowed. Ownership is enforced below, on the coordinator, which
+/// is why widening who may ask does not widen what anyone may reach.
+#[tokio::test]
+async fn a_nested_agent_that_may_still_spawn_reaches_the_backend() {
+    let (backend, mut receiver) = coordinator_backend();
+    let mut resources = Resources::new();
+    resources.insert(backend.into_resource());
+    resources.insert(SubagentDepthCounter(1));
+    resources.insert(MaxSubagentDepth(3));
+
+    let send = run(resources.into_shared(), "sub-1", "use ripgrep".to_owned());
+    let respond = async move {
+        let ingress = completes(receiver.active_messages.recv())
+            .await
+            .expect("a depth-1 sender must reach the active-message ingress");
+        // The sender's own session id, which is what the coordinator reads as
+        // "who is speaking" when it checks ownership.
+        assert_eq!(ingress.request.parent_session_id, "trusted-parent");
+        assert_eq!(ingress.request.request.subagent_id(), "sub-1");
+        ingress
+            .request
+            .respond_to
+            .send(ActiveAgentMessageOutcome::Accepted {
+                message_id: "message-1".to_owned(),
+            })
+            .unwrap();
+    };
+
+    assert_eq!(
+        completes(async { tokio::join!(send, respond) }).await.0,
+        SendSubagentMessageOutput::Accepted {
+            message_id: "message-1".to_owned()
+        }
+    );
+}
+
+/// The floor is still a floor: an agent at the nesting limit cannot spawn, so it
+/// can never hold an id to steer, and the tool says so without touching the
+/// backend.
+#[tokio::test]
+async fn an_agent_at_the_nesting_limit_is_unsupported_without_calling_the_backend() {
+    let (backend, mut receiver) = coordinator_backend();
+    let mut resources = Resources::new();
+    resources.insert(backend.into_resource());
+    resources.insert(SubagentDepthCounter(3));
+    resources.insert(MaxSubagentDepth(3));
+
+    assert_eq!(
+        run(resources.into_shared(), "sub-1", "use ripgrep".to_owned()).await,
+        SendSubagentMessageOutput::Unsupported
+    );
+    assert!(receiver.active_messages.try_recv().is_err());
 }
