@@ -36,6 +36,14 @@ body {
   border-right: 1px solid var(--grok-prompt-border, canvastext);
 }
 
+/* The column scrolls, so nothing inside it may be squeezed below its own
+ * content height. Without this a wrapped status line renders at half its
+ * height and its second line vanishes under the next control — a flex
+ * default that only a real browser shows. */
+.sidebar > * {
+  flex-shrink: 0;
+}
+
 .connect {
   display: flex;
   flex-direction: column;
