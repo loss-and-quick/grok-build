@@ -1,0 +1,7 @@
+{
+  "name": "panel-probe",
+  "version": "0.1.0",
+  "description": "Publishes one panel using all five PanelBlock kinds, so a client can be checked against every block it must draw.",
+  "network": false,
+  "exec": ["${GROK_PLUGIN_ROOT}/_sdk/run", "--runtime=bun", "index.ts"]
+}
