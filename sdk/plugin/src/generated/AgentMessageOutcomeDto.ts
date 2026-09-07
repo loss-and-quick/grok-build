@@ -3,9 +3,9 @@
 /**
  * `agent_message` outcome. Plugin→core.
  *
- * Every variant is a separate answer on purpose — "queued but the turn ended"
- * and "the child's channel is gone" call for different reactions from the
- * plugin, so they are never merged into a single success flag. The reply comes
- * once the outcome is *known*, not once the text is posted.
+ * Every variant is a separate answer on purpose — "admission was refused" and
+ * "the child's channel is gone" call for different reactions from the plugin,
+ * so they are never merged into a single success flag. The reply comes once
+ * the outcome is *known*, not once the text is posted.
  */
 export type AgentMessageOutcomeDto = "delivered" | "not_delivered" | "not_started" | "already_finished" | "unreachable" | "not_found";

@@ -77,7 +77,6 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::BackgroundTaskAction,
     ToolKind::WaitTasksAction,
     ToolKind::KillTaskAction,
-    ToolKind::MessageSubagentAction,
     ToolKind::MessageParentAction,
     ToolKind::List,
     ToolKind::Skill,
@@ -148,15 +147,8 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         // Bash / shell.
         Execute => matches!(mode, M::Execute),
 
-        BackgroundTaskAction
-        | WaitTasksAction
-        | KillTaskAction
-        | MessageSubagentAction
-        | MessageParentAction
-        | ActiveAgentMessage
-        | Task
-        | Monitor
-        | Workflow => matches!(mode, M::Execute),
+        BackgroundTaskAction | WaitTasksAction | KillTaskAction | MessageParentAction
+        | ActiveAgentMessage | Task | Monitor | Workflow => matches!(mode, M::Execute),
 
         // Integration dispatch.
         UseTool => matches!(mode, M::ReadWrite | M::Execute),

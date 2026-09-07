@@ -9,8 +9,8 @@ use super::*;
 use xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend;
 use xai_grok_tools::implementations::grok_build::task::types::{
     ActiveAgentMessageOutcome, ActiveAgentMessageRequest, ParentMessageOutcome,
-    SubagentCancelOutcome, SubagentDescribeOutcome, SubagentMessageOutcome, SubagentRequest,
-    SubagentResult, SubagentSnapshot, SubagentValidateTypeOutcome,
+    SubagentCancelOutcome, SubagentDescribeOutcome, SubagentRequest, SubagentResult,
+    SubagentSnapshot, SubagentValidateTypeOutcome,
 };
 
 struct FixedActiveMessageBackend {
@@ -36,10 +36,6 @@ impl SubagentBackend for FixedActiveMessageBackend {
 
     async fn send_active_message(&self, _: ActiveAgentMessageRequest) -> ActiveAgentMessageOutcome {
         self.outcome.clone()
-    }
-
-    async fn message(&self, _: &str, _: &str) -> SubagentMessageOutcome {
-        SubagentMessageOutcome::Unreachable
     }
 
     async fn message_parent(&self, _: &str) -> ParentMessageOutcome {

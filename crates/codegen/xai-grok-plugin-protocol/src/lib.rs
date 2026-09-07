@@ -1126,16 +1126,15 @@ pub struct AgentCancelResult {
 }
 
 /// `agent_message` request params. Plugin→core. Steers a subagent that is
-/// **running right now**: `text` is handed to the live child and lands in its
-/// conversation as a system reminder before its next inference request, so the
-/// child changes course mid-task.
+/// **running right now**: `text` is handed to the live child and becomes
+/// model-visible at its next safe point, so the child changes course mid-task.
 ///
-/// The model has this same capability as the `message_subagent` tool: one
-/// coordinator, one set of outcomes, one injection point in the child. A plugin
-/// and the parent model may both steer the same child — the texts are drained in
-/// the order the coordinator took them. The surfaces differ only in shape: a
-/// plugin branches on the enum below, while the tool spends a sentence per
-/// outcome naming the call the model should make next.
+/// The model has this same capability as the `send_subagent_message` tool, and
+/// it is the same route: one coordinator, one admission, one delivery into the
+/// child. A plugin and the parent model may both steer the same child — the
+/// texts are drained in the order the coordinator admitted them. The surfaces
+/// differ only in shape: a plugin branches on the enum below, while the tool
+/// spends a sentence per outcome naming the call the model should make next.
 ///
 /// Not to be confused with [`AgentSendParams`]: `agent_send` applies only to a
 /// subagent that has already *finished*, and answers with a NEW subagent id.
@@ -1155,29 +1154,33 @@ pub struct AgentMessageParams {
 
 /// `agent_message` outcome. Plugin→core.
 ///
-/// Every variant is a separate answer on purpose — "queued but the turn ended"
-/// and "the child's channel is gone" call for different reactions from the
-/// plugin, so they are never merged into a single success flag. The reply comes
-/// once the outcome is *known*, not once the text is posted.
+/// Every variant is a separate answer on purpose — "admission was refused" and
+/// "the child's channel is gone" call for different reactions from the plugin,
+/// so they are never merged into a single success flag. The reply comes once
+/// the outcome is *known*, not once the text is posted.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum AgentMessageOutcomeDto {
-    /// In the child's conversation, ahead of its next inference request.
+    /// Admitted by the live child: it becomes model-visible at the child's next
+    /// safe point, or as a queued turn if the child is between turns. Nothing
+    /// more to do.
     Delivered,
-    /// The child took the message but its turn ended (or was cancelled) before
-    /// the next injection point; the text was dropped, never rerun as a turn of
-    /// its own. Re-send if the correction still matters.
+    /// Admission was refused and nothing reached the child — too many messages
+    /// in flight, the admission deadline passed, or the text is over the size
+    /// limit. Nothing was queued, so re-sending is the right move.
     NotDelivered,
-    /// The child exists but has not started its session yet, so there is no
-    /// turn to steer. Nothing was queued: retry, or let the spawn prompt carry
-    /// the instruction.
+    /// No longer produced: a message aimed at a child that is still starting is
+    /// parked until it is live rather than refused. Kept on the wire so an
+    /// existing `switch` still compiles.
     NotStarted,
-    /// The child reached a terminal state before the text could land. Use
-    /// `agent_send` to continue it with a fresh turn.
+    /// The child is finalizing or already terminal, so it can take nothing more.
+    /// Use `agent_send` to continue it with a fresh turn.
     AlreadyFinished,
-    /// The child is running but its session channel is gone (mid-teardown, or a
-    /// crashed child session).
+    /// No route to the child: its channel is gone, this session has no
+    /// coordinator, or admission could not be confirmed either way. Do not
+    /// re-send on this one — a repeat could double-steer a child that did take
+    /// the first copy.
     Unreachable,
     /// No subagent with this id belongs to this plugin's session.
     NotFound,
@@ -1204,9 +1207,10 @@ pub struct AgentMessageResult {
 /// [`AgentMessageParams`], which delivers into the live child and keeps its id.
 ///
 /// The model's counterpart to this RPC is `task`'s `resume_from` argument, not
-/// the `message_subagent` tool — the same split under different names on the two
-/// surfaces, and the one worth stating twice: `agent_send` / `resume_from` mint
-/// a new id, `agent_message` / `message_subagent` keep the old one.
+/// the `send_subagent_message` tool — the same split under different names on
+/// the two surfaces, and the one worth stating twice: `agent_send` /
+/// `resume_from` mint a new id, `agent_message` / `send_subagent_message` keep
+/// the old one.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
 pub struct AgentSendParams {

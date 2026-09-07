@@ -11,9 +11,9 @@ use super::coordinator::active_message::{ActiveChildGeneration, ActiveMessageLif
 use super::types::{
     ActiveAgentMessageDelivery, ActiveSubagentSummary, MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT,
     MAX_PARENT_MESSAGES_PER_SUBAGENT, ParentMessageOutcome, SubagentCompletionSummary,
-    SubagentDescribeOutcome, SubagentInspection, SubagentMessageOutcome, SubagentRequest,
-    SubagentResult, SubagentResumeLookup, SubagentSnapshot, SubagentSnapshotStatus,
-    SubagentTypeDescriptor, SubagentValidateTypeOutcome,
+    SubagentDescribeOutcome, SubagentInspection, SubagentRequest, SubagentResult,
+    SubagentResumeLookup, SubagentSnapshot, SubagentSnapshotStatus, SubagentTypeDescriptor,
+    SubagentValidateTypeOutcome,
 };
 
 /// Cap on retained completed-subagent entries before the oldest are evicted.
@@ -75,7 +75,6 @@ pub const ACTIVE_MESSAGE_FINALIZATION_TIMEOUT: std::time::Duration =
 /// Runtime handle retained while a child is active.
 pub trait ChildControl: 'static {
     type ProgressFuture: Future<Output = SubagentProgress> + 'static;
-    type MessageFuture: Future<Output = SubagentMessageOutcome> + 'static;
     type ParentReportFuture: Future<Output = ParentReportDelivery> + 'static;
 
     fn progress(&self) -> Self::ProgressFuture;
@@ -97,22 +96,13 @@ pub trait ChildControl: 'static {
     /// Hand `text` up to the session that spawned this child, resolving as soon
     /// as the parent has *taken* it — not once the parent has read it.
     ///
-    /// The asymmetry with [`Self::message`] is deliberate and load-bearing. A
-    /// parent steering a child can wait for the real delivery because the
-    /// child's turn advances on its own. A child cannot: its parent may be
-    /// parked inside the very `task` call awaiting this child, which reaches no
-    /// injection point until the child finishes, so waiting for delivery would
-    /// be waiting for itself.
+    /// The asymmetry with [`Self::send_active_message`] is deliberate and
+    /// load-bearing. A parent steering a child can wait for the real delivery
+    /// because the child's turn advances on its own. A child cannot: its
+    /// parent may be parked inside the very `task` call awaiting this child,
+    /// which reaches no injection point until the child finishes, so waiting
+    /// for delivery would be waiting for itself.
     fn message_parent(&self, text: String) -> Self::ParentReportFuture;
-
-    /// Hand `text` to the running child out of band, resolving only once the
-    /// child has put it in its conversation or established that it will not.
-    ///
-    /// A control may only answer with the child-observable outcomes —
-    /// [`SubagentMessageOutcome::Delivered`], `NotDelivered`, or `Unreachable`.
-    /// `NotFound` / `NotStarted` / `AlreadyFinished` describe registry state the
-    /// coordinator resolves before a control is ever consulted.
-    fn message(&self, text: String) -> Self::MessageFuture;
 }
 
 /// Data reported when runtime initialization has produced a live child.

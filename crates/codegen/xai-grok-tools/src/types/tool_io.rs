@@ -23,7 +23,6 @@ use crate::implementations::grok_build::image_edit::ImageEditInput;
 use crate::implementations::grok_build::image_gen::ImageGenInput;
 use crate::implementations::grok_build::list_dir::ListDirInput;
 use crate::implementations::grok_build::message_parent::MessageParentInput;
-use crate::implementations::grok_build::message_subagent::MessageSubagentInput;
 use crate::implementations::grok_build::read_file::ReadFileInput;
 use crate::implementations::grok_build::search_replace::SearchReplaceInput;
 use crate::implementations::grok_build::send_subagent_message::SendSubagentMessageInput;
@@ -74,7 +73,6 @@ pub enum ToolInput {
     TaskOutput(TaskOutputToolInput),
     WaitTasks(WaitTasksToolInput),
     KillTask(KillTaskToolInput),
-    MessageSubagent(MessageSubagentInput),
     MessageParent(MessageParentInput),
     Task(TaskToolInput),
     WebSearch(WebSearchInput),

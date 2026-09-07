@@ -15,9 +15,10 @@
  * [`AgentMessageParams`], which delivers into the live child and keeps its id.
  *
  * The model's counterpart to this RPC is `task`'s `resume_from` argument, not
- * the `message_subagent` tool — the same split under different names on the two
- * surfaces, and the one worth stating twice: `agent_send` / `resume_from` mint
- * a new id, `agent_message` / `message_subagent` keep the old one.
+ * the `send_subagent_message` tool — the same split under different names on
+ * the two surfaces, and the one worth stating twice: `agent_send` /
+ * `resume_from` mint a new id, `agent_message` / `send_subagent_message` keep
+ * the old one.
  */
 export type AgentSendParams = { 
 /**

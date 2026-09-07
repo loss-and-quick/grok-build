@@ -29,8 +29,8 @@ use xai_grok_tools::implementations::grok_build::task::coordinator::{
     SubagentProgress,
 };
 use xai_grok_tools::implementations::grok_build::task::types::{
-    SubagentDescribeOutcome, SubagentMessageOutcome, SubagentOwner, SubagentRegistryCounts,
-    SubagentRequest, SubagentResult, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
+    SubagentDescribeOutcome, SubagentOwner, SubagentRegistryCounts, SubagentRequest,
+    SubagentResult, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
 };
 
 const PARENT_SESSION_ID: &str = "subagent-soak-parent";
@@ -297,12 +297,7 @@ struct SoakControl {
 
 impl ChildControl for SoakControl {
     type ProgressFuture = std::future::Ready<SubagentProgress>;
-    type MessageFuture = std::future::Ready<SubagentMessageOutcome>;
     type ParentReportFuture = std::future::Ready<ParentReportDelivery>;
-
-    fn message(&self, _text: String) -> Self::MessageFuture {
-        std::future::ready(SubagentMessageOutcome::Delivered)
-    }
 
     fn message_parent(&self, _text: String) -> Self::ParentReportFuture {
         std::future::ready(ParentReportDelivery::Buffered)

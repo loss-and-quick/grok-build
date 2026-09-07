@@ -131,26 +131,13 @@ async fn wait_for_pending_interjection(buf: &InterjectionBuffer<acp::ImageConten
 /// finished — and for a parent waiting on the very subagent that just reported,
 /// that is until the report is moot.
 ///
-/// Returns the sentence for the aborted wait. The two directions read
-/// differently to the model, and an owner's correction outranks a child's
-/// report when both are pending: the correction is the one it must not mistake
-/// for information.
+/// Returns the sentence for the aborted wait.
 async fn wait_for_pending_steering(
-    buf: &std::sync::Arc<parking_lot::Mutex<Vec<super::PendingSteeringMessage>>>,
+    buf: &std::sync::Arc<parking_lot::Mutex<Vec<super::PendingChildReport>>>,
 ) -> &'static str {
     loop {
-        {
-            let pending = buf.lock();
-            if !pending.is_empty() {
-                return if pending
-                    .iter()
-                    .all(|entry| matches!(entry.origin, super::SteeringOrigin::Child { .. }))
-                {
-                    "Wait interrupted: a subagent you spawned sent a report while running."
-                } else {
-                    "Wait interrupted: the agent that started this task sent a correction."
-                };
-            }
+        if !buf.lock().is_empty() {
+            return "Wait interrupted: a subagent you spawned sent a report while running.";
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -2331,18 +2318,9 @@ impl SessionActor {
             ),
             // Deliberately not routed through `is_bg_plumbing_tool`: polling
             // and killing are plumbing the task pane already shows, but a
-            // steer is the parent changing what a child is doing, and hiding
-            // it would leave the child's turn in the transcript unexplained.
-            ToolInput::MessageSubagent(ref m) => (
-                format!("Message subagent: {}", m.subagent_id),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            // The same reasoning read the other way round, and if anything
-            // stronger: a report is a child interrupting work already under
-            // way, and the `<system-reminder>` it produces in the parent's
-            // turn is unattributable unless the call that sent it is visible.
+            // report is a child interrupting work already under way, and the
+            // `<system-reminder>` it produces in the parent's turn is
+            // unattributable unless the call that sent it is visible.
             // Named by the child's own subagent type — the identity a subagent
             // session holds about itself, and the one its parent spawned it by.
             ToolInput::MessageParent(_) => (

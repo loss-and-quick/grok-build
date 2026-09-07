@@ -265,7 +265,6 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
             | ToolInput::TaskOutput(_)
             | ToolInput::WaitTasks(_)
             | ToolInput::KillTask(_)
-            | ToolInput::MessageSubagent(_)
             | ToolInput::Skill(_) => AccessKind::Read(None),
             ToolInput::Task(t) => AccessKind::Edit(format!("task:{}", t.subagent_type)),
             ToolInput::SendSubagentMessage(message) => AccessKind::AgentMessage {

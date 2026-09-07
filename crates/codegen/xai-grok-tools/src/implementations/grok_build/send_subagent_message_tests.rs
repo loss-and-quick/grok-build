@@ -9,8 +9,7 @@ use crate::implementations::grok_build::task::coordinator::{
 };
 use crate::implementations::grok_build::task::types::{
     ActiveAgentMessageOutcome, MAX_ACTIVE_AGENT_MESSAGE_BYTES, SubagentDepthCounter,
-    SubagentDescribeOutcome, SubagentMessageOutcome, SubagentTypeDescriptor,
-    SubagentValidateTypeOutcome,
+    SubagentDescribeOutcome, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
 };
 use crate::types::resources::{Resources, SharedResources};
 use crate::types::tool_metadata::test_ctx;
@@ -27,7 +26,6 @@ struct ToolTestControl;
 
 impl ChildControl for ToolTestControl {
     type ProgressFuture = std::future::Ready<SubagentProgress>;
-    type MessageFuture = std::future::Ready<SubagentMessageOutcome>;
     type ParentReportFuture = std::future::Ready<ParentReportDelivery>;
 
     fn progress(&self) -> Self::ProgressFuture {
@@ -36,10 +34,6 @@ impl ChildControl for ToolTestControl {
 
     fn message_parent(&self, _text: String) -> Self::ParentReportFuture {
         std::future::ready(ParentReportDelivery::Buffered)
-    }
-
-    fn message(&self, _text: String) -> Self::MessageFuture {
-        std::future::ready(SubagentMessageOutcome::Delivered)
     }
 
     fn cancel(&self) {}

@@ -637,50 +637,6 @@ pub enum SubagentCancelOutcome {
     NotFound,
 }
 
-/// Out-of-band message aimed at a subagent that is already running.
-///
-/// Scoped by `parent_session_id` exactly like [`SubagentCancelRequest`] and
-/// `SubagentQueryRequest`: a caller may only reach children its own session
-/// spawned. `respond_to` is answered once the outcome is *known*, not once the
-/// message is posted — see [`SubagentMessageOutcome`].
-#[derive(Educe)]
-#[educe(Debug)]
-pub struct SubagentMessageRequest {
-    pub subagent_id: String,
-    pub parent_session_id: Option<String>,
-    pub text: String,
-    #[educe(Debug(ignore))]
-    pub respond_to: oneshot::Sender<SubagentMessageOutcome>,
-}
-
-/// What became of a message sent to a running subagent.
-///
-/// Every variant is a distinguishable answer to the sender. There is
-/// deliberately no "posted, probably fine" state: a sender that believes it
-/// steered a child which never saw the text is worse than no feature at all,
-/// so the reply waits until the child has either put the message in its
-/// conversation or established that it never will.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SubagentMessageOutcome {
-    /// In the child's conversation, ahead of its next inference request.
-    Delivered,
-    /// The child was accepted the message but its turn ended (or was
-    /// cancelled) before the next injection point, so nothing was added to its
-    /// conversation. The message is dropped, never rerun as a turn of its own.
-    NotDelivered,
-    /// The child exists but has not started its session yet, so there is no
-    /// turn to steer. Not queued: the sender should retry or let the spawn
-    /// prompt carry the instruction.
-    NotStarted,
-    /// The child reached a terminal state before the message could land.
-    AlreadyFinished { status: String },
-    /// The child is running but its session channel is gone (mid-teardown, or
-    /// a crashed child session actor).
-    Unreachable,
-    /// No subagent with this id belongs to the calling session.
-    NotFound,
-}
-
 /// How many messages one subagent may send up to its parent, for its whole
 /// life.
 ///
@@ -719,8 +675,8 @@ pub const MAX_PARENT_MESSAGE_ATTEMPTS_PER_SUBAGENT: u32 = MAX_PARENT_MESSAGES_PE
 
 /// What became of a message a subagent sent up to the agent that spawned it.
 ///
-/// The mirror of [`SubagentMessageOutcome`], and deliberately not the same
-/// enum: the answers a child can honestly be given are different ones. A child
+/// Deliberately not [`ActiveAgentMessageOutcome`], the answer the downward
+/// route gives: what a child can honestly be told is different. A child
 /// learns whether its parent *took* the text, never whether the parent has
 /// read it — waiting for that would park the child behind a parent that may be
 /// blocked inside the very tool call awaiting this child.
@@ -1071,7 +1027,6 @@ pub enum SubagentEvent {
     Query(SubagentQueryRequest),
     SendActiveMessage(SubagentActiveMessageRequest),
     Cancel(SubagentCancelRequest),
-    Message(SubagentMessageRequest),
     MessageParent(SubagentParentMessageRequest),
     ListActive(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),

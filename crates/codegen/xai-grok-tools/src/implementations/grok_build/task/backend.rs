@@ -17,10 +17,10 @@ use super::types::{
     SubagentActiveMessageRequest, SubagentCancelOutcome, SubagentCancelRequest,
     SubagentCancelTarget, SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent,
     SubagentEventSender, SubagentInspectRequest, SubagentInspection, SubagentListRunningRequest,
-    SubagentMessageOutcome, SubagentMessageRequest, SubagentParentMessageRequest,
-    SubagentQueryRequest, SubagentRegistryCounts, SubagentRegistryCountsRequest, SubagentRequest,
-    SubagentResult, SubagentSnapshot, SubagentSpawnRequest, SubagentSpawnedRefsRequest,
-    SubagentValidateTypeOutcome, SubagentValidateTypeRequest,
+    SubagentParentMessageRequest, SubagentQueryRequest, SubagentRegistryCounts,
+    SubagentRegistryCountsRequest, SubagentRequest, SubagentResult, SubagentSnapshot,
+    SubagentSpawnRequest, SubagentSpawnedRefsRequest, SubagentValidateTypeOutcome,
+    SubagentValidateTypeRequest,
 };
 use crate::register_resource;
 use xai_tool_runtime::ToolError;
@@ -73,24 +73,14 @@ pub trait SubagentBackend: Send + Sync + 'static {
     /// Request cancellation of a subagent by ID.
     async fn cancel(&self, id: &str) -> SubagentCancelOutcome;
 
-    /// Steer a running subagent: hand it `text` out of band, without
-    /// cancelling it and without spawning a replacement.
-    ///
-    /// Awaits the real outcome rather than acknowledging the post. A child in
-    /// a long tool call is not "between turns" — it just has not reached its
-    /// next injection point — so a deadline here would report a failure that
-    /// is about to become a delivery. The reply arrives when the child settles
-    /// it, or when the child's session goes away and the reply channel drops.
-    async fn message(&self, id: &str, text: &str) -> SubagentMessageOutcome;
-
     /// Send `text` up to the session that spawned *this* session, if one did.
     ///
     /// Takes no address: the coordinator resolves the parent from its own
     /// registry, so the reverse channel reaches exactly one place and cannot be
-    /// turned into an agent-to-agent bus. Unlike [`Self::message`] it resolves
-    /// as soon as the parent has taken the text, not once the parent has read
-    /// it — a child whose parent is blocked awaiting that same child would
-    /// otherwise wait on itself.
+    /// turned into an agent-to-agent bus. Unlike [`Self::send_active_message`]
+    /// it resolves as soon as the parent has taken the text, not once the
+    /// parent has read it — a child whose parent is blocked awaiting that same
+    /// child would otherwise wait on itself.
     async fn message_parent(&self, text: &str) -> ParentMessageOutcome;
 
     /// Validate a subagent type synchronously before spawning.
@@ -629,22 +619,6 @@ impl SubagentBackend for ChannelBackend {
             return SubagentCancelOutcome::NotFound;
         }
         response_rx.await.unwrap_or(SubagentCancelOutcome::NotFound)
-    }
-
-    async fn message(&self, id: &str, text: &str) -> SubagentMessageOutcome {
-        let (respond_to, response_rx) = oneshot::channel();
-        let sent = self.tx.send(SubagentEvent::Message(SubagentMessageRequest {
-            subagent_id: id.to_string(),
-            parent_session_id: self.parent_session_id(),
-            text: text.to_string(),
-            respond_to,
-        }));
-        if sent.is_err() {
-            return SubagentMessageOutcome::Unreachable;
-        }
-        response_rx
-            .await
-            .unwrap_or(SubagentMessageOutcome::Unreachable)
     }
 
     /// The session id this backend is bound to is the caller's *own* — the

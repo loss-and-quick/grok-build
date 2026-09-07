@@ -32,10 +32,9 @@ use super::coordinator_state::{
 };
 use super::types::{
     ActiveAgentMessageOutcome, ParentMessageOutcome, SpawnedSubagentRef, SubagentCancelOutcome,
-    SubagentCancelTarget, SubagentDescribeOutcome, SubagentEvent, SubagentMessageOutcome,
-    SubagentOutstandingReply, SubagentRegistryCounts, SubagentRequest, SubagentResult,
-    SubagentResumeLookup, SubagentResumeSource, SubagentTypeDescriptor,
-    SubagentValidateTypeOutcome,
+    SubagentCancelTarget, SubagentDescribeOutcome, SubagentEvent, SubagentOutstandingReply,
+    SubagentRegistryCounts, SubagentRequest, SubagentResult, SubagentResumeLookup,
+    SubagentResumeSource, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
 };
 use active_message::{
     ActiveChildGeneration, ActiveMessageFuture, ActiveMessageLifecycle, SpawnReadyMessages,
@@ -100,22 +99,14 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     spawn_ready: SpawnReadyMessages,
     terminal_outputs: HashMap<String, ChildRunOutput<R::CompletionData>>,
     progress: FuturesUnordered<ProgressFuture<<R::Control as ChildControl>::ProgressFuture>>,
-    messages: FuturesUnordered<
-        ReplyFuture<<R::Control as ChildControl>::MessageFuture, SubagentMessageOutcome>,
-    >,
     parent_messages:
         FuturesUnordered<ParentReportReply<<R::Control as ChildControl>::ParentReportFuture>>,
     list_requests: HashMap<u64, ListRequest>,
     next_list_request_id: u64,
 }
 
-/// A message the registry settles on its own, paired with the caller's channel.
-type ImmediateMessageReply = (
-    oneshot::Sender<SubagentMessageOutcome>,
-    SubagentMessageOutcome,
-);
-
-/// The child→parent counterpart of [`ImmediateMessageReply`].
+/// A child→parent report the registry settles on its own, paired with the
+/// caller's channel.
 type ImmediateParentMessageReply = (oneshot::Sender<ParentMessageOutcome>, ParentMessageOutcome);
 
 /// Backstop for a delete-path teardown hold: if a cancelled child never
@@ -276,7 +267,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             spawn_ready: SpawnReadyMessages::new(active_message_permits, active_message_capacity),
             terminal_outputs: HashMap::new(),
             progress: FuturesUnordered::new(),
-            messages: FuturesUnordered::new(),
             parent_messages: FuturesUnordered::new(),
             list_requests: HashMap::new(),
             next_list_request_id: 0,
@@ -300,7 +290,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 && self.spawn_ready.is_empty()
                 && self.terminal_outputs.is_empty()
                 && self.progress.is_empty()
-                && self.messages.is_empty()
                 && self.parent_messages.is_empty()
             {
                 debug_assert!(
@@ -352,9 +341,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 }
                 Some((seed, target, progress)) = self.progress.next(), if !self.progress.is_empty() => {
                     self.finish_progress(seed, target, progress);
-                }
-                Some((respond_to, outcome)) = self.messages.next(), if !self.messages.is_empty() => {
-                    let _ = respond_to.send(outcome);
                 }
                 Some(resolved) = self.parent_messages.next(), if !self.parent_messages.is_empty() => {
                     self.settle_parent_message(resolved);
@@ -432,17 +418,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     }
                 }
             },
-            SubagentEvent::Message(request) => {
-                let outcome = self.begin_message(
-                    &request.subagent_id,
-                    request.parent_session_id.as_deref(),
-                    request.text,
-                    request.respond_to,
-                );
-                if let Some((respond_to, outcome)) = outcome {
-                    let _ = respond_to.send(outcome);
-                }
-            }
             SubagentEvent::MessageParent(request) => {
                 if let Some((respond_to, outcome)) = self.begin_parent_message(
                     &request.child_session_id,
@@ -1103,55 +1078,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         self.resolve_teardown_drain_waiters(&parent_session_id);
         self.start_queued_within_capacity();
-    }
-
-    /// Resolve a message against the registry and, when there is a live child
-    /// to steer, queue its control future. Returns `Some((respond_to, outcome))`
-    /// when the registry alone settles the answer, `None` once the child has
-    /// been asked and the reply rides on [`Self::messages`].
-    ///
-    /// Registry state is checked before any control is touched, so a caller
-    /// naming a child of another session, a child that has not started, or one
-    /// that already finished gets its own answer instead of a delivery attempt
-    /// against something that cannot take it. A child whose cancellation token
-    /// is already set is answered `NotDelivered` here rather than handed the
-    /// text: its turn is being torn down, and a control future queued against
-    /// it would only resolve after the teardown it is racing.
-    fn begin_message(
-        &mut self,
-        id: &str,
-        parent_session_id: Option<&str>,
-        text: String,
-        respond_to: oneshot::Sender<SubagentMessageOutcome>,
-    ) -> Option<ImmediateMessageReply> {
-        if let Some(child) = self.active.get(id)
-            && belongs_to_session(&child.request, parent_session_id)
-        {
-            if child.cancellation.is_cancelled() {
-                return Some((respond_to, SubagentMessageOutcome::NotDelivered));
-            }
-            self.messages.push(ReplyFuture {
-                future: Box::pin(child.control.message(text)),
-                respond_to: Some(respond_to),
-            });
-            return None;
-        }
-        if let Some(child) = self.pending.get(id)
-            && belongs_to_session(&child.request, parent_session_id)
-        {
-            return Some((respond_to, SubagentMessageOutcome::NotStarted));
-        }
-        if let Some(child) = self.completed.get(id)
-            && belongs_to_session(&child.request, parent_session_id)
-        {
-            return Some((
-                respond_to,
-                SubagentMessageOutcome::AlreadyFinished {
-                    status: child.result.status().to_owned(),
-                },
-            ));
-        }
-        Some((respond_to, SubagentMessageOutcome::NotFound))
     }
 
     /// Start a child's message to the session that spawned it.

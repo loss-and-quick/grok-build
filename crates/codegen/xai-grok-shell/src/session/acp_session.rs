@@ -838,18 +838,16 @@ pub(crate) struct SessionActor {
     /// Pushed by `SessionCommand::Interject` handler, drained at safe points in `process_conversation_turn`.
     /// Internally synchronized.
     pub(crate) pending_interjections: InterjectionBuffer<acp::ImageContent>,
-    /// Out-of-band steering messages aimed at the running turn by whoever owns
-    /// this session (today: a subagent's parent, via the subagent coordinator).
-    /// Pushed by the `SessionCommand::Steer` handler, drained at exactly the
-    /// same safe points as `pending_interjections`.
+    /// Mid-task reports from subagents this session spawned, aimed at the
+    /// running turn. Pushed by the `SessionCommand::ChildReport` handler,
+    /// drained at exactly the same safe points as `pending_interjections`.
     ///
-    /// Each entry carries its own acknowledgement, fired at the moment the
-    /// text enters the conversation — not when it was posted. That is what
-    /// lets the sender be told the truth when a turn ends underneath its
-    /// message instead of believing it steered something it never reached.
+    /// The child is answered at enqueue rather than at drain, so no entry
+    /// carries a channel: a parent blocked inside the `task` call awaiting this
+    /// very child reaches no drain point until the child finishes.
     /// `Arc`-shared so the interruptible wait-tool select can watch it the way
     /// it already watches `pending_interjections`.
-    pub(crate) pending_steering: Arc<Mutex<Vec<PendingSteeringMessage>>>,
+    pub(crate) pending_steering: Arc<Mutex<Vec<PendingChildReport>>>,
     /// Skill-announcement reminders that arrived while a turn was running.
     /// Flushed at the same safe points as `pending_interjections`, plus on cancel/idle.
     /// The flush also delivers the plan tracker's buffered mid-turn activation reminder (see `activate_plan_mode_mid_turn`).

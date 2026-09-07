@@ -213,12 +213,15 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
         remote: Some(|settings| settings.subagent_worktree_snapshot_enabled),
     },
+    // On by default here, unlike upstream: this is the only route a parent has
+    // to a child it already spawned, and a workflow built on steering loses it
+    // silently when the flag defaults off.
     FeatureSpec {
         id: Feature::ActiveAgentMessages,
         key: "active_agent_messages",
         path: "features.active_agent_messages",
         env: "GROK_ACTIVE_AGENT_MESSAGES",
-        default_enabled: false,
+        default_enabled: true,
         remote: Some(|settings| settings.active_agent_messages_enabled),
     },
     FeatureSpec {

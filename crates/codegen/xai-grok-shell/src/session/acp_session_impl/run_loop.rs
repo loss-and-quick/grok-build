@@ -2104,9 +2104,6 @@ pub(super) async fn run_session(
                                 .await;
                             }
                         }
-                        SessionCommand::Steer { text, ack } => {
-                            session.accept_steering_message(text, ack);
-                        }
                         SessionCommand::ChildReport { subagent_id, text, ack } => {
                             session.accept_child_report(subagent_id, text, ack);
                         }
@@ -2408,14 +2405,11 @@ pub(super) async fn run_session(
                                 .await;
                         }
                     }
-                    // The steering counterpart of that flush, and deliberately
-                    // not the same move: the owner's steering aimed at a turn
-                    // that has now ended has no later turn it could honestly
-                    // run in, so it is answered "not delivered" instead of
-                    // queued. A child's report is held instead of dropped — it
-                    // was charged and acknowledged as taken, and only a cancel
-                    // was ever excluded.
-                    session.discard_steering_at_turn_end();
+                    // No steering counterpart to that flush: a child's report is
+                    // held rather than dropped or queued. It was charged and
+                    // acknowledged as taken, only a cancel was ever excluded,
+                    // and turning it into a turn of its own is exactly the wake
+                    // the reverse channel refuses (see `discard_pending_steering`).
                     SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                     // If no user prompt started, check for pending notifications
                     SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;

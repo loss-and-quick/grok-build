@@ -8,8 +8,8 @@ use xai_grok_tools::implementations::grok_build::task::coordinator::{
 };
 use xai_grok_tools::implementations::grok_build::task::types::{
     ActiveAgentMessageDelivery, ActiveAgentMessageOperation, ActiveAgentMessageOutcome,
-    ActiveAgentMessageRequest, SubagentDescribeOutcome, SubagentMessageOutcome, SubagentOwner,
-    SubagentRequest, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
+    ActiveAgentMessageRequest, SubagentDescribeOutcome, SubagentOwner, SubagentRequest,
+    SubagentTypeDescriptor, SubagentValidateTypeOutcome,
 };
 
 const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -27,15 +27,10 @@ struct SnapshotProbeControl {
 
 impl ChildControl for SnapshotProbeControl {
     type ProgressFuture = LocalBoxFuture<SubagentProgress>;
-    type MessageFuture = LocalBoxFuture<SubagentMessageOutcome>;
     type ParentReportFuture = LocalBoxFuture<ParentReportDelivery>;
 
     fn progress(&self) -> Self::ProgressFuture {
         self.runtime.progress()
-    }
-
-    fn message(&self, text: String) -> Self::MessageFuture {
-        self.runtime.message(text)
     }
 
     fn message_parent(&self, text: String) -> Self::ParentReportFuture {

@@ -166,17 +166,21 @@ if (outcome !== "delivered") { /* "not_delivered" | "not_started" | ... */ }
 const nextId = await ctx.agents.send(id, "now write the tests", 60_000);
 ```
 
-`message` never queues: if the child's turn ended before the text landed
-you get `"not_delivered"` and nothing was added to its conversation, so
-re-send if the correction still matters. It is text only — no attachments,
-and no slash-command expansion.
+`message` steers the child's running turn: `"delivered"` means the text was
+admitted and becomes model-visible at the child's next safe point (or as a
+queued turn if the child is between turns). `"not_delivered"` means admission
+was refused and nothing reached the child, so re-send if the correction still
+matters; `"unreachable"` means there is no route, or the outcome could not be
+confirmed — do not re-send on that one, a repeat could double-steer a child
+that did take the first copy. It is text only — no attachments, and no
+slash-command expansion.
 
 The model reaches the same mechanism from the other side, through the
-`message_subagent` tool: same coordinator, same six outcomes, same injection
-point in the child. A plugin and the parent model can both steer the same
-child; the messages arrive in the order the coordinator took them. What the
-model does *not* have is an equivalent of `send` — it continues a terminal
-subagent with `task`'s `resume_from`, which likewise mints a new id.
+`send_subagent_message` tool: same coordinator, same admission, same delivery
+into the child. A plugin and the parent model can both steer the same child;
+the messages arrive in the order the coordinator admitted them. What the model
+does *not* have is an equivalent of `send` — it continues a terminal subagent
+with `task`'s `resume_from`, which likewise mints a new id.
 
 Progress is delivered by **cursor-based polling rather than host→plugin
 notifications**: the capability server is plain request/reply and keeps

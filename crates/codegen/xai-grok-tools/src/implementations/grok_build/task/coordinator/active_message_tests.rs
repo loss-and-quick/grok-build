@@ -28,7 +28,6 @@ struct TestControl {
 
 impl ChildControl for TestControl {
     type ProgressFuture = std::future::Ready<SubagentProgress>;
-    type MessageFuture = std::future::Ready<SubagentMessageOutcome>;
     type ParentReportFuture = std::future::Ready<ParentReportDelivery>;
 
     fn progress(&self) -> Self::ProgressFuture {
@@ -37,10 +36,6 @@ impl ChildControl for TestControl {
 
     fn message_parent(&self, _text: String) -> Self::ParentReportFuture {
         std::future::ready(ParentReportDelivery::Buffered)
-    }
-
-    fn message(&self, _text: String) -> Self::MessageFuture {
-        std::future::ready(SubagentMessageOutcome::Delivered)
     }
 
     fn send_active_message(

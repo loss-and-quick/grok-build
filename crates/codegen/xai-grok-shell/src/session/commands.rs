@@ -864,34 +864,17 @@ pub enum SessionCommand {
         /// Empty from text-only or older clients.
         images: Vec<acp::ImageContent>,
     },
-    /// Steer this session's running turn from outside it: the text is queued
-    /// in `pending_steering` and injected as a `<system-reminder>` at the same
-    /// safe points [`Self::Interject`] uses.
-    ///
-    /// Two things separate it from `Interject`. The framing carries operator
-    /// authority rather than reading as the task's requester changing their
-    /// mind — the sender is whoever owns this session, not whoever asked for
-    /// the work. And `ack` reports whether the text actually reached the
-    /// conversation: a steering message that finds no turn left is answered
-    /// `false` and dropped, never converted into a turn of its own, because
-    /// the only sender today is a subagent's parent and a subagent runs
-    /// exactly one prompt — a resurrected turn would race the child's own
-    /// teardown.
-    Steer {
-        text: String,
-        ack: oneshot::Sender<bool>,
-    },
     /// A running subagent reporting up to the session that spawned it — the
-    /// reverse of [`Self::Steer`], and the only command a child may aim at its
-    /// parent.
+    /// reverse of `send_subagent_message`, and the only command a child may aim
+    /// at its parent.
     ///
-    /// It shares the steering buffer and every one of its drain points, so a
-    /// parent parked in `wait_tasks` is interrupted for it exactly as a child
-    /// is interrupted for a correction. Three things differ.
+    /// It is injected as a `<system-reminder>` at the same safe points a
+    /// mid-turn interjection uses, so a parent parked in `wait_tasks` is
+    /// interrupted for it. Three things separate it from the downward route.
     ///
     /// The framing names a child rather than an owner, so the parent reads a
     /// report from below rather than an instruction from above, and carries
-    /// the child's id so the parent can answer with `message_subagent`.
+    /// the child's id so the parent can answer with `send_subagent_message`.
     ///
     /// `ack` fires when the text is *taken*, not when it is read. The parent
     /// may be blocked inside the very `task` call awaiting this child, which

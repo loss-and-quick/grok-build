@@ -1431,7 +1431,11 @@ pub(crate) async fn spawn_session_actor(
                 // Arms the plugin `agent_*` orchestration RPCs: plugin spawns
                 // route through this session's subagent coordinator like any
                 // Task spawn.
-                tool_context.subagent_event_tx.clone(),
+                tool_context.subagent_event_tx.clone().map(|tx| {
+                    // The ingress rides along because `agent_message` steers
+                    // over it, not over the event channel the other RPCs use.
+                    (tx, tool_context.subagent_coordinator_sender.clone())
+                }),
                 // Arms the `ui_publish_panel` / `ui_close_panel` /
                 // `panel_action` seam: panels emit `plugin_panel` /
                 // `panel_closed` notifications and button presses route back to

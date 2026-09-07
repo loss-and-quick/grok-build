@@ -258,8 +258,12 @@ fn install_child_seccomp(_cmd: &mut tokio::process::Command) -> Result<(), Strin
 ///
 /// Registers one plugin per active plugin that resolves a `sidecar_spec()`;
 /// spawning is deferred until the first matching hook fires.
-/// `subagent_event_tx` (the session's coordinator channel) arms the `agent_*`
-/// orchestration RPCs; without it they answer `method_not_found`.
+/// `subagent_orchestration` (the session's coordinator channel, and beside it
+/// that coordinator's private active-message ingress) arms the `agent_*`
+/// orchestration RPCs; without it they answer `method_not_found`. The two ride
+/// together because they are one coordinator: spawn/cancel/progress go over the
+/// plain event channel, `agent_message` over the ingress, and a host given only
+/// the first would answer steering `Unreachable` while claiming to orchestrate.
 ///
 /// `cmd_tx` is the session's command channel, which arms the panel RPCs. It is
 /// optional because this is also how the agent-level sign-in host is built
@@ -272,11 +276,14 @@ pub(crate) fn build_session_plugin_host(
     session_id: &str,
     workspace_root: &str,
     plugin_config: &std::collections::BTreeMap<String, serde_json::Value>,
-    subagent_event_tx: Option<
+    subagent_orchestration: Option<(
         tokio::sync::mpsc::UnboundedSender<
             xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
         >,
-    >,
+        Option<
+            xai_grok_tools::implementations::grok_build::task::backend::SubagentCoordinatorSender,
+        >,
+    )>,
     cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::session::commands::SessionCommand>>,
 ) -> Option<Arc<PluginHost>> {
     let registry = plugin_registry?;
@@ -304,10 +311,11 @@ pub(crate) fn build_session_plugin_host(
     // Tier 2 orchestration: route the `agent_*` RPCs through this session's
     // subagent coordinator channel, so plugin spawns are real children of the
     // session (TUI-visible, cancellable) on the exact same path as Task spawns.
-    if let Some(tx) = subagent_event_tx {
+    if let Some((tx, active_message_tx)) = subagent_orchestration {
         host.set_agent_orchestrator(Arc::new(SessionAgentOrchestrator {
             session_id: session_id.to_string(),
             tx,
+            active_message_tx,
         }));
     }
     // UI panels: route `ui_publish_panel` / `ui_close_panel` from any sidecar
@@ -563,10 +571,48 @@ pub(crate) struct SessionAgentOrchestrator {
     pub(crate) tx: tokio::sync::mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
     >,
+    /// The coordinator's active-message ingress, which `agent_message` steers
+    /// through. `None` on a legacy channel with no coordinator behind it, where
+    /// steering answers `Unreachable` rather than pretending to have landed.
+    pub(crate) active_message_tx: Option<
+        xai_grok_tools::implementations::grok_build::task::backend::SubagentCoordinatorSender,
+    >,
 }
 
 /// Default agent type for a plugin spawn that names none.
 const PLUGIN_SPAWN_DEFAULT_AGENT_TYPE: &str = "general-purpose";
+
+/// Narrow the coordinator's active-message outcome onto the plugin wire enum.
+///
+/// The wire has told plugins three things worth branching on since it existed —
+/// the child has it, admission was refused, there is no route — and each
+/// coordinator outcome collapses onto whichever of those a plugin would act on.
+/// `AdmissionUncertain` is the one with no honest wire token: the message may
+/// or may not have landed, and `NotDelivered` would invite a re-send that
+/// double-steers a child which did take the first copy, so it rides with the
+/// no-route answers, the ones a plugin is told not to retry.
+fn orchestrator_message_from(
+    outcome: xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageOutcome,
+) -> xai_grok_plugin_host::OrchestratorMessage {
+    use xai_grok_plugin_host::OrchestratorMessage;
+    use xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageOutcome as O;
+    match outcome {
+        O::Accepted { .. } => OrchestratorMessage::Delivered,
+        // The child exists and is owned, but is finalizing or already terminal.
+        O::NotActiveOrFinalizing => OrchestratorMessage::AlreadyFinished,
+        O::NotFoundOrNotOwned => OrchestratorMessage::NotFound,
+        // Admission was definitely refused and nothing reached the child, so a
+        // later re-send is exactly the right move.
+        O::Saturated { .. } | O::NotAcceptedBeforeDeadline | O::Limit { .. } => {
+            OrchestratorMessage::NotDelivered
+        }
+        // The catch-all covers `#[non_exhaustive]`: an outcome this fork has not
+        // seen yet is reported as unreachable rather than as a delivery.
+        O::AdmissionUncertain | O::Unsupported | O::ChannelClosed | _ => {
+            OrchestratorMessage::Unreachable
+        }
+    }
+}
 
 impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
     fn spawn(
@@ -745,6 +791,11 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
         })
     }
 
+    /// Steer a running child over the same active-message route the model's
+    /// `send_subagent_message` uses: admission lease, receipt, and safe-point
+    /// delivery included. A plugin steering a child its own session spawned is
+    /// the same act as the model steering one, so it must not be a second path
+    /// with its own delivery guarantees.
     fn message<'a>(
         &'a self,
         id: &'a str,
@@ -752,38 +803,32 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
     ) -> xai_grok_plugin_host::OrchestratorFuture<'a, xai_grok_plugin_host::OrchestratorMessage>
     {
         use xai_grok_plugin_host::OrchestratorMessage;
+        use xai_grok_tools::implementations::grok_build::task::backend::{
+            ChannelBackend, SubagentBackend,
+        };
         use xai_grok_tools::implementations::grok_build::task::types::{
-            SubagentEvent, SubagentMessageOutcome, SubagentMessageRequest,
+            ActiveAgentMessageOperation, ActiveAgentMessageRequest,
         };
         Box::pin(async move {
-            let (respond_to, rx) = tokio::sync::oneshot::channel();
-            if self
-                .tx
-                .send(SubagentEvent::Message(SubagentMessageRequest {
-                    subagent_id: id.to_string(),
-                    // Same scoping as `progress` and `cancel`: a plugin cannot
-                    // steer a child belonging to another session.
-                    parent_session_id: Some(self.session_id.clone()),
-                    text: text.to_string(),
-                    respond_to,
-                }))
-                .is_err()
-            {
+            let Some(sender) = self.active_message_tx.clone() else {
                 return OrchestratorMessage::Unreachable;
-            }
-            match rx.await {
-                Ok(SubagentMessageOutcome::Delivered) => OrchestratorMessage::Delivered,
-                Ok(SubagentMessageOutcome::NotDelivered) => OrchestratorMessage::NotDelivered,
-                Ok(SubagentMessageOutcome::NotStarted) => OrchestratorMessage::NotStarted,
-                Ok(SubagentMessageOutcome::AlreadyFinished { .. }) => {
-                    OrchestratorMessage::AlreadyFinished
-                }
-                Ok(SubagentMessageOutcome::Unreachable) => OrchestratorMessage::Unreachable,
-                Ok(SubagentMessageOutcome::NotFound) => OrchestratorMessage::NotFound,
-                // The coordinator dropped the reply channel: the agent is going
-                // away, which is an unreachable child rather than a missing one.
-                Err(_) => OrchestratorMessage::Unreachable,
-            }
+            };
+            // Same scoping as `progress` and `cancel`: the backend is bound to
+            // this session, and the coordinator reads that as "who is speaking",
+            // so a plugin cannot steer a child belonging to another session.
+            let backend = ChannelBackend::for_coordinator_session(sender, self.session_id.clone());
+            // Steer, not Queue: a plugin correcting a live child means the
+            // running turn, and an idle child falls back to a queued turn inside
+            // the child's own admission rather than here.
+            let request = match ActiveAgentMessageRequest::try_new_with_operation(
+                id.to_string(),
+                text.to_string(),
+                ActiveAgentMessageOperation::Steer,
+            ) {
+                Ok(request) => request,
+                Err(outcome) => return orchestrator_message_from(outcome),
+            };
+            orchestrator_message_from(backend.send_active_message(request).await)
         })
     }
 
@@ -1996,5 +2041,212 @@ mod network_confinement_tests {
         let mut c = cmd();
         deny_child_network(&denial, None, &mut c, false).unwrap();
         assert_eq!(c.as_std().get_program(), "/usr/bin/plugin");
+    }
+}
+
+/// A plugin steering a running subagent, end to end through a real coordinator.
+///
+/// This is the capability the fork keeps that upstream's tool alone does not
+/// offer, and the whole point of routing `agent_message` onto the active-message
+/// ingress rather than a private channel of its own. The assertions are the two
+/// halves that a re-point can break: the text reaches the live child's control,
+/// and the answer is a real coordinator outcome rather than an optimistic ack.
+#[cfg(test)]
+mod plugin_steering_tests {
+    use super::SessionAgentOrchestrator;
+    use tokio::sync::{mpsc, oneshot};
+    use xai_grok_plugin_host::{AgentOrchestrator, OrchestratorMessage};
+    use xai_grok_tools::implementations::grok_build::task::coordinator::{
+        ActiveMessageAdmission, ChildCompletion, ChildControl, ChildRunOutput, ChildRunRequest,
+        ChildRunner, CoordinatorConfig, ParentReportDelivery, SendBoxFuture, StartedChild,
+        SubagentCoordinator, SubagentProgress,
+    };
+    use xai_grok_tools::implementations::grok_build::task::types::{
+        ActiveAgentMessageDelivery, ModelOverrideProvenance, SubagentDescribeOutcome,
+        SubagentEvent, SubagentOwner, SubagentRequest, SubagentResult, SubagentRuntimeOverrides,
+        SubagentSpawnRequest, SubagentTypeDescriptor, SubagentValidateTypeOutcome,
+    };
+
+    /// Records what the live child was handed, and admits it the way a real
+    /// child host does — through the lease, which is the only way `Accepted`
+    /// can come back.
+    struct RecordingControl {
+        steers: mpsc::UnboundedSender<String>,
+    }
+
+    impl ChildControl for RecordingControl {
+        type ProgressFuture = std::future::Ready<SubagentProgress>;
+        type ParentReportFuture = std::future::Ready<ParentReportDelivery>;
+
+        fn progress(&self) -> Self::ProgressFuture {
+            std::future::ready(SubagentProgress::default())
+        }
+
+        fn message_parent(&self, _text: String) -> Self::ParentReportFuture {
+            std::future::ready(ParentReportDelivery::Buffered)
+        }
+
+        fn send_active_message(
+            &self,
+            delivery: ActiveAgentMessageDelivery,
+        ) -> SendBoxFuture<ActiveMessageAdmission> {
+            let _ = self.steers.send(delivery.message().text.to_string());
+            Box::pin(async move {
+                match delivery.commit_admission(|| ()) {
+                    Some(()) => ActiveMessageAdmission::Admitted,
+                    None => ActiveMessageAdmission::Rejected,
+                }
+            })
+        }
+
+        fn cancel(&self) {}
+    }
+
+    /// Promotes every spawn to a live child, then parks so the child stays
+    /// active for the duration of the steer.
+    struct ParkingRunner {
+        steers: mpsc::UnboundedSender<String>,
+    }
+
+    impl ChildRunner for ParkingRunner {
+        type Control = RecordingControl;
+        type CompletionData = ();
+        type RunFuture = SendBoxFuture<ChildRunOutput<()>>;
+        type ValidateFuture = SendBoxFuture<SubagentValidateTypeOutcome>;
+        type DescribeFuture = SendBoxFuture<SubagentDescribeOutcome>;
+        type ListTypesFuture = SendBoxFuture<Vec<SubagentTypeDescriptor>>;
+
+        fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
+            let steers = self.steers.clone();
+            Box::pin(async move {
+                assert!(
+                    run.reporter
+                        .started(StartedChild {
+                            child_session_id: run.request.id.clone(),
+                            persona: None,
+                            resumed_from: None,
+                            child_cwd: String::new(),
+                            worktree_path: None,
+                            effective_model_id: "test-model".to_owned(),
+                            definition_background: true,
+                            control: RecordingControl { steers },
+                        })
+                        .await
+                );
+                std::future::pending::<()>().await;
+                unreachable!("the parked child never finishes")
+            })
+        }
+
+        fn validate_type(&self, _: String, _: String) -> Self::ValidateFuture {
+            Box::pin(std::future::ready(SubagentValidateTypeOutcome::Ok))
+        }
+
+        fn describe_type(&self, _: String, _: Option<String>, _: String) -> Self::DescribeFuture {
+            Box::pin(std::future::pending())
+        }
+
+        fn list_types(&self, _: String) -> Self::ListTypesFuture {
+            Box::pin(std::future::ready(Vec::new()))
+        }
+
+        fn on_completed(&self, _: ChildCompletion<()>) {}
+    }
+
+    fn spawn_request(id: &str, parent_session_id: &str) -> SubagentRequest {
+        SubagentRequest {
+            id: id.to_owned(),
+            prompt: "work".to_owned(),
+            description: "plugin child".to_owned(),
+            subagent_type: "general-purpose".to_owned(),
+            parent_session_id: parent_session_id.to_owned(),
+            parent_prompt_id: None,
+            resume_from: None,
+            cwd: None,
+            runtime_overrides: SubagentRuntimeOverrides {
+                model_override_provenance: ModelOverrideProvenance::Tool,
+                ..Default::default()
+            },
+            run_in_background: true,
+            surface_completion: false,
+            await_to_completion: false,
+            fork_context: false,
+            owner: SubagentOwner::Task,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plugin_steers_a_running_child_of_its_own_session() {
+        let (steer_tx, mut steers) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = SubagentCoordinator::<ParkingRunner>::channel();
+        let actor = tokio::spawn(
+            SubagentCoordinator::from_channel(
+                command_rx,
+                ParkingRunner { steers: steer_tx },
+                CoordinatorConfig::default(),
+            )
+            .run(),
+        );
+        let orchestrator = SessionAgentOrchestrator {
+            session_id: "session-a".to_owned(),
+            tx: command_tx.event_sender().0.clone(),
+            active_message_tx: Some(command_tx.clone()),
+        };
+
+        let (result_tx, _result_rx) = oneshot::channel::<SubagentResult>();
+        let (registered_tx, registered) = oneshot::channel();
+        command_tx
+            .send(SubagentEvent::Spawn(SubagentSpawnRequest {
+                request: Box::new(spawn_request("child-1", "session-a")),
+                result_tx,
+                registered_tx: Some(registered_tx),
+            }))
+            .expect("coordinator accepts the spawn");
+        registered.await.expect("the child is recorded");
+
+        let outcome = orchestrator
+            .message("child-1", "use ripgrep, not find")
+            .await;
+        assert_eq!(
+            outcome,
+            OrchestratorMessage::Delivered,
+            "an admitted active message is what a plugin reads as delivered",
+        );
+        assert_eq!(
+            steers.recv().await.as_deref(),
+            Some("use ripgrep, not find"),
+            "the text must reach the live child's own control",
+        );
+
+        // Scoping is the coordinator's, not the RPC's: another session's
+        // orchestrator cannot reach this child even knowing its id.
+        let foreign = SessionAgentOrchestrator {
+            session_id: "session-b".to_owned(),
+            tx: command_tx.event_sender().0.clone(),
+            active_message_tx: Some(command_tx.clone()),
+        };
+        assert_eq!(
+            foreign.message("child-1", "steal it").await,
+            OrchestratorMessage::NotFound,
+        );
+
+        actor.abort();
+    }
+
+    /// Without a coordinator behind it there is no route at all, and saying so
+    /// is the point: a plugin that reads `Delivered` stops retrying.
+    #[tokio::test]
+    async fn steering_without_an_active_message_route_is_unreachable() {
+        let (tx, _rx) = mpsc::unbounded_channel::<SubagentEvent>();
+        let orchestrator = SessionAgentOrchestrator {
+            session_id: "session-a".to_owned(),
+            tx,
+            active_message_tx: None,
+        };
+        assert_eq!(
+            orchestrator.message("child-1", "hello").await,
+            OrchestratorMessage::Unreachable,
+        );
     }
 }

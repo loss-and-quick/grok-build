@@ -38,7 +38,6 @@ struct BackendTestControl;
 
 impl super::super::coordinator::ChildControl for BackendTestControl {
     type ProgressFuture = std::future::Ready<super::super::coordinator::SubagentProgress>;
-    type MessageFuture = std::future::Ready<SubagentMessageOutcome>;
     type ParentReportFuture = std::future::Ready<super::super::coordinator::ParentReportDelivery>;
 
     fn progress(&self) -> Self::ProgressFuture {
@@ -47,10 +46,6 @@ impl super::super::coordinator::ChildControl for BackendTestControl {
 
     fn message_parent(&self, _text: String) -> Self::ParentReportFuture {
         std::future::ready(super::super::coordinator::ParentReportDelivery::Buffered)
-    }
-
-    fn message(&self, _text: String) -> Self::MessageFuture {
-        std::future::ready(SubagentMessageOutcome::Delivered)
     }
 
     fn cancel(&self) {}
@@ -109,10 +104,6 @@ impl SubagentBackend for BackendWithoutActiveMessages {
 
     async fn cancel(&self, _id: &str) -> SubagentCancelOutcome {
         SubagentCancelOutcome::NotFound
-    }
-
-    async fn message(&self, _id: &str, _text: &str) -> SubagentMessageOutcome {
-        SubagentMessageOutcome::NotFound
     }
 
     async fn message_parent(&self, _text: &str) -> ParentMessageOutcome {

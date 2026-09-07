@@ -457,8 +457,8 @@ impl PluginCapabilities {
     /// keeps the child (and its id) and changes what it is doing.
     ///
     /// Every coordinator outcome keeps its own wire token; the plugin needs to
-    /// tell "the child has it" from "its turn ended first" from "its channel is
-    /// gone" to decide whether re-sending would help.
+    /// tell "the child has it" from "admission was refused" from "there is no
+    /// route at all" to decide whether re-sending would help.
     async fn agent_message(&self, params: &Value) -> Result<Value, RpcError> {
         let orchestrator = self.orchestrator_for("agent_message")?;
         let p: AgentMessageParams = parse_params(params)?;

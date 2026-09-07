@@ -538,53 +538,6 @@ async fn fallback_prompt_respects_active_plan_mode() {
         .await;
 }
 
-/// A steering message accepted into a running turn reaches the model as a
-/// `<system-reminder>`, and its sender is told so only once the text is really
-/// in the conversation.
-#[tokio::test]
-async fn steering_message_lands_as_a_system_reminder_and_acks_on_injection() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (actor, _rx) = build_actor().await;
-            *actor
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned") = Some("running".into());
-
-            let (ack, mut ack_rx) = tokio::sync::oneshot::channel();
-            actor.accept_steering_message("drop the rewrite".to_string(), ack);
-            assert_eq!(
-                ack_rx.try_recv(),
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty),
-                "acknowledging at enqueue would claim a delivery that has not happened",
-            );
-
-            assert!(actor.drain_pending_steering());
-            assert_eq!(ack_rx.await, Ok(true));
-
-            let conversation = actor.chat_state_handle.get_conversation().await;
-            let item = match conversation.last() {
-                Some(ConversationItem::User(u)) => u,
-                other => panic!("conversation tail must be a user item, got: {other:?}"),
-            };
-            assert_eq!(item.synthetic_reason, Some(SyntheticReason::SystemReminder));
-            let text = match item.content.first() {
-                Some(xai_grok_sampling_types::conversation::ContentPart::Text { text }) => {
-                    text.to_string()
-                }
-                other => panic!("expected a text part, got {other:?}"),
-            };
-            assert!(text.contains("<system-reminder>"), "framing: {text}");
-            assert!(text.contains("drop the rewrite"), "framing: {text}");
-            assert!(
-                !text.contains("<user_query>"),
-                "steering is the session owner speaking, not the task's requester: {text}",
-            );
-        })
-        .await;
-}
-
 /// A child's report lands in its parent's running turn, framed as a report
 /// from below rather than as an instruction from above, and naming the child so
 /// the parent can answer the right subagent.
@@ -679,86 +632,15 @@ async fn a_child_report_never_wakes_an_idle_parent() {
         .await;
 }
 
-/// A steering message that arrives while the session is between turns is
-/// answered `false` and dropped. It must never become a prompt turn the way a
-/// stranded interjection does: a subagent runs exactly one prompt, so a
-/// resurrected turn would race the child's own teardown.
-#[tokio::test]
-async fn steering_message_between_turns_is_refused_and_queues_no_turn() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (actor, _rx) = build_actor().await;
-            assert!(
-                actor
-                    .current_prompt_id
-                    .lock()
-                    .expect("current_prompt_id mutex poisoned")
-                    .is_none(),
-                "precondition: no turn is running",
-            );
-
-            let (ack, ack_rx) = tokio::sync::oneshot::channel();
-            actor.accept_steering_message("too late".to_string(), ack);
-
-            assert_eq!(ack_rx.await, Ok(false));
-            assert!(actor.pending_steering.lock().is_empty());
-            assert!(
-                actor.state.lock().await.pending_inputs.is_empty(),
-                "a refused steering message must not be queued as a turn of its own",
-            );
-        })
-        .await;
-}
-
-/// A turn that ends (or is cancelled) underneath a buffered steering message
-/// takes the message with it, and the sender learns that rather than being left
-/// to believe it steered.
-#[tokio::test]
-async fn discarding_steering_messages_answers_every_waiting_sender() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (actor, _rx) = build_actor().await;
-            *actor
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned") = Some("running".into());
-
-            let (first_ack, first_rx) = tokio::sync::oneshot::channel();
-            let (second_ack, second_rx) = tokio::sync::oneshot::channel();
-            actor.accept_steering_message("one".to_string(), first_ack);
-            actor.accept_steering_message("two".to_string(), second_ack);
-
-            actor.discard_pending_steering();
-
-            assert_eq!(first_rx.await, Ok(false));
-            assert_eq!(second_rx.await, Ok(false));
-            assert!(actor.pending_steering.lock().is_empty());
-            assert!(
-                !actor.drain_pending_steering(),
-                "discarded messages must not resurface at the next drain point",
-            );
-            assert!(
-                actor.state.lock().await.pending_inputs.is_empty(),
-                "discard never converts a message into a turn",
-            );
-        })
-        .await;
-}
-
-/// A turn that ends normally is not a turn that was cancelled, and the two
-/// buffered kinds part ways there.
+/// A turn that ends normally is not a turn that was cancelled.
 ///
-/// The owner's steering was aimed at the turn that just finished and its sender
-/// is still waiting, so it is answered "not delivered". A child's report was
-/// answered "taken" at enqueue and cost one of the child's three sends; the
-/// only escape clause the child was given is a cancel, so an ordinary turn end
-/// must not drop it. It is held for the parent's next step instead — held, not
-/// requeued: nothing here starts a turn, so an idle parent is still never woken
-/// by a child.
+/// A child's report was answered "taken" at enqueue and cost one of the child's
+/// three sends; the only escape clause the child was given is a cancel, so an
+/// ordinary turn end must not drop it. It is held for the parent's next step
+/// instead — held, not requeued: nothing here starts a turn, so an idle parent
+/// is still never woken by a child.
 #[tokio::test]
-async fn a_turn_ending_keeps_a_child_report_and_answers_the_owner() {
+async fn a_turn_ending_keeps_a_child_report() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -768,8 +650,6 @@ async fn a_turn_ending_keeps_a_child_report_and_answers_the_owner() {
                 .lock()
                 .expect("current_prompt_id mutex poisoned") = Some("running".into());
 
-            let (owner_ack, owner_rx) = tokio::sync::oneshot::channel();
-            actor.accept_steering_message("drop the rewrite".to_string(), owner_ack);
             let (child_ack, child_rx) = tokio::sync::oneshot::channel();
             actor.accept_child_report(
                 "sub-9".to_string(),
@@ -778,13 +658,7 @@ async fn a_turn_ending_keeps_a_child_report_and_answers_the_owner() {
             );
             assert_eq!(child_rx.await, Ok(true), "the child was charged for this");
 
-            actor.discard_steering_at_turn_end();
-
-            assert_eq!(
-                owner_rx.await,
-                Ok(false),
-                "the turn the owner aimed at is gone, and it is waiting to hear so",
-            );
+            // Nothing runs at turn end: the buffer is simply left alone.
             assert_eq!(
                 actor.pending_steering.lock().len(),
                 1,
@@ -813,10 +687,6 @@ async fn a_turn_ending_keeps_a_child_report_and_answers_the_owner() {
                 other => panic!("expected a text part, got {other:?}"),
             };
             assert!(text.contains("the repo is Rust, not Go"), "framing: {text}");
-            assert!(
-                !text.contains("drop the rewrite"),
-                "the owner's steering was answered and dropped: {text}",
-            );
         })
         .await;
 }

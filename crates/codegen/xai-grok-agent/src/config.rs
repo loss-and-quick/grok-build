@@ -257,7 +257,6 @@ fn grok_build_core_toolset(include_workflow: bool) -> ToolServerConfig {
         task_output_tool_config(),
         wait_tasks_tool_config(),
         task_tool_config(),
-        (&grok_build::MessageSubagentTool).into(),
         (&grok_build::MessageParentTool).into(),
         (&grok_build::SchedulerCreateTool).into(),
         (&grok_build::SchedulerDeleteTool).into(),
@@ -312,7 +311,6 @@ pub fn grok_build_hashline_toolset(
         task_output_tool_config(),
         wait_tasks_tool_config(),
         task_tool_config(),
-        (&grok_build::MessageSubagentTool).into(),
         (&grok_build::MessageParentTool).into(),
         (&grok_build::WebSearchTool).into(),
         (&grok_build::SchedulerCreateTool).into(),
@@ -391,7 +389,6 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
             (&grok_build::TodoWriteTool).into(),
             task_output_tool_config(),
             task_tool_config(),
-            (&grok_build::MessageSubagentTool).into(),
             (&grok_build::MessageParentTool).into(),
             (&grok_build::SchedulerCreateTool).into(),
             (&grok_build::SchedulerDeleteTool).into(),
@@ -422,9 +419,13 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&grok_build::ReadFileTool).into(),
             (&grok_build::ListDirTool).into(),
             (&grok_build::GrepTool).into(),
-            // Subagent orchestration
+            // Subagent orchestration. `send_subagent_message` is listed rather
+            // than injected: this is the one preset whose definition sets
+            // `inject_default_tools: false`, so the builder never adds it here,
+            // and an orchestrator that cannot steer what it spawned is the one
+            // agent the omission would hurt most.
             task_tool_config(),
-            (&grok_build::MessageSubagentTool).into(),
+            (&grok_build::SendSubagentMessageTool).into(),
             (&grok_build::MessageParentTool).into(),
             task_output_tool_config(),
             wait_tasks_tool_config(),
@@ -508,7 +509,6 @@ fn grok_build_ask_user_toolset() -> ToolServerConfig {
             task_output_tool_config(),
             wait_tasks_tool_config(),
             task_tool_config(),
-            (&grok_build::MessageSubagentTool).into(),
             (&grok_build::MessageParentTool).into(),
             (&grok_build::SchedulerCreateTool).into(),
             (&grok_build::SchedulerDeleteTool).into(),
@@ -1687,30 +1687,33 @@ mod tests {
         }
         assert!(toolset_for_preset("does-not-exist").is_none());
     }
-    /// `message_subagent` requires `task` at the registry, so a preset carrying
-    /// one without the other would abort session init for anyone selecting it.
-    /// Pairing them here is also the reason it needs no opt-in: an agent that can
-    /// spawn can steer, and one that cannot never sees the tool.
+    /// Both directions of agent messaging reach the orchestrator's toolset.
+    ///
+    /// It is the one builtin whose definition turns `inject_default_tools` off,
+    /// so nothing is added to it at build time: a tool it does not list, it does
+    /// not get. Delegating to subagents is the whole of its job, which makes it
+    /// the agent that would suffer most from losing the ability to steer what it
+    /// spawned or to hear from it.
     #[test]
-    fn every_preset_pairs_message_subagent_with_task() {
-        let task_id = ToolConfig::from(&grok_build::TaskTool).id;
-        let message_id = ToolConfig::from(&grok_build::MessageSubagentTool).id;
-        let mut paired = 0;
-        for (name, cfg) in all_toolset_presets() {
-            let ids: std::collections::HashSet<&str> =
-                cfg.tools.iter().map(|t| t.id.as_str()).collect();
-            let has_task = ids.contains(task_id.as_str());
-            let has_message = ids.contains(message_id.as_str());
-            assert_eq!(
-                has_task, has_message,
-                "preset `{name}`: task={has_task} but message_subagent={has_message}"
-            );
-            paired += usize::from(has_task);
-        }
+    fn the_orchestrator_toolset_carries_both_message_directions() {
+        let definition = AgentDefinition::grok_build_orchestrator();
         assert!(
-            paired > 0,
-            "no preset spawns subagents — test proves nothing"
+            !definition.inject_default_tools,
+            "the premise of this test is that nothing is injected into it"
         );
+        let ids: std::collections::HashSet<&str> = definition
+            .tool_config
+            .tools
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+        for tool in [
+            ToolConfig::from(&grok_build::TaskTool).id,
+            ToolConfig::from(&grok_build::SendSubagentMessageTool).id,
+            ToolConfig::from(&grok_build::MessageParentTool).id,
+        ] {
+            assert!(ids.contains(tool.as_str()), "orchestrator lost `{tool}`");
+        }
     }
     #[test]
     fn presets_select_distinct_toolsets_by_size() {

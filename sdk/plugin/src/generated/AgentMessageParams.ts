@@ -2,16 +2,15 @@
 
 /**
  * `agent_message` request params. Plugin→core. Steers a subagent that is
- * **running right now**: `text` is handed to the live child and lands in its
- * conversation as a system reminder before its next inference request, so the
- * child changes course mid-task.
+ * **running right now**: `text` is handed to the live child and becomes
+ * model-visible at its next safe point, so the child changes course mid-task.
  *
- * The model has this same capability as the `message_subagent` tool: one
- * coordinator, one set of outcomes, one injection point in the child. A plugin
- * and the parent model may both steer the same child — the texts are drained in
- * the order the coordinator took them. The surfaces differ only in shape: a
- * plugin branches on the enum below, while the tool spends a sentence per
- * outcome naming the call the model should make next.
+ * The model has this same capability as the `send_subagent_message` tool, and
+ * it is the same route: one coordinator, one admission, one delivery into the
+ * child. A plugin and the parent model may both steer the same child — the
+ * texts are drained in the order the coordinator admitted them. The surfaces
+ * differ only in shape: a plugin branches on the enum below, while the tool
+ * spends a sentence per outcome naming the call the model should make next.
  *
  * Not to be confused with [`AgentSendParams`]: `agent_send` applies only to a
  * subagent that has already *finished*, and answers with a NEW subagent id.

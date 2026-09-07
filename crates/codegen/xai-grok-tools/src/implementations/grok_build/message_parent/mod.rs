@@ -1,11 +1,14 @@
 //! `message_parent` tool — a running subagent reporting back up.
 //!
-//! The reverse of [`message_subagent`](super::message_subagent), and
-//! deliberately not its mirror image. That tool is an instrument of control: a
-//! parent redirects a child it owns, and waits to hear whether the child took
-//! the correction. This one is an instrument of report: a child tells the agent
-//! that spawned it something the parent needs before the child finishes, and
-//! then goes straight back to work.
+//! The reverse of
+//! [`send_subagent_message`](super::send_subagent_message), and deliberately
+//! not its mirror image — which is why it is a tool of its own rather than a
+//! direction argument on that one. That tool is an instrument of control: a
+//! parent redirects a child it owns, over an admission it can be told the fate
+//! of, and an idle child is queued a turn. This one is an instrument of report:
+//! a child tells the agent that spawned it something the parent needs before
+//! the child finishes, and then goes straight back to work. Nothing here queues
+//! and nothing here wakes, because the sender is below the receiver.
 //!
 //! Three properties keep the pair from becoming a conversation.
 //!
