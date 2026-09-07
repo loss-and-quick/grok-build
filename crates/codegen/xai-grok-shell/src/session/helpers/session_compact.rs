@@ -813,10 +813,104 @@ pub(crate) async fn generate_session_compact(
             }
         }
         ApiBackend::Gemini => {
-            return Err(CompactFailure::Deterministic(
-                acp::Error::internal_error()
-                    .data("compact failed: Gemini backend is not yet supported"),
-            ));
+            // `GeminiRequest` has no `toolConfig`, so `build_gemini_request` carries no tool
+            // choice: `GROK_COMPACTION_TOOL_CHOICE=none` cannot be enforced on the wire here.
+            // Say so rather than let a knob look honored. The prompt already forbids tool calls,
+            // and the Messages branch above sends no tool choice either, so this is the same
+            // guarantee compaction already runs under there.
+            if matches!(tool_choice, crate::util::config::CompactionToolChoice::None)
+                && !tools.is_empty()
+            {
+                tracing::warn!(
+                    "compaction tool_choice=none is not expressible on Gemini; the summarizer may still emit a function call"
+                );
+            }
+            let request = ConversationRequest {
+                items: chat_history,
+                // Prefix-cache alignment (see doc comment). `hosted_tools` have no Gemini
+                // representation and are dropped in translation, as they are on Messages.
+                tools,
+                hosted_tools,
+                model: Some(sampling_config.model.to_owned()),
+                temperature: Some(1.0),
+                x_grok_conv_id: Some(session_id.to_string()),
+                x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
+                x_grok_session_id: Some(session_id.to_string()),
+                x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
+                ..Default::default()
+            };
+            tracing::info!(
+                compact_model = %sampling_config.model,
+                num_messages = num_messages,
+                "Sending compact request (streaming)"
+            );
+            let stream_result =
+                await_unless_cancelled(cancel, client.conversation_stream_gemini(request)).await?;
+            let mut stream = match stream_result {
+                Ok((s, _metadata)) => s,
+                Err(e) => return Err(classify_sampling_error(e)),
+            };
+            let mut timing = StreamTiming::new();
+            let mut truncated = false;
+            let mut stop_reason: Option<String> = None;
+            let mut content = String::new();
+            let mut last_progress_at = std::time::Instant::now();
+            loop {
+                let idle_remaining = idle_timeout.saturating_sub(last_progress_at.elapsed());
+                let chunk_result = match next_stream_step(&mut stream, idle_remaining, cancel)
+                    .await?
+                {
+                    StreamStep::Item(item) => item,
+                    StreamStep::Ended => break,
+                    StreamStep::IdleTimeout => {
+                        return Err(CompactFailure::Transient(
+                            acp::Error::internal_error().data(format!(
+                                "{COMPACT_FAILED_PREFIX}stream idle timeout after {idle_timeout:?} ({} chars received)",
+                                content.chars().count()
+                            )),
+                        ));
+                    }
+                };
+                // Wall-clock backstop (0 disables it): cut a runaway, including a reasoning spiral that token limits miss, and let it retry
+                if wall_clock_budget_secs > 0 && timing.elapsed_secs() >= wall_clock_budget_secs {
+                    return Err(CompactFailure::Transient(
+                        acp::Error::internal_error().data(format!(
+                            "{COMPACT_FAILED_PREFIX}exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
+                        )),
+                    ));
+                }
+                match chunk_result {
+                    Ok(chunk) => {
+                        // Gemini has no keep-alive event: every chunk decoded off the wire is progress.
+                        last_progress_at = std::time::Instant::now();
+                        for candidate in chunk.candidates {
+                            for part in candidate.content.into_iter().flat_map(|c| c.parts) {
+                                if let Some(text) = part.text.filter(|t| !t.is_empty()) {
+                                    timing.record_delta();
+                                    content.push_str(&text);
+                                }
+                            }
+                            // Terminal chunks repeat the reason; the last one wins, as on the other backends.
+                            if let Some(reason) = candidate.finish_reason {
+                                truncated = reason == "MAX_TOKENS";
+                                stop_reason = Some(reason);
+                            }
+                        }
+                    }
+                    // Gemini reports failures as a transport/decode error rather than an in-band
+                    // event, so there is no equivalent of the Responses error branches here.
+                    Err(e) => return Err(classify_sampling_error(e)),
+                }
+            }
+            CompactOutput {
+                content,
+                stop_reason,
+                truncated,
+                ttft_ms: timing.ttft_ms(),
+                stream_ms: timing.stream_ms(),
+                delta_count: timing.count,
+                itl_max_ms: timing.itl_max_ms(),
+            }
         }
     };
 
@@ -860,3 +954,9 @@ mod large_body_tests;
 #[cfg(test)]
 #[path = "session_compact_reasoning_compaction_regression_tests.rs"]
 mod reasoning_compaction_regression_tests;
+
+/// Gemini compaction is served rather than refused, and the request keeps the shapes the
+/// translation can carry.
+#[cfg(test)]
+#[path = "session_compact_gemini_tests.rs"]
+mod gemini_tests;
