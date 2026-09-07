@@ -17,12 +17,14 @@
     "forceConsistentCasingInFileNames": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "types": ["bun"],
+    "types": ["bun", "vite/client"],
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
     "baseUrl": ".",
     "paths": {
       "@grok-build/theme": ["../theme/src/index.ts"],
       "@grok-build/plugin/generated/*": ["../plugin/src/generated/*"]
     }
   },
-  "include": ["src", "test", "scripts"]
+  "include": ["src", "test", "scripts", "vite.config.ts"]
 }

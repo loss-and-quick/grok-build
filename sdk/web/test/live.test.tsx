@@ -7,11 +7,23 @@
 // frames, same DOM the browser builds.
 import { describe, expect, test } from "bun:test";
 
-import { App } from "../src/app.ts";
+import { render } from "@solidjs/testing-library";
+import { Route, Router } from "@solidjs/router";
+
+import { App, Home, SessionRoute } from "../src/App.tsx";
 
 const URL_ = process.env["GROK_WEB_LIVE_URL"];
 const SECRET = process.env["GROK_WEB_LIVE_SECRET"];
 const live = URL_ && SECRET ? describe : describe.skip;
+
+function mount() {
+  return render(() => (
+    <Router root={App}>
+      <Route path="/" component={Home} />
+      <Route path="/s/:sessionId" component={SessionRoute} />
+    </Router>
+  ));
+}
 
 function settle(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -37,11 +49,8 @@ async function until(
 
 live("against a live gateway", () => {
   test("connects, groups the roster by cwd, attaches and renders a plugin panel", async () => {
-    document.body.innerHTML = "";
     localStorage.clear();
-    const root = document.createElement("div");
-    document.body.append(root);
-    new App(root).mount();
+    const { container: root } = mount();
 
     const url = root.querySelector(".connect-url") as HTMLInputElement;
     const secret = root.querySelector(".connect-secret") as HTMLInputElement;
@@ -92,11 +101,8 @@ live("against a live gateway", () => {
   }, 60_000);
 
   test("sends a prompt and streams the reply back", async () => {
-    document.body.innerHTML = "";
     localStorage.clear();
-    const root = document.createElement("div");
-    document.body.append(root);
-    new App(root).mount();
+    const { container: root } = mount();
 
     (root.querySelector(".connect-url") as HTMLInputElement).value = URL_!;
     (root.querySelector(".connect-secret") as HTMLInputElement).value = SECRET!;

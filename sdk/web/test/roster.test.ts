@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { ACTIVITY_ROLE, directoryLabel, groupByDirectory, Roster, sessionLabel } from "../src/roster.ts";
+import {
+  ACTIVITY_ROLE,
+  createRoster,
+  directoryLabel,
+  groupByDirectory,
+  sessionLabel,
+} from "../src/roster.ts";
 import type { RosterActivity, RosterEntry } from "../src/wire.ts";
 
 function entry(over: Partial<RosterEntry> & { sessionId: string; cwd: string }): RosterEntry {
@@ -58,7 +64,7 @@ describe("roster grouped by working directory", () => {
   });
 
   test("`sessions/changed` upserts and removes against the snapshot", () => {
-    const roster = new Roster();
+    const roster = createRoster();
     roster.replace([entry({ sessionId: "a", cwd: "/repo" })]);
     roster.apply({
       upserted: [entry({ sessionId: "a", cwd: "/repo", activity: "working" })],
@@ -71,7 +77,7 @@ describe("roster grouped by working directory", () => {
   });
 
   test("a change payload with neither key is a no-op, not a crash", () => {
-    const roster = new Roster();
+    const roster = createRoster();
     roster.replace([entry({ sessionId: "a", cwd: "/repo" })]);
     roster.apply({});
     expect(roster.all()).toHaveLength(1);

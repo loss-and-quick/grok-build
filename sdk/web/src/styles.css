@@ -97,12 +97,6 @@ button:disabled {
   margin-bottom: 1rem;
 }
 
-.roster-cwd {
-  margin: 0;
-  font-size: 1rem;
-  color: var(--grok-path, canvastext);
-}
-
 .roster-cwd-full {
   margin-bottom: 0.35rem;
   font-size: 0.75rem;
@@ -482,4 +476,26 @@ button:disabled {
   background: transparent;
   color: var(--grok-gray-bright, canvastext);
   border-style: dashed;
+}
+
+/* Roster rows and directory headings are links so a session is bookmarkable,
+ * but they are chrome, not prose: the underline and the user-agent link colour
+ * are not wanted. Colour still comes from the roles below. */
+.roster-cwd,
+.roster-row {
+  text-decoration: none;
+  color: inherit;
+}
+
+.roster-cwd {
+  display: block;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: bold;
+  color: var(--grok-path, canvastext);
+}
+
+.roster-cwd:hover,
+.roster-cwd:focus-visible {
+  color: var(--grok-text-primary, canvastext);
 }

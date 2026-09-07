@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import { panelKey, Transcript, type MessageEntry, type ToolCallEntry } from "../src/transcript.ts";
+import {
+  createTranscript,
+  panelKey,
+  type MessageEntry,
+  type ToolCallEntry,
+} from "../src/transcript.ts";
 import type { SessionUpdate } from "../src/wire.ts";
 
 function chunk(role: "agent" | "user" | "agent_thought", text: string): SessionUpdate {
@@ -15,7 +20,7 @@ function chunk(role: "agent" | "user" | "agent_thought", text: string): SessionU
 
 describe("session update fold", () => {
   test("consecutive chunks of one role become one message", () => {
-    const t = new Transcript();
+    const t = createTranscript();
     t.apply(chunk("agent", "Hel"));
     t.apply(chunk("agent", "lo"));
     expect(t.entries).toHaveLength(1);
@@ -23,7 +28,7 @@ describe("session update fold", () => {
   });
 
   test("a change of role starts a new message", () => {
-    const t = new Transcript();
+    const t = createTranscript();
     t.apply(chunk("user", "hi"));
     t.apply(chunk("agent_thought", "thinking"));
     t.apply(chunk("agent", "hello"));
@@ -35,7 +40,7 @@ describe("session update fold", () => {
   });
 
   test("a tool call is updated in place, not appended twice", () => {
-    const t = new Transcript();
+    const t = createTranscript();
     t.apply({
       sessionUpdate: "tool_call",
       toolCallId: "tc-1",
@@ -56,13 +61,13 @@ describe("session update fold", () => {
   });
 
   test("an update for an unknown tool call is dropped, not synthesized", () => {
-    const t = new Transcript();
+    const t = createTranscript();
     t.apply({ sessionUpdate: "tool_call_update", toolCallId: "ghost" } as SessionUpdate);
     expect(t.entries).toHaveLength(0);
   });
 
   test("panels are keyed by (plugin, id), because ids are only plugin-local", () => {
-    const t = new Transcript();
+    const t = createTranscript();
     const vm = { id: "p", title: "A", blocks: [] };
     t.apply({ sessionUpdate: "plugin_panel", plugin: "one", view_model: vm } as SessionUpdate);
     t.apply({
@@ -70,13 +75,13 @@ describe("session update fold", () => {
       plugin: "two",
       view_model: { ...vm, title: "B" },
     } as SessionUpdate);
-    expect(t.panels.size).toBe(2);
-    expect(t.panels.get(panelKey("one", "p"))?.viewModel.title).toBe("A");
-    expect(t.panels.get(panelKey("two", "p"))?.viewModel.title).toBe("B");
+    expect(Object.keys(t.panels)).toHaveLength(2);
+    expect(t.panels[panelKey("one", "p")]?.viewModel.title).toBe("A");
+    expect(t.panels[panelKey("two", "p")]?.viewModel.title).toBe("B");
   });
 
   test("re-publishing one id replaces that panel, latest wins", () => {
-    const t = new Transcript();
+    const t = createTranscript();
     t.apply({
       sessionUpdate: "plugin_panel",
       plugin: "one",
@@ -87,12 +92,12 @@ describe("session update fold", () => {
       plugin: "one",
       view_model: { id: "p", title: "second", blocks: [] },
     } as SessionUpdate);
-    expect(t.panels.size).toBe(1);
-    expect(t.panels.get(panelKey("one", "p"))?.viewModel.title).toBe("second");
+    expect(Object.keys(t.panels)).toHaveLength(1);
+    expect(t.panels[panelKey("one", "p")]?.viewModel.title).toBe("second");
   });
 
   test("panel_closed removes only its own (plugin, id)", () => {
-    const t = new Transcript();
+    const t = createTranscript();
     for (const plugin of ["one", "two"]) {
       t.apply({
         sessionUpdate: "plugin_panel",
@@ -101,18 +106,18 @@ describe("session update fold", () => {
       } as SessionUpdate);
     }
     t.apply({ sessionUpdate: "panel_closed", plugin: "one", id: "p" } as SessionUpdate);
-    expect([...t.panels.keys()]).toEqual([panelKey("two", "p")]);
+    expect(Object.keys(t.panels)).toEqual([panelKey("two", "p")]);
   });
 
   test("an unknown sessionUpdate tag is ignored rather than guessed at", () => {
-    const t = new Transcript();
+    const t = createTranscript();
     t.apply({ sessionUpdate: "something_new_next_year", payload: 1 } as SessionUpdate);
     expect(t.entries).toHaveLength(0);
-    expect(t.panels.size).toBe(0);
+    expect(Object.keys(t.panels)).toHaveLength(0);
   });
 
   test("an empty chunk does not open an empty message", () => {
-    const t = new Transcript();
+    const t = createTranscript();
     t.apply(chunk("agent", ""));
     expect(t.entries).toHaveLength(0);
   });

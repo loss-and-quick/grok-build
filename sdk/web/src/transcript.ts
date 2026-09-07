@@ -5,6 +5,8 @@
 // transcript to the attaching client as the very same notifications, which is
 // why there is no second code path for "history"
 // (`crates/codegen/xai-grok-shell/src/agent/web_gateway.rs` module docs).
+import { createStore, produce } from "solid-js/store";
+
 import type { PanelViewModel } from "@grok-build/plugin/generated/PanelViewModel.ts";
 
 import type { ContentBlock, SessionUpdate, ToolCallStatus } from "./wire.ts";
@@ -44,25 +46,39 @@ export function panelKey(plugin: string, id: string): string {
 /**
  * Everything one attached session shows.
  *
+ * Backed by a Solid store rather than plain arrays, so the components that read
+ * it subscribe per field. The fold itself is unchanged from the plain version:
+ * the same `sessionUpdate` tags, the same coalescing, the same unknown-tag
+ * silence.
+ *
  * Panels live outside the transcript because they are not events: republishing
  * the same `(plugin, id)` replaces the panel, latest wins
  * (`PanelViewModel` docs in `sdk/plugin/src/generated/PanelViewModel.ts`).
  */
-export class Transcript {
-  readonly entries: TranscriptEntry[] = [];
-  readonly panels = new Map<string, PanelEntry>();
-  private readonly toolCalls = new Map<string, ToolCallEntry>();
+export interface Transcript {
+  readonly entries: readonly TranscriptEntry[];
+  /** Keyed by {@link panelKey}; a closed panel is deleted, not blanked. */
+  readonly panels: Readonly<Record<string, PanelEntry>>;
+  apply(update: SessionUpdate): void;
+}
 
-  apply(update: SessionUpdate): void {
+export function createTranscript(): Transcript {
+  const [entries, setEntries] = createStore<TranscriptEntry[]>([]);
+  const [panels, setPanels] = createStore<Record<string, PanelEntry>>({});
+  // Index into `entries`, so a `tool_call_update` reaches its entry without a
+  // scan and without a second copy of the entry to keep in step.
+  const toolCallAt = new Map<string, number>();
+
+  const apply = (update: SessionUpdate): void => {
     switch (update.sessionUpdate) {
       case "user_message_chunk":
-        this.appendMessage("user", textOf(update["content"] as ContentBlock | undefined));
+        appendMessage("user", textOf(update["content"] as ContentBlock | undefined));
         return;
       case "agent_message_chunk":
-        this.appendMessage("assistant", textOf(update["content"] as ContentBlock | undefined));
+        appendMessage("assistant", textOf(update["content"] as ContentBlock | undefined));
         return;
       case "agent_thought_chunk":
-        this.appendMessage("thought", textOf(update["content"] as ContentBlock | undefined));
+        appendMessage("thought", textOf(update["content"] as ContentBlock | undefined));
         return;
       case "tool_call": {
         const call: ToolCallEntry = {
@@ -72,27 +88,37 @@ export class Transcript {
           status: (update["status"] as ToolCallStatus | undefined) ?? "pending",
           output: toolOutput(update["content"]),
         };
-        this.toolCalls.set(call.toolCallId, call);
-        this.entries.push(call);
+        toolCallAt.set(call.toolCallId, entries.length);
+        setEntries(entries.length, call);
         return;
       }
       case "tool_call_update": {
-        const call = this.toolCalls.get(String(update["toolCallId"]));
-        if (!call) return;
-        if (typeof update["title"] === "string") call.title = update["title"];
-        if (typeof update["status"] === "string") call.status = update["status"] as ToolCallStatus;
+        const at = toolCallAt.get(String(update["toolCallId"]));
+        if (at === undefined) return;
+        const title = update["title"];
+        const status = update["status"];
         const output = toolOutput(update["content"]);
-        if (output) call.output = output;
+        // One `produce` per update, so a status change touches only the nodes
+        // bound to `status` and leaves the output text node alone.
+        setEntries(
+          at,
+          produce((entry) => {
+            if (entry.kind !== "tool_call") return;
+            if (typeof title === "string") entry.title = title;
+            if (typeof status === "string") entry.status = status as ToolCallStatus;
+            if (output) entry.output = output;
+          }),
+        );
         return;
       }
       case "plugin_panel": {
         const plugin = String(update["plugin"]);
         const viewModel = update["view_model"] as PanelViewModel;
-        this.panels.set(panelKey(plugin, viewModel.id), { plugin, viewModel });
+        setPanels(panelKey(plugin, viewModel.id), { plugin, viewModel });
         return;
       }
       case "panel_closed": {
-        this.panels.delete(panelKey(String(update["plugin"]), String(update["id"])));
+        setPanels(panelKey(String(update["plugin"]), String(update["id"])), undefined!);
         return;
       }
       default:
@@ -106,17 +132,28 @@ export class Transcript {
    * Chunks of the same role coalesce into one message.
    *
    * The agent streams a reply as many `agent_message_chunk`s; appending each as
-   * its own entry would render one paragraph per token.
+   * its own entry would render one paragraph per token. Growing the existing
+   * entry's `text` is also the whole reason this client is fine-grained: the
+   * store updates one text node, where a virtual DOM would reconcile the entire
+   * transcript on every chunk of a streaming reply.
    */
-  private appendMessage(role: MessageEntry["role"], text: string): void {
+  const appendMessage = (role: MessageEntry["role"], text: string): void => {
     if (!text) return;
-    const last = this.entries.at(-1);
+    const at = entries.length - 1;
+    const last = entries[at];
     if (last && last.kind === "message" && last.role === role) {
-      last.text += text;
+      setEntries(
+        at,
+        produce((entry) => {
+          if (entry.kind === "message") entry.text += text;
+        }),
+      );
       return;
     }
-    this.entries.push({ kind: "message", role, text });
-  }
+    setEntries(entries.length, { kind: "message", role, text });
+  };
+
+  return { entries, panels, apply };
 }
 
 function toolOutput(content: unknown): string {

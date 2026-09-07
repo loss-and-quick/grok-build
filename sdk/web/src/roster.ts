@@ -6,6 +6,8 @@
 // (`crates/codegen/xai-grok-shell/src/agent/roster.rs`). "An instance" is
 // therefore a directory with sessions in it, and switching instances is
 // switching sessions — not repointing one.
+import { createStore, produce } from "solid-js/store";
+
 import type { ThemeRole } from "./theme.ts";
 import type { RosterActivity, RosterChanged, RosterEntry } from "./wire.ts";
 
@@ -14,31 +16,47 @@ export interface DirectoryGroup {
   sessions: RosterEntry[];
 }
 
-/** Live roster: the `x.ai/sessions/list` snapshot reconciled against `x.ai/sessions/changed`. */
-export class Roster {
-  private readonly entries = new Map<string, RosterEntry>();
+export interface Roster {
+  replace(sessions: readonly RosterEntry[]): void;
+  apply(change: RosterChanged): void;
+  get(sessionId: string): RosterEntry | undefined;
+  all(): RosterEntry[];
+  groups(): DirectoryGroup[];
+}
 
-  replace(sessions: readonly RosterEntry[]): void {
-    this.entries.clear();
-    for (const entry of sessions) this.entries.set(entry.sessionId, entry);
-  }
+/**
+ * Live roster: the `x.ai/sessions/list` snapshot reconciled against
+ * `x.ai/sessions/changed`.
+ *
+ * A store rather than a `Map` so an upsert of one session re-renders that row
+ * and not the sidebar. `x.ai/sessions/changed` is a broadcast — every attached
+ * client gets every session's activity flip — so this is the collection under
+ * the most churn.
+ */
+export function createRoster(): Roster {
+  const [entries, setEntries] = createStore<Record<string, RosterEntry>>({});
 
-  apply(change: RosterChanged): void {
-    for (const entry of change.upserted ?? []) this.entries.set(entry.sessionId, entry);
-    for (const id of change.removed ?? []) this.entries.delete(id);
-  }
-
-  get(sessionId: string): RosterEntry | undefined {
-    return this.entries.get(sessionId);
-  }
-
-  all(): RosterEntry[] {
-    return [...this.entries.values()];
-  }
-
-  groups(): DirectoryGroup[] {
-    return groupByDirectory(this.all());
-  }
+  return {
+    replace(sessions) {
+      setEntries(
+        produce((state) => {
+          for (const id of Object.keys(state)) delete state[id];
+          for (const entry of sessions) state[entry.sessionId] = entry;
+        }),
+      );
+    },
+    apply(change) {
+      setEntries(
+        produce((state) => {
+          for (const entry of change.upserted ?? []) state[entry.sessionId] = entry;
+          for (const id of change.removed ?? []) delete state[id];
+        }),
+      );
+    },
+    get: (sessionId) => entries[sessionId],
+    all: () => Object.values(entries),
+    groups: () => groupByDirectory(Object.values(entries)),
+  };
 }
 
 /**
