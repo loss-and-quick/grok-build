@@ -1,0 +1,19 @@
+{
+  "name": "@grok-build/theme",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The pager's color palette, generated from the Rust theme constructors so a browser client cannot drift from the TUI.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

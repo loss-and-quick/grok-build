@@ -18,6 +18,7 @@ mod oscura;
 mod rosepine;
 pub mod system_appearance;
 mod terminal_default;
+pub mod tokens;
 pub mod tokyonight;
 
 pub use color_support::quantize;
