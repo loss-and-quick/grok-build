@@ -913,7 +913,8 @@ pub async fn run_leader(
     local_set
         .run_until(async move {
             let (config_watcher_path_tx, config_watcher_path_rx_opt) = if recursive_config_watch_enabled {
-                let (tx, rx) = mpsc::unbounded_channel::<std::path::PathBuf>();
+                let (tx, rx) =
+                    mpsc::unbounded_channel::<crate::config::watcher::ConfigWatchRequest>();
                 (Some(tx), Some(rx))
             } else {
                 (None, None)
@@ -1113,8 +1114,13 @@ pub async fn run_leader(
                             tokio::select! {
                                 biased;
                                 _ = cancel_for_drain.cancelled() => break,
-                                cwd = rx.recv() => match cwd {
-                                    Some(cwd) => watcher_for_drain.borrow_mut().watch_path(&cwd),
+                                request = rx.recv() => match request {
+                                    Some(crate::config::watcher::ConfigWatchRequest::Watch(cwd)) => {
+                                        watcher_for_drain.borrow_mut().watch_path(&cwd)
+                                    }
+                                    Some(crate::config::watcher::ConfigWatchRequest::Unwatch(cwd)) => {
+                                        watcher_for_drain.borrow_mut().unwatch_path(&cwd)
+                                    }
                                     None => break,
                                 },
                             }

@@ -187,15 +187,20 @@ impl MvpAgent {
             if let Some(scope) = &handle.tool_context.process_scope {
                 scope.kill_all();
             }
-            self.release_plugin_root(&handle.info.cwd);
+            self.release_session_root(&handle.info.cwd);
         }
         handle
     }
-    /// Drop a root's memoized plugin registry once the last session there is
-    /// gone, so a leader holds one entry per live root rather than one per root
-    /// opened over its lifetime. Runs after the handle has left residency, so
-    /// the departing session is not counted against itself.
-    fn release_plugin_root(&self, cwd: &str) {
+    /// Hand back everything the leader holds per session root once the last
+    /// session there is gone, so it holds one of each per live root rather than
+    /// one per root opened over its lifetime. Runs after the handle has left
+    /// residency, so the departing session is not counted against itself.
+    ///
+    /// Both the memoized plugin registry and the config watcher's two
+    /// non-recursive watches on `<cwd>/` and `<cwd>/.grok/` hang off this one
+    /// liveness check; `ConfigFileWatcher::unwatch_path` documents that its
+    /// caller must ref-count, and this is that caller.
+    fn release_session_root(&self, cwd: &str) {
         let cwd = std::path::Path::new(cwd);
         let mut still_live = false;
         self.session_registry.for_each_resident(|_, h| {
@@ -203,6 +208,7 @@ impl MvpAgent {
         });
         if !still_live {
             self.plugin_registry_handle.release_root(cwd);
+            self.notify_session_cwd_unwatched(cwd);
         }
     }
     /// Remove a session without finalizing; it stays resumable on disk.

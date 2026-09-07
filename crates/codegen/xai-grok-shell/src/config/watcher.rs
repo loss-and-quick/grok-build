@@ -1,10 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
 use notify::RecursiveMode;
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer_opt};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(1000);
 
@@ -274,6 +275,19 @@ impl ConfigFileWatcher {
     }
 }
 
+/// A session-driven change to the leader's set of watched project cwds.
+///
+/// Sessions open and close across many directories over a leader's life, so the fan-in that
+/// registers a cwd has to carry the matching release; otherwise [`ConfigFileWatcher::unwatch_path`]
+/// has no caller and the watch set only ever grows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigWatchRequest {
+    /// A session opened in this cwd.
+    Watch(PathBuf),
+    /// The last session rooted in this cwd is gone; the caller has already checked liveness.
+    Unwatch(PathBuf),
+}
+
 /// Answers "is `parent` the directory `dir`?" while tolerating symlink and canonicalization differences.
 /// A `notify`-delivered event path may be canonicalized while a `xai_dirs::home_dir()`-style reference is not.
 /// `dir` is expected to be already canonicalized (see `ConfigFileWatcher::start`).
@@ -405,10 +419,25 @@ fn vendor_skill_refresh_dirs(config_dir: &Path) -> [(PathBuf, RecursiveMode); 3]
     ]
 }
 
-fn project_grok_refresh_dirs(project_root: &Path) -> Vec<(PathBuf, RecursiveMode)> {
-    let project_grok = project_root.join(".grok");
-    let mut dirs = vec![(project_grok.clone(), RecursiveMode::NonRecursive)];
-    dirs.extend(vendor_skill_refresh_dirs(&project_grok));
+/// The vendor config roots a project root can hold, whether or not they exist yet.
+fn project_vendor_roots(project_root: &Path) -> Vec<PathBuf> {
+    VENDOR_CONFIG_ROOT_NAMES
+        .iter()
+        .map(|name| project_root.join(name))
+        .collect()
+}
+
+/// Every discovery dir under a project root, across **all** vendors rather than `.grok` alone.
+///
+/// A session rooted outside the launch directory is covered only by its own per-root watcher, so
+/// that watcher has to see the same vendors [`SkillsFileWatcher`] sees or edits to the session's
+/// `.claude/skills` never reach it.
+fn project_discovery_refresh_dirs(project_root: &Path) -> Vec<(PathBuf, RecursiveMode)> {
+    let mut dirs = Vec::new();
+    for vendor_root in project_vendor_roots(project_root) {
+        dirs.push((vendor_root.clone(), RecursiveMode::NonRecursive));
+        dirs.extend(vendor_skill_refresh_dirs(&vendor_root));
+    }
     dirs
 }
 
@@ -515,29 +544,114 @@ fn plan_skills_watch_targets(
     }
 }
 
-/// Watches project `.grok` skills/commands/workflows for mid-session discovery.
+/// How many discovery changes a subscriber may fall behind before it is told it lagged.
+///
+/// A lagging subscriber loses nothing that matters: the payload is "something under this root
+/// changed", so [`ProjectDiscoveryWatcher::subscribe`]'s consumer treats a lag as a reload.
+const DISCOVERY_BROADCAST_CAPACITY: usize = 16;
+
+/// Live watchers by canonical project root, holding [`Weak`] refs so a root's watcher is torn down
+/// once its last session lets go.
+///
+/// Mirrors `xai_fsnotify::shared` (`xai-fsnotify/src/registry.rs`), which solves the same problem
+/// for the workspace file-event source.
+static DISCOVERY_REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<ProjectDiscoveryWatcher>>>> =
+    OnceLock::new();
+
+fn discovery_registry() -> &'static Mutex<HashMap<PathBuf, Weak<ProjectDiscoveryWatcher>>> {
+    DISCOVERY_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn canonical_root_key(root: &Path) -> PathBuf {
+    dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
+
+/// Watches a project root's vendor skills/commands/workflows dirs for mid-session discovery.
+///
+/// **One per root, not one per session.** Every instance costs two OS threads — one in `notify`'s
+/// inotify backend and one in the debouncer — plus its own inotify instance, so N sessions in one
+/// repository used to pay N times over for watches on identical paths.
+///
+/// Obtain one through [`Self::shared`] and keep the returned [`Arc`] for as long as you want
+/// events. The watches are released when the last holder drops it, which is also what bounds
+/// inotify accumulation as sessions churn across directories: no explicit teardown call to forget.
 ///
 /// After a [`DiscoveryChange`], call [`Self::refresh_new_dirs`] so newly created seed dirs get watches attached.
 pub(crate) struct ProjectDiscoveryWatcher {
+    /// `refresh_new_dirs` mutates the debouncer, and the watcher is shared, so the mutable state
+    /// sits behind a lock rather than behind `&mut self`.
+    state: Mutex<DiscoveryWatchState>,
+    changes_tx: broadcast::Sender<DiscoveryChange>,
+    key: PathBuf,
+}
+
+struct DiscoveryWatchState {
     debouncer: Debouncer<AccessFilteredWatcher>,
     refresh_dirs: Vec<(PathBuf, RecursiveMode)>,
     refreshed_dirs: HashSet<PathBuf>,
 }
 
+impl Drop for ProjectDiscoveryWatcher {
+    fn drop(&mut self) {
+        let mut map = discovery_registry()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Only clear our own entry: a racing `shared` may already have installed a replacement.
+        if map.get(&self.key).is_some_and(|w| w.strong_count() == 0) {
+            map.remove(&self.key);
+        }
+    }
+}
+
 impl ProjectDiscoveryWatcher {
-    pub(crate) fn start(cwd: &Path) -> Option<(Self, mpsc::UnboundedReceiver<DiscoveryChange>)> {
+    /// Get the watcher for `cwd`'s project root, reusing the live one if another session already
+    /// opened it, and subscribe to its changes.
+    pub(crate) fn shared(cwd: &Path) -> Option<(Arc<Self>, broadcast::Receiver<DiscoveryChange>)> {
         let project_root = crate::session::workflow::registry::project_root(cwd);
-        let project_grok = project_root.join(".grok");
-        let (tx, rx) = mpsc::unbounded_channel();
-        let project_grok_for_events = project_grok.clone();
+        let key = canonical_root_key(&project_root);
+
+        {
+            let mut map = discovery_registry()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            map.retain(|_, watcher| watcher.strong_count() > 0);
+            if let Some(existing) = map.get(&key).and_then(Weak::upgrade) {
+                let rx = existing.changes_tx.subscribe();
+                return Some((existing, rx));
+            }
+        }
+
+        // Build outside the registry lock: attaching watches blocks, and unrelated roots must not
+        // serialize behind this one.
+        let watcher = Arc::new(Self::start(&project_root, key.clone())?);
+
+        let mut map = discovery_registry()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(existing) = map.get(&key).and_then(Weak::upgrade) {
+            // Another caller won the race; drop ours and share theirs.
+            let rx = existing.changes_tx.subscribe();
+            return Some((existing, rx));
+        }
+        map.insert(key, Arc::downgrade(&watcher));
+        let rx = watcher.changes_tx.subscribe();
+        Some((watcher, rx))
+    }
+
+    fn start(project_root: &Path, key: PathBuf) -> Option<Self> {
+        let vendor_roots = project_vendor_roots(project_root);
+        let (changes_tx, _) = broadcast::channel(DISCOVERY_BROADCAST_CAPACITY);
+        let tx = changes_tx.clone();
+        let vendor_roots_for_events = vendor_roots.clone();
         let mut debouncer =
             new_filtered_debouncer(SKILLS_DEBOUNCE, move |res: DebounceEventResult| {
                 let Ok(events) = res else { return };
                 let mut change = None;
-                for event in events
-                    .iter()
-                    .filter(|event| event.path.starts_with(&project_grok_for_events))
-                {
+                for event in events.iter().filter(|event| {
+                    vendor_roots_for_events
+                        .iter()
+                        .any(|root| event.path.starts_with(root))
+                }) {
                     let next = discovery_change_for_path(&event.path)
                         .unwrap_or(DiscoveryChange::Workflows);
                     if next == DiscoveryChange::Skills {
@@ -553,42 +667,48 @@ impl ProjectDiscoveryWatcher {
             .map_err(|error| tracing::warn!(%error, "failed to create project workflow watcher"))
             .ok()?;
 
-        let initial = if project_grok.is_dir() {
-            project_grok.clone()
-        } else {
-            project_root.clone()
-        };
-        if let Err(error) = debouncer
-            .watcher()
-            .watch(&initial, RecursiveMode::NonRecursive)
-        {
-            log_watch_error(&error, "failed to watch project workflow parent");
-            return None;
+        let refresh_dirs = project_discovery_refresh_dirs(project_root);
+        let mut refreshed_dirs = HashSet::new();
+        // Watch the root itself only while some vendor dir is still missing, so its first creation
+        // is observed. Once they all exist the root watch is pure noise from unrelated edits.
+        if vendor_roots.iter().any(|root| !root.is_dir()) {
+            match debouncer
+                .watcher()
+                .watch(project_root, RecursiveMode::NonRecursive)
+            {
+                Ok(()) => {
+                    refreshed_dirs.insert(project_root.to_path_buf());
+                }
+                Err(error) => log_watch_error(&error, "failed to watch project workflow parent"),
+            }
         }
-        let refresh_dirs = project_grok_refresh_dirs(&project_root);
-        let mut refreshed_dirs = HashSet::from([initial]);
         attach_new_refresh_dirs(
             &mut debouncer,
             &refresh_dirs,
             &mut refreshed_dirs,
             "failed to watch project discovery dir",
         );
-        Some((
-            Self {
+        if refreshed_dirs.is_empty() {
+            return None;
+        }
+        Some(Self {
+            state: Mutex::new(DiscoveryWatchState {
                 debouncer,
                 refresh_dirs,
                 refreshed_dirs,
-            },
-            rx,
-        ))
+            }),
+            changes_tx,
+            key,
+        })
     }
 
     /// Attach watches for seed dirs that now exist (call after a discovery event).
-    pub(crate) fn refresh_new_dirs(&mut self) {
+    pub(crate) fn refresh_new_dirs(&self) {
+        let state = &mut *self.state.lock().unwrap_or_else(PoisonError::into_inner);
         attach_new_refresh_dirs(
-            &mut self.debouncer,
-            &self.refresh_dirs,
-            &mut self.refreshed_dirs,
+            &mut state.debouncer,
+            &state.refresh_dirs,
+            &mut state.refreshed_dirs,
             "failed to watch newly-created project workflow dir",
         );
     }
@@ -774,23 +894,29 @@ mod tests {
         );
     }
 
+    /// A session rooted outside the launch dir is covered only by its own per-root watcher, so that
+    /// watcher must cover every vendor — not `.grok` alone, which left `.claude/skills` edits in
+    /// such a root seen by nobody.
     #[test]
-    fn project_grok_refresh_dirs_matches_vendor_layout() {
-        let project = Path::new("/tmp/repo");
-        let grok = project.join(".grok");
-        let dirs = project_grok_refresh_dirs(project);
+    fn project_discovery_refresh_dirs_covers_every_vendor_root() {
+        let project = Path::new("/repo");
+        let dirs = project_discovery_refresh_dirs(project);
 
-        assert_eq!(dirs.len(), 4);
-        assert_eq!(dirs[0], (grok.clone(), RecursiveMode::NonRecursive));
-        assert_eq!(
-            &dirs[1..],
-            [
-                (grok.join("skills"), RecursiveMode::Recursive),
-                (grok.join("commands"), RecursiveMode::NonRecursive),
-                (grok.join("workflows"), RecursiveMode::NonRecursive),
-            ]
-        );
-        assert_eq!(dirs[1..], vendor_skill_refresh_dirs(&grok));
+        assert_eq!(dirs.len(), VENDOR_CONFIG_ROOT_NAMES.len() * 4);
+        for name in VENDOR_CONFIG_ROOT_NAMES {
+            let vendor = project.join(name);
+            assert!(
+                dirs.contains(&(vendor.clone(), RecursiveMode::NonRecursive)),
+                "{name} root not watched"
+            );
+            for expected in vendor_skill_refresh_dirs(&vendor) {
+                assert!(dirs.contains(&expected), "{name} missing {:?}", expected.0);
+            }
+        }
+        assert!(dirs.contains(&(
+            project.join(".claude").join("skills"),
+            RecursiveMode::Recursive
+        )));
     }
 
     #[test]
@@ -1497,5 +1623,65 @@ mod tests {
         assert!(!watcher.watched_cwds.contains(p));
         watcher.unwatch_path(p);
         assert!(!watcher.watched_cwds.contains(p));
+    }
+
+    fn registry_holds(key: &Path) -> bool {
+        discovery_registry()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .is_some_and(|watcher| watcher.strong_count() > 0)
+    }
+
+    /// Sibling sessions in one repository must ride a single watcher: each one costs two OS threads
+    /// and an inotify instance, and they would all be watching identical paths.
+    #[test]
+    fn project_discovery_watcher_is_shared_per_root() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join(".grok").join("skills")).unwrap();
+        let key = canonical_root_key(root);
+
+        let (first, _first_rx) = ProjectDiscoveryWatcher::shared(root).unwrap();
+        let (second, _second_rx) = ProjectDiscoveryWatcher::shared(root).unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a second session in the same root opened its own watcher"
+        );
+        assert!(registry_holds(&key));
+
+        // The root is handed back only once the last holder lets go.
+        drop(first);
+        assert!(registry_holds(&key));
+        drop(second);
+        assert!(!registry_holds(&key));
+    }
+
+    /// A session rooted outside the launch dir sees edits to its own vendor skill dirs.
+    /// Before, only `.grok` was watched here and the launch-dir watcher covered `.claude` for the
+    /// launch root alone, so this edit reached nobody.
+    #[test]
+    fn project_discovery_watcher_sees_non_grok_vendor_edits() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let skills = root.join(".claude").join("skills");
+        fs::create_dir_all(&skills).unwrap();
+
+        let (_watcher, mut changes) = ProjectDiscoveryWatcher::shared(root).unwrap();
+        fs::write(skills.join("SKILL.md"), "# skill").unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let observed = loop {
+            match changes.try_recv() {
+                Ok(change) => break Some(change),
+                _ if std::time::Instant::now() >= deadline => break None,
+                _ => wait_ms(100),
+            }
+        };
+        assert_eq!(
+            observed,
+            Some(DiscoveryChange::Skills),
+            "a .claude/skills edit under this root produced no skills reload"
+        );
     }
 }

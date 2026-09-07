@@ -809,9 +809,12 @@ pub struct MvpAgent {
     pub(crate) trace_upload_live: Arc<std::sync::atomic::AtomicBool>,
     /// Memory system configuration (None when memory is disabled).
     memory_config: Option<crate::config::MemoryConfig>,
-    /// Optional channel to the leader's `ConfigFileWatcher` for dynamic per-cwd registration as new sessions open.
-    /// Each successful session insert in `spawn_and_register_session` sends the session's cwd to the watcher task spawned in `agent/app.rs`.
-    /// That task calls [`crate::config::watcher::ConfigFileWatcher::watch_path`] (a **non-recursive** watch on `<cwd>/` and `<cwd>/.grok/`).
+    /// Optional channel to the leader's `ConfigFileWatcher` for dynamic per-cwd registration as sessions open and close.
+    /// Each successful session insert in `spawn_and_register_session` sends [`ConfigWatchRequest::Watch`] for the session's cwd
+    /// to the watcher task spawned in `agent/app.rs`; the teardown funnel sends [`ConfigWatchRequest::Unwatch`] once the last
+    /// session rooted there is gone.
+    /// That task calls [`crate::config::watcher::ConfigFileWatcher::watch_path`] / `unwatch_path`
+    /// (a **non-recursive** watch on `<cwd>/` and `<cwd>/.grok/`).
     ///
     /// `None` outside leader mode and in tests; the registration is a no-op in that case.
     /// That is fine: the existing per-extra-path loop already covers the leader's startup cwd.
@@ -819,7 +822,7 @@ pub struct MvpAgent {
     /// This is written exactly once, by `set_config_watcher_path_tx(&mut self)` during leader construction while the agent is still uniquely owned.
     /// It is only read thereafter, so no interior mutability is required.
     pub(crate) config_watcher_path_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>,
+        tokio::sync::mpsc::UnboundedSender<crate::config::watcher::ConfigWatchRequest>,
     >,
     relay_sync_enabled: bool,
     /// LEADER-SAFE(init-once): set once per connection during initialize from client capabilities, read when spawning sessions.

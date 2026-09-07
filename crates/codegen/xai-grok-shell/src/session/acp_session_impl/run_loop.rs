@@ -316,13 +316,25 @@ pub(super) async fn run_session(
             }
         });
     }
-    let _workflow_watch = crate::config::watcher::ProjectDiscoveryWatcher::start(
+    // Shared per project root: sibling sessions in the same repository ride this one watcher, and
+    // its inotify watches go away when the last of them drops its `Arc`.
+    let _workflow_watch = crate::config::watcher::ProjectDiscoveryWatcher::shared(
         std::path::Path::new(session.session_info.cwd.as_str()),
     )
-    .map(|(mut watcher, mut changes)| {
+    .map(|(watcher, mut changes)| {
         let session = session.clone();
-        tokio::task::spawn_local(async move {
-            while let Some(change) = changes.recv().await {
+        // The task owns the `Arc`, and its own watcher holds the broadcast sender, so the channel
+        // never closes on its own. Aborting on drop is what actually hands the root back.
+        crate::util::AbortOnDrop(tokio::task::spawn_local(async move {
+            loop {
+                let change = match changes.recv().await {
+                    Ok(change) => change,
+                    // Too many changes to keep up with is still "reload everything".
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        crate::config::watcher::DiscoveryChange::Skills
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
                 watcher.refresh_new_dirs();
                 match change {
                     crate::config::watcher::DiscoveryChange::Skills => {
@@ -333,7 +345,7 @@ pub(super) async fn run_session(
                     }
                 }
             }
-        })
+        }))
     });
     let _fs_watch: Option<fs_watch::FsWatchHandle> = if fs_watch_caps.needs_watcher() {
         let deps = fs_watch::FsWatchDeps::from_session(

@@ -566,12 +566,13 @@ impl MvpAgent {
     pub async fn flush_all_sessions(&self, grace: std::time::Duration) {
         self.activity.flush_all_sessions(grace).await;
     }
-    /// Install the channel that fans new session cwds into the leader's `ConfigFileWatcher::watch_path`.
+    /// Install the channel that fans session cwds into the leader's `ConfigFileWatcher::watch_path`
+    /// and `unwatch_path`.
     /// Called once after the watcher is constructed in `agent/app.rs`.
-    /// In simple / non-leader mode the channel is never wired and `notify_session_cwd_for_watch` is a no-op.
+    /// In simple / non-leader mode the channel is never wired and the notify helpers are no-ops.
     pub(crate) fn set_config_watcher_path_tx(
         &mut self,
-        tx: tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::config::watcher::ConfigWatchRequest>,
     ) {
         self.config_watcher_path_tx = Some(tx);
     }
@@ -579,8 +580,26 @@ impl MvpAgent {
     /// No-op if `set_config_watcher_path_tx` was never called (simple mode, tests) or if the receiver has been dropped.
     /// Watcher errors are logged inside the spawned task and do NOT propagate here.
     pub(crate) fn notify_session_cwd_for_watch(&self, cwd: &std::path::Path) {
+        self.send_config_watch_request(
+            crate::config::watcher::ConfigWatchRequest::Watch(cwd.to_path_buf()),
+            cwd,
+        );
+    }
+    /// The release half: drop a cwd's two non-recursive watches once no live session is rooted there.
+    /// Callers must have established that; see `release_session_root`.
+    pub(crate) fn notify_session_cwd_unwatched(&self, cwd: &std::path::Path) {
+        self.send_config_watch_request(
+            crate::config::watcher::ConfigWatchRequest::Unwatch(cwd.to_path_buf()),
+            cwd,
+        );
+    }
+    fn send_config_watch_request(
+        &self,
+        request: crate::config::watcher::ConfigWatchRequest,
+        cwd: &std::path::Path,
+    ) {
         if let Some(tx) = self.config_watcher_path_tx.as_ref()
-            && tx.send(cwd.to_path_buf()).is_err()
+            && tx.send(request).is_err()
         {
             tracing::debug!(
                 cwd = %cwd.display(),
