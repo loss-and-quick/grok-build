@@ -39,19 +39,26 @@ already talking to, so a running `grok` and this page share sessions. Pass
 ```sh
 cd sdk/web
 bun install
-bun run build      # bundles src/main.ts into public/bundle.js
-bun run serve      # http://127.0.0.1:2421, static files only
+bun run dev        # http://127.0.0.1:2421, with hot reload
+# or
+bun run build && bun run preview
 ```
 
 The dev server never talks to the leader: the page opens its own WebSocket, so
-the secret goes from the browser to the gateway and through nothing else.
-`GROK_WEB_PORT` moves the page's port; the host is fixed to `127.0.0.1`.
+the secret goes from the browser to the gateway and through nothing else. Both
+servers are pinned to `127.0.0.1`.
 
 **3. Connect.** Paste the gateway URL (`ws://127.0.0.1:2420/ws`, without the
 query string) and the secret into the two fields, and press Connect. The
 sidebar fills with directories; each holds its sessions. Click one to attach —
 history replays, live updates follow — or press **+ session here** to start a
 new session in that directory.
+
+Attaching navigates to `/s/<sessionId>`, so a session is a URL: reload it,
+bookmark it, or open it in a second tab, and the page comes back attached. The
+leader treats every tab as its own client, so two tabs on one session is an
+ordinary multi-client case rather than a special one. `/d/<cwd>` opens a
+directory's most recent session.
 
 The theme picker offers the six palettes from `sdk/theme`. Nothing in this
 client names a colour; see "Colour" below.
@@ -82,16 +89,21 @@ panel with what it received, and the new version replaces the old one.
 
 ```sh
 bun test          # unit tests; no gateway needed
-bunx tsc --noEmit
+bun run typecheck
 ```
 
-`test/live.test.ts` drives the real `App` against a running gateway and is
+`test/setup.ts` registers two things Bun needs and Vite provides on its own:
+`babel-preset-solid`, because Solid's reactivity is a compile-time transform,
+and a rewrite of the `solid-js/web` specifier, because Bun resolves with the
+`node` condition and Solid's `node` export is its *server* renderer.
+
+`test/live.test.tsx` drives the real `App` against a running gateway and is
 skipped unless you point it at one:
 
 ```sh
 GROK_WEB_LIVE_URL=ws://127.0.0.1:2420/ws \
 GROK_WEB_LIVE_SECRET=<secret> \
-bun test test/live.test.ts
+bun test test/live.test.tsx
 ```
 
 It needs the `panel-probe` fixture installed and a model provider configured,
@@ -101,7 +113,7 @@ because it asserts on a real panel and a real streamed reply.
 
 Every colour comes from `sdk/theme/src/generated/themes.ts`, which is serialized
 from the pager's own Rust `Theme` constructors. `src/theme.ts` turns each role
-into a CSS custom property and `public/style.css` only ever names those
+into a CSS custom property and `src/styles.css` only ever names those
 properties — there is not one literal colour in this package. If a colour you
 want is missing from the generated set, that is a finding, not a licence to
 invent one.
@@ -121,15 +133,24 @@ and a test fails the day one does.
 
 ## Layout
 
+Vite + SolidJS + TypeScript. Solid because of streaming: an assistant reply
+arrives as many small chunks that grow one message in place, so a virtual DOM
+would reconcile the whole transcript to update a single text node. Bun stays
+the package manager and test runner; Vite is here only for Solid's JSX
+transform, which the reactivity depends on.
+
 | file | what it holds |
 | --- | --- |
 | `src/wire.ts` | the slice of the protocol this client speaks, and nothing else |
 | `src/client.ts` | JSON-RPC 2.0 over the gateway's WebSocket |
+| `src/gateway.ts` | the live connection, as reactive state |
 | `src/roster.ts` | the roster, grouped by `cwd` |
-| `src/transcript.ts` | folding `session/update` into something renderable |
-| `src/panel.ts` | plugin panels, from the generated `Panel*` types |
+| `src/transcript.ts` | folding `session/update` into a store |
+| `src/markdown.ts` | the panel markdown parser, and which links keep an href |
+| `src/panel.ts` | tone-to-role, and the block-kind exhaustiveness guard |
 | `src/theme.ts` | generated palette to CSS custom properties |
-| `src/app.ts` | the screen |
+| `src/App.tsx` | the screen and its routes |
+| `src/components/` | Roster, Session, Panel, Markdown, Settings, PermissionCard |
 
 `src/wire.ts` is hand-written on purpose and the reasoning is at the top of the
 file: the panel types and the palette *are* generated and are imported, never
