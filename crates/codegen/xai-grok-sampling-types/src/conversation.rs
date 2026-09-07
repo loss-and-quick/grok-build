@@ -2420,6 +2420,64 @@ mod tests {
         }
     }
 
+    /// Keeps `forwards_hosted_tools()` honest against each mapping: a model entry
+    /// may declare backend search on any backend, and only this predicate stands
+    /// between that entry and a session whose hosted tools vanish in translation.
+    #[test]
+    fn hosted_tools_reach_the_wire_only_where_the_backend_claims() {
+        let request = || ConversationRequest {
+            items: vec![ConversationItem::user("hi")],
+            model: Some("test-model".to_string()),
+            hosted_tools: vec![
+                HostedTool::WebSearch { options: None },
+                HostedTool::XSearch { options: None },
+            ],
+            ..Default::default()
+        };
+        let mentions_hosted = |mapped: &serde_json::Value| {
+            let body = mapped.to_string();
+            body.contains("web_search") || body.contains("x_search")
+        };
+
+        for backend in [
+            crate::ApiBackend::ChatCompletions,
+            crate::ApiBackend::Responses,
+            crate::ApiBackend::Messages,
+            crate::ApiBackend::Gemini,
+        ] {
+            let on_wire = match backend {
+                // The Responses mapping leaves `tools` alone; the hosted entries
+                // ride the raw-JSON channel the sampler splices into the body.
+                crate::ApiBackend::Responses => {
+                    !extra_tool_entries(&request().hosted_tools).is_empty()
+                }
+                crate::ApiBackend::ChatCompletions => {
+                    let mapped = ChatCompletionRequest::from(request());
+                    mentions_hosted(
+                        &serde_json::to_value(&mapped).expect("chat request serializes"),
+                    )
+                }
+                crate::ApiBackend::Messages => {
+                    let mapped = super::messages::build_messages_request(&request(), None);
+                    mentions_hosted(
+                        &serde_json::to_value(&mapped).expect("messages request serializes"),
+                    )
+                }
+                crate::ApiBackend::Gemini => {
+                    let mapped = crate::build_gemini_request(&request());
+                    mentions_hosted(
+                        &serde_json::to_value(&mapped).expect("gemini request serializes"),
+                    )
+                }
+            };
+            assert_eq!(
+                on_wire,
+                backend.forwards_hosted_tools(),
+                "{backend:?}: forwards_hosted_tools() disagrees with the mapping"
+            );
+        }
+    }
+
     #[test]
     fn prior_turn_interrupt_serde_round_trip_and_unknown_fallback() {
         for (variant, wire) in [

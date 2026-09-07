@@ -2369,19 +2369,34 @@ fn resolve_model_override_to_config_no_resolver_for_byok_model() {
     assert!(config.bearer_resolver.is_none());
     assert_eq!(config.api_key.as_deref(), Some("sk-byok"));
 }
+/// The catalog claim is inherited, but only onto a backend that can carry hosted
+/// tools: a child on Chat Completions would ship the flag and search nowhere.
 #[tokio::test]
 async fn read_parent_sampling_config_resolves_backend_search_from_catalog() {
-    let mut entry = test_model_entry("grok-4.5");
-    entry.info.supports_backend_search = true;
-    let mut models = indexmap::IndexMap::new();
-    models.insert("auto".to_string(), entry);
-    let mut ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "auto", models);
-    ctx.sampling_config.supports_backend_search = false;
-    let (config, _model_id) = read_parent_sampling_config(&ctx).await;
-    assert!(
-            config.supports_backend_search,
-            "subagent should inherit backend-tools capability from the live model catalog"
+    for (backend, expected) in [
+        (crate::sampling::ApiBackend::Responses, true),
+        (crate::sampling::ApiBackend::ChatCompletions, false),
+    ] {
+        let mut entry = test_model_entry("grok-4.5");
+        entry.info.supports_backend_search = true;
+        let mut models = indexmap::IndexMap::new();
+        models.insert("auto".to_string(), entry);
+        let mut ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "auto", models);
+        ctx.sampling_config.supports_backend_search = false;
+        ctx.parent_chat_state
+            .as_ref()
+            .unwrap()
+            .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
+                api_backend: backend.clone(),
+                base_url: "https://api.x.ai/v1".to_string(),
+                ..test_sampling_config("grok-4.5")
+            });
+        let (config, _model_id) = read_parent_sampling_config(&ctx).await;
+        assert_eq!(
+            config.supports_backend_search, expected,
+            "{backend:?}: the child inherits the catalog claim only where it holds"
         );
+    }
 }
 #[tokio::test]
 async fn read_parent_sampling_config_fallback_resolves_backend_search_from_catalog() {

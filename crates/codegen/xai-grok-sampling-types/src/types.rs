@@ -1119,6 +1119,21 @@ impl ApiBackend {
     pub fn forwards_prompt_cache_key(&self) -> bool {
         matches!(self, Self::Responses)
     }
+
+    /// Whether [`ConversationRequest::hosted_tools`] reaches the wire.
+    ///
+    /// Only the Responses mapping emits them, through the raw-JSON
+    /// `extra_tool_entries` channel. The Chat Completions, Messages and Gemini
+    /// mappings never read the field, so hosted tools handed to them are
+    /// dropped in translation.
+    ///
+    /// A model entry that claims backend search must be gated on this, or the
+    /// session promises a search that silently never runs.
+    ///
+    /// [`ConversationRequest::hosted_tools`]: crate::conversation::ConversationRequest::hosted_tools
+    pub fn forwards_hosted_tools(&self) -> bool {
+        matches!(self, Self::Responses)
+    }
 }
 
 /// Sampling client configuration (API key excluded; that stays in the client).

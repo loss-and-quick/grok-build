@@ -2246,6 +2246,38 @@ impl Config {
                     ),
                 );
             }
+            // Declared here rather than dropped at load: a machine-generated
+            // config must keep its catalog entry. The flag is gated where the
+            // request is built, so what the user sees is a warning naming the
+            // backend, not a session that quietly stops searching.
+            if model.supports_backend_search.unwrap_or(false)
+                && let Some(backend) = model.api_backend.clone().or_else(|| {
+                    model
+                        .model_provider
+                        .as_ref()
+                        .and_then(|id| config.model_providers.get(id))
+                        .and_then(|provider| provider.api_backend.clone())
+                })
+                && !backend.forwards_hosted_tools()
+            {
+                let backend_key = serde_json::to_value(&backend)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| format!("{backend:?}"));
+                config.config_warnings.push(
+                    super::config_model_override_parse::ConfigWarning::model(
+                        model_key,
+                        Some("supports_backend_search"),
+                        super::config_model_override_parse::ConfigWarningKind::ConflictingFields,
+                        format!(
+                            "backend search only reaches the wire on the `responses` backend; \
+                             on `{backend_key}` the hosted search tools are dropped in \
+                             translation, so the flag resolves to false and the model searches \
+                             through the client-side `web_search` tool instead"
+                        ),
+                    ),
+                );
+            }
         }
         for (id, provider) in &config.model_providers {
             if let Some(ref name) = provider.auth_provider
@@ -5898,6 +5930,26 @@ pub(crate) fn resolve_model_to_sampling_config(
     ))
 }
 
+/// Whether a model entry's `supports_backend_search` can actually be honoured.
+///
+/// Hosted tools reach the wire on the Responses backend alone
+/// ([`ApiBackend::forwards_hosted_tools`]); the Chat Completions, Messages and
+/// Gemini mappings drop them in translation. Ungated, an entry that pairs the
+/// flag with any other backend produces a session that reports backend search,
+/// strips the client-side `web_search` tool from the turn, and then searches
+/// nowhere.
+///
+/// Gated, the flag reads false off Responses: the turn keeps its `web_search`
+/// function tool and the model-switch capability log states the honest value.
+/// Nothing is rejected — a declarative config must still load, so the mismatch
+/// is reported as a config warning at parse time.
+pub(crate) fn backend_search_supported(
+    supports_backend_search: bool,
+    api_backend: &ApiBackend,
+) -> bool {
+    supports_backend_search && api_backend.forwards_hosted_tools()
+}
+
 /// Selects xAI-only Responses extensions for trusted backend-search routes.
 ///
 /// Third-party Responses providers reject `no_inline_citations`.
@@ -5935,11 +5987,10 @@ pub(crate) fn sampling_config_for_model(
         &credentials.base_url,
     );
     let api_backend = info.api_backend.clone();
-    let extra_response_includes = response_include_extensions(
-        info.supports_backend_search,
-        &api_backend,
-        &credentials.base_url,
-    );
+    let supports_backend_search =
+        backend_search_supported(info.supports_backend_search, &api_backend);
+    let extra_response_includes =
+        response_include_extensions(supports_backend_search, &api_backend, &credentials.base_url);
     SamplerConfig {
         api_key: credentials.api_key,
         model: model_name,
@@ -5978,7 +6029,7 @@ pub(crate) fn sampling_config_for_model(
         origin_client: None,
         attribution_callback: None,
         bearer_resolver: None,
-        supports_backend_search: info.supports_backend_search,
+        supports_backend_search,
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,

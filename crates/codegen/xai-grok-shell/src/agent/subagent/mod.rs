@@ -709,9 +709,13 @@ async fn read_parent_sampling_config(
             let inherited_base_url = cfg.base_url.clone();
             let strip_guard = ctx.would_strip_fallback_key(creds.api_key.as_deref());
             let catalog_model_id = parent_catalog_model_id(ctx, &cfg.model);
-            let supports_backend_search = ctx
-                .models_manager
-                .model_supports_backend_search(catalog_model_id.0.as_ref());
+            // A child inherits the parent transport, so the flag is gated on the
+            // backend the child will actually speak, not on the catalog claim.
+            let supports_backend_search = crate::agent::config::backend_search_supported(
+                ctx.models_manager
+                    .model_supports_backend_search(catalog_model_id.0.as_ref()),
+                &cfg.api_backend,
+            );
             let extra_response_includes = crate::agent::config::response_include_extensions(
                 supports_backend_search,
                 &cfg.api_backend,
@@ -806,9 +810,11 @@ async fn read_parent_sampling_config(
         catalog_bearer_resolver(ctx, &fallback.model, &fallback.base_url)
     };
     let catalog_model_id = parent_catalog_model_id(ctx, &fallback.model);
-    fallback.supports_backend_search = ctx
-        .models_manager
-        .model_supports_backend_search(catalog_model_id.0.as_ref());
+    fallback.supports_backend_search = crate::agent::config::backend_search_supported(
+        ctx.models_manager
+            .model_supports_backend_search(catalog_model_id.0.as_ref()),
+        &fallback.api_backend,
+    );
     fallback.extra_response_includes = crate::agent::config::response_include_extensions(
         fallback.supports_backend_search,
         &fallback.api_backend,

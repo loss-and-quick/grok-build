@@ -1675,6 +1675,107 @@ fn sampling_config_scopes_no_inline_citations_include() {
         );
     }
 }
+/// A model entry may declare `supports_backend_search` on any backend, but hosted
+/// tools reach the wire on Responses alone. What the resolved config reports here
+/// is what the session's `backend_search_active` gate believes, so a claim the
+/// backend cannot honour becomes a turn that ships no search and strips the
+/// client-side `web_search` tool that would have covered for it.
+#[test]
+fn sampling_config_gates_backend_search_on_the_responses_backend() {
+    for backend in [
+        ApiBackend::ChatCompletions,
+        ApiBackend::Responses,
+        ApiBackend::Messages,
+        ApiBackend::Gemini,
+    ] {
+        let mut model = test_model_entry("test-model", "https://api.x.ai/v1", None, None, None);
+        model.info.supports_backend_search = true;
+        model.info.api_backend = backend.clone();
+        let config = sampling_config_for_model(
+            &model,
+            resolve_credentials(&model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            config.supports_backend_search,
+            backend.forwards_hosted_tools(),
+            "{backend:?}: a session must not claim a search the backend drops"
+        );
+    }
+}
+/// The mismatch fails visibly without being destructive: the entry loads, and the
+/// warning names the backend that cannot carry the search.
+#[test]
+fn backend_search_off_responses_warns_and_keeps_the_model_entry() {
+    use super::super::config_model_override_parse::{ConfigWarningKind, WarningTarget};
+    let raw_config: toml::Value = toml::from_str(
+        r#"
+            [model.searching-chat]
+            model = "m"
+            base_url = "https://vendor.example/v1"
+            context_window = 200000
+            api_backend = "chat_completions"
+            supports_backend_search = true
+
+            [model.searching-via-provider]
+            model = "m"
+            model_provider = "vendor"
+            context_window = 200000
+            supports_backend_search = true
+
+            [model.searching-responses]
+            model = "m"
+            base_url = "https://api.x.ai/v1"
+            context_window = 200000
+            api_backend = "responses"
+            supports_backend_search = true
+
+            [model_providers.vendor]
+            base_url = "https://vendor.example/v1"
+            api_backend = "messages"
+            "#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+    let warning = |key: &str| {
+        cfg.config_warnings.iter().find(|w| {
+            w.kind == ConfigWarningKind::ConflictingFields
+                && matches!(
+                    &w.target,
+                    WarningTarget::Model { key: k, field: f }
+                        if k == key && f.as_deref() == Some("supports_backend_search")
+                )
+        })
+    };
+    assert!(
+        warning("searching-chat").is_some_and(|w| w.reason.contains("chat_completions")),
+        "the warning must name the backend: {:?}",
+        cfg.config_warnings
+    );
+    assert!(
+        warning("searching-via-provider").is_some_and(|w| w.reason.contains("messages")),
+        "a backend inherited from [model_providers] warns too: {:?}",
+        cfg.config_warnings
+    );
+    assert!(
+        warning("searching-responses").is_none(),
+        "the backend that carries hosted tools must not warn: {:?}",
+        cfg.config_warnings
+    );
+    for key in [
+        "searching-chat",
+        "searching-via-provider",
+        "searching-responses",
+    ] {
+        assert!(
+            cfg.config_models.contains_key(key),
+            "{key}: a warned entry must still load"
+        );
+    }
+}
 #[test]
 fn default_models_dual_endpoint_routing() {
     let endpoints = EndpointsConfig::default();
