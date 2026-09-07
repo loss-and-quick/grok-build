@@ -6299,7 +6299,12 @@ fn interactive_trust_prompt_grant_reloads_project_mcp() {
         let (mut handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
         agent.insert_resident(&sid, handle);
-        agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
+        agent.maybe_spawn_interactive_trust_prompt(
+            &sid,
+            &repo_path,
+            agent.interactive_trust_client.get(),
+            Some(&remote),
+        );
         let params = answer_folder_trust_request(&mut gw_rx, "trust").await;
         assert!(
             params["configKinds"]
@@ -6374,7 +6379,12 @@ fn interactive_trust_prompt_reject_keeps_gated() {
         let (mut handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
         agent.insert_resident(&sid, handle);
-        agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
+        agent.maybe_spawn_interactive_trust_prompt(
+            &sid,
+            &repo_path,
+            agent.interactive_trust_client.get(),
+            Some(&remote),
+        );
         let _ = answer_folder_trust_request(&mut gw_rx, "reject").await;
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(300), cmd_rx.recv())
@@ -6413,7 +6423,12 @@ fn interactive_trust_prompt_dormant_when_feature_off() {
         let (mut handle, _tx, _cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
         agent.insert_resident(&sid, handle);
-        agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
+        agent.maybe_spawn_interactive_trust_prompt(
+            &sid,
+            &repo_path,
+            agent.interactive_trust_client.get(),
+            Some(&remote),
+        );
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(300), gw_rx.recv())
                 .await
@@ -6440,7 +6455,12 @@ fn interactive_trust_prompt_no_request_without_capability() {
         let (mut handle, _tx, _cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
         agent.insert_resident(&sid, handle);
-        agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
+        agent.maybe_spawn_interactive_trust_prompt(
+            &sid,
+            &repo_path,
+            agent.interactive_trust_client.get(),
+            Some(&remote),
+        );
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(300), gw_rx.recv())
                 .await
@@ -6469,7 +6489,12 @@ fn interactive_trust_prompt_client_error_fails_closed() {
         let (mut handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
         agent.insert_resident(&sid, handle);
-        agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
+        agent.maybe_spawn_interactive_trust_prompt(
+            &sid,
+            &repo_path,
+            agent.interactive_trust_client.get(),
+            Some(&remote),
+        );
         let msg = tokio::time::timeout(std::time::Duration::from_secs(2), gw_rx.recv())
             .await
             .expect("trust request must be sent")
@@ -6510,13 +6535,23 @@ fn interactive_trust_prompt_dedups_same_workspace() {
         let (mut handle, _tx, _cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
         agent.insert_resident(&sid, handle);
-        agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
+        agent.maybe_spawn_interactive_trust_prompt(
+            &sid,
+            &repo_path,
+            agent.interactive_trust_client.get(),
+            Some(&remote),
+        );
         let first = tokio::time::timeout(std::time::Duration::from_secs(2), gw_rx.recv()).await;
         assert!(
             matches!(first, Ok(Some(xai_acp_lib::AcpClientMessage::ExtMethod(_)))),
             "first prompt for an untrusted workspace must emit a request"
         );
-        agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
+        agent.maybe_spawn_interactive_trust_prompt(
+            &sid,
+            &repo_path,
+            agent.interactive_trust_client.get(),
+            Some(&remote),
+        );
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(300), gw_rx.recv())
                 .await
@@ -6601,7 +6636,12 @@ fn interactive_trust_prompt_reloads_all_same_workspace_sessions() {
         let (mut h_other, _t3, mut rx_other) = make_live_session_handle(&sid_other, None);
         h_other.info.cwd = other_path.to_string_lossy().to_string();
         agent.insert_resident(&sid_other, h_other);
-        agent.maybe_spawn_interactive_trust_prompt(&sid_root, &root, Some(&remote));
+        agent.maybe_spawn_interactive_trust_prompt(
+            &sid_root,
+            &root,
+            agent.interactive_trust_client.get(),
+            Some(&remote),
+        );
         let _ = answer_folder_trust_request(&mut gw_rx, "trust").await;
         let root_cmds = drain_reload_commands(&mut rx_root).await;
         assert!(
@@ -6646,7 +6686,12 @@ fn interactive_trust_prompt_reprompts_after_untrust() {
         let (mut handle, _tx, _cmd_rx) = make_live_session_handle(&sid, None);
         handle.info.cwd = repo_path.to_string_lossy().to_string();
         agent.insert_resident(&sid, handle);
-        agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
+        agent.maybe_spawn_interactive_trust_prompt(
+            &sid,
+            &repo_path,
+            agent.interactive_trust_client.get(),
+            Some(&remote),
+        );
         assert!(
             matches!(
                 tokio::time::timeout(std::time::Duration::from_secs(2), gw_rx.recv()).await,
@@ -6654,7 +6699,12 @@ fn interactive_trust_prompt_reprompts_after_untrust() {
             ),
             "first prompt must emit a request"
         );
-        agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
+        agent.maybe_spawn_interactive_trust_prompt(
+            &sid,
+            &repo_path,
+            agent.interactive_trust_client.get(),
+            Some(&remote),
+        );
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(200), gw_rx.recv())
                 .await
@@ -6666,7 +6716,12 @@ fn interactive_trust_prompt_reprompts_after_untrust() {
             agent.execute_hooks_action(&sid, HooksAction::Untrust),
         )
         .await;
-        agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
+        agent.maybe_spawn_interactive_trust_prompt(
+            &sid,
+            &repo_path,
+            agent.interactive_trust_client.get(),
+            Some(&remote),
+        );
         assert!(
             matches!(
                 tokio::time::timeout(std::time::Duration::from_secs(2), gw_rx.recv()).await,

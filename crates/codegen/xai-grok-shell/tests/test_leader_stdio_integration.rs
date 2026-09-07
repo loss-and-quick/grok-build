@@ -1915,6 +1915,141 @@ async fn test_code_nav_capability_injected_into_session_load() {
     cancel.cancel();
 }
 
+// =============================================================================
+// Interactive folder-trust capability injection integration tests
+//
+// The agent's `interactive_trust_client` is one flag written by every `initialize`, so under a leader it names
+// whichever client connected last. These drive `interactive_trust` from registration to the forwarded payload.
+// =============================================================================
+
+/// The regression. A browser registering alongside a running TUI used to clear the agent's shared trust flag on its
+/// own `initialize`, and every session the TUI opened afterwards then resolved a non-launch-dir root untrusted with
+/// no card and no notice, losing that session's project MCP servers, hooks, plugins, LSP and permission rules.
+/// Each client's `session/new` must carry that client's own verdict.
+#[tokio::test]
+async fn test_leader_interactive_trust_client_isolation() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, mut acp_rx, _response_tx) = setup_test_server(&temp).await;
+
+    // A TUI on a TTY: it draws the trust card and answers it with crossterm keys.
+    let tui_client = LeaderClient::connect(
+        sock_path.clone(),
+        "grok-tui",
+        ClientMode::Stdio,
+        ClientCapabilities {
+            interactive_trust: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // A browser joining the same leader: nothing on the far side answers `x.ai/folder_trust/request`.
+    let web_client = LeaderClient::connect(
+        sock_path,
+        "grok-web",
+        ClientMode::Stdio,
+        ClientCapabilities {
+            interactive_trust: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let session_new = r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/repo","mcpServers":[]}}"#;
+
+    // The browser registers and opens its session first, which is what used to clear the shared flag.
+    web_client.send(session_new.to_string()).unwrap();
+    let web_fwd = acp_rx.recv().await.unwrap();
+    let web_json: serde_json::Value = serde_json::from_str(&web_fwd).unwrap();
+
+    tui_client.send(session_new.to_string()).unwrap();
+    let tui_fwd = acp_rx.recv().await.unwrap();
+    let tui_json: serde_json::Value = serde_json::from_str(&tui_fwd).unwrap();
+
+    assert_eq!(
+        tui_json["params"]["_meta"]["interactiveTrust"],
+        serde_json::json!(true),
+        "the TUI's session must still be prompted after a browser joined the same leader"
+    );
+    assert_eq!(
+        web_json["params"]["_meta"]["interactiveTrust"],
+        serde_json::json!(false),
+        "the browser must not inherit the TUI's capability and be sent a card it cannot answer"
+    );
+
+    tui_client.cancel();
+    web_client.cancel();
+    cancel.cancel();
+}
+
+/// A client that declared nothing must be left exactly where it was before this key existed: no key in `_meta`, so the
+/// agent keeps its initialize-time fallback. That covers every older client and the `grok agent stdio` relay, whose
+/// real client initializes later over the bridge and answers for itself.
+#[tokio::test]
+async fn test_leader_undeclared_interactive_trust_is_not_injected() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, mut acp_rx, _response_tx) = setup_test_server(&temp).await;
+
+    let relay = LeaderClient::connect(
+        sock_path,
+        "grok-agent-stdio",
+        ClientMode::Stdio,
+        ClientCapabilities::default(),
+    )
+    .await
+    .unwrap();
+
+    let session_new = r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/repo","mcpServers":[]}}"#;
+    relay.send(session_new.to_string()).unwrap();
+
+    let forwarded = acp_rx.recv().await.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+    assert!(
+        json["params"]["_meta"].get("interactiveTrust").is_none(),
+        "a client that declared nothing must not have `false` asserted on its behalf: got {}",
+        json["params"]["_meta"]
+    );
+
+    relay.cancel();
+    cancel.cancel();
+}
+
+/// `session/load` carries it too, so a reconnect resolves against the reconnecting client rather than the last one to
+/// have initialized.
+#[tokio::test]
+async fn test_interactive_trust_injected_into_session_load() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, mut acp_rx, _response_tx) = setup_test_server(&temp).await;
+
+    let tui_client = LeaderClient::connect(
+        sock_path,
+        "grok-tui",
+        ClientMode::Stdio,
+        ClientCapabilities {
+            interactive_trust: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let session_load = r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"sess-abc","cwd":"/repo","mcpServers":[]}}"#;
+    tui_client.send(session_load.to_string()).unwrap();
+
+    let forwarded = acp_rx.recv().await.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+    assert_eq!(json["method"], "session/load");
+    assert_eq!(
+        json["params"]["_meta"]["interactiveTrust"],
+        serde_json::json!(true)
+    );
+
+    tui_client.cancel();
+    cancel.cancel();
+}
+
 /// Verify that an `x.ai/code/status` extension request is forwarded to the agent with the correct method, sessionId, and cwd in the params.
 /// This tests the routing boundary between leader and agent for code-nav extension requests without requiring a live agent.
 #[tokio::test]

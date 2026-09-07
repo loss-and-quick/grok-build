@@ -158,6 +158,13 @@ pub type LeaderAttach = Arc<
 /// them. Terminals and file operations stay on the agent side.
 ///
 /// `code_nav_enabled` and `status_line` are false for the same reason: nothing here renders them.
+///
+/// `interactive_trust` is `Some(false)`, an explicit refusal rather than `None`. A browser could in principle draw
+/// the folder-trust card, but nothing on the far side of this socket answers `x.ai/folder_trust/request` today, and
+/// an unanswered card just holds the round-trip open until it times out while the workspace stays gated. `None` would
+/// be worse still: it lets the agent fall back to whichever client initialized last, so a TUI sharing this leader
+/// would aim its own `true` at a browser that cannot reply. Flip this to `Some(true)` in this one place when a
+/// browser front-end implements the card.
 fn browser_capabilities() -> ClientCapabilities {
     ClientCapabilities {
         terminal: false,
@@ -165,6 +172,7 @@ fn browser_capabilities() -> ClientCapabilities {
         fs_write: false,
         code_nav_enabled: false,
         status_line: false,
+        interactive_trust: Some(false),
         client_version: Some(xai_grok_version::VERSION.to_string()),
         ..ClientCapabilities::default()
     }

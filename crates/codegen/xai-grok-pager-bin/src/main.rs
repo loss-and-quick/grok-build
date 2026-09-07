@@ -1375,6 +1375,15 @@ async fn run_agent_command(
             fs_read: false,
             fs_write: false,
             status_line: false,
+            // Headless has no way to ask anyone: `build_headless_init_request` advertises
+            // `nonInteractive` and never claims `x.ai/folderTrust.interactive`, so say so and stop
+            // another client's `initialize` from aiming a trust card at it.
+            // The stdio bridge only relays; its real client initializes later over this pipe and
+            // answers for itself, so it registers no opinion and the agent keeps that fallback.
+            interactive_trust: match mode {
+                ClientMode::Headless => Some(false),
+                ClientMode::Stdio => None,
+            },
         };
         let conn = connect_or_spawn(&client_type, mode, &env_urls, capabilities.clone()).await?;
         let (tx, rx) = conn.into_channels();

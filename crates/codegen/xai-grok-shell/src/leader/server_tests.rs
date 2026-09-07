@@ -4638,6 +4638,115 @@ fn inject_capabilities_terminal_and_fs_per_client() {
     );
 }
 
+// =========================================================================
+// Interactive folder-trust capability injection tests
+// =========================================================================
+
+/// A client that declares either way has `interactiveTrust` injected, into every session method.
+/// The agent needs the `false` as much as the `true`: without it, it falls back to whichever client initialized last.
+#[test]
+fn inject_capabilities_interactive_trust_declared_either_way() {
+    for (declared, method) in [
+        (true, AGENT_METHOD_NAMES.session_new),
+        (false, AGENT_METHOD_NAMES.session_new),
+        (true, AGENT_METHOD_NAMES.session_load),
+        (true, AGENT_METHOD_NAMES.session_resume),
+    ] {
+        let payload = format!(
+            r#"{{"jsonrpc":"2.0","method":"{method}","id":1,"params":{{"cwd":"/repo","sessionId":"sess-1","_meta":{{}}}}}}"#
+        );
+        let caps = ClientCapabilities {
+            interactive_trust: Some(declared),
+            ..Default::default()
+        };
+        let mut json = pv(&payload);
+        assert!(inject_session_request_context(
+            &mut json,
+            &caps,
+            "grok-tui",
+            ClientId(1)
+        ));
+        assert_eq!(
+            json["params"]["_meta"]["interactiveTrust"],
+            serde_json::json!(declared),
+            "{method} must carry the declaring client's own verdict ({declared})"
+        );
+    }
+}
+
+/// A client that declared nothing must inject nothing, so the agent keeps the initialize-time fallback it used before
+/// this key existed. Injecting `false` here would silently strip a non-declaring client's project config instead.
+#[test]
+fn inject_capabilities_undeclared_interactive_trust_stays_absent() {
+    let caps = ClientCapabilities {
+        interactive_trust: None,
+        code_nav_enabled: true,
+        ..Default::default()
+    };
+    let payload =
+        r#"{"jsonrpc":"2.0","method":"session/new","id":1,"params":{"cwd":"/repo","_meta":{}}}"#;
+    let mut json = pv(payload);
+    inject_session_request_context(&mut json, &caps, "grok-tui", ClientId(1));
+    assert!(
+        json["params"]["_meta"].get("interactiveTrust").is_none(),
+        "an undeclared capability must leave the key absent, not assert `false`"
+    );
+}
+
+/// The declaration must survive the early return that skips injection entirely for an otherwise-blank client.
+/// A client whose only capability is this one would otherwise have it dropped and fall back to another client's flag.
+#[test]
+fn inject_capabilities_interactive_trust_survives_the_blank_client_early_return() {
+    for declared in [true, false] {
+        let caps = ClientCapabilities {
+            interactive_trust: Some(declared),
+            ..Default::default()
+        };
+        let payload = r#"{"jsonrpc":"2.0","method":"session/new","id":1,"params":{"cwd":"/repo"}}"#;
+        let mut json = pv(payload);
+        assert!(
+            inject_session_request_context(&mut json, &caps, "", ClientId(1)),
+            "a lone interactive_trust declaration must still mutate the request (declared={declared})"
+        );
+        assert_eq!(
+            json["params"]["_meta"]["interactiveTrust"],
+            serde_json::json!(declared)
+        );
+    }
+}
+
+/// The reported regression, at the injection boundary: a browser registering alongside a TUI must not decide whether
+/// the TUI's sessions are asked about trust.
+#[test]
+fn inject_capabilities_interactive_trust_per_client() {
+    let tui_caps = ClientCapabilities {
+        interactive_trust: Some(true),
+        ..Default::default()
+    };
+    let web_caps = ClientCapabilities {
+        interactive_trust: Some(false),
+        ..Default::default()
+    };
+    let session_new =
+        r#"{"jsonrpc":"2.0","method":"session/new","id":1,"params":{"cwd":"/repo","_meta":{}}}"#;
+
+    let mut tui_json = pv(session_new);
+    inject_session_request_context(&mut tui_json, &tui_caps, "grok-tui", ClientId(1));
+    let mut web_json = pv(session_new);
+    inject_session_request_context(&mut web_json, &web_caps, "grok-web", ClientId(2));
+
+    assert_eq!(
+        tui_json["params"]["_meta"]["interactiveTrust"],
+        serde_json::json!(true),
+        "the TUI must keep its prompt"
+    );
+    assert_eq!(
+        web_json["params"]["_meta"]["interactiveTrust"],
+        serde_json::json!(false),
+        "the browser must not inherit the TUI's `true`"
+    );
+}
+
 #[test]
 fn inject_capabilities_terminal_into_session_load() {
     let caps = ClientCapabilities {

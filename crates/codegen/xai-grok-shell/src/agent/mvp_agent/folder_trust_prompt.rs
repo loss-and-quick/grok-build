@@ -70,8 +70,26 @@ impl MvpAgent {
             .unwrap_or(false)
     }
 
+    /// Whether the client that opened *this* session can answer the folder-trust card.
+    ///
+    /// `_meta.interactiveTrust` is what the leader injected for that client, so it wins.
+    /// `fallback` is [`Self::parse_interactive_trust_capability`]'s verdict from `initialize`, kept for a direct stdio
+    /// connection (one client, so the shared flag is that client's own) and for a client that registered no opinion.
+    /// Reading `fallback` unconditionally is the bug this replaces: `initialize` overwrites it on every connect, so a
+    /// second client joining a leader decides for every session opened afterwards, whoever owns it.
+    pub(crate) fn resolve_interactive_trust(meta: Option<&acp::Meta>, fallback: bool) -> bool {
+        meta.and_then(|m| m.get("interactiveTrust"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(fallback)
+    }
+
     /// Ask a GUI client to decide trust for `session_id`'s workspace, then grant and reload on accept.
     /// Dormant: it does nothing unless the client advertised `x.ai/folderTrust.interactive` and [`folder_trust::prompt_warranted`] holds.
+    ///
+    /// `client_interactive_trust` is resolved per session by `resolve_client_caps`, from the `interactiveTrust` the
+    /// leader injects for the client that opened this session, falling back to `interactive_trust_client`.
+    /// Reading the field directly would ask whichever client initialized last, so a browser joining a running TUI
+    /// would clear it and take the prompt away from every later TUI session.
     ///
     /// Non-blocking: the session was already created with project servers gated (the untrusted resolve in `new_session`/`load_session`).
     /// Nothing repo-local spawns while the prompt is open.
@@ -81,9 +99,10 @@ impl MvpAgent {
         &self,
         session_id: &acp::SessionId,
         cwd: &std::path::Path,
+        client_interactive_trust: bool,
         remote: Option<&crate::util::config::RemoteSettings>,
     ) {
-        if !self.interactive_trust_client.get() {
+        if !client_interactive_trust {
             return;
         }
         if !folder_trust::prompt_warranted(cwd, remote) {
@@ -343,6 +362,51 @@ mod tests {
         );
         let init = init_with_meta(Some(serde_json::Value::Object(meta)));
         assert!(!MvpAgent::parse_interactive_trust_capability(&init));
+    }
+
+    fn session_meta(pairs: &[(&str, serde_json::Value)]) -> acp::Meta {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    /// Regression: one leader, two clients. The browser's `initialize` clears the shared
+    /// `interactive_trust_client`, and before the leader injected `interactiveTrust` every session the TUI opened
+    /// afterwards read that cleared flag and resolved a non-launch-dir root untrusted with no card and no notice.
+    /// The session's own `_meta` has to outrank whoever initialized last, in both directions.
+    #[test]
+    fn resolve_interactive_trust_prefers_session_meta_over_last_initialize() {
+        let declared = session_meta(&[("interactiveTrust", serde_json::json!(true))]);
+        assert!(
+            MvpAgent::resolve_interactive_trust(Some(&declared), false),
+            "a client that declared the capability must keep its prompt after another client's \
+             initialize cleared the shared flag"
+        );
+        let refused = session_meta(&[("interactiveTrust", serde_json::json!(false))]);
+        assert!(
+            !MvpAgent::resolve_interactive_trust(Some(&refused), true),
+            "a client that cannot render the card must not inherit another client's `true`"
+        );
+    }
+
+    /// A client that registered no opinion (a pre-existing client, or the `grok agent stdio` relay that only forwards
+    /// someone else's `initialize`) must land exactly where it did before this key existed: on the shared flag.
+    #[test]
+    fn resolve_interactive_trust_without_meta_falls_back_to_initialize() {
+        for fallback in [true, false] {
+            assert_eq!(
+                MvpAgent::resolve_interactive_trust(None, fallback),
+                fallback,
+                "absent meta must not change behaviour (fallback={fallback})"
+            );
+            let unrelated = session_meta(&[("codeNavEnabled", serde_json::json!(true))]);
+            assert_eq!(
+                MvpAgent::resolve_interactive_trust(Some(&unrelated), fallback),
+                fallback,
+                "meta without the key must not change behaviour (fallback={fallback})"
+            );
+        }
     }
 
     #[test]

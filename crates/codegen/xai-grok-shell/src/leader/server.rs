@@ -692,6 +692,10 @@ fn inject_session_request_context(
         && !capabilities.fs_read
         && !capabilities.fs_write
         && !capabilities.status_line
+        // Any declaration, `Some(true)` or `Some(false)`, has to reach the agent: a client that
+        // cannot prompt needs its `false` injected just as much, or the agent falls back to
+        // whichever client initialized last and prompts one that will never answer.
+        && capabilities.interactive_trust.is_none()
     {
         return false;
     }
@@ -764,6 +768,18 @@ fn inject_session_request_context(
                 xai_grok_status_line::CLIENT_STATUS_LINE_META.to_string(),
                 serde_json::json!(capabilities.status_line),
             );
+            // Only a client that declared either way; `None` means "did not say", and the key must
+            // stay absent so the agent keeps its pre-existing initialize-time fallback.
+            if let Some(interactive_trust) = capabilities.interactive_trust {
+                meta_obj.insert(
+                    "interactiveTrust".to_string(),
+                    serde_json::json!(interactive_trust),
+                );
+                debug!(
+                    interactive_trust,
+                    "Injected interactiveTrust into session request"
+                );
+            }
         }
     }
     mutated

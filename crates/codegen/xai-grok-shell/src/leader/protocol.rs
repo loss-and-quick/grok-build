@@ -163,6 +163,21 @@ pub struct ClientCapabilities {
     /// The flag it sets is per session, so other subscribers of a shared session receive the payload too.
     #[serde(default)]
     pub status_line: bool,
+
+    /// Whether this client can render and answer the agent's folder-trust card (`x.ai/folderTrust.interactive`).
+    /// A `Some` is injected as `interactiveTrust` into `session/new`, `session/load` and `session/resume`, and the
+    /// agent prefers it over its last-initialized `interactive_trust_client`, which names the wrong client as soon as
+    /// a leader multiplexes a TUI and a browser.
+    ///
+    /// `Option`, unlike the `bool` siblings above, because absence here is not the same claim as `false`.
+    /// A `false` sibling only keeps work on the agent side; a `false` here leaves a non-launch-dir session root
+    /// resolving untrusted with no prompt, silently dropping its project MCP servers, hooks, plugins, LSP and
+    /// permission rules. So a client that cannot honestly answer registers `None`, nothing is injected, and the agent
+    /// falls back to the initialize-time flag exactly as it did before this field existed. That covers a relay such as
+    /// `grok agent stdio`, whose real client initializes later over the bridge, and every client built against an
+    /// older leader protocol.
+    #[serde(default)]
+    pub interactive_trust: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -319,6 +319,10 @@ pub async fn connect_via_leader(
         fs_read: flags.fs_read,
         fs_write: flags.fs_write,
         status_line: flags.status_line,
+        // The same answer the TUI puts in `client_capabilities.meta`, but the leader needs it per
+        // client: `initialize` sets one shared flag, so another client connecting later would
+        // otherwise decide whether this TUI's next worktree session is asked about trust at all.
+        interactive_trust: Some(flags.interactive_trust),
     };
 
     startup::enter(StartupPhase::LeaderConnect);

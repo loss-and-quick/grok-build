@@ -81,6 +81,8 @@ struct ClientCaps {
     terminal: bool,
     fs_read: bool,
     fs_write: bool,
+    /// Whether this session's own client can render the folder-trust card.
+    interactive_trust: bool,
 }
 /// What an attach recovers from disk before the plan mode moves into the actor.
 /// It holds telemetry counters and the parked approval the rebuilt actor has to re-ask.
@@ -208,6 +210,12 @@ impl MvpAgent {
             terminal,
             fs_read,
             fs_write,
+            // The leader injects this per client; the `Cell` is the fallback for a direct stdio
+            // connection and for a client that registered no opinion (see `ClientCapabilities`).
+            interactive_trust: Self::resolve_interactive_trust(
+                meta,
+                self.interactive_trust_client.get(),
+            ),
         }
     }
     /// Resolve the workspace both pipelines run in.
@@ -505,6 +513,7 @@ impl MvpAgent {
             terminal: client_terminal,
             fs_read: client_fs_read,
             fs_write: client_fs_write,
+            interactive_trust: client_interactive_trust,
         } = self.resolve_client_caps(arguments.meta.as_ref(), init);
         let spawn_res = {
             let mut timer = crate::instrumentation_timer!("session.spawn_session_actor");
@@ -569,6 +578,7 @@ impl MvpAgent {
         self.maybe_spawn_interactive_trust_prompt(
             &session_id,
             cwd.as_path(),
+            client_interactive_trust,
             remote_settings.as_ref(),
         );
         let bridge_attach = BridgeAttach::NotAttached;
@@ -959,6 +969,7 @@ impl MvpAgent {
             terminal: client_terminal,
             fs_read: client_fs_read,
             fs_write: client_fs_write,
+            interactive_trust: client_interactive_trust,
         } = self.resolve_client_caps(request_meta.as_ref(), init);
         let prompt_display_cwd = request_meta
             .as_ref()
@@ -1081,6 +1092,7 @@ impl MvpAgent {
         self.maybe_spawn_interactive_trust_prompt(
             &session_id,
             cwd.as_path(),
+            client_interactive_trust,
             remote_settings.as_ref(),
         );
         self.heal_orphaned_subagents(&session_id, &unfinished_subagents)

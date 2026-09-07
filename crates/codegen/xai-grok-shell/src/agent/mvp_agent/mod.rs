@@ -774,6 +774,12 @@ pub struct MvpAgent {
     /// Set on every `initialize()` (last-client-wins, like `code_nav_enabled`).
     /// Gates the DORMANT agent-to-client trust round-trip in `new_session`/`load_session`.
     /// `Cell<bool>` so `.get()` is a borrow-free copy across await points.
+    ///
+    /// **Fallback only.** Last-client-wins is wrong under a leader, where one client's `initialize` would otherwise
+    /// silence the prompt for every other client's later sessions. `resolve_client_caps` prefers the per-session
+    /// `_meta.interactiveTrust` the leader injects for the client that owns the session; this is read only when that
+    /// key is absent, which means a direct stdio connection (one client, so the value is that client's own) or a
+    /// client that registered no opinion.
     interactive_trust_client: std::cell::Cell<bool>,
     /// Workspaces (canonical `workspace_key`) already prompted/decided for the interactive folder-trust round-trip this process.
     /// Dedups re-prompts on `load_session` reconnect and concurrent same-workspace sessions.
