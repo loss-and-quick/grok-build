@@ -242,6 +242,20 @@ fn try_direnv_export(dir: &Path, deadline: Instant) -> DirenvExport {
 }
 
 /// This is the fallback when direnv is not installed.
+/// The bash that evaluates the `.envrc`.
+///
+/// `/bin/bash` first, because an absolute path cannot be redirected by `PATH`. It is not
+/// everywhere, though: a system that does not populate `/bin` (NixOS ships only `/bin/sh`) has
+/// bash on `PATH` alone, and hard-coding the absolute path made every evaluation there fail
+/// closed — a workspace's `.envrc` silently contributed nothing whenever direnv could not export.
+fn bash_program() -> &'static str {
+    if Path::new("/bin/bash").exists() {
+        "/bin/bash"
+    } else {
+        "bash"
+    }
+}
+
 fn load_envrc_via_bash(dir: &Path, deadline: Instant) -> Option<HashMap<String, String>> {
     if Instant::now() >= deadline {
         return None;
@@ -268,7 +282,7 @@ printf '%s' '{sentinel}'
     let baseline: HashMap<String, String> = std::env::vars().collect();
 
     // Run the script and capture output
-    let mut bash_cmd = Command::new("/bin/bash");
+    let mut bash_cmd = Command::new(bash_program());
     bash_cmd.arg("-c").arg(&script).current_dir(dir);
     let output = match run_with_deadline(bash_cmd, deadline, "bash") {
         // `truncated` is ignored here: the sentinel below is strictly stronger evidence of completeness
@@ -602,6 +616,18 @@ mod tests {
 
         let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).unwrap();
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
+    }
+
+    /// A host without `/bin/bash` must still evaluate: the loader has to reach a real bash, not
+    /// fail open with an empty environment.
+    #[test]
+    fn the_evaluator_finds_a_runnable_bash() {
+        let program = bash_program();
+        let out = Command::new(program).arg("-c").arg("printf ok").output();
+        assert!(
+            out.is_ok_and(|o| o.status.success() && o.stdout == b"ok"),
+            "no runnable bash at {program:?}"
+        );
     }
 
     #[test]
