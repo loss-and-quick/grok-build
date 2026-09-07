@@ -13837,6 +13837,7 @@ dependencies = [
  "xai-grok-plugin-marketplace",
  "xai-grok-plugin-protocol",
  "xai-grok-sandbox",
+ "xai-grok-settings-types",
  "xai-grok-shell",
  "xai-grok-status-line",
  "xai-grok-telemetry",
@@ -14171,6 +14172,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-settings-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "xai-grok-shared"
 version = "0.0.0"
 dependencies = [
@@ -14325,6 +14334,7 @@ dependencies = [
  "xai-grok-sandbox",
  "xai-grok-session-events",
  "xai-grok-session-search",
+ "xai-grok-settings-types",
  "xai-grok-shared",
  "xai-grok-shell-base",
  "xai-grok-shell-session-support",

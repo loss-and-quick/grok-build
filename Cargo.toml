@@ -58,6 +58,7 @@ members = [
     "crates/codegen/xai-grok-secrets",
     "crates/codegen/xai-grok-session-events",
     "crates/codegen/xai-grok-session-search",
+    "crates/codegen/xai-grok-settings-types",
     "crates/codegen/xai-grok-shared",
     "crates/codegen/xai-grok-shell",
     "crates/codegen/xai-grok-shell-base",
@@ -345,6 +346,7 @@ xai-grok-sampler = { path = "crates/codegen/xai-grok-sampler" }
 xai-grok-secrets = { path = "crates/codegen/xai-grok-secrets" }
 xai-grok-session-events = { path = "crates/codegen/xai-grok-session-events" }
 xai-grok-session-search = { path = "crates/codegen/xai-grok-session-search" }
+xai-grok-settings-types = { path = "crates/codegen/xai-grok-settings-types" }
 xai-grok-shared = { path = "crates/codegen/xai-grok-shared" }
 xai-grok-shell = { path = "crates/codegen/xai-grok-shell" }
 xai-grok-shell-base = { path = "crates/codegen/xai-grok-shell-base" }
