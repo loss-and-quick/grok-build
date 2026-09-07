@@ -64,8 +64,8 @@ impl MvpAgent {
             )
         };
         crate::agent::subagent::SubagentValidationContext {
+            plugin_registry: self.plugin_registry_handle.registry_for_root(&parent_cwd),
             parent_cwd,
-            plugin_registry: self.plugin_registry_handle.snapshot(),
             subagent_toggle,
             allowed_subagent_types,
             cli_agent_names,
@@ -285,7 +285,7 @@ impl MvpAgent {
                 .is_feature_enabled(crate::agent::config::Feature::BackendTools),
             respect_gitignore: self.cfg.borrow().respect_gitignore,
             path_not_found_hints: self.cfg.borrow().path_not_found_hints,
-            plugin_registry: self.plugin_registry_handle.snapshot(),
+            plugin_registry: self.plugin_registry_handle.registry_for_root(&parent_cwd),
             models_manager: self.models_manager.clone(),
             file_tool_overrides: {
                 let cfg = self.cfg.borrow();

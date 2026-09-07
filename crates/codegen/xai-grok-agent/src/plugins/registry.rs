@@ -443,27 +443,138 @@ impl PluginRegistry {
 
 // ── Shared handle for cross-thread reload ─────────────────────────────
 
-/// Builds per-session registries and rebuilds the shared "latest" registry for new sessions.
-#[derive(Debug, Clone)]
+/// Builds per-session registries and holds the process's per-root registries.
+#[derive(Clone)]
 pub struct SharedPluginRegistryHandle {
-    /// The latest registry, rebuilt on `/plugins reload`.
-    /// New sessions clone from here. Running sessions keep their snapshot.
+    /// The launch-directory registry, rebuilt on `/plugins reload`.
+    ///
+    /// Only callers with no working directory at all read this — ACP
+    /// `initialize` advertising plugin OAuth methods, `authenticate` building
+    /// the sign-in seam, a `commands/list` pull that carried no `cwd`. Anything
+    /// holding a root goes through [`Self::registry_for_root`] instead, because
+    /// project-scoped plugins differ by directory and a single cell cannot
+    /// answer for more than one of them.
     inner: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<PluginRegistry>>>>,
+    /// Per-root registries, keyed by canonical root. Built on first use for a
+    /// root and dropped when the last session there is gone, so a leader holds
+    /// one entry per *live* root rather than one per root ever visited.
+    #[allow(clippy::type_complexity)]
+    by_root:
+        std::sync::Arc<std::sync::RwLock<HashMap<PathBuf, Option<std::sync::Arc<PluginRegistry>>>>>,
+    /// Resolves a root's discovery inputs; see [`Self::set_root_context_resolver`].
+    root_context: std::sync::Arc<std::sync::RwLock<Option<RootPluginContextFn>>>,
     /// CLI `--plugin-dir` paths from process startup, preserved across reloads.
     cli_plugin_dirs: std::sync::Arc<Vec<std::path::PathBuf>>,
+}
+
+/// Resolves the two cwd-dependent inputs to plugin discovery for an arbitrary
+/// root: the effective `[plugins]` config for that tree, and its folder-trust
+/// verdict (which gates Project-scope plugins).
+///
+/// Both live above this crate — the config merge walks ancestor project
+/// configs, and the verdict comes from the shell's folder-trust store — so the
+/// embedder installs this once and [`SharedPluginRegistryHandle`] calls it per
+/// root.
+pub type RootPluginContextFn =
+    std::sync::Arc<dyn Fn(&Path) -> (super::discovery::DiscoveryConfig, bool) + Send + Sync>;
+
+/// Hand-written because [`RootPluginContextFn`] is a closure. Reports the roots
+/// held and whether a resolver is installed, which is what a debug dump of this
+/// handle is actually for.
+impl std::fmt::Debug for SharedPluginRegistryHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedPluginRegistryHandle")
+            .field("launch_dir_registry", &self.inner.read().unwrap())
+            .field(
+                "roots",
+                &self.by_root.read().unwrap().keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "has_root_resolver",
+                &self.root_context.read().unwrap().is_some(),
+            )
+            .field("cli_plugin_dirs", &self.cli_plugin_dirs)
+            .finish()
+    }
 }
 
 impl SharedPluginRegistryHandle {
     pub fn new(registry: Option<PluginRegistry>, cli_plugin_dirs: Vec<std::path::PathBuf>) -> Self {
         Self {
             inner: std::sync::Arc::new(std::sync::RwLock::new(registry.map(std::sync::Arc::new))),
+            by_root: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
+            root_context: std::sync::Arc::new(std::sync::RwLock::new(None)),
             cli_plugin_dirs: std::sync::Arc::new(cli_plugin_dirs),
         }
     }
 
-    /// Get the current registry snapshot (cheap Arc clone).
+    /// The launch-directory registry (cheap Arc clone).
+    ///
+    /// Correct only for a caller that has no root to speak of. A caller holding
+    /// one wants [`Self::registry_for_root`]; reading this instead hands it
+    /// whichever directory the process launched in, or whichever session
+    /// reloaded plugins last.
     pub fn snapshot(&self) -> Option<std::sync::Arc<PluginRegistry>> {
         self.inner.read().unwrap().clone()
+    }
+
+    /// Install the resolver consulted when a root first needs a registry.
+    ///
+    /// Without one, [`Self::registry_for_root`] can only fall back to the
+    /// launch-directory snapshot — the pre-existing behaviour, kept so an
+    /// embedder that never installs a resolver is not silently left with no
+    /// plugins at all.
+    pub fn set_root_context_resolver(&self, resolver: RootPluginContextFn) {
+        *self.root_context.write().unwrap() = Some(resolver);
+    }
+
+    /// Canonical key for the per-root map. Falls back to the raw path when the
+    /// root does not resolve, so two spellings of a live tree still share one
+    /// entry.
+    fn root_key(root: &Path) -> PathBuf {
+        dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    }
+
+    /// The registry serving `root`: the plugins discovered from that tree,
+    /// under that tree's own folder-trust verdict and `[plugins]` config.
+    ///
+    /// Memoized per root. A reload drops every entry (a plugin
+    /// enable/disable/add/remove changes what *any* root discovers), so a
+    /// memoized registry is never staler than the last reload.
+    ///
+    /// Carries no per-session `_meta.pluginDirs`: those belong to one session,
+    /// not to its root, and sessions that have them rebuild their own view via
+    /// [`Self::build_for_cwd`].
+    pub fn registry_for_root(&self, root: &Path) -> Option<std::sync::Arc<PluginRegistry>> {
+        let key = Self::root_key(root);
+        if let Some(existing) = self.by_root.read().unwrap().get(&key) {
+            return existing.clone();
+        }
+        let Some(resolve) = self.root_context.read().unwrap().clone() else {
+            return self.snapshot();
+        };
+        // Built outside the map lock: the resolver reads config off disk and
+        // discovery walks the tree, and an unrelated root must not queue behind
+        // that.
+        let (disk_config, project_trusted) = resolve(&key);
+        let built = self.build_for_cwd(&key, &disk_config, &[], project_trusted);
+        let mut map = self.by_root.write().unwrap();
+        // A concurrent caller may have inserted while we were building; prefer
+        // theirs so one root never ends up with two registries in flight.
+        map.entry(key).or_insert(built).clone()
+    }
+
+    /// Drop `root`'s memoized registry. The caller is responsible for checking
+    /// that no live session is rooted there — this keeps a leader's entry count
+    /// bounded by live roots rather than by roots opened over its lifetime.
+    pub fn release_root(&self, root: &Path) {
+        self.by_root.write().unwrap().remove(&Self::root_key(root));
+    }
+
+    /// Roots currently holding a memoized registry.
+    #[cfg(test)]
+    pub(crate) fn root_count(&self) -> usize {
+        self.by_root.read().unwrap().len()
     }
 
     /// The read-only `commands/list` pull and the reload fan-out also call this, so it must not refresh or mutate local installs on disk.
@@ -539,7 +650,15 @@ impl SharedPluginRegistryHandle {
         );
     }
 
-    /// Rebuild the shared registry from disk and replace the shared state.
+    /// Rebuild `cwd`'s registry from disk, replacing both that root's entry and
+    /// the launch-directory snapshot.
+    ///
+    /// Every *other* root's memoized entry is dropped rather than overwritten.
+    /// A reload re-reads global plugin config and re-copies local installs, so
+    /// what any root discovers may have changed — but only `cwd`'s new registry
+    /// was discovered against `cwd`. Handing it to a session rooted elsewhere
+    /// is what made a reload under one root change what every other root saw;
+    /// dropping instead lets each root rebuild for itself on next use.
     ///
     /// `cwd` should be the session's working directory.
     /// `disk_config` should be freshly loaded from config.toml.
@@ -570,11 +689,22 @@ impl SharedPluginRegistryHandle {
         config.populate_plugin_lists(&discovered);
         let registry =
             PluginRegistry::from_discovered(discovered, &config.disabled, &config.enabled);
-        *self.inner.write().unwrap() = if registry.is_empty() {
+        let rebuilt = if registry.is_empty() {
             None
         } else {
             Some(std::sync::Arc::new(registry))
         };
+        *self.inner.write().unwrap() = rebuilt.clone();
+        {
+            let mut map = self.by_root.write().unwrap();
+            map.clear();
+            // `cwd`'s entry is seeded from the build just done rather than left
+            // to a lazy rebuild, so the reloading session's own root does not
+            // pay for a second discovery walk on its next read.
+            if let Some(cwd) = cwd {
+                map.insert(Self::root_key(cwd), rebuilt);
+            }
+        }
         count
     }
 }
@@ -1668,5 +1798,232 @@ mod tests {
             }),
         );
         assert!(reg.oauth_login_providers().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod per_root_tests {
+    use std::path::{Path, PathBuf};
+
+    use serial_test::serial;
+
+    use super::super::discovery::DiscoveryConfig;
+    use super::*;
+
+    /// RAII env var guard: discovery reads `HOME`/`GROK_HOME` for user-scope
+    /// plugins, so a test must point them somewhere empty and put them back.
+    /// Local copy — this crate has no test-support dependency.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let prev = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    /// A root whose `[plugins].paths` names one plugin of its own — the shape
+    /// `resolve_effective_plugins_config` produces from a tree's own
+    /// `.grok/config.toml`, and the reason two roots discover different plugins.
+    fn root_with_plugin(parent: &Path, root_name: &str, plugin: &str) -> PathBuf {
+        let root = parent.join(root_name);
+        let plugin_dir = root.join("plugins").join(plugin);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            format!(r#"{{"name":"{plugin}"}}"#),
+        )
+        .unwrap();
+        root
+    }
+
+    /// The resolver the shell installs, in miniature: each root answers with
+    /// its own discovery config.
+    fn handle_for(roots: Vec<(PathBuf, String)>) -> SharedPluginRegistryHandle {
+        let handle = SharedPluginRegistryHandle::new(None, vec![]);
+        handle.set_root_context_resolver(std::sync::Arc::new(move |root: &Path| {
+            let config_paths = roots
+                .iter()
+                .filter(|(r, _)| r == root)
+                .map(|(r, p)| r.join("plugins").join(p))
+                .collect();
+            (
+                DiscoveryConfig {
+                    config_paths,
+                    ..Default::default()
+                },
+                true,
+            )
+        }));
+        handle
+    }
+
+    /// A `/plugins reload` run from a session rooted at `/a` must not change
+    /// what a session rooted at `/b` discovers.
+    ///
+    /// The shared registry used to be one cell that `reload` overwrote with the
+    /// reloading session's cwd, so every other root — a git worktree under
+    /// `~/.grok/worktrees/…`, a desktop client's chosen workspace — silently
+    /// started reading `/a`'s project plugins.
+    #[test]
+    #[serial]
+    fn reload_in_one_root_leaves_another_roots_registry_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _home = EnvVarGuard::set("HOME", &home);
+        let _grok = EnvVarGuard::set("GROK_HOME", &home);
+
+        let root_a = root_with_plugin(tmp.path(), "a", "alpha");
+        let root_b = root_with_plugin(tmp.path(), "b", "beta");
+        let handle = handle_for(vec![
+            (root_a.clone(), "alpha".to_string()),
+            (root_b.clone(), "beta".to_string()),
+        ]);
+
+        let names = |root: &Path| -> Vec<String> {
+            handle
+                .registry_for_root(root)
+                .map(|r| {
+                    let mut n: Vec<String> = r
+                        .enabled_plugins()
+                        .into_iter()
+                        .map(|p| p.name.clone())
+                        .collect();
+                    n.sort();
+                    n
+                })
+                .unwrap_or_default()
+        };
+
+        assert_eq!(names(&root_a), vec!["alpha".to_string()]);
+        assert_eq!(names(&root_b), vec!["beta".to_string()]);
+
+        // The clobber: a session rooted at `/a` reloads plugins, with `/a`'s own
+        // discovery config — the shape `reload_plugins_impl` passes.
+        handle.reload(
+            Some(&root_a),
+            &DiscoveryConfig {
+                config_paths: vec![root_a.join("plugins").join("alpha")],
+                ..Default::default()
+            },
+            true,
+            false,
+        );
+
+        // The regression: `/a`'s freshly discovered `alpha` must not become
+        // `/b`'s answer.
+        assert_eq!(
+            names(&root_b),
+            vec!["beta".to_string()],
+            "a reload under one root must not hand its plugins to another root"
+        );
+        assert_eq!(names(&root_a), vec!["alpha".to_string()]);
+    }
+
+    /// A reload drops other roots' memoized registries rather than serving them
+    /// from before the reload.
+    ///
+    /// A reload re-reads global plugin config and re-copies local installs, so
+    /// what `/b` discovers may have changed even though `/a` is the root that
+    /// reloaded. Memoizing without this would trade the clobber for a stale
+    /// read: `/b` would keep its pre-reload plugins until its last session
+    /// closed.
+    #[test]
+    #[serial]
+    fn reload_invalidates_other_roots_rather_than_serving_them_stale() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _home = EnvVarGuard::set("HOME", &home);
+        let _grok = EnvVarGuard::set("GROK_HOME", &home);
+
+        let root_a = root_with_plugin(tmp.path(), "a", "alpha");
+        let root_b = root_with_plugin(tmp.path(), "b", "beta");
+
+        // Counts how often `/b`'s discovery inputs are resolved, which happens
+        // only when `/b` has no memoized entry.
+        let resolves = std::sync::Arc::new(AtomicUsize::new(0));
+        let handle = SharedPluginRegistryHandle::new(None, vec![]);
+        {
+            let (b, resolves) = (root_b.clone(), resolves.clone());
+            handle.set_root_context_resolver(std::sync::Arc::new(move |root: &Path| {
+                if root == b {
+                    resolves.fetch_add(1, Ordering::Relaxed);
+                }
+                // `[plugins].paths` entries name a plugin dir, not the dir above it.
+                let plugin = if root.ends_with("a") { "alpha" } else { "beta" };
+                (
+                    DiscoveryConfig {
+                        config_paths: vec![root.join("plugins").join(plugin)],
+                        ..Default::default()
+                    },
+                    true,
+                )
+            }));
+        }
+
+        handle.registry_for_root(&root_b);
+        handle.registry_for_root(&root_b);
+        assert_eq!(
+            resolves.load(Ordering::Relaxed),
+            1,
+            "a root's registry is memoized between reloads"
+        );
+
+        handle.reload(Some(&root_a), &DiscoveryConfig::default(), true, false);
+
+        handle.registry_for_root(&root_b);
+        assert_eq!(
+            resolves.load(Ordering::Relaxed),
+            2,
+            "a reload must drop other roots' entries so they rebuild from the new disk state"
+        );
+    }
+
+    /// Releasing a root drops its entry, so a leader that opens and closes
+    /// sessions across many roots does not accumulate one registry per root
+    /// ever visited.
+    #[test]
+    #[serial]
+    fn release_root_drops_the_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _home = EnvVarGuard::set("HOME", &home);
+        let _grok = EnvVarGuard::set("GROK_HOME", &home);
+
+        let root_a = root_with_plugin(tmp.path(), "a", "alpha");
+        let handle = handle_for(vec![(root_a.clone(), "alpha".to_string())]);
+
+        handle.registry_for_root(&root_a);
+        assert_eq!(handle.root_count(), 1);
+        handle.release_root(&root_a);
+        assert_eq!(handle.root_count(), 0);
+    }
+
+    /// Without a resolver the handle falls back to the launch-directory
+    /// registry, so an embedder that never installs one is not silently left
+    /// with no plugins at all.
+    #[test]
+    #[serial]
+    fn no_resolver_falls_back_to_the_launch_dir_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = SharedPluginRegistryHandle::new(None, vec![]);
+        assert!(handle.registry_for_root(tmp.path()).is_none());
+        assert_eq!(handle.root_count(), 0);
     }
 }

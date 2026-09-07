@@ -544,7 +544,10 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
     let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
         admitted.clone(),
         &cwd,
-        agent.plugin_registry_handle().snapshot().as_deref(),
+        agent
+            .plugin_registry_handle()
+            .registry_for_root(&cwd)
+            .as_deref(),
         &compat,
     );
 
@@ -653,7 +656,10 @@ async fn handle_reload_all_mcp_servers(agent: &MvpAgent) -> ExtResult {
             &handle.cmd_tx,
             &cwd,
             handle.initial_client_mcp_servers.clone(),
-            agent.plugin_registry_handle().snapshot().as_deref(),
+            agent
+                .plugin_registry_handle()
+                .registry_for_root(&cwd)
+                .as_deref(),
             &compat,
         ) {
             updated += 1;
@@ -712,7 +718,10 @@ async fn handle_reload_project_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequ
         let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
             handle.initial_client_mcp_servers.clone(),
             cwd,
-            agent.plugin_registry_handle().snapshot().as_deref(),
+            agent
+                .plugin_registry_handle()
+                .registry_for_root(cwd)
+                .as_deref(),
             &agent.cfg.borrow().compat_resolved,
         );
 

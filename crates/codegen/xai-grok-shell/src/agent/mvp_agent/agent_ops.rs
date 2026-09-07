@@ -383,9 +383,10 @@ impl MvpAgent {
     ///
     /// Boot-time discovery was deferred past ACP `initialize`, leaving `plugin_registry_handle` empty.
     /// The cwd-to-git-root and user/marketplace walks stalled grok-desktop's first `initialize`.
-    /// That shared snapshot still backs the launch-dir plugin MCP/LSP merges read in `resolve_mcp_servers` and the session LSP build.
+    /// That launch-dir registry still backs the callers with no working directory to resolve against:
+    /// the `initialize` plugin-OAuth advertisement, the `authenticate` sign-in seam, and a `commands/list` pull that carried no `cwd`.
     /// So populate it lazily, off the `initialize` critical path, on the first session-creating call.
-    /// Runs the discovery walk once; per-session `build_for_cwd` still re-resolves project-scoped plugins for each session's own cwd.
+    /// Runs the discovery walk once; every caller holding a root reads `registry_for_root` instead, which discovers that tree's own project-scoped plugins.
     pub(super) fn ensure_plugin_registry(&self) {
         if self.plugin_registry_initialized.replace(true) {
             return;
@@ -538,7 +539,7 @@ impl MvpAgent {
         let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
             admitted.clone(),
             cwd,
-            self.plugin_registry_handle.snapshot().as_deref(),
+            self.plugin_registry_handle.registry_for_root(cwd).as_deref(),
             &compat,
         );
         (admitted, merged)
@@ -2624,6 +2625,21 @@ impl MvpAgent {
             #[cfg(test)]
             tier_recheck_run_count: std::cell::Cell::new(0),
         };
+        // The plugin registry serves every root in the process, so a session
+        // rooted outside the launch dir must discover its own project plugins
+        // rather than inherit the launch dir's. `project_scope_allowed` reads
+        // the verdict already recorded for that root — the session's own spawn
+        // resolve records it with the real remote settings — which is the same
+        // stored-verdict read `preserve_session_plugin_dirs` and session spawn
+        // use, so no root is gated on a verdict resolved a different way.
+        instance
+            .plugin_registry_handle
+            .set_root_context_resolver(std::sync::Arc::new(|root: &std::path::Path| {
+                (
+                    crate::config::resolve_effective_plugins_config(root).to_discovery_config(),
+                    folder_trust::project_scope_allowed(root),
+                )
+            }));
         instance
             .auth_manager
             .configure_refresher(
@@ -3227,11 +3243,21 @@ impl MvpAgent {
             .deliver_panel_action(plugin, panel_id, button_id, inputs)
             .await
     }
-    /// Get a snapshot of the shared plugin registry (for `x.ai/plugins/list`).
+    /// The launch-dir plugin registry, for the `x.ai/plugins/list` pull that
+    /// names no session. A caller holding a working directory wants
+    /// [`Self::plugin_registry_for_root`].
     pub(crate) fn plugin_registry_snapshot(
         &self,
     ) -> Option<std::sync::Arc<xai_grok_agent::plugins::PluginRegistry>> {
         self.plugin_registry_handle.snapshot()
+    }
+    /// The plugin registry `cwd` discovers, for the MCP and prompt-metadata
+    /// paths that each already resolve a session's own working directory.
+    pub(crate) fn plugin_registry_for_root(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Option<std::sync::Arc<xai_grok_agent::plugins::PluginRegistry>> {
+        self.plugin_registry_handle.registry_for_root(cwd)
     }
     /// Returns an upload method, or `None` when trace uploads are disabled.
     pub(crate) async fn trace_upload_config(
@@ -4609,7 +4635,13 @@ impl MvpAgent {
             .borrow()
             .is_feature_enabled(crate::agent::config::Feature::LspTools);
         if lsp_tools_enabled && tool_ctx.lsp.is_none() {
-            let snapshot = self.plugin_registry_handle.snapshot();
+            // This session's own root, not the launch dir: the plugins
+            // contributing LSP servers here must be the ones the tree below
+            // `tool_ctx.cwd` actually discovers, matching the root the very
+            // next `load_servers_with_plugins_sourced` call reads.
+            let snapshot = self
+                .plugin_registry_handle
+                .registry_for_root(tool_ctx.cwd.as_path());
             let active: Vec<_> = snapshot
                 .iter()
                 .flat_map(|reg| reg.active_plugins())

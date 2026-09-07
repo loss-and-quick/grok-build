@@ -124,7 +124,10 @@ pub(crate) async fn apply(
             let resolved = xai_grok_agent::discovery::by_name_in_cwd_with_plugins(
                 required,
                 cwd,
-                agent.plugin_registry_handle.snapshot().as_deref(),
+                agent
+                    .plugin_registry_handle
+                    .registry_for_root(cwd)
+                    .as_deref(),
             );
             match resolved {
                 Some(def) => {

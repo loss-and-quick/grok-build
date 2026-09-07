@@ -183,12 +183,27 @@ impl MvpAgent {
     /// That runs even on idle-unload, so a wedged session's tree is still reclaimed.
     pub(super) fn take_session(&self, id: &acp::SessionId) -> Option<SessionHandle> {
         let handle = self.session_registry.take_resident(id);
-        if let Some(handle) = &handle
-            && let Some(scope) = &handle.tool_context.process_scope
-        {
-            scope.kill_all();
+        if let Some(handle) = &handle {
+            if let Some(scope) = &handle.tool_context.process_scope {
+                scope.kill_all();
+            }
+            self.release_plugin_root(&handle.info.cwd);
         }
         handle
+    }
+    /// Drop a root's memoized plugin registry once the last session there is
+    /// gone, so a leader holds one entry per live root rather than one per root
+    /// opened over its lifetime. Runs after the handle has left residency, so
+    /// the departing session is not counted against itself.
+    fn release_plugin_root(&self, cwd: &str) {
+        let cwd = std::path::Path::new(cwd);
+        let mut still_live = false;
+        self.session_registry.for_each_resident(|_, h| {
+            still_live |= std::path::Path::new(&h.info.cwd) == cwd;
+        });
+        if !still_live {
+            self.plugin_registry_handle.release_root(cwd);
+        }
     }
     /// Remove a session without finalizing; it stays resumable on disk.
     pub(crate) fn remove_session(&self, id: &acp::SessionId) {

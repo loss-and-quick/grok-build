@@ -887,7 +887,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     );
 
     let compat = agent.cfg.borrow().compat_resolved;
-    let plugin_registry_snapshot = agent.plugin_registry_snapshot();
+    let plugin_registry_for_cwd = agent.plugin_registry_for_root(&cwd);
     let local_servers = crate::util::config::load_mcp_servers(&cwd, &compat);
     let disabled_tools = crate::util::config::get_all_mcp_disabled_tools(&cwd);
     let mut servers = build_mcp_catalog_with_gateway_tools(
@@ -898,7 +898,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let disabled_names = crate::util::config::disabled_mcp_server_names(&cwd);
     let setup_entries = crate::util::config::collect_mcp_setup_configs(
         &cwd,
-        plugin_registry_snapshot.as_deref(),
+        plugin_registry_for_cwd.as_deref(),
         &compat,
     );
     let preferences = crate::util::config::load_mcp_preferences().file();
@@ -958,7 +958,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let catalog_names: HashSet<String> = servers.iter().map(|s| s.name.clone()).collect();
     let discovery = crate::session::managed_mcp::McpDiscoveryInputs {
         cwd: &cwd,
-        plugin_registry: plugin_registry_snapshot.as_deref(),
+        plugin_registry: plugin_registry_for_cwd.as_deref(),
         compat: &compat,
     };
     let stubs = crate::util::config::reenableable_disabled_stubs(
@@ -1077,7 +1077,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     // Tag servers with the owning plugin
     // This covers both a plugin's .mcp.json and its inline plugin.json mcpServers via the registry's deduped owner map
-    if let Some(registry) = plugin_registry_snapshot.as_ref() {
+    if let Some(registry) = plugin_registry_for_cwd.as_ref() {
         for entry in &mut servers {
             if entry.source_label.is_none()
                 && let Some(plugin_name) = registry.mcp_server_owner(&entry.name)
@@ -1438,7 +1438,7 @@ async fn handle_auth_trigger(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let setup_entries = crate::util::config::collect_mcp_setup_configs(
         &cwd,
-        agent.plugin_registry_snapshot().as_deref(),
+        agent.plugin_registry_for_root(&cwd).as_deref(),
         &agent.cfg.borrow().compat_resolved,
     );
     let preferences = crate::util::config::load_mcp_preferences().file();
@@ -1506,7 +1506,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let setup_entries = crate::util::config::collect_mcp_setup_configs(
         &cwd,
-        agent.plugin_registry_snapshot().as_deref(),
+        agent.plugin_registry_for_root(&cwd).as_deref(),
         &agent.cfg.borrow().compat_resolved,
     );
     let entry = setup_entries
@@ -1568,7 +1568,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     };
 
     // Presence check with personal disable ignored (no config write yet).
-    let plugin_reg = agent.plugin_registry_snapshot();
+    let plugin_reg = agent.plugin_registry_for_root(&cwd);
     let compat = agent.cfg.borrow().compat_resolved;
     let discovery = crate::session::managed_mcp::McpDiscoveryInputs {
         cwd: &cwd,
@@ -1725,7 +1725,7 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             crate::session::managed_mcp::merge_managed_mcp_servers_with_policy(
                 vec![],
                 &cwd,
-                agent.plugin_registry_snapshot().as_deref(),
+                agent.plugin_registry_for_root(&cwd).as_deref(),
                 &agent.cfg.borrow().compat_resolved,
             );
         let found = all_servers_with_policy
