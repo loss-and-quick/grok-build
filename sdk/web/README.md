@@ -1,0 +1,140 @@
+# @grok-build/web
+
+A browser client for `grok agent gateway`. It lists the leader's sessions
+**grouped by working directory**, attaches to one, streams its transcript, sends
+prompts, answers permission prompts, and renders plugin panels.
+
+It is a proof that the seam works, not a product. The TUI is still the complete
+client; what this shows is that a second one needs no privileged path — every
+byte it moves is a frame the pager also moves.
+
+Why it lives in `sdk/`: it is the third consumer of the generated artifacts that
+already live here. `sdk/theme` gives it every colour, `sdk/plugin` gives it the
+panel types, `sdk/settings` gives it the settings catalog. Putting it anywhere
+else would mean copying one of those, and copying is the failure this whole
+arrangement exists to prevent.
+
+## Running it against a live gateway
+
+You need a `grok` built from this tree — `agent gateway` landed recently and a
+released binary will reject the subcommand.
+
+```sh
+cargo build -p xai-grok-pager-bin       # produces target/debug/xai-grok-pager
+```
+
+**1. Start the gateway.** It prints its own secret and URL.
+
+```sh
+./target/debug/xai-grok-pager agent gateway
+#   WebSocket URL: ws://127.0.0.1:2420/ws?server-key=<secret>
+```
+
+It binds loopback and attaches each browser connection to the leader the TUI is
+already talking to, so a running `grok` and this page share sessions. Pass
+`--secret` (or `GROK_AGENT_SECRET`) to pin the secret instead of generating one.
+
+**2. Build and serve the page.**
+
+```sh
+cd sdk/web
+bun install
+bun run build      # bundles src/main.ts into public/bundle.js
+bun run serve      # http://127.0.0.1:2421, static files only
+```
+
+The dev server never talks to the leader: the page opens its own WebSocket, so
+the secret goes from the browser to the gateway and through nothing else.
+`GROK_WEB_PORT` moves the page's port; the host is fixed to `127.0.0.1`.
+
+**3. Connect.** Paste the gateway URL (`ws://127.0.0.1:2420/ws`, without the
+query string) and the secret into the two fields, and press Connect. The
+sidebar fills with directories; each holds its sessions. Click one to attach —
+history replays, live updates follow — or press **+ session here** to start a
+new session in that directory.
+
+The theme picker offers the six palettes from `sdk/theme`. Nothing in this
+client names a colour; see "Colour" below.
+
+## Trying a plugin panel
+
+`test/fixtures/panel-probe` is a plugin that publishes one panel using all five
+`PanelBlock` kinds. It knows nothing about browsers — it is the same publish the
+pager renders.
+
+```sh
+GROK_HOME=/tmp/…                                     # or your real ~/.grok
+cp -rL sdk/web/test/fixtures/panel-probe "$GROK_HOME/plugins/panel-probe"
+```
+
+then add it to `config.toml`:
+
+```toml
+[plugins]
+enabled = ["panel-probe"]
+```
+
+Start a session and the panel appears. Type into a field and press **Echo**: the
+press routes back through `x.ai/plugins/panel_action`, the plugin republishes the
+panel with what it received, and the new version replaces the old one.
+
+## Tests
+
+```sh
+bun test          # unit tests; no gateway needed
+bunx tsc --noEmit
+```
+
+`test/live.test.ts` drives the real `App` against a running gateway and is
+skipped unless you point it at one:
+
+```sh
+GROK_WEB_LIVE_URL=ws://127.0.0.1:2420/ws \
+GROK_WEB_LIVE_SECRET=<secret> \
+bun test test/live.test.ts
+```
+
+It needs the `panel-probe` fixture installed and a model provider configured,
+because it asserts on a real panel and a real streamed reply.
+
+## Colour
+
+Every colour comes from `sdk/theme/src/generated/themes.ts`, which is serialized
+from the pager's own Rust `Theme` constructors. `src/theme.ts` turns each role
+into a CSS custom property and `public/style.css` only ever names those
+properties — there is not one literal colour in this package. If a colour you
+want is missing from the generated set, that is a finding, not a licence to
+invent one.
+
+Two translations are this client's own, because only a browser needs them:
+
+- `"reset"` becomes `canvas` for a background role and `canvastext` for a
+  foreground one, as the generated file's own doc comment prescribes. Which
+  roles are backgrounds is spelled out in `BACKGROUND_ROLES`, and a test fails
+  when a new generated role arrives unclassified.
+- `muted_uses_dim` becomes opacity, reproducing the SGR dim that `Theme::muted`
+  uses when a palette's gray is `"reset"`.
+
+`"idx:N"` — the 256-colour palette — is expressible in `ThemeColor` but the
+generated artifact exports no table beyond ANSI 0–15. No shipped theme uses it,
+and a test fails the day one does.
+
+## Layout
+
+| file | what it holds |
+| --- | --- |
+| `src/wire.ts` | the slice of the protocol this client speaks, and nothing else |
+| `src/client.ts` | JSON-RPC 2.0 over the gateway's WebSocket |
+| `src/roster.ts` | the roster, grouped by `cwd` |
+| `src/transcript.ts` | folding `session/update` into something renderable |
+| `src/panel.ts` | plugin panels, from the generated `Panel*` types |
+| `src/theme.ts` | generated palette to CSS custom properties |
+| `src/app.ts` | the screen |
+
+`src/wire.ts` is hand-written on purpose and the reasoning is at the top of the
+file: the panel types and the palette *are* generated and are imported, never
+restated, but the conversational protocol has no generated form to import.
+
+No name in this package appears on the wire. If this client ever needs something
+the protocol cannot say, the answer is a change to the protocol, not a
+client-prefixed method only one client understands.
