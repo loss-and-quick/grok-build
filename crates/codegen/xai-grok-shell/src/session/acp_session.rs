@@ -2311,6 +2311,9 @@ mod managed_gateway_tool_tests {
     }
 }
 #[cfg(test)]
+#[path = "acp_session_tests/gemini_side_calls_tests.rs"]
+mod gemini_side_calls_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/goal/goal_planner_e2e_tests.rs"]
 mod goal_planner_e2e_tests;
 #[cfg(test)]
