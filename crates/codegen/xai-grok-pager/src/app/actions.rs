@@ -1784,8 +1784,10 @@ pub enum Effect {
         session_id: acp::SessionId,
     },
     /// Fetch skills list from the shell (x.ai/skills/list).
-    /// `cwd` is the session's own root, not the leader's: one leader hosts
-    /// sessions rooted in different directories and skill discovery is per-root.
+    /// Both fields name the session's own root, not the leader's: one leader
+    /// hosts sessions rooted in different directories and skill discovery is
+    /// per-root. The shell resolves `session_id` itself; `cwd` only reaches a
+    /// shell old enough to still read it.
     FetchSkillsList {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -1796,8 +1798,9 @@ pub enum Effect {
         session_id: acp::SessionId,
     },
     /// Toggle a skill via x.ai/skills/toggle (enable/disable without restart).
-    /// `cwd` is the session's own root: the shell validates `skill_name` against
-    /// that root's skills before writing the global `[skills].disabled` list.
+    /// The shell validates `skill_name` against the named session's own skills
+    /// before writing the global `[skills].disabled` list; `cwd` names the same
+    /// root for a shell old enough to still read it.
     ToggleSkill {
         agent_id: AgentId,
         session_id: acp::SessionId,

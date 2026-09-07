@@ -2306,6 +2306,7 @@ mod list_running_heal_tests;
 mod process_scope_reclaim;
 mod session_rename_tests;
 mod session_resume_close_tests;
+mod session_root_tests;
 
 // ── Plugin sign-in without a session ────────────────────────────────────
 //

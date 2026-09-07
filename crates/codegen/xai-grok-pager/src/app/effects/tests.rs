@@ -1915,6 +1915,11 @@ async fn skills_requests_send_the_session_root_not_the_process_cwd() {
         .find(|(method, _)| method == "x.ai/skills/list")
         .expect("skills/list sent");
     assert_eq!(
+            list.1["sessionId"], "test-session",
+            "skills/list must name the session so the shell can check the root, got {:?}",
+            list.1
+        );
+    assert_eq!(
             list.1["cwd"], "/roots/b",
             "skills/list must ask about the session's own root, got {:?}",
             list.1
@@ -1923,6 +1928,11 @@ async fn skills_requests_send_the_session_root_not_the_process_cwd() {
         .iter()
         .find(|(method, _)| method == "x.ai/skills/toggle")
         .expect("skills/toggle sent");
+    assert_eq!(
+            toggle.1["sessionId"], "test-session",
+            "skills/toggle must name the session it writes on behalf of, got {:?}",
+            toggle.1
+        );
     assert_eq!(
             toggle.1["cwd"], "/roots/b",
             "skills/toggle validates against the root it names, got {:?}",

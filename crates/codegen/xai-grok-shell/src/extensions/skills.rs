@@ -8,10 +8,13 @@ use xai_grok_agent::prompt::skills::{
 
 use super::ExtResult;
 
-/// Generic params for methods that only need an optional `cwd`.
-#[derive(Debug, Deserialize)]
+/// Generic params for methods that name a session, or fall back to a bare `cwd`.
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CwdParams {
+    /// The session whose root the request is about. Preferred over `cwd`.
+    #[serde(default)]
+    session_id: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
 }
@@ -19,6 +22,9 @@ struct CwdParams {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsAddRequest {
+    /// The session whose root the request is about. Preferred over `cwd`.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// Path to add (directory or SKILL.md file). Supports `~` expansion.
     pub path: String,
     /// Working directory for skill discovery context.
@@ -43,6 +49,9 @@ pub struct SkillsAddResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsRemoveRequest {
+    /// The session whose root the request is about. Preferred over `cwd`.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// Path to remove from config paths.
     pub path: String,
     /// Working directory for skill discovery context.
@@ -70,6 +79,9 @@ pub struct SkillsResetResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SkillsToggleRequest {
+    /// The session whose root the request is about. Preferred over `cwd`.
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub name: String,
     pub enabled: bool,
     /// Working directory for skill discovery context.
@@ -80,8 +92,12 @@ pub(crate) struct SkillsToggleRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsListRequest {
+    /// The session whose root the request is about. Preferred over `cwd`.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// Working directory for skill discovery context.
-    pub cwd: String,
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +122,34 @@ pub struct SkillsConfigResponse {
     pub total_skills: usize,
     pub message: String,
     pub skills: Vec<SkillInfo>,
+}
+
+/// The root a skills request is about.
+///
+/// A leader hosts sessions in several directories, so a client-supplied `cwd`
+/// is a claim the shell cannot check, and `skills/toggle` writes the global
+/// disabled list off the back of it. A named session is checkable, so it wins
+/// outright and the request's own `cwd` is never consulted alongside it.
+/// `cwd` stays for clients that predate `sessionId`; without it they would
+/// fall to the leader's launch directory, which is the confusion itself.
+/// A session that is named but not resident is refused rather than guessed at.
+async fn session_root(
+    agent: &crate::agent::mvp_agent::MvpAgent,
+    session_id: Option<&str>,
+    cwd: Option<&str>,
+) -> Result<String, acp::Error> {
+    let Some(session_id) = session_id else {
+        return Ok(cwd.unwrap_or(".").to_string());
+    };
+    let sid = acp::SessionId::new(session_id);
+    // Waits out an in-flight `session/load`, the same way `workflows/list` does:
+    // a client replaying its session on reconnect must not be told it has none.
+    match agent.session_handle_waiting_for_load(&sid).await {
+        Some(handle) => Ok(handle.info.cwd.clone()),
+        None => Err(acp::Error::resource_not_found(Some(format!(
+            "unknown session id: {session_id}"
+        )))),
+    }
 }
 
 /// Reload skills using the current config for the given working directory.
@@ -276,10 +320,10 @@ pub async fn handle(
     match args.method.as_ref() {
         "x.ai/skills/add" => {
             let req: SkillsAddRequest = serde_json::from_str(args.params.get())?;
-            let cwd = req.cwd.as_deref().unwrap_or(".");
+            let cwd = session_root(agent, req.session_id.as_deref(), req.cwd.as_deref()).await?;
 
             // Resolve to absolute path so config entries work from any cwd.
-            let resolved = resolve_skill_path(&req.path, cwd);
+            let resolved = resolve_skill_path(&req.path, &cwd);
 
             let p = resolved.clone();
             if let Err(e) = cli_config::update_config(|cfg| {
@@ -304,7 +348,7 @@ pub async fn handle(
                 )));
             }
 
-            let skills = reload_skills(cwd, plugin_registry, compat).await;
+            let skills = reload_skills(&cwd, plugin_registry, compat).await;
             let added_count = skills
                 .iter()
                 .filter(|s| s.path.starts_with(&resolved))
@@ -334,10 +378,10 @@ pub async fn handle(
 
         "x.ai/skills/remove" => {
             let req: SkillsRemoveRequest = serde_json::from_str(args.params.get())?;
-            let cwd = req.cwd.as_deref().unwrap_or(".");
+            let cwd = session_root(agent, req.session_id.as_deref(), req.cwd.as_deref()).await?;
 
             // Resolve so relative/tilde paths match what was saved by add.
-            let resolved = resolve_skill_path(&req.path, cwd);
+            let resolved = resolve_skill_path(&req.path, &cwd);
 
             let p = resolved.clone();
             if let Err(e) = cli_config::update_config(|cfg| {
@@ -353,7 +397,7 @@ pub async fn handle(
                 )));
             }
 
-            let skills = reload_skills(cwd, plugin_registry, compat).await;
+            let skills = reload_skills(&cwd, plugin_registry, compat).await;
             let total = skills.len();
             let message = format!(
                 "Removed path {}. {} skill{} remaining.",
@@ -373,9 +417,9 @@ pub async fn handle(
         }
 
         "x.ai/skills/reset" => {
-            let params: CwdParams =
-                serde_json::from_str(args.params.get()).unwrap_or(CwdParams { cwd: None });
-            let cwd = params.cwd.as_deref().unwrap_or(".");
+            let params: CwdParams = serde_json::from_str(args.params.get()).unwrap_or_default();
+            let cwd =
+                session_root(agent, params.session_id.as_deref(), params.cwd.as_deref()).await?;
 
             if let Err(e) = cli_config::update_config(|cfg| {
                 cfg.skills = SkillsConfig::default();
@@ -387,7 +431,7 @@ pub async fn handle(
                 )));
             }
 
-            let skills = reload_skills(cwd, plugin_registry, compat).await;
+            let skills = reload_skills(&cwd, plugin_registry, compat).await;
             let message = "Custom skills config reset".to_string();
 
             super::to_ext_response(Ok(SkillsResetResponse { skills, message }))
@@ -395,7 +439,8 @@ pub async fn handle(
 
         "x.ai/skills/list" => {
             let req: SkillsListRequest = serde_json::from_str(args.params.get())?;
-            let skills = reload_skills(&req.cwd, plugin_registry, compat).await;
+            let cwd = session_root(agent, req.session_id.as_deref(), req.cwd.as_deref()).await?;
+            let skills = reload_skills(&cwd, plugin_registry, compat).await;
             super::to_ext_response(Ok(SkillsListResponse { skills }))
         }
 
@@ -419,18 +464,18 @@ pub async fn handle(
         }
 
         "x.ai/skills/config" => {
-            let params: CwdParams =
-                serde_json::from_str(args.params.get()).unwrap_or(CwdParams { cwd: None });
-            let cwd = params.cwd.as_deref().unwrap_or(".");
+            let params: CwdParams = serde_json::from_str(args.params.get()).unwrap_or_default();
+            let cwd =
+                session_root(agent, params.session_id.as_deref(), params.cwd.as_deref()).await?;
 
             let config = cli_config::load_config().await.skills;
             let paths = config.paths.clone();
             let ignore = config.ignore.clone();
 
-            let skills = reload_skills(cwd, plugin_registry, compat).await;
+            let skills = reload_skills(&cwd, plugin_registry, compat).await;
             let total_skills = skills.len();
 
-            let auto_sources = discover_auto_sources(cwd, &skills);
+            let auto_sources = discover_auto_sources(&cwd, &skills);
 
             let mut msg = String::new();
 
@@ -483,10 +528,10 @@ pub async fn handle(
 
         "x.ai/skills/toggle" => {
             let req: SkillsToggleRequest = serde_json::from_str(args.params.get())?;
-            let cwd = req.cwd.as_deref().unwrap_or(".");
+            let cwd = session_root(agent, req.session_id.as_deref(), req.cwd.as_deref()).await?;
 
             // Validate the skill name exists before modifying config.
-            let current_skills = reload_skills(cwd, plugin_registry, compat).await;
+            let current_skills = reload_skills(&cwd, plugin_registry, compat).await;
             if !current_skills.iter().any(|s| s.name == req.name) {
                 return super::to_ext_response(Err::<SkillsListResponse, _>(anyhow::anyhow!(
                     "Skill '{}' not found",
@@ -556,11 +601,21 @@ mod tests {
         assert_eq!(req.cwd, Some("/project".to_string()));
     }
 
+    /// A shell must keep answering a client that predates `sessionId`, or the
+    /// wire change turns a resolvable request into a hard failure.
     #[test]
     fn test_list_request() {
         let json = r#"{"cwd": "/project"}"#;
         let req: SkillsListRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.cwd, "/project");
+        assert_eq!(req.cwd, Some("/project".to_string()));
+        assert_eq!(req.session_id, None);
+    }
+
+    #[test]
+    fn test_list_request_with_session() {
+        let json = r#"{"sessionId": "sess-1", "cwd": "/project"}"#;
+        let req: SkillsListRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.session_id, Some("sess-1".to_string()));
     }
 
     #[test]
