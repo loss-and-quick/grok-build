@@ -1311,6 +1311,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
                 prev_model_id: switch.prev_model_id,
             });
         }
+        let session_cwd = agent.session.cwd.clone();
         if std::mem::take(&mut agent.pending_extensions_fetch)
             && let Some(modal) = agent.extensions_modal.as_mut()
         {
@@ -1318,6 +1319,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
                 modal,
                 agent_id,
                 hydrate_sid.clone(),
+                session_cwd,
             ));
         }
         effects.push(Effect::RegisterActiveSession {

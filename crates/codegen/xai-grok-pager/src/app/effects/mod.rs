@@ -2790,12 +2790,12 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchSkillsList { agent_id, session_id: _ } => {
+        Effect::FetchSkillsList { agent_id, session_id: _, cwd } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     let params = serde_json::json!({
-                    "cwd": "."
+                    "cwd": cwd.to_string_lossy()
                 });
                     let req = acp::ExtRequest::new(
                         "x.ai/skills/list",
@@ -2871,14 +2871,14 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::ToggleSkill { agent_id, session_id: _, skill_name, enabled } => {
+        Effect::ToggleSkill { agent_id, session_id: _, skill_name, enabled, cwd } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     let params = serde_json::json!({
                     "name": skill_name,
                     "enabled": enabled,
-                    "cwd": ".",
+                    "cwd": cwd.to_string_lossy(),
                 });
                     let req = acp::ExtRequest::new(
                         "x.ai/skills/toggle",

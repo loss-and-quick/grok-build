@@ -1846,6 +1846,89 @@ async fn fetch_workflows_list_sends_session_id() {
     assert_eq!(captured[0]["sessionId"], "test-session");
     assert!(captured[0].get("cwd").is_none());
 }
+/// Skills are discovered per session root, and one leader hosts sessions rooted in
+/// different directories: a `cwd` the leader resolves itself (`"."`) answers about
+/// the wrong root, and `skills/toggle` then writes the global `[skills].disabled`
+/// list after validating the name against a menu the user was never shown.
+#[tokio::test]
+async fn skills_requests_send_the_session_root_not_the_process_cwd() {
+    use std::sync::{Arc, Mutex};
+    use xai_acp_lib::AcpAgentMessage;
+    let captured: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
+    let captured_for_task = captured.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let AcpAgentMessage::ExtMethod(args) = msg {
+                let params: serde_json::Value = serde_json::from_str(
+                        args.request.params.get(),
+                    )
+                    .expect("params JSON");
+                captured_for_task
+                    .lock()
+                    .unwrap()
+                    .push((args.request.method.as_ref().to_string(), params));
+                let body = serde_json::json!({ "result": { "skills": [] } });
+                let raw = serde_json::value::RawValue::from_string(body.to_string())
+                    .expect("serialize skills response");
+                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw))));
+            }
+        }
+    });
+    let session_id = acp::SessionId::new(Arc::from("test-session"));
+    let session_root = PathBuf::from("/roots/b");
+    // The leader this session is attached to was launched somewhere else.
+    let leader_cwd = Path::new("/roots/a");
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+    execute(
+        Effect::FetchSkillsList {
+            agent_id: AgentId(7),
+            session_id: session_id.clone(),
+            cwd: session_root.clone(),
+        },
+        &mut tasks,
+        &tx,
+        leader_cwd,
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let _ = tasks.join_next().await;
+    execute(
+        Effect::ToggleSkill {
+            agent_id: AgentId(7),
+            session_id,
+            skill_name: "review".into(),
+            enabled: false,
+            cwd: session_root.clone(),
+        },
+        &mut tasks,
+        &tx,
+        leader_cwd,
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let _ = tasks.join_next().await;
+    let captured = captured.lock().unwrap();
+    let list = captured
+        .iter()
+        .find(|(method, _)| method == "x.ai/skills/list")
+        .expect("skills/list sent");
+    assert_eq!(
+            list.1["cwd"], "/roots/b",
+            "skills/list must ask about the session's own root, got {:?}",
+            list.1
+        );
+    let toggle = captured
+        .iter()
+        .find(|(method, _)| method == "x.ai/skills/toggle")
+        .expect("skills/toggle sent");
+    assert_eq!(
+            toggle.1["cwd"], "/roots/b",
+            "skills/toggle validates against the root it names, got {:?}",
+            toggle.1
+        );
+}
 /// The debounce arm must echo `query` and `seq` exactly.
 /// Awaits the real 250 ms debounce (tokio's paused clock needs `test-util`, not enabled in this crate).
 #[tokio::test]

@@ -762,10 +762,12 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 modal.skills_data = crate::views::extensions_modal::TabDataState::Loading;
                 modal.workflows_data = crate::views::extensions_modal::TabDataState::Loading;
             }
+            let cwd = agent.session.cwd.clone();
             vec![
                 Effect::FetchSkillsList {
                     agent_id: id,
                     session_id: session_id.clone(),
+                    cwd,
                 },
                 Effect::FetchWorkflowsList {
                     agent_id: id,
@@ -919,6 +921,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 session_id,
                 skill_name,
                 enabled,
+                cwd: agent.session.cwd.clone(),
             }]
         }
         Action::ToggleMcpServer {

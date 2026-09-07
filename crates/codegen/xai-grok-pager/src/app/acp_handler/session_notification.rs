@@ -1459,6 +1459,7 @@ pub(super) fn handle_session_notification_with_origin(
             app.pending_effects.push(Effect::FetchSkillsList {
                 agent_id: parent_id,
                 session_id,
+                cwd: agent.session.cwd.clone(),
             });
         } else if let Some(agent) = app.agents.get_mut(&parent_id)
             && let Some(ref mut modal) = agent.extensions_modal

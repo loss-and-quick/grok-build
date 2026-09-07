@@ -1147,6 +1147,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 mode_id: acp::SessionModeId::new(mode.as_id()),
             });
         }
+        let session_cwd = agent.session.cwd.clone();
         if std::mem::take(&mut agent.pending_extensions_fetch)
             && let Some(modal) = agent.extensions_modal.as_mut()
         {
@@ -1154,6 +1155,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 modal,
                 agent_id,
                 session_id_clone.clone(),
+                session_cwd,
             ));
         }
         effects.push(Effect::RegisterActiveSession {
@@ -1252,6 +1254,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 mode_id: acp::SessionModeId::new(mode.as_id()),
             });
         }
+        let session_cwd = agent.session.cwd.clone();
         if std::mem::take(&mut agent.pending_extensions_fetch)
             && let Some(modal) = agent.extensions_modal.as_mut()
         {
@@ -1259,6 +1262,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 modal,
                 agent_id,
                 session_id_clone.clone(),
+                session_cwd,
             ));
         }
         effects.push(Effect::RegisterActiveSession {

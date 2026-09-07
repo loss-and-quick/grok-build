@@ -90,6 +90,46 @@ fn reload_skills_marks_both_lists_loading_and_refetches() {
     );
 }
 
+/// The skills effects must name the agent's own session root. One leader serves
+/// sessions rooted in different directories, so a request that leaves the root to
+/// the leader lists — and disables — skills belonging to some other session's root.
+#[test]
+fn skills_effects_carry_the_agents_own_session_cwd() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_cwd = std::path::PathBuf::from("/roots/b");
+    app.agents.get_mut(&id).unwrap().session.cwd = session_cwd.clone();
+    app.agents.get_mut(&id).unwrap().extensions_modal =
+        Some(ExtensionsModalState::new(ExtensionsTab::Skills));
+
+    let effects = dispatch(Action::ReloadSkills, &mut app);
+    match effects
+        .iter()
+        .find(|e| matches!(e, Effect::FetchSkillsList { .. }))
+        .expect("reload must refetch skills")
+    {
+        Effect::FetchSkillsList { cwd, .. } => assert_eq!(cwd, &session_cwd),
+        _ => unreachable!(),
+    }
+
+    let effects = dispatch(
+        Action::ToggleSkill {
+            skill_name: "review".into(),
+            enabled: false,
+        },
+        &mut app,
+    );
+    match effects
+        .iter()
+        .find(|e| matches!(e, Effect::ToggleSkill { .. }))
+        .expect("toggle must emit the skills toggle")
+    {
+        Effect::ToggleSkill { cwd, .. } => assert_eq!(cwd, &session_cwd),
+        _ => unreachable!(),
+    }
+}
+
 #[test]
 fn reload_skills_without_session_keeps_loaded_state() {
     use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, TabDataState};

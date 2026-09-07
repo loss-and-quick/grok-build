@@ -369,9 +369,15 @@ pub(super) fn handle_plugin_cta_mcps_loaded(
                     tab: ExtensionsTab::McpServers.telemetry_tab(),
                 });
                 agent.plugin_cta.phase = CtaPhase::Hidden;
+                let session_cwd = agent.session.cwd.clone();
                 if let Some(session_id) = session_id.clone() {
                     if let Some(modal) = agent.extensions_modal.as_mut() {
-                        effects.extend(extensions_modal_tab_fetches(modal, agent_id, session_id));
+                        effects.extend(extensions_modal_tab_fetches(
+                            modal,
+                            agent_id,
+                            session_id,
+                            session_cwd,
+                        ));
                     }
                 } else {
                     agent.pending_extensions_fetch = true;

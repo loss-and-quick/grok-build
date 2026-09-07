@@ -389,6 +389,7 @@ pub(super) fn extensions_modal_tab_fetches(
     modal: &mut crate::views::extensions_modal::ExtensionsModalState,
     agent_id: AgentId,
     session_id: acp::SessionId,
+    session_cwd: std::path::PathBuf,
 ) -> Vec<Effect> {
     let mut effects = vec![
         Effect::FetchHooksList {
@@ -407,6 +408,7 @@ pub(super) fn extensions_modal_tab_fetches(
         Effect::FetchSkillsList {
             agent_id,
             session_id: session_id.clone(),
+            cwd: session_cwd,
         },
         Effect::FetchWorkflowsList {
             agent_id,
@@ -507,10 +509,11 @@ pub(super) fn dispatch_open_extensions_modal(
         return vec![];
     };
     agent.pending_extensions_fetch = false;
+    let session_cwd = agent.session.cwd.clone();
     let Some(modal) = agent.extensions_modal.as_mut() else {
         return vec![];
     };
-    extensions_modal_tab_fetches(modal, id, session_id)
+    extensions_modal_tab_fetches(modal, id, session_id, session_cwd)
 }
 
 /// Open the agents modal, showing all agent definitions.

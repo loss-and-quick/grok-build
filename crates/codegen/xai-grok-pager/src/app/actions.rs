@@ -1784,20 +1784,26 @@ pub enum Effect {
         session_id: acp::SessionId,
     },
     /// Fetch skills list from the shell (x.ai/skills/list).
+    /// `cwd` is the session's own root, not the leader's: one leader hosts
+    /// sessions rooted in different directories and skill discovery is per-root.
     FetchSkillsList {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        cwd: std::path::PathBuf,
     },
     FetchWorkflowsList {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
     /// Toggle a skill via x.ai/skills/toggle (enable/disable without restart).
+    /// `cwd` is the session's own root: the shell validates `skill_name` against
+    /// that root's skills before writing the global `[skills].disabled` list.
     ToggleSkill {
         agent_id: AgentId,
         session_id: acp::SessionId,
         skill_name: String,
         enabled: bool,
+        cwd: std::path::PathBuf,
     },
     /// Execute a marketplace action (install/uninstall/refresh) via ACP.
     MarketplaceAction {
