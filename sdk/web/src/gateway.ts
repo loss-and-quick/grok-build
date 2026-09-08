@@ -3,8 +3,17 @@
 // Everything the wire teaches is imported, not restated: `client.ts` owns the
 // socket and the JSON-RPC framing (including the `_` prefix and the
 // inconsistently wrapped extension replies), `wire.ts` owns the shapes. This
-// module is only the part that has to be reactive — what is connected, what is
-// attached, and what is waiting on an answer.
+// module is only the part that has to be reactive — what is attached, and what
+// is waiting on an answer.
+//
+// **Whether the link is up is deliberately not here.** This module used to
+// carry a `connection()` signal, and it could not go backwards: a socket that
+// closed left it saying `"connected"`, so a restarted leader or a slept laptop
+// produced a page that looked alive and refused every control on it. What can
+// answer that question is the thing that watches the socket — `watchLink` in
+// `client.ts`, read as `link.phase()` in `App.tsx` — and a second, staler
+// answer next to it is worse than none, because the two disagree exactly when
+// it matters.
 import { createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 
@@ -53,8 +62,6 @@ import {
   type SettingRow,
   type SettingsListResponse,
 } from "./wire.ts";
-
-export type Connection = "offline" | "connecting" | "connected" | "failed";
 
 /** A shared permission modal waiting for this client to answer it. */
 export interface PendingPermission {
@@ -163,7 +170,6 @@ export function remember(key: keyof typeof STORE_KEYS, value: string): void {
 }
 
 export function createGateway() {
-  const [connection, setConnection] = createSignal<Connection>("offline");
   const [status, setStatus] = createSignal("not connected");
   const [attached, setAttached] = createSignal<Attached | null>(null);
   // Where the directory picker starts walking. The agent names its own launch
@@ -331,7 +337,6 @@ export function createGateway() {
 
   const connect = async (base: string, secret: string): Promise<void> => {
     client?.close();
-    setConnection("connecting");
     say("connecting…");
     const next = new GatewayClient(() => new WebSocket(gatewayUrl(base, secret)));
     client = next;
@@ -370,10 +375,8 @@ export function createGateway() {
       await settleAuth(initialized);
       await refreshRoster();
       await refreshSettings();
-      setConnection("connected");
       say("connected");
     } catch (e) {
-      setConnection("failed");
       say(`connection failed: ${String(e)}`);
       throw e;
     }
@@ -879,12 +882,10 @@ export function createGateway() {
     );
     setSeedCommands([]);
     setCommands([]);
-    setConnection("offline");
     say("not connected");
   };
 
   return {
-    connection,
     status,
     attached,
     agentCwd,
