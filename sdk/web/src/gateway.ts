@@ -8,6 +8,16 @@
 import { createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 
+import {
+  XAI_API_KEY,
+  drivable,
+  interactiveMethods,
+  noLoginAvailable,
+  selectEagerMethod,
+  startMode,
+  startupNeedsLogin,
+  undrivableMessage,
+} from "./auth.ts";
 import { GatewayClient, gatewayUrl } from "./client.ts";
 import type { PanelAction } from "./panel.ts";
 import { createRoster, type Roster } from "./roster.ts";
@@ -17,6 +27,10 @@ import {
   PROTOCOL_VERSION,
   visibleSettingRows,
   FOLDER_TRUST_DISMISSED,
+  type AuthMethod,
+  type AuthUrlMode,
+  type AuthUrlResponse,
+  type AuthenticateResponse,
   type AvailableCommand,
   type FolderTrustOutcome,
   type FolderTrustRequest,
@@ -67,6 +81,51 @@ export interface PendingFolderTrust {
   /** Leave it undecided, so the next session in this workspace asks again. */
   dismiss: () => void;
 }
+
+/**
+ * Where this connection stands with the agent's authentication.
+ *
+ * `"settled"` is the only state in which `session/new` and `session/load` can
+ * succeed: both go through `spawn_and_register_session`, which refuses with
+ * `auth_required` — "no auth method id provided" — while the agent has no
+ * method installed (`agent_ops.rs:4494`). The whole point of this state is that
+ * a browser can reach `"settled"` on its own instead of waiting for a terminal
+ * to reach it first.
+ */
+export type AuthStatus = "unknown" | "settled" | "needed" | "running";
+
+export interface AuthState {
+  status: AuthStatus;
+  /** Advertised methods, in the agent's order. The order is the contract. */
+  methods: AuthMethod[];
+  /** The method a login is currently being driven on. */
+  driving: string | null;
+  /** Scopes a cancel to one attempt; also discards a stale attempt's results. */
+  requestSeq: number;
+  /** The authorize URL, once the agent has one to give. */
+  url: string | null;
+  /** How the agent is presenting this login; `null` until `get_url` answers. */
+  mode: AuthUrlMode | null;
+  /** The last failure, in the agent's own words. */
+  error: string | null;
+  /**
+   * Set when no login can be started from here at all, with the reason and the
+   * place it can be done instead. Distinct from `error`: an error invites a
+   * retry, and this does not.
+   */
+  blocked: string | null;
+}
+
+/**
+ * How long to keep asking for the authorize URL.
+ *
+ * The pager's own cadence (`pager/src/app/effects/mod.rs:2276`): the receiver
+ * is taken once, so the first poll to arrive after the attempt registers blocks
+ * until the URL is ready and every later one returns nulls immediately. The
+ * retries exist for the poll that arrives *before* the attempt exists.
+ */
+const AUTH_URL_POLLS = 60;
+const AUTH_URL_POLL_GAP_MS = 50;
 
 export interface Attached {
   entry: RosterEntry;
@@ -121,6 +180,16 @@ export function createGateway() {
     terminalOnly: 0,
     values: {},
     locks: {},
+  });
+  const [auth, setAuth] = createStore<AuthState>({
+    status: "unknown",
+    methods: [],
+    driving: null,
+    requestSeq: 0,
+    url: null,
+    mode: null,
+    error: null,
+    blocked: null,
   });
   const [permissions, setPermissions] = createStore<PendingPermission[]>([]);
   const [folderTrusts, setFolderTrusts] = createStore<PendingFolderTrust[]>([]);
@@ -270,6 +339,9 @@ export function createGateway() {
       const seed = initialized._meta?.availableCommands;
       setSeedCommands(Array.isArray(seed) ? seed : []);
       setCommands(seedCommands());
+      // Before the roster, because this is what decides whether attaching to
+      // anything on it can work at all.
+      await settleAuth(initialized);
       await refreshRoster();
       await refreshSettings();
       setConnection("connected");
@@ -279,6 +351,253 @@ export function createGateway() {
       say(`connection failed: ${String(e)}`);
       throw e;
     }
+  };
+
+  /**
+   * Move to the login screen, and say so when there is no login to show.
+   *
+   * A card with a title and no button under it is the shape this avoids: an
+   * agent can advertise a method this build cannot drive, or only credentials
+   * it reads for itself, and in both cases the person needs the reason and the
+   * remedy rather than an empty panel.
+   */
+  const needLogin = (): void => {
+    setAuth(
+      produce((state) => {
+        state.status = "needed";
+        state.blocked = noLoginAvailable(state.methods);
+      }),
+    );
+  };
+
+  /**
+   * Settle authentication from what `initialize` said, exactly as the terminal
+   * settles it (`eager_auth_or_login_fallback`,
+   * `xai-grok-pager/src/acp/mod.rs:735`).
+   *
+   * The order of these branches is the whole behaviour, and none of it is this
+   * client's invention:
+   *
+   * 1. **No methods at all** is fail-closed by construction — a
+   *    `preferred_method` pin with no credential builds an empty list
+   *    (`auth_method.rs:173`). There is nothing to drive, so say where it can
+   *    be fixed instead.
+   * 2. **A restored plugin sign-in** means the agent is already authenticated.
+   *    Authenticating on that method would re-drive the plugin's interactive
+   *    flow, which is the login the restoration exists to spare the user.
+   * 3. **An interactive method first** means `build_auth_methods` found no
+   *    credential: every non-interactive one it finds is ordered ahead of the
+   *    login. Do not authenticate eagerly — that opens a browser nobody asked
+   *    for. Wait for the person.
+   * 4. Otherwise authenticate on the agent's own choice.
+   */
+  const settleAuth = async (initialized: InitializeResponse): Promise<void> => {
+    const methods = initialized.authMethods ?? [];
+    const defaultId = initialized._meta?.defaultAuthMethodId ?? null;
+    setAuth(
+      produce((state) => {
+        state.methods = methods;
+        state.error = null;
+        state.blocked = null;
+        state.driving = null;
+        state.url = null;
+        state.mode = null;
+      }),
+    );
+
+    if (methods.length === 0) {
+      needLogin();
+      say("cannot sign in: the agent advertised no method");
+      return;
+    }
+    if (initialized._meta?.restoredAuthMeta) {
+      setAuth("status", "settled");
+      return;
+    }
+    if (startupNeedsLogin(methods)) {
+      needLogin();
+      say("sign in to start a session");
+      return;
+    }
+
+    const eager = selectEagerMethod(methods, defaultId);
+    if (!eager) {
+      needLogin();
+      return;
+    }
+    try {
+      await client?.request("authenticate", { methodId: eager });
+      setAuth("status", "settled");
+    } catch (e) {
+      // The shell owns the fallthrough between non-interactive methods, and a
+      // failed api-key authenticate must not be promoted to a browser login —
+      // `eager_auth_or_login_fallback` says so, and it can afford to: an
+      // advertised `xai.api_key` means `initialize` already installed a default
+      // method, so sessions still open. Report it and leave the login alone.
+      const advertisesApiKey = methods.some((m) => m.id === XAI_API_KEY);
+      setAuth("error", String(e));
+      if (advertisesApiKey) setAuth("status", "settled");
+      else needLogin();
+    }
+  };
+
+  /**
+   * Ask for the authorize URL until the agent has one.
+   *
+   * Runs alongside the `authenticate` call, never after it: that call does not
+   * return until the whole login has finished, so the URL a person needs in
+   * order to finish it can only be collected concurrently. The retries are for
+   * the poll that arrives before the attempt is registered; once it is, the
+   * first poll blocks until the URL is ready.
+   */
+  const pollAuthUrl = async (requestSeq: number): Promise<void> => {
+    for (let i = 0; i < AUTH_URL_POLLS; i += 1) {
+      if (i > 0) await new Promise((resolve) => setTimeout(resolve, AUTH_URL_POLL_GAP_MS));
+      if (auth.requestSeq !== requestSeq || !client) return;
+      let response: AuthUrlResponse | undefined;
+      try {
+        response = (await client.ext("x.ai/auth/get_url", {})) as AuthUrlResponse;
+      } catch {
+        return;
+      }
+      if (auth.requestSeq !== requestSeq) return;
+      const url = response?.auth_url;
+      if (!url) continue;
+      const mode = response?.mode ?? (response?.external_provider ? "command" : "loopback");
+      setAuth(
+        produce((state) => {
+          state.url = url;
+          // `mode` is authoritative; `external_provider` is what an older agent
+          // sends instead, and it only ever meant "command".
+          state.mode = mode;
+        }),
+      );
+      return;
+    }
+  };
+
+  /**
+   * Start an interactive login on `methodId`, or on the first advertised
+   * interactive method when the caller names none.
+   *
+   * `force_interactive` is what makes this mean "sign in" rather than "use
+   * whatever is cached": a person pressed a button. It clears nothing, so a
+   * login abandoned halfway leaves every running session on this leader
+   * working.
+   */
+  const login = async (methodId?: string): Promise<void> => {
+    if (!client) return;
+    const method = methodId
+      ? auth.methods.find((candidate) => candidate.id === methodId)
+      : interactiveMethods(auth.methods)[0];
+    if (!method) {
+      setAuth("error", "That sign-in is no longer advertised by the agent.");
+      return;
+    }
+    if (!drivable(method)) {
+      setAuth(produce((state) => {
+        state.blocked = undrivableMessage(method.id);
+        state.status = "needed";
+      }));
+      return;
+    }
+
+    const requestSeq = auth.requestSeq + 1;
+    setAuth(
+      produce((state) => {
+        state.requestSeq = requestSeq;
+        state.status = "running";
+        state.driving = method.id;
+        state.url = null;
+        state.mode = startMode(method);
+        state.error = null;
+        state.blocked = null;
+      }),
+    );
+    say("signing in with " + method.name + "…");
+
+    void pollAuthUrl(requestSeq);
+    try {
+      (await client.request("authenticate", {
+        methodId: method.id,
+        _meta: { request_seq: requestSeq, force_interactive: true },
+      })) as AuthenticateResponse;
+      if (auth.requestSeq !== requestSeq) return;
+      setAuth(
+        produce((state) => {
+          state.status = "settled";
+          state.driving = null;
+          state.url = null;
+          state.mode = null;
+        }),
+      );
+      say("signed in");
+      // Both were read before the credential existed.
+      await refreshRoster();
+      await refreshSettings();
+    } catch (e) {
+      if (auth.requestSeq !== requestSeq) return;
+      setAuth(
+        produce((state) => {
+          state.status = "needed";
+          state.driving = null;
+          state.url = null;
+          state.mode = null;
+          state.error = String(e);
+        }),
+      );
+      say("sign-in failed");
+    }
+  };
+
+  /**
+   * Hand back a pasted callback URL or bare code.
+   *
+   * Only meaningful in `loopback` mode, which is why the card offers the box
+   * nowhere else: that is the one flow racing a pasted code against the
+   * callback listener (`oidc/login.rs`, `race_callback_and_client_ui`). The
+   * agent accepts either the whole `http://127.0.0.1:PORT/callback?code=…`
+   * address or the bare code (`parse_pasted_input`), so neither form has to be
+   * explained to the person pasting.
+   *
+   * A paste the agent cannot parse at all — empty, or a URL with no `code` —
+   * is dropped by its bridge and the flow keeps waiting, so nothing is reported
+   * here. A paste that parses but is not a valid code is a different thing: it
+   * is exchanged, refused by the issuer, and ends the attempt. That failure
+   * arrives as the `authenticate` call's own error and lands on the card in the
+   * issuer's words. Verified by pasting a bogus code at a live issuer.
+   */
+  const submitAuthCode = async (code: string): Promise<void> => {
+    if (!client || !code.trim()) return;
+    try {
+      await client.ext("x.ai/auth/submit_code", { code: code.trim() });
+      say("code submitted");
+    } catch (e) {
+      setAuth("error", String(e));
+    }
+  };
+
+  /**
+   * Abandon the login in flight.
+   *
+   * Scoped by `request_seq` so a cancel that arrives late cannot tear down a
+   * login that has already replaced this one — the agent's single flight keys
+   * on the same number (`cancel_for_client_seq`). Bumping the sequence first is
+   * what makes this client discard the abandoned attempt's own results too.
+   */
+  const cancelLogin = (): void => {
+    const requestSeq = auth.requestSeq;
+    setAuth(
+      produce((state) => {
+        state.requestSeq = requestSeq + 1;
+        state.status = "needed";
+        state.driving = null;
+        state.url = null;
+        state.mode = null;
+      }),
+    );
+    void client?.ext("x.ai/auth/cancel", { request_seq: requestSeq }).catch(() => undefined);
+    say("sign-in cancelled");
   };
 
   const refreshRoster = async (): Promise<void> => {
@@ -429,6 +748,20 @@ export function createGateway() {
     client?.close();
     client = null;
     setAttached(null);
+    // A new connection re-reads the advertised methods and re-runs the eager
+    // authenticate. Keeping the old list would offer a login on an agent that
+    // may no longer advertise it.
+    setAuth(
+      produce((state) => {
+        state.status = "unknown";
+        state.methods = [];
+        state.driving = null;
+        state.url = null;
+        state.mode = null;
+        state.error = null;
+        state.blocked = null;
+      }),
+    );
     setSeedCommands([]);
     setCommands([]);
     setConnection("offline");
@@ -443,10 +776,14 @@ export function createGateway() {
     commands,
     roster,
     settings,
+    auth,
     permissions,
     folderTrusts,
     connect,
     disconnect,
+    login,
+    submitAuthCode,
+    cancelLogin,
     attach,
     createSession,
     listDirectory,
