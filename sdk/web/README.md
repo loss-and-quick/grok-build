@@ -249,6 +249,119 @@ not only this one, and it can afford to: a client that answers with an error, an
 undecodable payload or nothing at all leaves the workspace gated exactly as a
 refusal to declare would. Only an explicit `"trust"` unblocks.
 
+## Watching a fan-out
+
+A session that spawns subagents shows them in their own pane above the
+transcript: one row per child, with what it is, what it is doing right now,
+how long it has been at it, and how it ended.
+
+The pane is separate from the transcript because a fan-out is *state*, not
+events. Three children each rewrite their own line several times a minute, and
+interleaving that with a streaming reply scrolls the thing you are watching off
+the screen. The terminal reached the same conclusion from the other side: it
+writes one scrollback line per child and keeps the live view in a docked pane
+(`views/tasks_pane.rs`).
+
+Nothing was added to the wire for this. The three updates already ride the
+parent session's own stream — `subagent_spawned`, `subagent_progress`,
+`subagent_finished` (`extensions/notification.rs:654`) — and the leader
+subscribes a client to each child at spawn by copying the parent's subscriber
+set (`leader/server.rs:2315`), which is how the browser sees a child's own
+tool calls without asking for them.
+
+### What each row is allowed to say
+
+Every field is something the wire carried. A counter that has not arrived reads
+as **—**, and a child that has not said anything yet reads as **unknown** —
+never as a zero. "It has made no tool calls" and "the agent has not told this
+client yet" are different facts, and the second one is the normal state for the
+first two seconds of every child's life.
+
+That is not a hypothetical. A child that finishes before its first progress tick
+ends with `context —` and `errors —` for good: those two fields exist only on
+the tick, and there never was one.
+
+| what the row shows | where it comes from |
+| --- | --- |
+| the label, the model, `resumed` / `forked` | `subagent_spawned` |
+| turns, tools, tokens, context %, errors | `subagent_progress`, every ~2s (8s heartbeat) |
+| elapsed | the agent's own `duration_ms`, plus the wait since that frame |
+| what it is doing now | the child session's own chunks and tool calls |
+| completed / failed / cancelled, and the answer | `subagent_finished` |
+
+Labelling is the terminal's, not this client's invention: persona, then role,
+then type, then a `[tag]` prefix, then `general`; `general-purpose` displays as
+`general`; the `[tag]` is stripped from the description either way
+(`app/subagent.rs:840`). So is the order — running first, then agent type, then
+newest — and hiding finished rows behind a toggle (`views/tasks_pane.rs:941`,
+`:900`).
+
+**Attaching in the middle of a fan-out works**, and takes one extra call.
+`session/load` replays every `subagent_spawned` and `subagent_finished` this
+session ever wrote, so which children exist is known immediately; progress ticks
+are deliberately never persisted (`agent/subagent/mod.rs:2049`), so their
+counters would be unknown until each child's next tick. `x.ai/subagent/list_running`
+fills them in at once — the call the shell itself names for this case
+(`:2050`), and one the terminal does not make.
+
+### Stopping a child
+
+Stopping is destructive and not undoable: the child's turn is cancelled where it
+stands and nothing it had done is handed back to the parent. **The button asks
+twice.** The first click arms it — the label becomes *confirm stop* — and the
+arming expires on its own.
+
+The terminal does not ask at all: `x` on the selected row sends the cancel
+(`app/agent_view/panes.rs:502`). That is defensible there and not here, because
+`x` is the second half of a gesture whose first half was moving a cursor onto
+the row; a click on a button in a list is the whole gesture. The expiry is the
+pager's own `PENDING_KILL_TIMEOUT_SECS` (`app/agent.rs:153`), which it uses for
+the same idea — how long a stop that has not resolved keeps a row marked — and
+a test reads the Rust so the two cannot drift.
+
+Three answers come back and only one of them means a finish is coming
+(`extensions/task.rs:79`). `cancelled` leaves the row marked until the real
+`subagent_finished` lands. `already_finished` carries the child's true status.
+`not_found` means the agent has no record of the id — **and this client says
+`unknown` there, where the terminal writes `cancelled`**
+(`app/dispatch/task_result.rs:780`). That substitution reports a stop that may
+not have happened; not knowing is the honest answer and the one that sends a
+person to look rather than to move on.
+
+### What the terminal knows and a browser cannot
+
+Worth stating plainly, because each of these is either a product gap or a
+computation that belongs on the wire:
+
+- **The task prompt.** `subagent_spawned` carries the model's one-line
+  `description`, never the prompt the child was actually given. The terminal
+  reads it from `meta.json` on disk (`app/subagent.rs:85`, filled by `enrich_from_meta` at `:246`).
+  A browser has no disk.
+- **The child's working directory and worktree.** Same file, same reason. So a
+  browser cannot even `session/load` a child by id: it has no `cwd` to send.
+  Child sessions are also excluded from the roster on purpose — their summaries
+  are `hidden` (`agent/roster.rs:276`).
+- **The child's transcript before this client attached.** The pane shows what a
+  child says from the moment the browser is subscribed. The terminal replays the
+  child's `updates.jsonl` from disk when you open it fullscreen.
+- **A start time on the spawn.** `subagent_spawned` has no timestamp, so a
+  client that missed it can only date the child from the first tick — which is
+  why the pane calls `list_running`, whose `startedAtEpochMs` is the only place
+  the wire states it.
+- **Which tool call spawned which child.** `subagent_spawned` carries no
+  `tool_call_id`, so the `spawn_subagent` tool call in the parent's transcript
+  and the row in this pane cannot be linked. Both clients live with it; only a
+  wire field would fix it.
+- **Initializing versus running.** The agent distinguishes them and will report
+  the difference through `x.ai/subagent/get`, but it never announces it, so a
+  client watching the stream sees a spawned child as running from the first
+  frame. This client matches the terminal and calls it running.
+- **The waiting reasons and retry states** in the terminal's activity line. The
+  three this pane draws — Thinking, Responding, Running: *tool* — are the arms
+  of `format_activity_label` a client can read off the update stream
+  (`app/subagent.rs:891`). The rest come from state the agent reports to the
+  pager on paths a browser is not on.
+
 ## Tests
 
 ```sh
@@ -326,12 +439,13 @@ Only `https?:` keeps an `href`, decided in `safeHref` and tested there.
 | `src/roster.ts` | the roster, grouped by `cwd` |
 | `src/directory.ts` | absolute-path arithmetic, and the listing params a picker needs |
 | `src/transcript.ts` | folding `session/update` into a store |
+| `src/subagents.ts` | the fan-out: the fold, the labels, and what stays unknown |
 | `src/commands.ts` | the slash catalog: provenance, matching, reading the composer |
 | `src/markdown.ts` | the markdown parser's configuration, and which links keep an href |
 | `src/panel.ts` | tone-to-role, and the block-kind exhaustiveness guard |
 | `src/theme.ts` | generated palette to CSS custom properties |
 | `src/App.tsx` | the screen and its routes |
-| `src/components/` | AuthCard, Roster, Session, Panel, Markdown, Settings, PermissionCard, FolderTrustCard, DirectoryPicker, CommandMenu |
+| `src/components/` | AuthCard, Roster, Session, Subagents, Panel, Markdown, Settings, PermissionCard, FolderTrustCard, DirectoryPicker, CommandMenu |
 
 `src/wire.ts` is hand-written on purpose and the reasoning is at the top of the
 file: the panel types and the palette *are* generated and are imported, never
