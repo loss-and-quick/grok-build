@@ -29,7 +29,7 @@ describe("settings surface", () => {
     // it should be visible in a diff rather than discovered later.
     const terminal = rows.filter((row) => row.surface === "terminal");
     expect(rows).toHaveLength(50);
-    expect(terminal).toHaveLength(14);
+    expect(terminal).toHaveLength(15);
   });
 
   test("every row a browser draws has a label and a kind to draw it with", () => {

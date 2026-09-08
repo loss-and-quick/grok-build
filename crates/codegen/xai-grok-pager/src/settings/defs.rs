@@ -585,7 +585,10 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "show_timeline",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
-            surface: SettingSurface::Any,
+            // The rail replaces the scrollbar: it is a column of terminal cells
+            // in the gutter, which is why `/timeline` is a Terminal command.
+            // A client without that gutter can draw the toggle but not obey it.
+            surface: SettingSurface::Terminal,
             label: "Timeline sidebar",
             description: "Per-turn tick rail in place of the scrollbar: hover previews a turn, click jumps to it.",
             keywords: &["timeline", "sidebar", "ticks", "turns", "navigator", "rail"],

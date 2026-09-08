@@ -125,7 +125,7 @@
       "key": "show_timeline",
       "category": "appearance",
       "owner": "shellCached",
-      "surface": "any",
+      "surface": "terminal",
       "label": "Timeline sidebar",
       "description": "Per-turn tick rail in place of the scrollbar: hover previews a turn, click jumps to it.",
       "keywords": [

@@ -530,7 +530,7 @@ mod tests {
             .filter(|r| r.surface == wire::SettingSurface::Terminal)
             .count();
         assert_eq!(
-            terminal, 14,
+            terminal, 15,
             "the terminal-only set changed; a row moved in or out of every \
              non-terminal client's settings view"
         );
