@@ -21,6 +21,7 @@ import {
   type RailSection,
 } from "../src/rail.ts";
 import { createSubagents } from "../src/subagents.ts";
+import { createTasks } from "../src/tasks.ts";
 import { createTranscript } from "../src/transcript.ts";
 import type { PanelAction } from "../src/panel.ts";
 import type { RosterEntry, SessionUpdate } from "../src/wire.ts";
@@ -129,14 +130,16 @@ function panel(id: string, title: string): PanelViewModel {
 function mount(published: [string, PanelViewModel][] = [], seed?: (into: Fixture) => void) {
   const transcript = createTranscript();
   const subagents = createSubagents(ENTRY.sessionId);
+  const tasks = createTasks();
   for (const [plugin, viewModel] of published) {
     transcript.apply({ sessionUpdate: "plugin_panel", plugin, view_model: viewModel } as SessionUpdate);
   }
   const stopped: string[] = [];
-  seed?.({ subagents });
+  const removed: string[] = [];
+  seed?.({ subagents, tasks });
   const seen: PanelAction[] = [];
   const gateway = {
-    attached: () => ({ entry: ENTRY, transcript, subagents }),
+    attached: () => ({ entry: ENTRY, transcript, subagents, tasks }),
     // Nobody has asked for the window here, so the rail holds plugin panels
     // and nothing else — which is what these tests are about. The context
     // section has its own file.
@@ -147,13 +150,19 @@ function mount(published: [string, PanelViewModel][] = [], seed?: (into: Fixture
     cancelSubagent: async (id: string) => {
       stopped.push(id);
     },
+    // The two the seam looks for. A gateway without them carries no background
+    // work at all, which is the state this client actually ships in today —
+    // `tasks.test.ts` covers that half.
+    killTask: (id: string) => stopped.push(id),
+    cancelScheduledLoop: (id: string) => removed.push(id),
   } as unknown as Gateway;
   const { container } = render(() => Rail({ gateway }));
-  return { container, seen, transcript, stopped };
+  return { container, seen, transcript, stopped, removed };
 }
 
 interface Fixture {
   subagents: ReturnType<typeof createSubagents>;
+  tasks: ReturnType<typeof createTasks>;
 }
 
 /** The section headers on screen, in the order they are drawn. */
@@ -261,7 +270,7 @@ describe("the rail on screen", () => {
   });
 });
 
-describe("the fan-out as a dock section", () => {
+describe("the dock's own sections in the rail", () => {
   const spawn = (id: string, over: Record<string, unknown> = {}): SessionUpdate =>
     ({
       sessionUpdate: "subagent_spawned",
@@ -273,19 +282,35 @@ describe("the fan-out as a dock section", () => {
       ...over,
     }) as unknown as SessionUpdate;
 
+  const bg = (id: string, over: Record<string, unknown> = {}): SessionUpdate =>
+    ({
+      sessionUpdate: "task_backgrounded",
+      tool_call_id: `tc-${id}`,
+      task_id: id,
+      command: "cargo test",
+      cwd: "/repo",
+      output_file: "/tmp/out",
+      ...over,
+    }) as unknown as SessionUpdate;
+
   test("a section with nothing in it is not drawn at all", () => {
     // `dock.rs`: "Sections with a zero count are hidden; an all-zero dock
-    // renders nothing." An empty Subagents heading must not hold a third column
-    // open over a session that has spawned nothing.
+    // renders nothing." Three empty sections must not become three headings
+    // for things that are not happening — nor an empty third column.
     const { container } = mount();
     expect(container.querySelector(".rail")).toBeNull();
   });
 
-  test("it stands above the plugins, as a built-in does", () => {
-    const { container } = mount([["acme", panel("oauth", "acme: OAuth")]], ({ subagents }) => {
+  test("they sit between the context window and the plugins, in the dock's order", () => {
+    const { container } = mount([["acme", panel("oauth", "acme: OAuth")]], ({ subagents, tasks }) => {
       subagents.apply(ENTRY.sessionId, spawn("sa-1"));
+      tasks.apply(bg("run-1"), false);
+      tasks.apply(bg("mon-1", { monitor_description: "watch the build" }), false);
     });
-    expect(labels(container)).toEqual(["Subagents", "acme: OAuth"]);
+    // No context window has been resolved in this fixture, so the three dock
+    // sections lead — the order among themselves is what is asserted here, and
+    // it is `dock.rs:60-67`'s.
+    expect(labels(container)).toEqual(["Subagents", "Tasks", "Watchers", "acme: OAuth"]);
   });
 
   test("a row is the dock's line: kind, label, activity, then the meta column", () => {
@@ -307,35 +332,71 @@ describe("the fan-out as a dock section", () => {
   });
 
   test("the count on the header is the number of rows, not the number shown", () => {
-    const { container } = mount([], ({ subagents }) => {
-      for (const id of ["a", "b", "c", "d"]) subagents.apply(ENTRY.sessionId, spawn(id));
+    const { container } = mount([], ({ tasks }) => {
+      for (const id of ["a", "b", "c", "d"]) tasks.apply(bg(id), false);
     });
     expect(container.querySelector(".rail-count")?.textContent).toBe("4");
-    expect(rowsOf(container, "subagents")).toHaveLength(MAX_SECTION_ROWS);
+    expect(rowsOf(container, "tasks")).toHaveLength(MAX_SECTION_ROWS);
     expect(container.querySelector(".rail-more")?.textContent).toContain(
       `${4 - MAX_SECTION_ROWS} more`,
     );
   });
 
-  test("arrows walk from the header into its rows, past the overflow line", () => {
-    const { container } = mount([], ({ subagents }) => {
-      for (const id of ["a", "b", "c"]) subagents.apply(ENTRY.sessionId, spawn(id));
+  test("arrows walk from a header into its rows and on to the next header", () => {
+    // The dock's cursor is one sequence over headers *and* rows, so Down from a
+    // section's last shown row lands on the next section's header rather than
+    // on its first row — and the "N more" line is not a stop on the way.
+    const { container } = mount([], ({ tasks }) => {
+      for (const id of ["a", "b", "c"]) tasks.apply(bg(id), false);
+      tasks.apply(bg("mon", { monitor_description: "watch" }), false);
     });
     const walk = [...container.querySelectorAll("[data-rail-item]")].map((node) =>
       node.getAttribute("data-rail-item"),
     );
-    expect(walk).toEqual(["h:subagents", "r:subagents:0", "r:subagents:1"]);
+    expect(walk).toEqual(["h:tasks", "r:tasks:0", "r:tasks:1", "h:watchers", "r:watchers:0"]);
+  });
+
+  test("Watchers holds monitors and loops, and the stop each one needs differs", () => {
+    // Two actions behind one button: a monitor is a process to kill, a loop is
+    // a schedule to delete. The terminal splits the same way, on a
+    // `DockWatcherId` that remembers which kind the row came from.
+    const { container, stopped, removed } = mount([], ({ tasks }) => {
+      tasks.apply(bg("mon", { monitor_description: "watch the build" }), false);
+      tasks.apply(
+        {
+          sessionUpdate: "scheduled_task_created",
+          task_id: "loop-1",
+          prompt: "check CI",
+          human_schedule: "every 5m",
+        } as unknown as SessionUpdate,
+        false,
+      );
+    });
+    const rows = rowsOf(container, "watchers");
+    expect(rows[0]).toContain("Monitor");
+    expect(rows[1]).toContain("Loop");
+    expect(rows[1]).toContain("every 5m");
+
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>(".stop-button")];
+    expect(buttons[1]!.textContent).toContain("remove");
+    // Twice, because the first press only arms it.
+    buttons[0]!.click();
+    buttons[0]!.click();
+    buttons[1]!.click();
+    buttons[1]!.click();
+    expect(stopped).toEqual(["mon"]);
+    expect(removed).toEqual(["loop-1"]);
   });
 
   test("the first press of a stop does not send it", () => {
-    const { container, stopped } = mount([], ({ subagents }) => {
-      subagents.apply(ENTRY.sessionId, spawn("sa-1"));
+    const { container, stopped } = mount([], ({ tasks }) => {
+      tasks.apply(bg("run-1"), false);
     });
     const button = container.querySelector<HTMLButtonElement>(".stop-button")!;
     button.click();
     expect(stopped).toEqual([]);
     expect(button.textContent).toContain("confirm");
     button.click();
-    expect(stopped).toEqual(["sa-1"]);
+    expect(stopped).toEqual(["run-1"]);
   });
 });

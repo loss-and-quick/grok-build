@@ -22,11 +22,18 @@ import {
   type RailSection,
 } from "../rail.ts";
 import { dockSubagents, subagentRailRow } from "../subagents.ts";
+import {
+  backgroundWork,
+  taskRailRows,
+  watcherRailRows,
+  type BackgroundWork,
+} from "../tasks.ts";
 import type { PanelEntry } from "../transcript.ts";
 import type { ContextFacts } from "../wire.ts";
 import { ContextWidget } from "./ContextWidget.tsx";
 import { Overlay } from "./Overlay.tsx";
 import { Panel, createFields, type Fields } from "./Panel.tsx";
+import { BackgroundPane } from "./Background.tsx";
 import { RailList } from "./RailList.tsx";
 import { StopButton } from "./StopButton.tsx";
 import { Subagents } from "./Subagents.tsx";
@@ -50,6 +57,8 @@ const CONTEXT_KEY = "context";
  * collide with them.
  */
 const SUBAGENTS_KEY = "subagents";
+const TASKS_KEY = "tasks";
+const WATCHERS_KEY = "watchers";
 
 /**
  * The widget rail.
@@ -121,6 +130,15 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
   };
 
   /**
+   * The two sections that are wired only as far as this client's own half.
+   *
+   * `undefined` while the gateway carries no background work — see
+   * {@link backgroundWork}, which says exactly what it would take — and both
+   * sections are then empty, which `dock.rs` draws as nothing at all.
+   */
+  const work = (): BackgroundWork | undefined => backgroundWork(props.gateway);
+
+  /**
    * Stops that were sent and never answered, released on the shared tick.
    *
    * The terminal does exactly this and in the same place — its render pass
@@ -137,6 +155,7 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
     untrack(() => {
       const at = performance.now();
       current.subagents.expireKills(at);
+      work()?.tasks.expireKills(at);
     });
   });
 
@@ -146,6 +165,20 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
     const current = props.gateway.attached();
     if (!current) return [];
     return dockSubagents(current.subagents.rows).map((row) => subagentRailRow(row, at));
+  };
+
+  /** Running background commands that are not monitors. */
+  const taskRows = (): RailRow[] => {
+    const at = now();
+    const held = work();
+    return held ? taskRailRows(held.tasks.tasks, at) : [];
+  };
+
+  /** Running monitors, then scheduled loops. */
+  const watcherRows = (): RailRow[] => {
+    const at = now();
+    const held = work();
+    return held ? watcherRailRows(held.tasks.tasks, held.tasks.loops, at) : [];
   };
 
   /**
@@ -169,6 +202,8 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
       all.push({ kind: "widget", key: CONTEXT_KEY, label: "Context", note: usageChip(context) });
     }
     all.push({ kind: "list", key: SUBAGENTS_KEY, label: "Subagents", rows: subagentRows() });
+    all.push({ kind: "list", key: TASKS_KEY, label: "Tasks", rows: taskRows() });
+    all.push({ kind: "list", key: WATCHERS_KEY, label: "Watchers", rows: watcherRows() });
     for (const panel of panels()) {
       all.push({
         kind: "panel",
@@ -192,6 +227,28 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
 
   const act = (panel: PanelEntry) => (action: PanelAction) =>
     void props.gateway.panelAction(panel.plugin, action);
+
+  /** Whether a Watchers row is a schedule rather than a running process. */
+  const isLoop = (key: string): boolean =>
+    work()?.tasks.loops.some((loop) => loop.taskId === key) === true;
+
+  /**
+   * Stop what a Watchers row names.
+   *
+   * Two different actions behind one button, resolved by looking the row up
+   * rather than by reading the word the row happens to display: the terminal
+   * splits the same way, on a `DockWatcherId` that remembers which of the two
+   * kinds the row came from (`panes.rs:9-15`, `:515-522`).
+   */
+  const stopWatcher = (key: string): void => {
+    const held = work();
+    if (!held) return;
+    if (isLoop(key)) {
+      held.cancelScheduledLoop(key);
+      return;
+    }
+    held.killTask(key);
+  };
 
   /**
    * One list section, drawn from the same row array the walk was given.
@@ -314,6 +371,30 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
             onConfirm={() => void props.gateway.cancelSubagent(row().key)}
           />
         ))}
+        {listSection(TASKS_KEY, "Tasks", taskRows, (row) => (
+          <StopButton
+            tick={tick}
+            subject={row().key}
+            pending={row().killable === false}
+            title="Kill this background command. Whatever it had not finished is not finished."
+            onConfirm={() => work()?.killTask(row().key)}
+          />
+        ))}
+        {listSection(WATCHERS_KEY, "Watchers", watcherRows, (row) => (
+          <StopButton
+            tick={tick}
+            subject={row().key}
+            pending={row().killable === false}
+            verb={isLoop(row().key) ? "remove" : "stop"}
+            pendingLabel={isLoop(row().key) ? "removing…" : "stopping…"}
+            title={
+              isLoop(row().key)
+                ? "Delete this schedule. It will not run again."
+                : "Kill this monitor. The agent stops being told what it was watching."
+            }
+            onConfirm={() => stopWatcher(row().key)}
+          />
+        ))}
         <For each={panels()}>
           {(panel) => (
             <Widget
@@ -368,6 +449,19 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
       <Show when={opened() === SUBAGENTS_KEY}>
         <Overlay label="Subagents" onClose={() => setOpened(null)}>
           <Subagents gateway={props.gateway} />
+        </Overlay>
+      </Show>
+
+      {/* Tasks and Watchers past the row cap, with the command each row is
+          hiding behind its label and the directory it runs in. */}
+      <Show when={opened() === TASKS_KEY}>
+        <Overlay label="Tasks" onClose={() => setOpened(null)}>
+          <BackgroundPane gateway={props.gateway} section="tasks" />
+        </Overlay>
+      </Show>
+      <Show when={opened() === WATCHERS_KEY}>
+        <Overlay label="Watchers" onClose={() => setOpened(null)}>
+          <BackgroundPane gateway={props.gateway} section="watchers" />
         </Overlay>
       </Show>
 
