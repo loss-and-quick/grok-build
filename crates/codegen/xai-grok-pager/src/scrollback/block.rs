@@ -708,14 +708,13 @@ impl RenderBlock {
 
     /// Create a `/context` snapshot block.
     ///
-    /// The block stores the raw `ContextInfo` snapshot and model name and rebuilds its styled output on every redraw.
+    /// The block stores the facts the agent resolved and the model name, and rebuilds its styled output on every redraw.
     /// Theme switches thus take effect without re-running `/context`.
     pub fn context_info(
-        snapshot: xai_grok_shell::session::ContextInfo,
-        history: &[crate::acp::tracker::CompactionRecord],
+        facts: xai_grok_shell::session::ContextFacts,
         model: impl Into<String>,
     ) -> Self {
-        RenderBlock::ContextInfo(ContextInfoBlock::new(snapshot, history, model))
+        RenderBlock::ContextInfo(ContextInfoBlock::new(facts, model))
     }
 
     pub fn session_event(event: SessionEvent) -> Self {
@@ -1481,7 +1480,8 @@ mod searchable_text_tests {
             auto_compact_threshold_percent: 85,
             usage_categories: vec![],
         };
-        let block = RenderBlock::context_info(snapshot, &[], "grok-4.5");
+        let facts = xai_grok_shell::session::ContextFacts::resolve(&snapshot, &[]);
+        let block = RenderBlock::context_info(facts, "grok-4.5");
         // Only the model name is source text; the rest is a numeric breakdown.
         assert_eq!(block.searchable_text().as_deref(), Some("grok-4.5"));
     }

@@ -319,45 +319,8 @@ pub struct PendingCompaction {
     pub estimate_after: u64,
     pub elapsed_ms: Option<i64>,
     pub last_used: Option<u64>,
-    /// First ~100 chars of the summary that replaced the collapsed history,
-    /// as sent by the shell. Carried through the deferral so the recorded
-    /// entry keeps it after the turn confirms the token counts.
-    pub summary_preview: Option<String>,
 }
 
-/// One completed compaction, kept for the session's compaction history.
-///
-/// Every field is a value the shell reported for that compaction — nothing
-/// here is re-derived from a second token count, so the history can never
-/// disagree with the `Context compacted: … → …` line in scrollback. The
-/// number of conversation items collapsed is deliberately absent: the shell
-/// does not report it and estimating it would be a fabricated number.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompactionRecord {
-    /// 1-based position in the session — the first compaction is 1. Ordinal
-    /// rather than wall-clock because a resumed session replays its past
-    /// compactions at load time, when "now" says nothing about when they ran.
-    pub ordinal: usize,
-    /// Tokens in the window before compaction. `None` from older shells,
-    /// which omit the field.
-    pub tokens_before: Option<u64>,
-    /// Tokens in the window after compaction.
-    pub tokens_after: u64,
-    /// How long compaction took, when the shell timed it.
-    pub elapsed_ms: Option<i64>,
-    /// Preview of the summary that replaced the collapsed history.
-    pub summary_preview: Option<String>,
-}
-
-impl CompactionRecord {
-    /// Tokens this compaction gave back, or `None` when the shell did not
-    /// report a before count. Saturating: a compaction that somehow ended
-    /// larger reports zero recovered rather than wrapping.
-    pub fn recovered(&self) -> Option<u64> {
-        self.tokens_before
-            .map(|before| before.saturating_sub(self.tokens_after))
-    }
-}
 /// Tracks in-flight streaming state for one agent's turn.
 ///
 /// Converts ACP `SessionUpdate` variants into scrollback entry mutations.
@@ -423,10 +386,6 @@ pub struct AcpUpdateTracker {
     /// Set by `set_compaction_activity()` from ExtNotification events, cleared by `finish_turn()`.
     compaction_activity: Option<TurnActivity>,
     pending_compaction: Option<PendingCompaction>,
-    /// Every compaction this session has completed, oldest first. Appended
-    /// only by [`Self::record_compaction`], which is also the single site
-    /// that builds the scrollback event, so the two never diverge.
-    compaction_history: Vec<CompactionRecord>,
     /// Retry-related activity override.
     /// Set by `set_retry_activity()` from ExtNotification `RetryState::Retrying`.
     /// Auto-cleared when normal streaming data resumes (in `handle_update` and `note_tool_call_arguments_delta`) and on `finish_turn()`.
@@ -665,48 +624,37 @@ impl AcpUpdateTracker {
         tokens_before: Option<u64>,
         estimate_after: u64,
         elapsed_ms: Option<i64>,
-        summary_preview: Option<String>,
     ) {
         self.pending_compaction = Some(PendingCompaction {
             tokens_before,
             estimate_after,
             elapsed_ms,
             last_used: None,
-            summary_preview,
         });
     }
 
-    /// Append a completed compaction to the history and return the scrollback
-    /// event that announces it.
+    /// The scrollback event announcing a completed compaction.
     ///
     /// Both paths that surface a compaction — the deferred flush in
     /// [`Self::finish_turn`] and the replay path that renders a resumed
-    /// session's past compactions — go through here, so the history holds
-    /// exactly the counts the user saw and nothing is recorded twice.
+    /// session's past compactions — go through here.
+    ///
+    /// No history accumulates behind it. The session's compaction history is
+    /// the agent's, read back from the session log and carried on
+    /// `x.ai/session/info`, so it is the same for a client that watched these
+    /// events and one that attached after them — which a count kept here
+    /// could never be.
     pub fn record_compaction(
-        &mut self,
+        &self,
         tokens_before: Option<u64>,
         tokens_after: u64,
         elapsed_ms: Option<i64>,
-        summary_preview: Option<String>,
     ) -> SessionEvent {
-        self.compaction_history.push(CompactionRecord {
-            ordinal: self.compaction_history.len() + 1,
-            tokens_before,
-            tokens_after,
-            elapsed_ms,
-            summary_preview,
-        });
         SessionEvent::CompactionCompleted {
             tokens_before,
             tokens_after,
             elapsed_ms,
         }
-    }
-
-    /// Every compaction this session has completed, oldest first.
-    pub fn compaction_history(&self) -> &[CompactionRecord] {
-        &self.compaction_history
     }
     pub fn note_context_used(&mut self, used: u64) {
         if let Some(pending) = self.pending_compaction.as_mut() {
@@ -1053,7 +1001,6 @@ impl AcpUpdateTracker {
                 pending.tokens_before,
                 pending.last_used.unwrap_or(pending.estimate_after),
                 pending.elapsed_ms,
-                pending.summary_preview,
             );
             scrollback.push_block(RenderBlock::session_event(event));
         }

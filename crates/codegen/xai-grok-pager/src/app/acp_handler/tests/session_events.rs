@@ -1051,9 +1051,28 @@
             other => panic!("expected deferred CompactionCompleted, got {other:?}"),
         }
     }
+    /// Collects every compaction the pager announced, in order.
+    ///
+    /// The pager keeps no compaction history of its own any more: the session's
+    /// history is the agent's, read back from the session log and carried on
+    /// `x.ai/session/info`, so it is the same for a client that watched these
+    /// events and one that attached after them. What is still the pager's is
+    /// *when* it announces one, and that is what these pin.
+    fn announced_compactions(sb: &ScrollbackState) -> Vec<SessionEvent> {
+        (0..sb.len())
+            .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+                Some(RenderBlock::SessionEvent(b))
+                    if matches!(b.event, SessionEvent::CompactionCompleted { .. }) =>
+                {
+                    Some(b.event.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
 
     #[test]
-    fn compaction_history_records_the_confirmed_count_not_the_estimate() {
+    fn compaction_is_announced_with_the_confirmed_count_not_the_estimate() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         let update = XaiSessionUpdate::AutoCompactCompleted {
@@ -1064,32 +1083,32 @@
         };
         assert!(apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
         assert!(
-            session.compaction_history().is_empty(),
-            "a deferred compaction is not history until the turn confirms it"
+            announced_compactions(&scrollback).is_empty(),
+            "a deferred compaction is not announced until the turn confirms it"
         );
 
         session.note_context_used(43_000);
         session.finish_turn(&mut scrollback);
 
-        let history = session.compaction_history();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].ordinal, 1);
-        assert_eq!(history[0].tokens_before, Some(858_000));
-        assert_eq!(
-            history[0].tokens_after, 43_000,
-            "history must hold the same confirmed count the scrollback line shows"
-        );
-        assert_eq!(history[0].recovered(), Some(815_000));
-        assert_eq!(history[0].elapsed_ms, Some(500));
-        assert_eq!(
-            history[0].summary_preview.as_deref(),
-            Some("refactored the parser"),
-            "the preview must survive the deferral"
-        );
+        match announced_compactions(&scrollback).as_slice() {
+            [SessionEvent::CompactionCompleted {
+                tokens_before,
+                tokens_after,
+                elapsed_ms,
+            }] => {
+                assert_eq!(*tokens_before, Some(858_000));
+                assert_eq!(
+                    *tokens_after, 43_000,
+                    "the line must show the same confirmed count the agent will report"
+                );
+                assert_eq!(*elapsed_ms, Some(500));
+            }
+            other => panic!("expected one announced compaction, got {other:?}"),
+        }
     }
 
     #[test]
-    fn compaction_history_accumulates_in_order() {
+    fn compactions_are_announced_in_order() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         for (before, after) in [(800_000u64, 60_000u64), (900_000, 70_000)] {
@@ -1103,19 +1122,18 @@
             session.finish_turn(&mut scrollback);
         }
 
-        let history = session.compaction_history();
-        assert_eq!(history.len(), 2);
-        assert_eq!(
-            history.iter().map(|r| r.ordinal).collect::<Vec<_>>(),
-            vec![1, 2],
-            "ordinals number the compactions in the order they ran"
-        );
-        assert_eq!(history[0].tokens_after, 60_000);
-        assert_eq!(history[1].tokens_after, 70_000);
+        let announced: Vec<u64> = announced_compactions(&scrollback)
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::CompactionCompleted { tokens_after, .. } => Some(tokens_after),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(announced, vec![60_000, 70_000]);
     }
 
     #[test]
-    fn replay_compaction_is_recorded_exactly_once() {
+    fn replay_compaction_is_announced_exactly_once() {
         let mut session = make_session(Some("s1"));
         session.loading_replay = true;
         let mut scrollback = ScrollbackState::new();
@@ -1127,38 +1145,15 @@
         };
         assert!(apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
         assert_eq!(
-            session.compaction_history().len(),
+            announced_compactions(&scrollback).len(),
             1,
-            "a resumed session's past compactions are recorded as they replay"
+            "a resumed session's past compactions are drawn as they replay"
         );
 
         // The replay path renders immediately rather than deferring, so a
-        // later turn end must not append the same compaction a second time.
+        // later turn end must not draw the same compaction a second time.
         session.finish_turn(&mut scrollback);
-        assert_eq!(session.compaction_history().len(), 1);
-        assert_eq!(session.compaction_history()[0].tokens_after, 20_000);
-    }
-
-    #[test]
-    fn compaction_history_omits_recovered_without_a_before_count() {
-        let mut session = make_session(Some("s1"));
-        let mut scrollback = ScrollbackState::new();
-        let update = XaiSessionUpdate::AutoCompactCompleted {
-            tokens_before: None,
-            tokens_after: 20_000,
-            elapsed_ms: None,
-            summary_preview: None,
-        };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, &oauth_auth()));
-        session.finish_turn(&mut scrollback);
-
-        let history = session.compaction_history();
-        assert_eq!(history.len(), 1);
-        assert_eq!(
-            history[0].recovered(),
-            None,
-            "an older shell that omits tokens_before yields no recovered figure"
-        );
+        assert_eq!(announced_compactions(&scrollback).len(), 1);
     }
 
     #[test]

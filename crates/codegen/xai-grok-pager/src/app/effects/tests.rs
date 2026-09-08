@@ -2666,6 +2666,7 @@ fn make_session_info(
                 auto_compact_threshold_percent: 85,
                 ..Default::default()
             },
+            context_facts: None,
         },
     }
 }

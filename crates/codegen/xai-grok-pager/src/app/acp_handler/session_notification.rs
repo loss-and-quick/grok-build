@@ -1656,30 +1656,20 @@ pub(super) fn apply_session_event(
             tokens_before,
             tokens_after,
             elapsed_ms,
-            summary_preview,
+            ..
         } => {
             tracing::info!("Auto-compact completed: {tokens_after} tokens after");
             session.set_compaction_activity(None);
             session.compact_held_prompt = None;
             if session.loading_replay {
                 // Replay of a resumed session: the counts are already final,
-                // so this is recorded straight away. Live compactions defer
+                // so this is announced straight away. Live compactions defer
                 // instead, because the confirmed `used` for the turn arrives
                 // after this notification and supersedes `tokens_after`.
-                let event = session.record_compaction(
-                    *tokens_before,
-                    *tokens_after,
-                    *elapsed_ms,
-                    summary_preview.clone(),
-                );
+                let event = session.record_compaction(*tokens_before, *tokens_after, *elapsed_ms);
                 scrollback.push_block(RenderBlock::session_event(event));
             } else {
-                session.defer_compaction(
-                    *tokens_before,
-                    *tokens_after,
-                    *elapsed_ms,
-                    summary_preview.clone(),
-                );
+                session.defer_compaction(*tokens_before, *tokens_after, *elapsed_ms);
             }
             true
         }

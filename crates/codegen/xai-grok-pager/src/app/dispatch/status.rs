@@ -689,18 +689,25 @@ pub(super) fn handle_context_info_complete(
         let model = info.data.model.as_deref().unwrap_or("unknown").to_string();
         let snapshot = info.data.context;
         agent.apply_full_context_info(snapshot.clone());
-        // Resolved here, off the render path: the block keeps the facts and
-        // only restyles on redraw.
-        let history = agent.session.compaction_history().to_vec();
+        // Every figure the panel shows comes from the agent's own resolution,
+        // so the terminal and any other client draw the same window. The
+        // fallback is for an agent too old to resolve them: it runs the same
+        // function on the snapshot it did send, and the compaction records —
+        // which only the agent can read back — are simply absent, which the
+        // panel reports rather than hides.
+        let facts = info
+            .data
+            .context_facts
+            .unwrap_or_else(|| xai_grok_shell::session::ContextFacts::resolve(&snapshot, &[]));
         if let Some(state) = usage_modal_state_mut(agent) {
             state.context = Some(crate::scrollback::blocks::ContextInfoBlock::new(
-                snapshot, &history, model,
+                facts, model,
             ));
             state.context_error = None;
         } else if minimal {
             push_and_page_flip(
                 &mut agent.scrollback,
-                crate::scrollback::block::RenderBlock::context_info(snapshot, &history, model),
+                crate::scrollback::block::RenderBlock::context_info(facts, model),
             );
         }
         // Full mode with the modal closed: the result arrived after dismissal, so drop it
