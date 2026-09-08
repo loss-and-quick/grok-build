@@ -220,8 +220,39 @@ export interface InitializeRequest {
  */
 export interface InitializeResponse {
   protocolVersion: number;
+  /**
+   * Every way this agent will accept an `authenticate`, in the agent's own
+   * order — and the whole contract. `authenticate` rejects an id that is not on
+   * this list (`acp_agent.rs`, whose final match arm answers `invalid_params`),
+   * and the pager treats it the same way: `dispatch_choose_auth_method` refuses
+   * a method it cannot find here. A client may drive what is listed; it may not
+   * invent anything else.
+   *
+   * `AuthMethod` is a `#[serde(untagged)]` enum whose only inhabited variant is
+   * `Agent(AuthMethodAgent)`, so each entry arrives as the bare object below
+   * (agent-client-protocol-schema-0.11.4/src/agent.rs:511, :593).
+   */
+  authMethods?: AuthMethod[];
   _meta?: {
     currentWorkingDirectory?: string;
+    /**
+     * The method the agent installed for itself, and the one a client should
+     * authenticate on rather than re-deriving the precedence — `acp_agent.rs`
+     * says so in as many words, because re-deriving it client-side has
+     * regressed OIDC refresh before. `null` means the agent found no credential
+     * on disk, which is exactly when `session/new` and `session/load` fail with
+     * `no auth method id provided` (`agent_ops.rs:4494`).
+     */
+    defaultAuthMethodId?: string | null;
+    /**
+     * A sign-in this launch restored, in the shape `authenticate` returns.
+     * Present only for a plugin sign-in, whose credential no first-party path
+     * can re-derive (`auth_method.rs:344`). Its presence means the agent is
+     * already authenticated — and authenticating on the restored method would
+     * re-drive the plugin's interactive flow, which is the login it exists to
+     * spare the user.
+     */
+    restoredAuthMeta?: Record<string, unknown> | null;
     /**
      * Pre-session builtins, gated on config alone — `acp_agent.rs:586` calls
      * `slash_commands::builtin_commands`, and nothing tool- or session-derived
@@ -549,4 +580,102 @@ export interface AvailableCommand {
 export interface SessionUpdateAvailableCommands {
   sessionUpdate: "available_commands_update";
   availableCommands: AvailableCommand[];
+}
+
+// ---------------------------------------------------------------------------
+// Authentication — crates/codegen/xai-grok-shell/src/agent/auth_method.rs
+//                  crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
+//                  crates/codegen/xai-grok-shell/src/extensions/auth.rs
+//
+// The interactive burden is entirely the agent's. It runs the OAuth2/OIDC
+// exchange, binds the loopback callback listener, opens a browser, polls the
+// device endpoint or shells out to an external provider, and it mints,
+// enriches and persists the credential into `~/.grok/auth.json` itself
+// (`auth/flow.rs`, `run_auth_flow_steps`). A client's whole part is to show a
+// URL, sometimes show a code, sometimes hand back a pasted one, and be able to
+// cancel. That is why a browser can do this at all: not one of those four is a
+// terminal capability.
+//
+// What this client must never call is on the same wire and deliberately
+// unused. `x.ai/auth/getBearerToken` hands a client the live bearer
+// (`extensions/auth.rs:47`) and `x.ai/setApiKey` lets a client install one
+// (`extensions/auth.rs:71`). Neither name appears anywhere in this package,
+// and the reasoning is in the README.
+// ---------------------------------------------------------------------------
+
+/**
+ * One advertised auth method.
+ *
+ * `_meta.external_provider` is set when the deployment configured an
+ * `auth_provider_command` (`auth_method.rs`, `grok_com_auth_method`); the pager
+ * reads exactly that key to start the flow in command mode, so this client does
+ * too.
+ */
+export interface AuthMethod {
+  id: string;
+  name: string;
+  description?: string | null;
+  _meta?: Record<string, unknown> | null;
+}
+
+/**
+ * `authenticate`'s `_meta`.
+ *
+ * Every field is `#[serde(default)]` on the agent (`mvp_agent/mod.rs:1205`,
+ * `AuthRequestMeta`), so only what is meant needs sending.
+ *
+ * `use_oauth` is deliberately absent. It is the `--oauth` CLI flag, and it
+ * *forces* the loopback transport. A browser has no CLI flag, and the transport
+ * is the deployment's choice — env, then `[auth] login_device_flow`, then a
+ * remote feature flag (`auth/flow.rs`, `should_use_device_flow`). Pinning it
+ * from here would overrule that choice on the deployment's behalf.
+ */
+export interface AuthenticateMeta {
+  /**
+   * Scopes `x.ai/auth/cancel` to this attempt, so a cancel that arrives late
+   * cannot tear down the login that already replaced it
+   * (`auth/single_flight.rs`, `cancel_for_client_seq`).
+   */
+  request_seq: number;
+  /**
+   * Skip cached credentials without clearing them — what "Sign in" means: the
+   * user asked for a login, not for whatever happens to be on disk. Unlike
+   * `reauth` it destroys nothing, so abandoning the flow leaves every running
+   * session working.
+   */
+  force_interactive?: boolean;
+}
+
+/** `authenticate`'s response body; `_meta` carries the account when there is one. */
+export interface AuthenticateResponse {
+  _meta?: Record<string, unknown> | null;
+}
+
+/**
+ * How a login presents itself, decided by the agent and reported by
+ * `x.ai/auth/get_url` (`auth/flow.rs`, `AuthUrlMode::as_wire_str`).
+ *
+ * The distinction is not cosmetic: it decides whether a paste box is a lie.
+ * Only `loopback` races a pasted code against the callback listener
+ * (`oidc/login.rs`, `race_callback_and_client_ui`). `device` polls the token
+ * endpoint and `command` waits on a subprocess, and neither reads `code_rx` at
+ * all — a box offered there would swallow whatever was typed into it.
+ */
+export type AuthUrlMode = "loopback" | "device" | "command";
+
+/**
+ * `x.ai/auth/get_url`'s reply.
+ *
+ * Not wrapped: the handler answers through `to_raw_response`
+ * (`extensions/auth.rs:118`), so the payload *is* the result.
+ *
+ * `auth_url` is `null` when no URL was sent — cached credentials settled it,
+ * the flow failed early, or this is a second poll, since the receiver is taken
+ * once (`take_url_rx`). `mode` is authoritative; `external_provider` is the
+ * back-compat flag older clients read.
+ */
+export interface AuthUrlResponse {
+  auth_url?: string | null;
+  external_provider?: boolean;
+  mode?: AuthUrlMode | null;
 }
