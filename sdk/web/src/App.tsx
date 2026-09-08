@@ -2,6 +2,7 @@ import { useNavigate, useParams } from "@solidjs/router";
 import { createEffect, createSignal, For, on, onMount, Show, type JSX } from "solid-js";
 import { THEMES, type ThemeName } from "@grok-build/theme";
 
+import { AuthCard } from "./components/AuthCard.tsx";
 import { DirectoryPicker } from "./components/DirectoryPicker.tsx";
 import { FolderTrustCard } from "./components/FolderTrustCard.tsx";
 import { Roster } from "./components/Roster.tsx";
@@ -60,6 +61,12 @@ export function App(props: { children?: JSX.Element }): JSX.Element {
         <Settings gateway={gateway} />
       </aside>
       <main class="main">
+        {/* First, and above everything: with no credential of its own the
+            agent refuses every session/new and session/load, so nothing below
+            this can work until it is answered. */}
+        <Show when={gateway.connection() === "connected" && gateway.auth.status !== "settled"}>
+          <AuthCard gateway={gateway} />
+        </Show>
         {/* Above the session rather than inside it. The leader routes a
             folder-trust request to the client that opened the session and
             never replays it, so it can arrive before that session is attached
@@ -95,7 +102,7 @@ function NewSessionButton(): JSX.Element {
       <button
         class="new-session"
         type="button"
-        disabled={gateway.connection() !== "connected"}
+        disabled={gateway.connection() !== "connected" || gateway.auth.status !== "settled"}
         onClick={() => setPicking(true)}
       >
         New session…

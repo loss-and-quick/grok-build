@@ -84,6 +84,7 @@ button:hover:enabled {
 }
 
 button:disabled {
+  color: var(--grok-gray, canvastext);
   opacity: var(--grok-muted-opacity, 0.6);
   cursor: default;
 }
@@ -932,5 +933,145 @@ button.picker-row:focus-visible {
 
 .slash-row.selected .slash-badge,
 .slash-row.selected .slash-description {
+  color: var(--grok-gray-bright, canvastext);
+}
+
+/* -- sign-in -------------------------------------------------------------- */
+
+/* The user accent, not the warning colour the trust and permission cards use.
+ * Those interrupt work in progress; this one is the front door, and painting it
+ * as an alarm would misdescribe an ordinary first step. */
+.auth {
+  padding: 0.6rem;
+  margin-bottom: 0.5rem;
+  background: var(--grok-bg-highlight, canvas);
+  border: 1px solid var(--grok-accent-user, canvastext);
+  border-radius: 6px;
+}
+
+.auth-title {
+  margin-bottom: 0.4rem;
+  color: var(--grok-accent-user, canvastext);
+}
+
+.auth-diamond {
+  margin-right: 0.4rem;
+}
+
+.auth-why,
+.auth-header {
+  margin-bottom: 0.5rem;
+  color: var(--grok-gray-bright, canvastext);
+}
+
+.auth-blocked {
+  margin-bottom: 0.4rem;
+  color: var(--grok-warning, canvastext);
+  overflow-wrap: anywhere;
+}
+
+.auth-methods {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.auth-method {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  text-align: left;
+  border-color: var(--grok-accent-user, canvastext);
+}
+
+.auth-method-note {
+  font-size: 0.8rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.auth-running {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+/* Centred and bold, as the pager draws it: this is the string a person checks
+ * against the page they are about to approve. */
+.auth-code-block {
+  align-self: stretch;
+  text-align: center;
+}
+
+.auth-code {
+  font-size: 1.6rem;
+  font-weight: bold;
+  letter-spacing: 0.15em;
+  color: var(--grok-text-primary, canvastext);
+}
+
+.auth-code-caption {
+  font-size: 0.8rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+/* A long authorize URL must wrap rather than widen the column: it carries a
+ * PKCE challenge and a state nonce and is routinely several hundred characters. */
+.auth-url {
+  align-self: stretch;
+  overflow-wrap: anywhere;
+  color: var(--grok-accent-skill, canvastext);
+}
+
+.auth-waiting {
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.auth-paste {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  align-self: stretch;
+}
+
+.auth-paste-label {
+  font-size: 0.8rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.auth-paste-submit {
+  align-self: flex-start;
+}
+
+.auth-error {
+  margin-top: 0.4rem;
+  color: var(--grok-accent-error, canvastext);
+  overflow-wrap: anywhere;
+}
+
+/* Chrome for the link, not prose: small and quiet, like the pager's own
+ * raw-URL toggle. */
+.auth-url-toggle {
+  align-self: flex-start;
+  padding: 0;
+  font-size: 0.8rem;
+  background: transparent;
+  border: none;
+  color: var(--grok-gray, canvastext);
+  text-decoration: underline;
+}
+
+.auth-url-raw {
+  align-self: stretch;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+  user-select: all;
+  background: var(--grok-bg-dark, canvas);
+  border-radius: 4px;
   color: var(--grok-gray-bright, canvastext);
 }
