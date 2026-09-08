@@ -10217,6 +10217,10 @@ async fn provider_thinking_dialect_reaches_the_messages_wire() {
         );
     }
 }
+/// Through [`apply_remote_signature_policy`], not the whole settings applier:
+/// the applier also blanks the remote auto-mode, MCP, tool-approval and
+/// crash-handler caches, whose own tests hold a different lock and would read
+/// back what this test erased.
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn remote_settings_disarm_managed_config_signatures() {
@@ -10229,19 +10233,19 @@ fn remote_settings_disarm_managed_config_signatures() {
         managed_config_signature_verification: Some(false),
         ..Default::default()
     };
-    apply_remote_settings_side_effects(Some(&settings));
+    apply_remote_signature_policy(Some(&settings));
     assert!(!xai_grok_config::signed_policy::verification_active());
     let settings = crate::util::config::RemoteSettings {
         managed_config_signature_verification: Some(true),
         ..Default::default()
     };
-    apply_remote_settings_side_effects(Some(&settings));
+    apply_remote_signature_policy(Some(&settings));
     assert!(xai_grok_config::signed_policy::verification_active());
     xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
         Some(false),
         true,
     );
-    apply_remote_settings_side_effects(None);
+    apply_remote_signature_policy(None);
     assert!(!xai_grok_config::signed_policy::verification_active());
     xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
         Some(true),
@@ -10250,6 +10254,7 @@ fn remote_settings_disarm_managed_config_signatures() {
     assert!(xai_grok_config::signed_policy::verification_active());
 }
 /// Keyed path: prod proxy origin can disarm; env override cannot.
+/// Narrowed to [`apply_remote_signature_policy`] for the reason above.
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
@@ -10265,7 +10270,7 @@ fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
     unsafe {
         std::env::remove_var("GROK_CLI_CHAT_PROXY_BASE_URL");
     }
-    apply_remote_settings_side_effects(Some(&settings));
+    apply_remote_signature_policy(Some(&settings));
     assert!(
         !xai_grok_config::signed_policy::verification_active(),
         "prod proxy origin must allow disarm when keys are embedded"
@@ -10281,7 +10286,7 @@ fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
             "https://attacker.example/v1",
         );
     }
-    apply_remote_settings_side_effects(Some(&settings));
+    apply_remote_signature_policy(Some(&settings));
     assert!(
         xai_grok_config::signed_policy::verification_active(),
         "env-overridden proxy must not be able to disarm keyed verification"

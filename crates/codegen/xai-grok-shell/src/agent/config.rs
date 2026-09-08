@@ -3573,6 +3573,26 @@ pub(crate) fn apply_external_otel_remote_policy(
         xai_grok_telemetry::external::apply_remote_policy(policy);
     }
 }
+/// The managed-config signature half of [`apply_remote_settings_side_effects`]:
+/// a remote disarm counts only from an origin we trust.
+///
+/// Named separately so a test about the disarm rule can exercise the rule.
+/// Reaching it through the bulk applier also zeroes six unrelated remote caches
+/// — the auto-mode config, the MCP timeouts, the tool-approval and crash-handler
+/// flags — which the tests asserting on *those* hold a different lock for, so a
+/// signature test scheduled between their write and their read blanks the value
+/// they are about to assert on.
+fn apply_remote_signature_policy(settings: Option<&crate::util::config::RemoteSettings>) {
+    let Some(s) = settings else { return };
+    let origin_trusted = crate::util::is_prod_cli_chat_proxy_url(
+        &EndpointsConfig::from_effective_config().proxy_url(),
+    );
+    xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
+        s.managed_config_signature_verification,
+        origin_trusted,
+    );
+}
+
 /// Seed free-function remote caches after writing `Config.remote_settings`.
 ///
 /// Called from `init.rs` at boot and from the agent when backgrounded settings arrive later.
@@ -3583,15 +3603,7 @@ pub(crate) fn apply_external_otel_remote_policy(
 /// That publish applies the same tighten-only policy and then opens the gate with a `Release` swap.
 /// Removing that second application to deduplicate would leave only the `Relaxed` store and reopen an ARM visibility hole.
 pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config::RemoteSettings>) {
-    if let Some(s) = settings {
-        let origin_trusted = crate::util::is_prod_cli_chat_proxy_url(
-            &EndpointsConfig::from_effective_config().proxy_url(),
-        );
-        xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
-            s.managed_config_signature_verification,
-            origin_trusted,
-        );
-    }
+    apply_remote_signature_policy(settings);
     crate::util::config::cache_remote_mcp_startup_timeout_secs(
         settings.and_then(|s| s.mcp_startup_timeout_secs),
     );
