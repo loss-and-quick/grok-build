@@ -3,7 +3,14 @@ import { Dynamic } from "solid-js/web";
 
 import { blendToward, createTick, waveBrightness } from "../animation.ts";
 import { acceptRow, argumentHint, type CommandRow } from "../commands.ts";
-import { ACCENT_BAR, BULLET, CHEVRON, PROMPT_ARROW, spinnerFrame } from "../glyphs.ts";
+import {
+  ACCENT_BAR,
+  BULLET,
+  CHEVRON,
+  GLYPH_WARNING,
+  PROMPT_ARROW,
+  spinnerFrame,
+} from "../glyphs.ts";
 import {
   defaultMode,
   ellipsisFor,
@@ -19,6 +26,7 @@ import {
 } from "../toolcall.ts";
 import { typedResult, type TypedResult } from "../toolresult.ts";
 
+import { decisionsFor } from "../decisions.ts";
 import type { Gateway } from "../gateway.ts";
 import { sessionLabel } from "../roster.ts";
 import type { ToolCallEntry, TranscriptEntry } from "../transcript.ts";
@@ -29,7 +37,7 @@ import { Markdown } from "./Markdown.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { Panel } from "./Panel.tsx";
 import { Rail } from "./Rail.tsx";
-import { PermissionCard } from "./PermissionCard.tsx";
+
 import { Subagents } from "./Subagents.tsx";
 import { ToolResult } from "./ToolResult.tsx";
 
@@ -56,6 +64,11 @@ export function Session(props: {
 }): JSX.Element {
   let composer: HTMLTextAreaElement | undefined;
   const tick = createTick();
+  // The same arbiter the modal reads, so "parked" means one thing on both
+  // surfaces: what Escape sets aside up there is what this offers to reopen.
+  const decisions = decisionsFor(props.gateway);
+  /** Questions this session's turn has stopped on, parked or not. */
+  const blocking = () => decisions.here();
   const menu = createCommandMenu(() => props.gateway.commands());
   const files = createFileMenu(props.gateway.fileSearch);
   // The composer's text as state, not only as a DOM value: the menu reads it on
@@ -137,12 +150,6 @@ export function Session(props: {
             <ModelPicker gateway={props.gateway} />
           </header>
 
-          <div class="permissions">
-            <For each={props.gateway.permissions}>
-              {(pending) => <PermissionCard pending={pending} />}
-            </For>
-          </div>
-
           {/* Where a panel goes when the rail is off: a stack over the
               transcript, which is where every panel went before the rail
               existed. The agent decides — `dock_enabled` rides
@@ -186,12 +193,43 @@ export function Session(props: {
 
           <form
             class="composer"
-            classList={{ running: props.gateway.status() === "running…" }}
+            classList={{
+              running: props.gateway.status() === "running…",
+              blocked: blocking().length > 0,
+            }}
             onSubmit={(event) => {
               event.preventDefault();
               send();
             }}
           >
+            {/* The pager does not let you type past a question it is blocked
+                on: the permission card is drawn *into the prompt slot*
+                (`agent_view/render.rs:2674-2687`), so the composer is not
+                there to type into. A browser cannot take the box away without
+                taking a half-written draft with it, so it says what is true
+                instead — the turn has stopped, and here is the way back to the
+                question. */}
+            <Show when={blocking()[0]}>
+              {(blocked) => (
+                <div class="composer-blocked">
+                  <span class="composer-blocked-mark" aria-hidden="true">
+                    {GLYPH_WARNING}
+                  </span>
+                  <span class="composer-blocked-text">
+                    {blocking().length === 1
+                      ? "This turn has stopped on a question."
+                      : `This turn has stopped on ${blocking().length} questions.`}
+                  </span>
+                  <button
+                    class="composer-blocked-open"
+                    type="button"
+                    onClick={() => decisions.unpark(blocked().key)}
+                  >
+                    Answer it
+                  </button>
+                </div>
+              )}
+            </Show>
             {/* Above the input rather than below it, the way the pager stacks
                 its dropdown over the prompt: the list grows upward, so a long
                 catalog never pushes the line being typed off the screen. */}
@@ -302,7 +340,7 @@ export function Session(props: {
                 }
               }}
             />
-            <button class="send" type="submit">
+            <button class="send" type="submit" disabled={blocking().length > 0}>
               Send
             </button>
           </form>

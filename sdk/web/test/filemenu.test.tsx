@@ -67,6 +67,7 @@ function mount() {
   const gateway = {
     attached: () => ({ entry: ENTRY, transcript: createTranscript(), subagents: createSubagents(ENTRY.sessionId) }),
     permissions: [],
+    folderTrusts: [],
     status: () => "connected",
     commands: () => [],
     models: () => null,

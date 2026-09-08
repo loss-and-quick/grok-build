@@ -14,7 +14,7 @@
 // persist, because the effort is session-scoped and rides in `_meta` on the same
 // `set_model` (`pager/src/app/effects/mod.rs:1846-1873`).
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { render } from "@solidjs/testing-library";
+import { cleanup, render } from "@solidjs/testing-library";
 
 import type { SocketLike } from "../src/client.ts";
 import { ModelPicker } from "../src/components/ModelPicker.tsx";
@@ -102,6 +102,11 @@ let socket: FakeSocket;
 const RealWebSocket = globalThis.WebSocket;
 
 beforeEach(() => {
+  // Take the previous test's page down first. An open picker holds a *document*
+  // keydown listener that swallows the arrows to walk its rows
+  // (`ModelPicker.tsx`), so a suite that leaves one mounted goes on eating
+  // arrow keys in whatever suite runs after it — the leak is here, not there.
+  cleanup();
   socket = new FakeSocket();
   (globalThis as { WebSocket: unknown }).WebSocket = function () {
     return socket;
@@ -109,6 +114,7 @@ beforeEach(() => {
 });
 
 afterAll(() => {
+  cleanup();
   (globalThis as { WebSocket: unknown }).WebSocket = RealWebSocket;
 });
 

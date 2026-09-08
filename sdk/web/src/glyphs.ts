@@ -90,3 +90,16 @@ export function spinnerFrame(tick: number): string {
   const at = Math.floor(tick / SPINNER_DIVISOR) % SPINNER_FRAMES.length;
   return SPINNER_FRAMES[at] ?? SPINNER_FRAMES[0];
 }
+
+/**
+ * `⚠` — the agent has stopped and is waiting on a person.
+ *
+ * The terminal's own marker for exactly this: `TitleItem::ActionRequired` puts
+ * `⚠ Action Required` first in the window title while a permission sits
+ * unanswered, blinking about once a second while the terminal is unfocused and
+ * standing still while it is focused (`notifications/title.rs:184-197`). A tab
+ * title is the browser's counterpart of a window title, so the glyph carries
+ * the same meaning in the same place — and, being the same glyph, cannot drift
+ * from it.
+ */
+export const GLYPH_WARNING = GLYPHS.warning_sign;

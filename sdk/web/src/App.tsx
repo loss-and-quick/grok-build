@@ -14,7 +14,7 @@ import { THEMES, type ThemeName } from "@grok-build/theme";
 
 import { AuthCard } from "./components/AuthCard.tsx";
 import { DirectoryPicker } from "./components/DirectoryPicker.tsx";
-import { FolderTrustCard } from "./components/FolderTrustCard.tsx";
+import { Decisions } from "./components/Decisions.tsx";
 import { InstanceMenu } from "./components/InstanceMenu.tsx";
 import { Roster } from "./components/Roster.tsx";
 import { Session } from "./components/Session.tsx";
@@ -583,12 +583,9 @@ export function App(props: { children?: JSX.Element }): JSX.Element {
             never replays it, so it can arrive before that session is attached
             or while another is on screen — and a card dropped for either
             reason is a project whose MCP servers, hooks, plugins and LSP go
-            off without a word. */}
-        <div class="trusts">
-          <For each={gateway.folderTrusts}>
-            {(pending) => <FolderTrustCard pending={pending} />}
-          </For>
-        </div>
+            off without a word. The permission modal is here for the same
+            reason plus one more: one arbiter hands out one modal slot. */}
+        <Decisions gateway={gateway} />
         {props.children}
       </main>
     </div>
