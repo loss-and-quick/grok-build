@@ -50,10 +50,11 @@ servers are pinned to `127.0.0.1`.
 
 **3. Connect.** The page opens on a form: paste the gateway URL
 (`ws://127.0.0.1:2420/ws`, without the query string) and the secret, and press
-Connect. Once it is up the form collapses to one line — a dot, the host, and
-**Disconnect** — because the roster is what the column is for; pressing the host
-brings the form back. The URL and the secret are remembered, so a reload
-reconnects on its own and the secret is never rendered back into the page.
+Connect. Once it is up the form collapses to one line — a dot, the machine's
+name, and **Disconnect** — because the roster is what the column is for;
+pressing the name opens the instance menu. The address and the secret are
+remembered, so a reload reconnects on its own and the secret is never rendered
+back into the page.
 
 The sidebar fills with directories; each holds its sessions. Click one to attach
 — history replays, live updates follow — or press **+ session here** to start a
@@ -76,6 +77,61 @@ directory's most recent session.
 
 The theme picker offers the six palettes from `sdk/theme`. Nothing in this
 client names a colour; see "Colour" below.
+
+## Instances
+
+An instance is a **machine, not an address**, and that is the wire's answer
+rather than a stance: `initialize._meta` carries `agentId`, a UUID the agent
+persists under its `$GROK_HOME`, so `127.0.0.1:2420` and the address the same
+machine answers on over the network are one instance with two addresses. Keying
+on the URL is the mistake opencode had to ship a migration to undo — their
+built-in server and `http://localhost:4096` had forked every project list in
+two — and an id the agent already mints cannot fork.
+
+Pressing the machine's name opens the menu: every remembered instance with its
+state, its addresses, how many sessions it had and when it was last seen, and
+per row **Rename**, **Open new tabs here** and **Forget**. "Open new tabs here"
+is deliberately not "the one you are looking at": without the distinction,
+looking at a colleague's machine once quietly decides where every tab opened
+afterwards signs in.
+
+**One live socket, switched in sequence.** Not for simplicity: connecting here
+runs `settleAuth`, which in the general case sends `authenticate`, so a page
+that eagerly opened three remembered instances would drive three sign-ins on
+three machines nobody asked about — and would owe each of them an answer to
+`session/request_permission` from a machine no one is looking at. opencode
+holds every server live and can, because theirs is basic auth in a config
+record; that difference is the argument against copying them rather than for it.
+The price is stated rather than hidden: while you are looking at one machine you
+do not know what is happening on another, and the mitigation is that a switch is
+one press, not a background socket.
+
+The state dot says which of six things is true, and two of them used to read the
+same: a socket that is up with no credential behind it refuses every session on
+the roster under it, and the line said "connected" for that as loudly as for a
+working link.
+
+### A link to a session on another machine
+
+Session ids are unique on a leader, not between leaders, so `/s/<id>` is half an
+address. New links carry `?i=<instance>`; old ones do not and read as
+"whichever instance this tab is on", which is what they have always meant.
+
+**A route never connects.** Opening `/s/<id>?i=<other>` while the page is on
+this instance says which session was looked for, on which machine, that the link
+was written on another, and offers a button. It does not switch: connecting is
+signing in, and a URL that could make a browser sign in to an agent on a machine
+is an action wearing navigation's clothes. Pressing the button switches, and the
+route then attaches on its own once that instance's roster arrives.
+
+Secrets are one `localStorage` key per instance, kept apart from the list. The
+list is describable — a label, hosts, a time — and a credential for a whole
+machine's agent is not, so "forget every secret, keep the list" stays one line
+and the list stays exportable. It survives a new tab, which is what makes
+`/s/<id>` a real URL, and it is never rendered back into a field. A store that
+refuses to save the list says so on screen: a theme that fails to save is
+retyped in a second, and a machine that fails to save is one somebody added and
+will not find again.
 
 ## Signing in
 
@@ -492,6 +548,35 @@ focus between browser regions and is an accessibility control. Both surfaces
 share one set of editors, so a code typed into the widget is still there in the
 dialog. A plugin that throws while being drawn takes down its own widget and
 nothing else.
+
+### The context window
+
+`/context` is the most useful thing the terminal had that a browser could not
+draw, and the reason was never the geometry: every number in it was a pure
+function compiled into the pager. The agent resolves it now and sends it on
+`x.ai/session/info` as `contextFacts`, so the widget renders and computes
+nothing — the used and free bands, the contributor rows with their details, the
+itemized injected blocks, the auto-compact threshold, the turn and tool-call
+counts, and the compaction history read back from the session's own log.
+
+Three of those went over the wire *because* they are decisions with no other
+expression, and each is drawn as sent: the unattributed remainder (a labelled
+row, plus the note saying what it holds, because the label alone would imply
+this client knows), the 80% advisory band before auto-compaction (read as a
+flag, never as a comparison made here), and the clamp order that squeezes the
+remainder when independently measured bands overrun `used`.
+
+What stayed with the terminal is the bar's *shape*. The partition is a hundred
+units so that one unit reads as one percent — a terminal spends them as cells
+over a 5×20 or 10×10 grid chosen by terminal width, and a browser spends them as
+percent — so the bar here is one strip and no grid is chosen at all.
+
+There is no notification carrier for any of it: `session/info` is
+request/response, and the pager debounces its own asking. So the window is
+re-read on attach, at the end of a turn — the only two moments it moves — and
+when **Refresh** is pressed. Never on a timer. **Open** raises the whole picture
+in a dialog, which is where the text each injected block was measured over is
+read; a 360px column is not that place.
 
 ### Which widths hold three columns
 
