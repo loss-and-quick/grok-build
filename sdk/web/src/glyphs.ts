@@ -4,7 +4,12 @@
 // constants these are not generated — `glyphs.rs` is a Rust module of `const
 // char`s with no artifact — and the same fix applies: emit them alongside the
 // palette. They change far less often than colours, but "less often" is not
-// "never", so `glyphsMatchThePager` pins them.
+// "never", so `test/glyphs.test.ts` reads `glyphs.rs` and compares.
+//
+// Two below are pinned by nothing, because `glyphs.rs` does not own them: the
+// chip separator lives in the context bar, and the hollow dot is a literal at
+// the pager's own permission and question views. Naming that here is cheaper
+// than a test that would have to know where every literal in the pager is.
 //
 // The ASCII fallbacks in `glyphs.rs` exist for legacy Windows consoles that
 // cannot render the codepoint. A browser has no such limit, so only the real
@@ -25,8 +30,22 @@ export const ACCENT_BAR = "┃";
 /** `│` — the separator between status chips. `context_bar::SEPARATOR`. */
 export const CHIP_SEPARATOR = "│";
 
-/** `●` / `○` — selected and unselected option markers. `filled_dot()`. */
+/**
+ * `›` — the separator the pager already uses for **settings breadcrumbs**, and
+ * so the one a path's breadcrumbs use here. `chevron()`.
+ */
+export const CHEVRON = "›";
+
+/** `‹` — `chevron()`'s mirror: the pager's "previous", and here the way up. `chevron_left()`. */
+export const CHEVRON_LEFT = "‹";
+
+/** `▸` — the collapsed-section marker; here, a directory you can descend into. `disclosure_closed()`. */
+export const DISCLOSURE_CLOSED = "▸";
+
+/** `●` — the selected option marker. `filled_dot()`. */
 export const DOT_FILLED = "●";
+
+/** `○` — its unselected partner, a literal at `permission_view.rs` and `question_view.rs`. */
 export const DOT_HOLLOW = "○";
 
 /** Braille spinner frames, cycled every 4 ticks. `braille_spinner_frames()`. */

@@ -12,9 +12,13 @@ import { GatewayClient, gatewayUrl } from "./client.ts";
 import type { PanelAction } from "./panel.ts";
 import { createRoster, type Roster } from "./roster.ts";
 import { createTranscript, type Transcript } from "./transcript.ts";
+import { LIST_PARAMS, ROOT } from "./directory.ts";
 import {
   PROTOCOL_VERSION,
   visibleSettingRows,
+  type FsExistsResponse,
+  type FsListResponse,
+  type InitializeResponse,
   type NewSessionResponse,
   type PanelActionResponse,
   type PromptResponse,
@@ -65,6 +69,11 @@ export function createGateway() {
   const [connection, setConnection] = createSignal<Connection>("offline");
   const [status, setStatus] = createSignal("not connected");
   const [attached, setAttached] = createSignal<Attached | null>(null);
+  // Where the directory picker starts walking. The agent names its own launch
+  // directory in `initialize`'s `_meta`; the root is the fallback because it is
+  // the one path that always exists, and it is never a *limit* — `session/new`
+  // takes any absolute `cwd`, so the picker may leave in either direction.
+  const [agentCwd, setAgentCwd] = createSignal(ROOT);
   const [settings, setSettings] = createStore<{ rows: SettingRow[]; terminalOnly: number; values: Record<string, unknown>; locks: Record<string, { reason: string }> }>({
     rows: [],
     terminalOnly: 0,
@@ -153,14 +162,16 @@ export function createGateway() {
 
     try {
       await next.connect();
-      await next.request("initialize", {
+      const initialized = (await next.request("initialize", {
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {
           fs: { readTextFile: false, writeTextFile: false },
           terminal: false,
         },
         clientInfo: { name: "grok-web", version: "0.1.0" },
-      });
+      })) as InitializeResponse;
+      const cwd = initialized._meta?.currentWorkingDirectory;
+      if (typeof cwd === "string" && cwd) setAgentCwd(cwd);
       await refreshRoster();
       await refreshSettings();
       setConnection("connected");
@@ -196,6 +207,37 @@ export function createGateway() {
         state.locks = response.state?.locks ?? {};
       }),
     );
+  };
+
+  /**
+   * List one directory for the picker.
+   *
+   * No `sessionId` is sent, on purpose: the agent consults it only to resolve a
+   * *relative* path against that session's cwd, and every path this client
+   * holds is absolute. The walk of an absolute path is identical whichever
+   * session asks — which is why a picker needed no wire change at all.
+   */
+  const listDirectory = async (path: string): Promise<FsListResponse> => {
+    if (!client) return { nodes: [], truncated: false };
+    const response = (await client.ext("x.ai/fs/list", {
+      path,
+      ...LIST_PARAMS,
+    })) as FsListResponse;
+    return { nodes: response.nodes ?? [], truncated: response.truncated ?? false };
+  };
+
+  /**
+   * Does the path exist?
+   *
+   * Asked only when a listing comes back empty, because that is the one case
+   * `fs/list` cannot explain by itself: an empty directory, a path that is a
+   * file, and a directory the leader may not read all answer with the same
+   * empty page.
+   */
+  const pathExists = async (path: string): Promise<boolean> => {
+    if (!client) return false;
+    const response = (await client.ext("x.ai/fs/exists", { path })) as FsExistsResponse;
+    return response.exists === true;
   };
 
   const attach = async (entry: RosterEntry): Promise<void> => {
@@ -293,6 +335,7 @@ export function createGateway() {
     connection,
     status,
     attached,
+    agentCwd,
     roster,
     settings,
     permissions,
@@ -300,6 +343,8 @@ export function createGateway() {
     disconnect,
     attach,
     createSession,
+    listDirectory,
+    pathExists,
     prompt,
     panelAction,
     refreshRoster,

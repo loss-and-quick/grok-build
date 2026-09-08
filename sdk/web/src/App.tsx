@@ -1,7 +1,8 @@
 import { useNavigate, useParams } from "@solidjs/router";
-import { createEffect, createSignal, For, on, onMount, type JSX } from "solid-js";
+import { createEffect, createSignal, For, on, onMount, Show, type JSX } from "solid-js";
 import { THEMES, type ThemeName } from "@grok-build/theme";
 
+import { DirectoryPicker } from "./components/DirectoryPicker.tsx";
 import { Roster } from "./components/Roster.tsx";
 import { Session } from "./components/Session.tsx";
 import { Settings } from "./components/Settings.tsx";
@@ -53,11 +54,51 @@ export function App(props: { children?: JSX.Element }): JSX.Element {
             {(name) => <option value={name}>{THEMES[name].display_name}</option>}
           </For>
         </select>
+        <NewSessionButton />
         <RosterPane />
         <Settings gateway={gateway} />
       </aside>
       <main class="main">{props.children}</main>
     </div>
+  );
+}
+
+/**
+ * Open a session in a directory the roster has never mentioned.
+ *
+ * The roster's own "+ session here" can only reach a root some client already
+ * opened, which made the browser a viewer of directories rather than a chooser
+ * of them. This is the same gesture without that limit — and, like it, creating
+ * and opening are one act, but only the route opens: navigating is what
+ * attaches, so a new session arrives at a URL like every other.
+ */
+function NewSessionButton(): JSX.Element {
+  const [picking, setPicking] = createSignal(false);
+  const navigate = useNavigate();
+
+  return (
+    <>
+      <button
+        class="new-session"
+        type="button"
+        disabled={gateway.connection() !== "connected"}
+        onClick={() => setPicking(true)}
+      >
+        New session…
+      </button>
+      <Show when={picking()}>
+        <DirectoryPicker
+          gateway={gateway}
+          onClose={() => setPicking(false)}
+          onOpen={(cwd) => {
+            setPicking(false);
+            void gateway.createSession(cwd).then((sessionId) => {
+              if (sessionId) navigate(`/s/${sessionId}`);
+            });
+          }}
+        />
+      </Show>
+    </>
   );
 }
 

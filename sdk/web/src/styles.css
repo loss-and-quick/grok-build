@@ -463,6 +463,165 @@ button:disabled {
   border-color: var(--grok-accent-error, canvastext);
 }
 
+/* -- directory picker ----------------------------------------------------- */
+
+.new-session {
+  width: 100%;
+  color: var(--grok-accent-user, canvastext);
+  border-color: var(--grok-prompt-border-active, canvastext);
+}
+
+/* The scrim is the palette's own darkest surface, thinned toward transparent —
+ * `color-mix` keeps the role as the only source of the colour, the way
+ * `blendToward` does for the animated accents. */
+.picker-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: color-mix(in srgb, var(--grok-bg-dark, canvas) 82%, transparent);
+}
+
+.picker {
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  gap: 0.6rem;
+  width: min(46rem, 100%);
+  height: min(34rem, 100%);
+  padding: 0.75rem;
+  background: var(--grok-bg-light, canvas);
+  border: 1px solid var(--grok-selection-border, canvastext);
+  border-radius: 6px;
+}
+
+.picker-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.picker-title {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--grok-accent-assistant, canvastext);
+}
+
+/* The breadcrumbs are the way back up, so they wrap rather than scroll: a deep
+ * path must never push its own root out of reach. */
+.picker-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem;
+}
+
+.picker-crumb {
+  padding: 0.05rem 0.25rem;
+  background: transparent;
+  border-color: transparent;
+  color: var(--grok-path, canvastext);
+}
+
+.picker-crumb-sep {
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.picker-jump {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.4rem;
+}
+
+.picker-list {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.25rem;
+  background: var(--grok-bg-base, canvas);
+  border: 1px solid var(--grok-prompt-border, canvastext);
+  border-radius: 4px;
+}
+
+/* The name column is `auto`, not `1fr`: as `1fr` it filled the row and shoved
+ * the symlink note against the far edge, where it read as a column of its own
+ * rather than a remark about the name it belongs to. */
+.picker-row {
+  display: grid;
+  grid-template-columns: 1.25rem auto minmax(0, 1fr);
+  gap: 0.3rem;
+  align-items: baseline;
+  width: 100%;
+  padding: 0.1rem 0.3rem;
+  text-align: left;
+  background: transparent;
+  border-color: transparent;
+  border-radius: 3px;
+}
+
+button.picker-row:hover,
+button.picker-row:focus-visible {
+  background: var(--grok-bg-hover, canvas);
+  border-color: var(--grok-hover-border, canvastext);
+  outline: none;
+}
+
+.picker-mark {
+  color: var(--grok-gray, canvastext);
+}
+
+.picker-name {
+  overflow-wrap: anywhere;
+}
+
+.picker-dir .picker-name {
+  color: var(--grok-path, canvastext);
+}
+
+/* A file is context, not a destination: it is dimmed, has no hover and is not a
+ * button. Keeping it on screen is what lets someone recognize the project. */
+.picker-file {
+  cursor: default;
+}
+
+.picker-file .picker-name {
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.picker-up .picker-name {
+  color: var(--grok-text-secondary, canvastext);
+}
+
+.picker-link {
+  font-size: 0.75rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.picker-note {
+  margin: 0.4rem 0.3rem;
+  color: var(--grok-warning, canvastext);
+}
+
+.picker-footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.picker-chosen {
+  color: var(--grok-path, canvastext);
+  overflow-wrap: anywhere;
+}
+
+.picker-open {
+  border-color: var(--grok-accent-success, canvastext);
+}
+
 /* -- settings (read-only) ------------------------------------------------- */
 
 .settings summary {

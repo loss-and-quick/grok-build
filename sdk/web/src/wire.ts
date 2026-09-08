@@ -208,6 +208,23 @@ export interface InitializeRequest {
   };
 }
 
+/**
+ * The part of `initialize`'s response this client reads.
+ *
+ * `_meta` is where the agent puts everything ACP has no field for, and
+ * `currentWorkingDirectory` is the leader's own launch directory
+ * (`crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs:577`). It is
+ * the natural place to start walking from — not a limit on where a session may
+ * go, since `session/new` takes any absolute `cwd`.
+ */
+export interface InitializeResponse {
+  protocolVersion: number;
+  _meta?: {
+    currentWorkingDirectory?: string;
+    [key: string]: unknown;
+  };
+}
+
 export interface PromptRequest {
   sessionId: string;
   prompt: ContentBlock[];
@@ -242,6 +259,57 @@ export interface PanelActionRequest {
 export interface PanelActionResponse {
   /** `false` when the session or the plugin is gone; the panel is then stale. */
   delivered: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem — crates/codegen/xai-grok-shell/src/extensions/fs.rs
+//
+// `sessionId` is optional and this client never sends it: it is only consulted
+// for a *relative* path, which is joined onto that session's cwd. Every path
+// here is absolute, so the walk is the same whichever session asks — the point
+// established by the two tests behind `docs/WEB-UI.md`'s finding that there is
+// no server-side gap under the directory picker.
+// ---------------------------------------------------------------------------
+
+/** Params of `x.ai/fs/list`. Everything but `path` has an agent-side default. */
+export interface FsListRequest {
+  path: string;
+  depth?: number;
+  limit?: number;
+  offset?: number;
+  includeHidden?: boolean;
+  followSymlinks?: boolean;
+  respectGitIgnore?: boolean;
+  includeGlobs?: string[];
+  excludeGlobs?: string[];
+}
+
+/**
+ * One entry of a listing.
+ *
+ * `isSymlink` rides only when true — the Rust writes `e.is_symlink
+ * .then_some(true)` behind a `skip_serializing_if` — and a symlinked directory
+ * still arrives as `"directory"`, because the walk follows links by default. So
+ * the flag is decoration on a kind, not a kind of its own.
+ */
+export interface FsNode {
+  name: string;
+  path: string;
+  type: "directory" | "file" | (string & {});
+  isSymlink?: boolean;
+  size?: number;
+  modifiedAt?: string;
+}
+
+export interface FsListResponse {
+  nodes: FsNode[];
+  /** The page hit `limit`; there are more entries than were sent. */
+  truncated: boolean;
+}
+
+/** Params of `x.ai/fs/exists`, the only method that separates missing from empty. */
+export interface FsExistsResponse {
+  exists: boolean;
 }
 
 // ---------------------------------------------------------------------------

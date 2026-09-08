@@ -54,6 +54,15 @@ sidebar fills with directories; each holds its sessions. Click one to attach —
 history replays, live updates follow — or press **+ session here** to start a
 new session in that directory.
 
+**New session…** opens a directory picker instead, so a session can start in a
+root no client has opened before. It begins at the directory `initialize`
+names, walks up and down, and takes a typed absolute path. Nothing about it is
+new on the wire: `x.ai/fs/list` walks an absolute path as given and
+`session/new` accepts any absolute `cwd`. The listing asks for git-ignored
+entries explicitly — the agent hides them by default, which would drop
+`target/` and anything a parent `.gitignore` names, and those are perfectly
+good places to work.
+
 Attaching navigates to `/s/<sessionId>`, so a session is a URL: reload it,
 bookmark it, or open it in a second tab, and the page comes back attached. The
 leader treats every tab as its own client, so two tabs on one session is an
@@ -94,8 +103,12 @@ bun run typecheck
 
 `test/setup.ts` registers two things Bun needs and Vite provides on its own:
 `babel-preset-solid`, because Solid's reactivity is a compile-time transform,
-and a rewrite of the `solid-js/web` specifier, because Bun resolves with the
-`node` condition and Solid's `node` export is its *server* renderer.
+and a rewrite of the `solid-js`, `solid-js/store` and `solid-js/web` specifiers,
+because Bun resolves with the `node` condition and every one of those points it
+at a *server* build. All three matter: on the server core `createEffect` and
+`onMount` are empty functions, so redirecting only the renderer left components
+rendering once and standing still, with nothing to say so.
+`test/environment.test.tsx` is what says so now.
 
 `test/live.test.tsx` drives the real `App` against a running gateway and is
 skipped unless you point it at one:
@@ -145,12 +158,13 @@ transform, which the reactivity depends on.
 | `src/client.ts` | JSON-RPC 2.0 over the gateway's WebSocket |
 | `src/gateway.ts` | the live connection, as reactive state |
 | `src/roster.ts` | the roster, grouped by `cwd` |
+| `src/directory.ts` | absolute-path arithmetic, and the listing params a picker needs |
 | `src/transcript.ts` | folding `session/update` into a store |
 | `src/markdown.ts` | the panel markdown parser, and which links keep an href |
 | `src/panel.ts` | tone-to-role, and the block-kind exhaustiveness guard |
 | `src/theme.ts` | generated palette to CSS custom properties |
 | `src/App.tsx` | the screen and its routes |
-| `src/components/` | Roster, Session, Panel, Markdown, Settings, PermissionCard |
+| `src/components/` | Roster, Session, Panel, Markdown, Settings, PermissionCard, DirectoryPicker |
 
 `src/wire.ts` is hand-written on purpose and the reasoning is at the top of the
 file: the panel types and the palette *are* generated and are imported, never
