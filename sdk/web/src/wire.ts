@@ -188,6 +188,7 @@ export type SessionUpdate =
   | SessionUpdateToolCallUpdate
   | SessionUpdatePluginPanel
   | SessionUpdatePanelClosed
+  | SessionUpdateAvailableCommands
   | SessionUpdateOther;
 
 /** Params of both `session/update` and `_x.ai/session/update`. */
@@ -221,6 +222,14 @@ export interface InitializeResponse {
   protocolVersion: number;
   _meta?: {
     currentWorkingDirectory?: string;
+    /**
+     * Pre-session builtins, gated on config alone — `acp_agent.rs:586` calls
+     * `slash_commands::builtin_commands`, and nothing tool- or session-derived
+     * can be evaluated yet. A seed, not the catalog: skills, workflows and a
+     * plugin's own commands need a session and arrive with the first
+     * `available_commands_update`.
+     */
+    availableCommands?: AvailableCommand[];
     [key: string]: unknown;
   };
 }
@@ -504,4 +513,40 @@ export const FOLDER_TRUST_DISMISSED = "folder trust left undecided by the user";
  */
 export interface NewSessionResponse {
   sessionId: string;
+}
+
+// ---------------------------------------------------------------------------
+// Slash commands — the catalog the shell advertises
+//
+// `AvailableCommandsUpdate` is a *standard* ACP `SessionUpdate`
+// (agent-client-protocol-schema-0.11.4/src/client.rs:97), so it rides the same
+// three carriers as every other update and needs no new dispatch — the point
+// made at the top of the session-update section.
+//
+// The shell fills it in `session/slash_commands.rs::available_commands`, and
+// `session/load` asks for one on every attach
+// (`agent/mvp_agent/session_setup.rs`, `SessionCommand::AdvertiseCommands`), so
+// a client that only listens still gets the catalog the moment it attaches.
+// ---------------------------------------------------------------------------
+
+/**
+ * One advertised command.
+ *
+ * `input` is serialized without `skip_serializing_if`, so it arrives as `null`
+ * rather than absent when a command takes no argument hint. It carries a hint
+ * only — never whether arguments are *allowed*: every ACP command accepts
+ * free-form text and the shell parses it (`AcpSlashCommand::from`, which sets
+ * `has_args: true` unconditionally).
+ */
+export interface AvailableCommand {
+  name: string;
+  description: string;
+  input?: { hint: string } | null;
+  /** Provenance and skill identity; see `commands.ts`. */
+  _meta?: Record<string, unknown> | null;
+}
+
+export interface SessionUpdateAvailableCommands {
+  sessionUpdate: "available_commands_update";
+  availableCommands: AvailableCommand[];
 }

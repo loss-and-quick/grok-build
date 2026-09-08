@@ -17,6 +17,7 @@ import {
   PROTOCOL_VERSION,
   visibleSettingRows,
   FOLDER_TRUST_DISMISSED,
+  type AvailableCommand,
   type FolderTrustOutcome,
   type FolderTrustRequest,
   type FolderTrustResponse,
@@ -99,6 +100,22 @@ export function createGateway() {
   // the one path that always exists, and it is never a *limit* — `session/new`
   // takes any absolute `cwd`, so the picker may leave in either direction.
   const [agentCwd, setAgentCwd] = createSignal(ROOT);
+  // The slash catalog for the attached session.
+  //
+  // Two sources, and the seam between them is the point. `initialize` carries
+  // the shell's pre-session builtins, which is all it *can* carry: skills,
+  // workflows and a plugin's own commands are resolved per session, against
+  // that session's cwd and tool set. The real catalog arrives as
+  // `available_commands_update` — and `session/load` asks for one on every
+  // attach (`SessionCommand::AdvertiseCommands`), so a client that merely
+  // listens is served, and served again whenever the model, the plugins or the
+  // skills on disk change.
+  //
+  // Per session, therefore, and reset on every attach: holding the previous
+  // session's list would offer a plugin's command in a directory whose plugin
+  // is not installed.
+  const [seedCommands, setSeedCommands] = createSignal<AvailableCommand[]>([]);
+  const [commands, setCommands] = createSignal<AvailableCommand[]>([]);
   const [settings, setSettings] = createStore<{ rows: SettingRow[]; terminalOnly: number; values: Record<string, unknown>; locks: Record<string, { reason: string }> }>({
     rows: [],
     terminalOnly: 0,
@@ -202,6 +219,11 @@ export function createGateway() {
       if (!notification?.update || !current) return;
       if (notification.sessionId !== current.entry.sessionId) return;
       const update = notification.update;
+      if (update.sessionUpdate === "available_commands_update") {
+        const advertised = (update as Record<string, unknown>)["availableCommands"];
+        setCommands(Array.isArray(advertised) ? (advertised as AvailableCommand[]) : []);
+        return;
+      }
       if (update.sessionUpdate === "interaction_resolved") {
         const id = String((update as Record<string, unknown>)["tool_call_id"] ?? "");
         const pending = permissions.find((p) => p.toolCallId === id);
@@ -245,6 +267,9 @@ export function createGateway() {
       })) as InitializeResponse;
       const cwd = initialized._meta?.currentWorkingDirectory;
       if (typeof cwd === "string" && cwd) setAgentCwd(cwd);
+      const seed = initialized._meta?.availableCommands;
+      setSeedCommands(Array.isArray(seed) ? seed : []);
+      setCommands(seedCommands());
       await refreshRoster();
       await refreshSettings();
       setConnection("connected");
@@ -316,6 +341,10 @@ export function createGateway() {
   const attach = async (entry: RosterEntry): Promise<void> => {
     if (!client) return;
     setAttached({ entry, transcript: createTranscript() });
+    // Back to the pre-session builtins until this session advertises its own.
+    // `session/load` triggers that advertisement, so the gap is one round-trip
+    // wide — and during it the menu offers only what every session has.
+    setCommands(seedCommands());
     say(`loading ${entry.sessionId}…`);
     try {
       // `cwd` comes straight off the roster row. That it is there at all is the
@@ -400,6 +429,8 @@ export function createGateway() {
     client?.close();
     client = null;
     setAttached(null);
+    setSeedCommands([]);
+    setCommands([]);
     setConnection("offline");
     say("not connected");
   };
@@ -409,6 +440,7 @@ export function createGateway() {
     status,
     attached,
     agentCwd,
+    commands,
     roster,
     settings,
     permissions,
