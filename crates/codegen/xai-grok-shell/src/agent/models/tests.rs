@@ -10,8 +10,11 @@ fn manager_with_catalog(models: IndexMap<String, ModelEntry>) -> ModelsManager {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
         .try_init();
-    let tmp = std::env::temp_dir().join("grok-test-models-manager");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    // One tempdir per call, like `cold_manager` below. A fixed temp path would
+    // hand `auth.json` and the models cache of every case in every concurrent
+    // run to the same file, and leave it on the machine for the next one.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
     ModelsManagerBuilder::new(
         None,
         models,
@@ -19,7 +22,7 @@ fn manager_with_catalog(models: IndexMap<String, ModelEntry>) -> ModelsManager {
         auth_manager,
         config::Config::default(),
     )
-    .cache(test_cache_manager(&tmp))
+    .cache(test_cache_manager(tmp.path()))
     .build()
 }
 
@@ -109,8 +112,8 @@ async fn catalog_retry_recovers_after_endpoint_returns() {
     }
 
     let calls = Arc::new(AtomicUsize::new(0));
-    let tmp = std::env::temp_dir().join("grok-test-catalog-retry");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
     let mgr = ModelsManagerBuilder::new(
         None,
         IndexMap::new(),
@@ -231,8 +234,8 @@ async fn auth_refresh_watcher_refetches_on_notify() {
     }
 
     let calls = Arc::new(AtomicUsize::new(0));
-    let tmp = std::env::temp_dir().join("grok-test-auth-refresh-watcher");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
     let mgr = ModelsManagerBuilder::new(
         None,
         IndexMap::new(),
@@ -872,8 +875,8 @@ fn current_reasoning_effort_round_trip() {
 
 #[test]
 fn current_reasoning_effort_seeded_from_config() {
-    let tmp = std::env::temp_dir().join("grok-test-models-manager-seed");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
     let mut cfg = config::Config::default();
     cfg.models.default_reasoning_effort = Some(ReasoningEffort::Xhigh);
     let mgr = ModelsManager::new(
@@ -1038,8 +1041,8 @@ fn config_menu_only_model_derives_support_and_default() {
     assert!(!catalog["plain"].info.supports_reasoning_effort);
     assert_eq!(catalog["plain"].info.reasoning_effort, None);
 
-    let tmp = std::env::temp_dir().join("grok-test-models-manager-menu-only");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
     let mgr = ModelsManager::new(
         None,
         catalog,
@@ -2613,8 +2616,8 @@ fn a_fallback_chain_naming_no_catalog_entry_warns_once() {
         "#,
     );
     let catalog = config::resolve_model_list(&cfg, None);
-    let tmp = std::env::temp_dir().join("grok-test-fallback-audit");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
 
     let logs = captured_warnings(|| {
         let mgr = ModelsManagerBuilder::new(
@@ -2624,7 +2627,7 @@ fn a_fallback_chain_naming_no_catalog_entry_warns_once() {
             auth_manager,
             cfg.clone(),
         )
-        .cache(test_cache_manager(&tmp))
+        .cache(test_cache_manager(tmp.path()))
         .build();
         // Republishing the same catalog must not repeat the warning.
         mgr.apply_config(cfg);
@@ -2653,8 +2656,8 @@ fn an_empty_catalog_reports_nothing() {
         on_errors = ["auth"]
         "#,
     );
-    let tmp = std::env::temp_dir().join("grok-test-fallback-audit-empty");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
 
     let logs = captured_warnings(|| {
         ModelsManagerBuilder::new(
@@ -2664,7 +2667,7 @@ fn an_empty_catalog_reports_nothing() {
             auth_manager,
             cfg,
         )
-        .cache(test_cache_manager(&tmp))
+        .cache(test_cache_manager(tmp.path()))
         .build();
     });
 

@@ -3043,7 +3043,9 @@ fn render_location_picker_shows_worktree_toggle_in_repo() {
     let theme = Theme::current();
     let area = Rect::new(0, 0, 80, 24);
     // A temp dir with a `.git` child so the toggle is eligible (hermetic, unlike depending on the test's real cwd being a repo)
-    let repo = std::env::temp_dir().join("grok-loc-wt-toggle-repo-test");
+    // Its own tempdir rather than a fixed temp name, which every concurrent run on the machine would share and none would clean up
+    let dir = tempfile::tempdir().expect("repo tempdir");
+    let repo = dir.path().to_path_buf();
     std::fs::create_dir_all(repo.join(".git")).expect("mk .git");
     let mut modal =
         LocationPickerState::new(vec![], repo.clone(), std::collections::HashMap::new());
@@ -3091,7 +3093,6 @@ fn render_location_picker_shows_worktree_toggle_in_repo() {
         Some(theme.text_primary),
         "hovered button must brighten the label text",
     );
-    let _ = std::fs::remove_dir_all(&repo);
 }
 
 /// Outside a git repo the worktree toggle is hidden (and no hit rect is recorded) so dispatch proceeds as a normal session.

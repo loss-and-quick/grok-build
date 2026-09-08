@@ -1961,9 +1961,12 @@ mod tests {
     }
 
     fn test_host() -> Arc<PluginHost> {
-        Arc::new(PluginHost::new(
-            std::env::temp_dir().join("plugin-tool-test"),
-        ))
+        // The registration assertions never read the root, so the host only
+        // needs a path nothing else answers to. A fixed temp path is shared
+        // with every other test binary on the machine and survives between
+        // runs; a tempdir dropped here leaves a name no one can plant under.
+        let root = tempfile::TempDir::new().unwrap();
+        Arc::new(PluginHost::new(root.path().to_path_buf()))
     }
 
     #[test]

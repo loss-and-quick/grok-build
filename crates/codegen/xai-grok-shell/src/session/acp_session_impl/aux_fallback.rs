@@ -481,9 +481,9 @@ mod tests {
     /// spending the transport budget the sampler owns separately.
     async fn actor_with_cfg(cfg: Config) -> crate::session::acp_session::SessionActor {
         let catalog: IndexMap<String, ModelEntry> = resolve_model_list(&cfg, None);
-        let tmp = std::env::temp_dir().join("grok-test-aux-fallback");
+        let tmp = tempfile::TempDir::new().unwrap();
         let auth_manager = std::sync::Arc::new(crate::auth::AuthManager::new(
-            &tmp,
+            tmp.path(),
             crate::auth::GrokComConfig::default(),
         ));
         let models_manager = crate::agent::models::ModelsManager::new(

@@ -359,9 +359,9 @@ mod tests {
         catalog: IndexMap<String, ModelEntry>,
         current_model_id: &str,
     ) -> ModelsManager {
-        let tmp = std::env::temp_dir().join("grok-test-web-fetch-distill");
+        let tmp = tempfile::TempDir::new().unwrap();
         let auth_manager = std::sync::Arc::new(crate::auth::AuthManager::new(
-            &tmp,
+            tmp.path(),
             crate::auth::GrokComConfig::default(),
         ));
         ModelsManager::new(

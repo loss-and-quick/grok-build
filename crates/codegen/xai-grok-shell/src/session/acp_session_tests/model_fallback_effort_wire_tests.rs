@@ -95,9 +95,9 @@ async fn actor_with(
         ..Config::default()
     };
     let catalog: indexmap::IndexMap<String, ModelEntry> = resolve_model_list(&cfg, None);
-    let tmp = std::env::temp_dir().join("grok-test-model-fallback-effort-wire");
+    let tmp = tempfile::TempDir::new().unwrap();
     let auth_manager = std::sync::Arc::new(crate::auth::AuthManager::new(
-        &tmp,
+        tmp.path(),
         crate::auth::GrokComConfig::default(),
     ));
     let models_manager = crate::agent::models::ModelsManager::new(

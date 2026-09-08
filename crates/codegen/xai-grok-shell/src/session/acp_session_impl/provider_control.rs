@@ -815,9 +815,9 @@ mod tests {
             model_fallbacks: chains,
             ..Config::default()
         };
-        let tmp = std::env::temp_dir().join("grok-test-provider-fallback");
+        let tmp = tempfile::TempDir::new().unwrap();
         let auth_manager = std::sync::Arc::new(crate::auth::AuthManager::new(
-            &tmp,
+            tmp.path(),
             crate::auth::GrokComConfig::default(),
         ));
         crate::agent::models::ModelsManager::new(
@@ -833,9 +833,9 @@ mod tests {
     /// see real `<provider>/<model>` keys and the wire slugs they serve.
     fn models_manager_for(cfg: Config) -> crate::agent::models::ModelsManager {
         let catalog = crate::agent::config::resolve_model_list(&cfg, None);
-        let tmp = std::env::temp_dir().join("grok-test-provider-fallback");
+        let tmp = tempfile::TempDir::new().unwrap();
         let auth_manager = std::sync::Arc::new(crate::auth::AuthManager::new(
-            &tmp,
+            tmp.path(),
             crate::auth::GrokComConfig::default(),
         ));
         crate::agent::models::ModelsManager::new(
