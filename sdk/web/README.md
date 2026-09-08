@@ -48,10 +48,15 @@ The dev server never talks to the leader: the page opens its own WebSocket, so
 the secret goes from the browser to the gateway and through nothing else. Both
 servers are pinned to `127.0.0.1`.
 
-**3. Connect.** Paste the gateway URL (`ws://127.0.0.1:2420/ws`, without the
-query string) and the secret into the two fields, and press Connect. The
-sidebar fills with directories; each holds its sessions. Click one to attach —
-history replays, live updates follow — or press **+ session here** to start a
+**3. Connect.** The page opens on a form: paste the gateway URL
+(`ws://127.0.0.1:2420/ws`, without the query string) and the secret, and press
+Connect. Once it is up the form collapses to one line — a dot, the host, and
+**Disconnect** — because the roster is what the column is for; pressing the host
+brings the form back. The URL and the secret are remembered, so a reload
+reconnects on its own and the secret is never rendered back into the page.
+
+The sidebar fills with directories; each holds its sessions. Click one to attach
+— history replays, live updates follow — or press **+ session here** to start a
 new session in that directory.
 
 **New session…** opens a directory picker instead, so a session can start in a
@@ -165,6 +170,50 @@ What is true is that a login is machine-wide. Signing in here signs in the
 terminal sharing this leader, and the agent's single flight means starting one
 login cancels another in flight — from either side, exactly as two terminals
 already do to each other.
+
+## The transcript
+
+An assistant reply and a reasoning block are markdown, because they are markdown
+in the terminal: `AgentMessageBlock` and `ThinkingBlock` are two users of one
+`MarkdownContent`. A user turn is not — the pager renders what was typed as
+plain text, and marking it up would show the author something other than what
+they wrote.
+
+A tool call is titled the way the terminal titles it, from `rawInput` rather
+than from the ACP `title`. That is not a preference: the pager treats `title` as
+a fallback and actively refuses one that is only the tool's function name, so a
+client printing it verbatim showed a bare grep pattern as a whole heading with
+nothing saying a search had happened. `Search "pattern" in *.rs in src (3
+matches in 2 files)`, `Run cargo test`, `Read src/main.rs (1-50 of 200)`,
+`Creating src/lib.rs`, `Skill deploy` — each rule and its source is in
+`src/toolcall.ts`, and `test/toolcall.test.ts` reads the pager's own files to
+pin the constants.
+
+**Output starts folded**, which is the pager's default for an agent tool call
+(`default_display_mode` returns `Collapsed`). Pressing the header opens it, to
+the head-and-tail the terminal keeps for a read or a shell command — with the
+pager's own `… +N lines` — or the whole thing for a kind the terminal never
+truncates. A failed call colours its bullet and its rail `accent_error` and says
+what failed, down to the exit code, which rides on the wire.
+
+### ANSI, and the half of it that is not a browser's job
+
+Tool output is a program's own bytes. A shell tool's `content` carries the raw
+PTY stream, so escape sequences used to land on the page verbatim. The fix is
+mostly not a conversion: `ToolOutput::Bash` also carries `output_for_prompt`,
+which the shell already built by stripping ANSI for the model, and `raw_output`
+is serialized to ACP untouched — **the clean text was on the wire the whole
+time**, and this client now reads it.
+
+Every other tool still arrives raw, so `src/ansi.ts` takes the escapes off.
+It applies `\r` and `CSI K` as well, because without them a `cargo build` turns
+one progress bar into dozens of rows; `test/fixtures/cargo-build.pty` is a real
+capture of exactly that, and the test asserts on it. What it does *not* do is
+emulate a terminal — no cursor addressing, no scroll regions, no colour. The
+pager runs a real `vte`-driven emulator (`render/terminal_output.rs`), and a
+second one written in JavaScript would be a second opinion about the same bytes.
+Colour in tool output belongs on the wire, next to `output_for_prompt`, not in
+each client.
 
 ## Slash commands
 
@@ -421,14 +470,21 @@ the package manager and test runner; Vite is here only for Solid's JSX
 transform, which the reactivity depends on.
 
 Three runtime dependencies: `solid-js`, `@solidjs/router`, and `markdown-it`.
-The last one is here because the terminal parses panel text with
-`pulldown-cmark` and `PanelBlock::Markdown` promises that renderer's output —
-headings, lists, tables, code — so a parser that knew six constructs was
-publishing a different panel than the plugin wrote. `markdown-it` is configured
-with `html: false`, so a panel's text can never become markup, and it is asked
-for tokens rather than for an HTML string: `Markdown.tsx` builds DOM from those
-nodes, which is why there is no `innerHTML` here and no sanitiser to remember.
-Only `https?:` keeps an `href`, decided in `safeHref` and tested there.
+The last one is here because the terminal parses both panel text and every
+assistant reply with `pulldown-cmark`, so a parser that knew six constructs was
+publishing a different panel than the plugin wrote and a different reply than
+the model wrote. `markdown-it` is configured with `html: false`, so that text
+can never become markup, and it is asked for tokens rather than for an HTML
+string: `Markdown.tsx` builds DOM from those nodes, which is why there is no
+`innerHTML` here and no sanitiser to remember. Only `https?:` keeps an `href`,
+decided in `safeHref` and tested there.
+
+A reply streams, so `markdown.ts` freezes what cannot change and re-parses only
+the tail — the pager's own rule, and its own boundary: a checkpoint is a
+top-level block, never one inside a list, a quote or a table
+(`xai-grok-markdown/src/checkpoint.rs`). Blocks that have not changed are handed
+back as the same objects, so `<For>` leaves their DOM — and any selection in it
+— alone.
 
 | file | what it holds |
 | --- | --- |
@@ -439,6 +495,8 @@ Only `https?:` keeps an `href`, decided in `safeHref` and tested there.
 | `src/roster.ts` | the roster, grouped by `cwd` |
 | `src/directory.ts` | absolute-path arithmetic, and the listing params a picker needs |
 | `src/transcript.ts` | folding `session/update` into a store |
+| `src/toolcall.ts` | the title, the fold and the truncation the terminal gives a tool call |
+| `src/ansi.ts` | escape sequences off arbitrary program output, and where that stops |
 | `src/subagents.ts` | the fan-out: the fold, the labels, and what stays unknown |
 | `src/commands.ts` | the slash catalog: provenance, matching, reading the composer |
 | `src/markdown.ts` | the markdown parser's configuration, and which links keep an href |
