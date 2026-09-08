@@ -2474,3 +2474,25 @@ button.picker-row:focus-visible {
     transition: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * A line this client wrote itself
+ *
+ * The transcript is otherwise made entirely of what the agent said, so the one
+ * thing a notice must not do is read as another of those. It takes the system
+ * accent — the role the terminal gives its own remarks rather than the model's
+ * — spans both columns instead of sitting in the message column, and carries a
+ * rule down its left edge. A border rather than a bar glyph: the glyphs in this
+ * client are generated from the pager's own table and none of them may be typed
+ * here, and a rule says the same thing without being one.
+ * ------------------------------------------------------------------------- */
+.message-notice {
+  padding: 0.35rem 0;
+}
+
+.message-notice .message-text {
+  grid-column: 1 / -1;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--grok-accent-system, canvastext);
+  color: var(--grok-accent-system, canvastext);
+}

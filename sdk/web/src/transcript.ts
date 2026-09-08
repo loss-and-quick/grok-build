@@ -15,7 +15,15 @@ import { textOf } from "./wire.ts";
 
 export interface MessageEntry {
   kind: "message";
-  role: "user" | "assistant" | "thought";
+  /**
+   * Who said it.
+   *
+   * `"notice"` is the one this client says itself, and it is a role rather than
+   * a fourth entry kind because on the screen it is the same thing: a paragraph
+   * at a point in the conversation. What it must never be is a paragraph that
+   * *looks* like the agent's, which is what its own class name is for.
+   */
+  role: "user" | "assistant" | "thought" | "notice";
   text: string;
 }
 
@@ -35,6 +43,23 @@ export interface ToolCallEntry {
 }
 
 export type TranscriptEntry = MessageEntry | ToolCallEntry;
+
+/**
+ * A position in the transcript: whole entries, and characters into the last.
+ *
+ * Not just a count of entries, and the second field is the whole reason this is
+ * a type rather than a number. Consecutive chunks of one role coalesce into a
+ * single entry — that is what makes a streaming reply one paragraph instead of
+ * one per token — and they do so across the *lines* the agent persists as well
+ * as within them. So two runs the agent wrote as two lines can be one entry
+ * here, and a position that could only name entries would be unable to say
+ * "after the first of them".
+ */
+export interface Mark {
+  entries: number;
+  /** Characters of the last kept entry; ignored unless it is a message. */
+  text: number;
+}
 
 /** A published panel, keyed the way the pager keys it: by `(plugin, id)`. */
 export interface PanelEntry {
@@ -68,6 +93,47 @@ export interface Transcript {
   /** Keyed by {@link panelKey}; a closed panel is deleted, not blanked. */
   readonly panels: Readonly<Record<string, PanelEntry>>;
   apply(update: SessionUpdate): void;
+  /**
+   * Say something in the conversation that the agent did not say.
+   *
+   * Always its own entry, never folded into the one before it, which is the
+   * whole difference from an `agent_message_chunk`: two notices in a row are
+   * two separate things that happened, and running them together would read as
+   * one sentence.
+   */
+  notice(text: string): void;
+  /**
+   * Throw the conversation away, because the agent is about to send it again.
+   *
+   * The one caller is a `session/load` whose cursor did not resolve, so the
+   * agent fell back to replaying the whole transcript ({@link "./resume.ts"}).
+   * Folding that replay into what is already here is the doubling this client
+   * has had before, and the only moment it can be prevented is between the
+   * frame that reveals the fallback and the fold that would draw it.
+   *
+   * Panels are deliberately left standing. They are not events — republishing a
+   * `(plugin, id)` replaces the panel and `panel_closed` deletes it, latest
+   * wins — so a rebuild of the *event* history says nothing about which panels
+   * a plugin still considers published, and clearing them would take a widget
+   * off the screen that nothing is going to put back.
+   */
+  reset(): void;
+  /** Where the transcript stands right now. */
+  mark(): Mark;
+  /**
+   * Go back to a position it stood at before.
+   *
+   * The other half of a resume. A reconnect can only name an event the agent
+   * wrote as a line of its own, and a reply that was still streaming when the
+   * link died was not written as one — it is persisted whole, under its last
+   * chunk's id (`resume.ts`). So the tail sends that reply back complete, and
+   * the half of it already on screen has to go first, or it is drawn twice.
+   *
+   * The position given is always one this transcript reported at the moment the
+   * cursor settled, so this can only ever remove what the tail is about to send
+   * again.
+   */
+  rewind(to: Mark): void;
 }
 
 export function createTranscript(): Transcript {
@@ -185,7 +251,40 @@ export function createTranscript(): Transcript {
     setEntries(entries.length, { kind: "message", role, text });
   };
 
-  return { entries, panels, apply };
+  const notice = (text: string): void => {
+    setEntries(entries.length, { kind: "message", role: "notice", text });
+  };
+
+  const mark = (): Mark => {
+    const last = entries[entries.length - 1];
+    return {
+      entries: entries.length,
+      text: last?.kind === "message" ? last.text.length : 0,
+    };
+  };
+
+  const rewind = (to: Mark): void => {
+    if (to.entries < entries.length) {
+      // The index goes with the entries it points into: a `tool_call_update`
+      // for a call that has just been dropped would otherwise write into
+      // whatever entry the tail puts at that position.
+      for (const [id, at] of [...toolCallAt]) if (at >= to.entries) toolCallAt.delete(id);
+      setEntries(produce((all) => void (all.length = to.entries)));
+    }
+    const at = to.entries - 1;
+    const last = entries[at];
+    if (last?.kind !== "message" || last.text.length <= to.text) return;
+    setEntries(
+      at,
+      produce((entry) => {
+        if (entry.kind === "message") entry.text = entry.text.slice(0, to.text);
+      }),
+    );
+  };
+
+  const reset = (): void => rewind({ entries: 0, text: 0 });
+
+  return { entries, panels, apply, notice, reset, mark, rewind };
 }
 
 /**
