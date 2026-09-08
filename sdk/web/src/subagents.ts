@@ -31,7 +31,6 @@ import type {
   SessionUpdateSubagentSpawned,
   SubagentLiveSnapshot,
 } from "./wire.ts";
-import { textOf, type ContentBlock } from "./wire.ts";
 
 /**
  * How long a stop gesture stands before it goes back to offering itself.
@@ -475,7 +474,3 @@ export function sortRows(rows: readonly Subagent[]): Subagent[] {
   });
 }
 
-/** The tool output a child streamed, reused by the transcript fold's own rule. */
-export function chunkText(content: unknown): string {
-  return textOf(content as ContentBlock | undefined);
-}
