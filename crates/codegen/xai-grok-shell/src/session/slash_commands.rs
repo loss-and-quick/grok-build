@@ -462,127 +462,159 @@ pub(crate) fn build_tools_meta(tool_names: &[String]) -> acp::Meta {
     meta.insert("tools".to_owned(), serde_json::json!(tool_names));
     meta
 }
-/// Pager-owned slash trigger keys (canonical and aliases) plus shell command names the pager never offers (`hooks-add`, `reload-plugins`, …).
+/// Which client can serve a pager slash command.
+///
+/// Judged from the wire, not from how the pager happens to reach the effect:
+/// the pager links this crate as a library and writes `config.toml` in process,
+/// while every other client reaches the same table through `x.ai/settings/set`
+/// (`crate::extensions::settings`). A local write here is therefore not
+/// evidence that a browser is stuck.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandSurface {
+    /// Both clients can serve it. Either the data and the action cross the
+    /// wire, or the command only touches state every client keeps for itself —
+    /// its own transcript, its own composer, its own view.
+    Any,
+    /// Serving it needs a terminal: escape sequences, a capability probe, the
+    /// alternate screen, cell geometry, key handling, or handing the screen to
+    /// another program. A browser is not behind on these; it has no such thing.
+    Terminal,
+    /// A browser could serve it, but the data or the effect lives only in the
+    /// pager's process or on its disk and no wire method carries it. This is
+    /// the parity backlog, written down where it cannot be forgotten: every
+    /// entry is one wire method away from `Any`.
+    WireMissing,
+    /// Nobody has decided yet. `pager_command_surfaces_are_classified` fails on
+    /// it deliberately: an author who does not know which client serves a new
+    /// command should say so and leave the build red rather than reach for
+    /// `Any`, which asserts the browser is fine.
+    Unclassified,
+}
+/// Pager-owned slash trigger keys (canonical and aliases) plus shell command names the pager never offers (`hooks-add`, `reload-plugins`, …), each with the surface that serves it.
 /// Reserved when advertising skills so a colliding skill ships qualified (`acme:login`, `local:hooks-add`) instead of a bare name the pager drops.
 ///
 /// Synced by pager contract tests (`pager_builtin_triggers_are_reserved_in_shell`, `pager_blocked_acp_names_are_reserved_in_shell`).
-/// Add names here when adding a pager builtin or a pager-blocked shell command.
-pub const PAGER_COMMAND_KEYS: &[&str] = &[
-    "agents",
-    "agents-dashboard",
-    "always-approve",
-    "announcements",
-    "auto",
-    "btw",
-    "cd",
-    "changelog",
-    "chat",
-    "clear",
-    "cloud",
-    "compact",
-    "compact-mode",
-    "config",
-    "config-agents",
-    "context",
-    "copy",
-    "cost",
-    "dashboard",
-    "debug",
-    "delete",
-    "docs",
-    "doctor",
-    "edit-prompt",
-    "effort",
-    "exit",
-    "expand",
-    "export",
-    "feedback",
-    "find",
-    "fork",
-    "full",
-    "fullscreen",
-    "gboom",
-    "guides",
-    "help",
-    "history",
-    "home",
-    "hooks",
-    "hooks-add",
-    "hooks-list",
-    "hooks-remove",
-    "hooks-trust",
-    "hooks-untrust",
-    "howto",
-    "imagine",
-    "imagine-video",
-    "import-claude",
-    "jump",
-    "login",
-    "logout",
-    "log",
-    "loop",
-    "m",
-    "marketplace",
-    "mcps",
-    "minimal",
-    "ml",
-    "model",
-    "multiline",
-    "new",
-    "onboarding",
-    "personas",
-    "plan",
-    "plan-view",
-    "plugin",
-    "plugins",
-    "preferences",
-    "prefs",
-    "privacy",
-    "providers",
-    "queue",
-    "quit",
-    "recap",
-    "release-notes",
-    "reload-plugins",
-    "remember",
-    "rename",
-    "resume",
-    "rewind",
-    "scroll-debug",
-    "session-info",
-    "sessions",
-    "settings",
-    "share",
-    "show-plan",
-    "skills",
-    "summarize",
-    "tasks",
-    "terminal-check",
-    "terminal-info",
-    "terminal-setup",
-    "theme",
-    "timeline",
-    "timestamps",
-    "title",
-    "toggle-mouse-reporting",
-    "tour",
-    "transcript",
-    "tutorial",
-    "t",
-    "undo",
-    "usage",
-    "view-plan",
-    "vim-mode",
-    "voice",
-    "welcome",
-    "workflow",
-    "workflows",
-    "yolo",
+/// Add names here when adding a pager builtin or a pager-blocked shell command; the tuple makes naming the surface part of adding the name, so a command the browser cannot serve is stated rather than discovered.
+pub const PAGER_COMMAND_KEYS: &[(&str, CommandSurface)] = &[
+    ("agents", CommandSurface::WireMissing), // alias of `config-agents`
+    ("agents-dashboard", CommandSurface::Any),
+    ("always-approve", CommandSurface::Any),
+    ("announcements", CommandSurface::WireMissing), // the hidden-announcement ids are a pager-side file with no wire method
+    ("auto", CommandSurface::Any),
+    ("btw", CommandSurface::Any),
+    ("cd", CommandSurface::WireMissing), // the dashboard's directory picker walks the pager's own filesystem
+    ("changelog", CommandSurface::WireMissing), // alias of `release-notes`
+    ("chat", CommandSurface::Any),       // reserved only; no command behind it in either client
+    ("clear", CommandSurface::Any),
+    ("cloud", CommandSurface::Any), // reserved only; no command behind it in either client
+    ("compact", CommandSurface::Any),
+    ("compact-mode", CommandSurface::Any),
+    ("config", CommandSurface::Any),
+    ("config-agents", CommandSurface::WireMissing), // personas are read and written as `.grok/personas/*.toml` by the pager
+    ("context", CommandSurface::Any),
+    ("copy", CommandSurface::Any),
+    ("cost", CommandSurface::Any),
+    ("dashboard", CommandSurface::Any),
+    ("debug", CommandSurface::Terminal), // the scroll and FPS diagnostic HUDs draw the terminal's own grid geometry
+    ("delete", CommandSurface::Any),
+    ("docs", CommandSurface::WireMissing), // the guides are `include_str!`-ed into the pager binary
+    ("doctor", CommandSurface::Terminal), // probes the terminal: kitty flags, XTVERSION, tmux passthrough, clipboard
+    ("edit-prompt", CommandSurface::Terminal), // drops raw mode and runs the user's `$EDITOR` as a child process
+    ("effort", CommandSurface::Any),
+    ("exit", CommandSurface::Any),
+    ("expand", CommandSurface::Terminal), // committed terminal text cannot be mutated, so minimal mode re-prints
+    ("export", CommandSurface::Any),
+    ("feedback", CommandSurface::Any),
+    ("find", CommandSurface::Any),
+    ("fork", CommandSurface::Any),
+    ("full", CommandSurface::Terminal), // relaunches into the alternate screen
+    ("fullscreen", CommandSurface::Terminal), // relaunches into the alternate screen
+    ("gboom", CommandSurface::Terminal), // refuses unless the terminal speaks the kitty graphics protocol
+    ("guides", CommandSurface::WireMissing), // alias of `docs`
+    ("help", CommandSurface::Any),
+    ("history", CommandSurface::Any),
+    ("home", CommandSurface::Any),
+    ("hooks", CommandSurface::Any),
+    ("hooks-add", CommandSurface::Any),
+    ("hooks-list", CommandSurface::Any),
+    ("hooks-remove", CommandSurface::Any),
+    ("hooks-trust", CommandSurface::Any),
+    ("hooks-untrust", CommandSurface::Any),
+    ("howto", CommandSurface::WireMissing), // alias of `docs`
+    ("imagine", CommandSurface::Any),
+    ("imagine-video", CommandSurface::Any),
+    ("import-claude", CommandSurface::WireMissing), // scans `.claude/` on the pager's disk
+    ("jump", CommandSurface::Any),
+    ("login", CommandSurface::Any),
+    ("logout", CommandSurface::Any),
+    ("log", CommandSurface::Terminal), // alias of `transcript`
+    ("loop", CommandSurface::Any),
+    ("m", CommandSurface::Any),
+    ("marketplace", CommandSurface::Any),
+    ("mcps", CommandSurface::Any),
+    ("minimal", CommandSurface::Terminal), // relaunches out of the alternate screen
+    ("ml", CommandSurface::Any),
+    ("model", CommandSurface::Any),
+    ("multiline", CommandSurface::Any),
+    ("new", CommandSurface::Any),
+    ("onboarding", CommandSurface::WireMissing), // alias of `tutorial`
+    ("personas", CommandSurface::WireMissing), // same `.grok/personas/*.toml` reads and writes as `config-agents`
+    ("plan", CommandSurface::Any),
+    ("plan-view", CommandSurface::WireMissing), // alias of `view-plan`
+    ("plugin", CommandSurface::Any),
+    ("plugins", CommandSurface::Any),
+    ("preferences", CommandSurface::Any),
+    ("prefs", CommandSurface::Any),
+    ("privacy", CommandSurface::Any),
+    ("providers", CommandSurface::WireMissing), // re-reads `config.toml` to resolve per-provider endpoints and slugs
+    ("queue", CommandSurface::Any),
+    ("quit", CommandSurface::Any),
+    ("recap", CommandSurface::Any),
+    ("release-notes", CommandSurface::WireMissing), // fetches the changelog CDN itself and caches it under `~/.grok`
+    ("reload-plugins", CommandSurface::Any),
+    ("remember", CommandSurface::WireMissing), // the note is appended to the memory file directly; only the optional rewrite crosses
+    ("rename", CommandSurface::Any),
+    ("resume", CommandSurface::Any),
+    ("rewind", CommandSurface::Any),
+    ("scroll-debug", CommandSurface::Terminal), // the scroll-diagnostics HUD, terminal grid geometry again
+    ("session-info", CommandSurface::Any),
+    ("sessions", CommandSurface::Any),
+    ("settings", CommandSurface::Any),
+    ("share", CommandSurface::Any),
+    ("show-plan", CommandSurface::WireMissing), // alias of `view-plan`
+    ("skills", CommandSurface::Any),
+    ("summarize", CommandSurface::Any),
+    ("tasks", CommandSurface::Any),
+    ("terminal-check", CommandSurface::Terminal), // alias of `doctor`
+    ("terminal-info", CommandSurface::Terminal),  // alias of `doctor`
+    ("terminal-setup", CommandSurface::Terminal), // alias of `doctor`
+    ("theme", CommandSurface::Any),
+    ("timeline", CommandSurface::Terminal), // the per-turn rail lives in the scrollbar gutter, a column of cells
+    ("timestamps", CommandSurface::Any),
+    ("title", CommandSurface::Any),
+    ("toggle-mouse-reporting", CommandSurface::Terminal), // writes the mouse-capture escape sequences itself
+    ("tour", CommandSurface::WireMissing),                // alias of `tutorial`
+    ("transcript", CommandSurface::Terminal), // renders to a temp file and hands the terminal to `$PAGER`
+    ("tutorial", CommandSurface::WireMissing), // the topic pages are `include_str!`-ed into the pager binary
+    ("t", CommandSurface::Any),
+    ("undo", CommandSurface::Any),
+    ("usage", CommandSurface::Any),
+    ("view-plan", CommandSurface::WireMissing), // reads `~/.grok/sessions/*/plan.md`; only live plan updates cross
+    ("vim-mode", CommandSurface::Terminal), // scrollback key handling; the settings row is `surface: terminal` too
+    ("voice", CommandSurface::WireMissing), // captures the mic in-process and streams it to `wss://api.x.ai/v1/stt`
+    ("welcome", CommandSurface::Any),
+    ("workflow", CommandSurface::Any),
+    ("workflows", CommandSurface::Any),
+    ("yolo", CommandSurface::Any),
 ];
+/// The reserved names alone, for the callers that only care about collisions.
+pub fn pager_command_names() -> impl Iterator<Item = &'static str> {
+    PAGER_COMMAND_KEYS.iter().map(|(key, _)| *key)
+}
 /// Unconditional reservations for `grok inspect`.
 /// Live advertising still includes currently gated-on shell builtins plus [`PAGER_COMMAND_KEYS`].
 static RESERVED_SLASH_NAMES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    let mut taken: HashSet<&'static str> = PAGER_COMMAND_KEYS.iter().copied().collect();
+    let mut taken: HashSet<&'static str> = pager_command_names().collect();
     for builtin in BUILTIN_COMMANDS
         .iter()
         .chain(PROMPT_COMMANDS.iter())
@@ -679,7 +711,7 @@ impl<'a> EffectiveSkillCatalog<'a> {
             .flat_map(|builtin| {
                 std::iter::once(builtin.name).chain(builtin.aliases.iter().copied())
             })
-            .chain(PAGER_COMMAND_KEYS.iter().copied())
+            .chain(pager_command_names())
             .map(slash_key)
             .collect();
         let candidates: Vec<_> = skills

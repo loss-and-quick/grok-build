@@ -2480,3 +2480,38 @@ fn a_plugin_command_prompt_reply_rides_the_markdown_envelope() {
     assert!(information.contains(r#"<skill name="ship" args="staging">"#));
     assert!(information.contains("Deploy it."));
 }
+
+/// Every reserved name has to say which client serves it.
+///
+/// The tuple already makes a surface mandatory to compile; this is the other
+/// half — `Unclassified` compiles so that an author who genuinely does not know
+/// can write it down, and fails here so the not-knowing cannot ship.
+#[test]
+fn pager_command_surfaces_are_classified() {
+    let undecided: Vec<&str> = PAGER_COMMAND_KEYS
+        .iter()
+        .filter(|(_, surface)| *surface == CommandSurface::Unclassified)
+        .map(|(key, _)| *key)
+        .collect();
+    assert!(
+        undecided.is_empty(),
+        "these pager commands have no surface yet: {undecided:?}\n\
+         Say which client serves each one: Any (both, from the wire or from \
+         state every client keeps), Terminal (needs a terminal and a browser \
+         is not behind), or WireMissing (a browser could, but no wire method \
+         carries it yet)."
+    );
+}
+
+/// A name appears once. Two rows for one key could carry two surfaces, and the
+/// answer to "can the browser serve this" would depend on which one was read.
+#[test]
+fn pager_command_keys_are_unique() {
+    let mut seen = std::collections::HashSet::new();
+    let duplicates: Vec<&str> = PAGER_COMMAND_KEYS
+        .iter()
+        .filter(|(key, _)| !seen.insert(*key))
+        .map(|(key, _)| *key)
+        .collect();
+    assert!(duplicates.is_empty(), "duplicated keys: {duplicates:?}");
+}

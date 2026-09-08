@@ -878,13 +878,13 @@ mod tests {
         assert!(reg.get("voice").is_none());
     }
     /// Every pager builtin trigger key must appear in the shell's `PAGER_COMMAND_KEYS`.
-    /// Add new names there when adding a pager builtin.
+    /// Add new names there when adding a pager builtin — with the surface that
+    /// serves the name, which is what turns "the browser is behind on this
+    /// command" from something found later into something written down now.
     #[test]
     fn pager_builtin_triggers_are_reserved_in_shell() {
-        let reserved: std::collections::HashSet<&str> = xai_grok_shell::session::PAGER_COMMAND_KEYS
-            .iter()
-            .copied()
-            .collect();
+        let reserved: std::collections::HashSet<&str> =
+            xai_grok_shell::session::pager_command_names().collect();
         let missing: Vec<String> = builtin_commands()
             .iter()
             .flat_map(|cmd| {
@@ -898,25 +898,45 @@ mod tests {
             "pager builtin trigger keys missing from the shell's \
              PAGER_COMMAND_KEYS (xai-grok-shell/src/session/slash_commands.rs); \
              a skill with one of these names would shadow or be shadowed by \
-             the pager builtin: {missing:?}"
+             the pager builtin, and the second client would have nothing \
+             saying whether it can serve them: {missing:?}"
         );
     }
+    /// A name the pager refuses to advertise is one the shell serves over the
+    /// wire, so every client reaches it the same way.
     #[test]
     fn pager_blocked_acp_names_are_reserved_in_shell() {
-        let reserved: std::collections::HashSet<&str> = xai_grok_shell::session::PAGER_COMMAND_KEYS
-            .iter()
-            .copied()
-            .collect();
+        let surfaces: std::collections::HashMap<&str, xai_grok_shell::session::CommandSurface> =
+            xai_grok_shell::session::PAGER_COMMAND_KEYS
+                .iter()
+                .copied()
+                .collect();
         let missing: Vec<&str> = crate::slash::registry::BLOCKED_ACP_NAMES
             .iter()
             .copied()
-            .filter(|name| !reserved.contains(name))
+            .filter(|name| !surfaces.contains_key(name))
             .collect();
         assert!(
             missing.is_empty(),
             "pager BLOCKED_ACP_NAMES missing from PAGER_COMMAND_KEYS; \
              a skill with one of these names is advertised bare and then \
              dropped: {missing:?}"
+        );
+        let unreachable: Vec<&str> = crate::slash::registry::BLOCKED_ACP_NAMES
+            .iter()
+            .copied()
+            .filter(|name| *name != "help")
+            .filter(|name| {
+                surfaces.get(name) != Some(&xai_grok_shell::session::CommandSurface::Any)
+            })
+            .collect();
+        assert!(
+            unreachable.is_empty(),
+            "these names are served by the shell, so every client reaches them \
+             through the same prompt text; marking them anything but Any says \
+             the browser cannot have what it already has: {unreachable:?}\n\
+             (`help` is exempt: the pager blocks the shell's copy because it \
+             draws its own palette.)"
         );
     }
 }

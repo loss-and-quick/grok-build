@@ -491,7 +491,7 @@ pub mod signals;
 pub(crate) mod slash_authority;
 pub(crate) mod slash_commands;
 pub mod usage_file;
-pub use slash_commands::PAGER_COMMAND_KEYS;
+pub use slash_commands::{CommandSurface, PAGER_COMMAND_KEYS, pager_command_names};
 pub(crate) mod repo_status_prefix;
 pub mod storage;
 pub(crate) mod streaming_capture;
