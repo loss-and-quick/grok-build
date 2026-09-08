@@ -45,10 +45,12 @@ export function Roster(props: { gateway: Gateway; current: string | undefined })
                 class="roster-new"
                 type="button"
                 title={`New session in ${group.cwd}`}
-                // Arbitrary directories need a picker, and a picker needs
-                // `x.ai/fs/list` — which resolves against the leader's launch
-                // directory, not the session's. So this client can only offer
-                // roots the roster already names.
+                // The shortcut, not the limit. `x.ai/fs/list` takes an absolute
+                // path and walks it as-is — confinement is off in local mode —
+                // and `initialize` answers with `currentWorkingDirectory`, so a
+                // picker rooted anywhere the user can read is a client-side
+                // change with no wire behind it. This button is just the case
+                // where the root is already on screen.
                 onClick={() => void createAndOpen(group.cwd)}
               >
                 + session here
