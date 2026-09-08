@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { render } from "@solidjs/testing-library";
+import { createSignal, Show } from "solid-js";
 
 import { DirectoryPicker } from "../src/components/DirectoryPicker.tsx";
 import type { Gateway } from "../src/gateway.ts";
@@ -148,5 +149,91 @@ describe("choosing a working directory", () => {
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await settle();
     expect(container.querySelector<HTMLButtonElement>(".picker-go")!.disabled).toBe(true);
+  });
+});
+
+/**
+ * `role="dialog" aria-modal="true"` is a promise about focus, and this card
+ * made it without keeping it: Tab walked out into the sidebar behind, which a
+ * screen reader had just been told was not there. A claimed modal that is not
+ * one is worse than no claim, because the claim is what a person navigates by.
+ */
+describe("the dialog holds the focus it claims", () => {
+  function press(key: string, shift = false): void {
+    document.dispatchEvent(new KeyboardEvent("keydown", { key, shiftKey: shift, bubbles: true }));
+  }
+
+  function focusables(container: Element): HTMLElement[] {
+    return [
+      ...container.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    ];
+  }
+
+  test("focus starts inside it, in the field that does the work", async () => {
+    const { gateway } = stub();
+    const { container } = mount(gateway);
+    await settle();
+    expect(document.activeElement).toBe(container.querySelector(".picker-path"));
+  });
+
+  test("Tab off the end comes back to the beginning instead of leaving", async () => {
+    const { gateway } = stub();
+    const { container } = mount(gateway);
+    await settle();
+    const items = focusables(container.querySelector(".picker")!);
+    items[items.length - 1]!.focus();
+    press("Tab");
+    expect(document.activeElement).toBe(items[0]!);
+  });
+
+  test("Shift+Tab off the front wraps to the end", async () => {
+    const { gateway } = stub();
+    const { container } = mount(gateway);
+    await settle();
+    const items = focusables(container.querySelector(".picker")!);
+    items[0]!.focus();
+    press("Tab", true);
+    expect(document.activeElement).toBe(items[items.length - 1]!);
+  });
+
+  test("focus that is already outside is brought back in", async () => {
+    // A click on the page behind, or a browser that parked focus on the
+    // address bar and handed it back to the body.
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    const { gateway } = stub();
+    const { container } = mount(gateway);
+    await settle();
+    outside.focus();
+    press("Tab");
+    expect(container.querySelector(".picker")!.contains(document.activeElement)).toBe(true);
+    outside.remove();
+  });
+
+  test("closing gives focus back to whatever opened it", async () => {
+    // Not a nicety: without it a keyboard user lands at the top of the
+    // document with nothing to say why, and has to walk back down to the
+    // button they just pressed.
+    const trigger = document.createElement("button");
+    document.body.appendChild(trigger);
+    trigger.focus();
+
+    const { gateway } = stub();
+    const [open, setOpen] = createSignal(true);
+    const { container } = render(() => (
+      <Show when={open()}>
+        <DirectoryPicker gateway={gateway} onOpen={() => {}} onClose={() => setOpen(false)} />
+      </Show>
+    ));
+    await settle();
+    expect(document.activeElement).not.toBe(trigger);
+
+    press("Escape");
+    await settle();
+    expect(container.querySelector(".picker")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    trigger.remove();
   });
 });

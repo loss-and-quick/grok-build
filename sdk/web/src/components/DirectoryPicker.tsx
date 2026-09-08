@@ -76,13 +76,78 @@ export function DirectoryPicker(props: {
     }
   };
 
+  // The dialog's own element, and the thing that opened it.
+  let card!: HTMLElement;
+  let opener: HTMLElement | null = null;
+
+  /**
+   * What Tab may reach, in the order Tab reaches it.
+   *
+   * Deliberately not filtered by visibility. Nothing in this card is hidden
+   * while it is mounted, and the checks that would establish invisibility
+   * (`offsetParent`, `getClientRects`) need layout — so under a DOM without one
+   * they would report *everything* as unreachable and empty the trap.
+   */
+  const focusable = (): HTMLElement[] => [
+    ...card.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ];
+
   onMount(() => {
     void walk(props.gateway.agentCwd());
+
+    // Where focus came from, so it can be given back. A dialog that swallows
+    // the focus of the button that opened it leaves a keyboard user at the top
+    // of the document with no idea why.
+    opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // Into the path field rather than onto the first button: typing a path is
+    // what this dialog is for, and the card is announced on entry either way.
+    card.querySelector<HTMLInputElement>(".picker-path")?.focus();
+
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") props.onClose();
+      if (event.key === "Escape") {
+        props.onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      // `aria-modal="true"` is a promise that focus cannot leave, and a promise
+      // this card made without keeping: Tab walked straight out into the
+      // sidebar behind it, where a screen reader had just been told there was
+      // nothing. Claiming the state and not holding it is worse than never
+      // claiming it, because the claim is what a person navigates by.
+      const items = focusable();
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (!first || !last) {
+        event.preventDefault();
+        return;
+      }
+      const active = document.activeElement;
+      // Focus that is already outside — a click on the page behind, or a
+      // browser that moved it to the address bar and back — is brought in
+      // rather than left to wander.
+      if (!(active instanceof HTMLElement) || !card.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+      if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener("keydown", onKey);
-    onCleanup(() => document.removeEventListener("keydown", onKey));
+    onCleanup(() => {
+      document.removeEventListener("keydown", onKey);
+      // Only if it is still there: the opener may have been re-rendered away
+      // while the dialog was up, and focusing a detached node moves focus to
+      // the body, which is the very thing this avoids.
+      if (opener?.isConnected) opener.focus();
+    });
   });
 
   const up = (): string | null => parentOf(path());
@@ -93,6 +158,7 @@ export function DirectoryPicker(props: {
     <div class="picker-scrim" onClick={() => props.onClose()}>
       <section
         class="picker"
+        ref={card}
         role="dialog"
         aria-modal="true"
         aria-label="Choose a working directory"
