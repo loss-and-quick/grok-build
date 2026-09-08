@@ -659,6 +659,14 @@ pub enum SessionUpdate {
         /// The parent prompt/turn that spawned this subagent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_prompt_id: Option<String>,
+        /// The `task` tool call in the parent's transcript that asked for this subagent.
+        ///
+        /// The child's ids are minted at spawn and share nothing with the parent's tool call,
+        /// so without this a client cannot fold a subagent into the call that started it.
+        /// Absent for harness-internal spawns (goal roles, workflows, plugins, scheduler loops),
+        /// which answer to no model tool call, and for children spawned before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
         /// The child session's ACP session ID.
         child_session_id: String,
         /// Agent type used for the subagent ("general-purpose", "explore", "plan", or custom).
@@ -1637,6 +1645,7 @@ mod tests {
             subagent_id: "s".into(),
             parent_session_id: "p".into(),
             parent_prompt_id: None,
+            tool_call_id: None,
             child_session_id: "c".into(),
             subagent_type: "explore".into(),
             description: "d".into(),

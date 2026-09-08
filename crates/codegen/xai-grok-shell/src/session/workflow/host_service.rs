@@ -544,6 +544,7 @@ impl HostService {
                     subagent_type: subagent_type.clone(),
                     parent_session_id: self.params.parent_session_id.clone(),
                     parent_prompt_id: None,
+                    tool_call_id: None,
                     resume_from,
                     cwd: None,
                     runtime_overrides: SubagentRuntimeOverrides {

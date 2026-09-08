@@ -79,6 +79,13 @@ pub struct SubagentRequest {
     /// Used to cancel only the subagents spawned by the currently-cancelled turn,
     /// without affecting background subagents from earlier turns.
     pub parent_prompt_id: Option<String>,
+    /// Tool-call id of the `task` call that asked for this subagent.
+    ///
+    /// The child's own id is minted here and shares nothing with the parent's
+    /// tool call, so this is the only thing that can join the two. `None` for
+    /// harness-internal spawns (goal roles, workflows, plugins, scheduler
+    /// loops), which answer to no model tool call.
+    pub tool_call_id: Option<String>,
     /// Resume from a previously completed subagent's conversation.
     /// Inherits raw transcript, tool state, and model. System prompt is
     /// freshly rendered.

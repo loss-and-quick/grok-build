@@ -607,6 +607,7 @@ impl xai_tool_runtime::Tool for TaskTool {
             subagent_type: input.subagent_type.clone(),
             parent_session_id,
             parent_prompt_id,
+            tool_call_id: Some(ctx.call_id.as_str().to_owned()),
             resume_from,
             cwd,
             runtime_overrides: SubagentRuntimeOverrides {
@@ -1584,6 +1585,50 @@ mod tests {
                 other => panic!("Expected SubagentCompleted, got {other:?}"),
             }
         }
+    }
+
+    /// The spawn carries the id of the `task` call that made it. It is the only
+    /// thing joining the child to that call: `request.id` is minted here, so a
+    /// client holding the parent's transcript has nothing else to match on.
+    #[tokio::test]
+    async fn spawn_carries_the_calling_tool_call_id() {
+        let (backend, mut rx) = make_backend();
+        let resources = resources_for_task(backend);
+        let shared = resources.into_shared();
+
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            assert_eq!(
+                request.tool_call_id.as_deref(),
+                Some("call-join-me"),
+                "the spawn must name the tool call that asked for it"
+            );
+            assert_ne!(
+                request.tool_call_id.as_deref(),
+                Some(request.id.as_str()),
+                "the child id is minted at spawn and cannot stand in for the call id"
+            );
+            let id = request.id.clone();
+            request
+                .result_tx
+                .send(SubagentResult {
+                    success: true,
+                    output: "ok".into(),
+                    subagent_id: id.clone(),
+                    child_session_id: id,
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        xai_tool_runtime::Tool::run(
+            &TaskTool,
+            crate::types::tool_metadata::test_ctx_with_call_id(shared, "call-join-me"),
+            task_input("general-purpose", false),
+        )
+        .await
+        .expect("spawn must succeed");
+        handle.await.unwrap();
     }
 
     #[tokio::test]

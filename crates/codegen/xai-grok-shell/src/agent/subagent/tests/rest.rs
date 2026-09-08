@@ -2060,6 +2060,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         subagent_id: "sa-resumed".into(),
         parent_session_id: "parent".into(),
         parent_prompt_id: Some("prompt-1".into()),
+        tool_call_id: None,
         child_session_id: "child-resumed".into(),
         subagent_type: "general-purpose".into(),
         description: "fix review feedback".into(),
@@ -2081,6 +2082,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         subagent_id: "sa-fresh".into(),
         parent_session_id: "p".into(),
         parent_prompt_id: None,
+        tool_call_id: None,
         child_session_id: "c".into(),
         subagent_type: "explore".into(),
         description: "d".into(),
@@ -2097,6 +2099,73 @@ fn notification_subagent_spawned_includes_resumed_from() {
     assert!(json.get("resumed_from").is_none());
     assert!(json.get("role").is_none());
     assert!(json.get("model").is_none());
+}
+/// The join a client needs to fold a subagent into the `task` call that started it.
+/// Both directions of the compatibility contract are pinned here: a spawn with no
+/// calling tool call omits the key entirely, and a payload written before the field
+/// existed still deserializes.
+#[test]
+fn notification_subagent_spawned_carries_the_calling_tool_call_id() {
+    let spawned = SessionUpdate::SubagentSpawned {
+        subagent_id: "sa-1".into(),
+        parent_session_id: "parent".into(),
+        parent_prompt_id: Some("prompt-1".into()),
+        tool_call_id: Some("call-7".into()),
+        child_session_id: "child-1".into(),
+        subagent_type: "general-purpose".into(),
+        description: "scan src/".into(),
+        effective_context_source: Some("new".into()),
+        context_normalized: false,
+        capability_mode: None,
+        persona: None,
+        role: None,
+        model: None,
+        resumed_from: None,
+        workflow_run_id: None,
+    };
+    let json = serde_json::to_value(&spawned).unwrap();
+    assert_eq!(json["tool_call_id"], "call-7");
+    assert_ne!(
+        json["tool_call_id"], json["subagent_id"],
+        "the child's own id is not the parent's tool call id"
+    );
+
+    let harness_spawn = SessionUpdate::SubagentSpawned {
+        subagent_id: "sa-2".into(),
+        parent_session_id: "parent".into(),
+        parent_prompt_id: None,
+        tool_call_id: None,
+        child_session_id: "child-2".into(),
+        subagent_type: "explore".into(),
+        description: "classify goal".into(),
+        effective_context_source: None,
+        context_normalized: false,
+        capability_mode: None,
+        persona: None,
+        role: None,
+        model: None,
+        resumed_from: None,
+        workflow_run_id: None,
+    };
+    let json = serde_json::to_value(&harness_spawn).unwrap();
+    assert!(
+        json.get("tool_call_id").is_none(),
+        "a harness spawn answers to no tool call and must not invent one"
+    );
+
+    let legacy = serde_json::json!({
+        "sessionUpdate": "subagent_spawned",
+        "subagent_id": "sa-3",
+        "parent_session_id": "parent",
+        "child_session_id": "child-3",
+        "subagent_type": "explore",
+        "description": "old payload",
+    });
+    let decoded: SessionUpdate = serde_json::from_value(legacy).unwrap();
+    let SessionUpdate::SubagentSpawned { tool_call_id, .. } = decoded else {
+        panic!("expected SubagentSpawned");
+    };
+    assert!(tool_call_id.is_none());
 }
 #[test]
 fn upload_ref_includes_resumed_from() {

@@ -702,6 +702,7 @@ impl SchedulerActor {
             subagent_type: "general-purpose".to_string(),
             parent_session_id,
             parent_prompt_id: None,
+            tool_call_id: None,
             resume_from,
             cwd: None,
             runtime_overrides: SubagentRuntimeOverrides {

@@ -1007,6 +1007,7 @@ pub(crate) async fn run_shell_child(
             child_session_id: child_session_id.0.to_string(),
             parent_session_id: ctx.parent_session_id.clone(),
             parent_prompt_id: request.parent_prompt_id.clone(),
+            tool_call_id: request.tool_call_id.clone(),
             subagent_type: request.subagent_type.clone(),
             description: request.description.clone(),
             effective_context_source: Some(effective_source_str.to_string()),

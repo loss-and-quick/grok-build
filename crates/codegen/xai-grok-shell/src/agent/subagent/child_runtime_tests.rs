@@ -146,6 +146,7 @@ fn request() -> SubagentRequest {
         subagent_type: "general-purpose".to_owned(),
         parent_session_id: "parent".to_owned(),
         parent_prompt_id: None,
+        tool_call_id: None,
         resume_from: None,
         cwd: None,
         runtime_overrides: Default::default(),
