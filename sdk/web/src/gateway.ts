@@ -69,6 +69,7 @@ import {
   type SessionNotification,
   type SettingRow,
   type SettingsListResponse,
+  type SettingsUpdate,
 } from "./wire.ts";
 
 /** A shared permission modal waiting for this client to answer it. */
@@ -159,7 +160,13 @@ export interface Attached {
   subagents: Subagents;
 }
 
-const STORE_KEYS = { url: "grok-gateway", secret: "grok-secret", theme: "grok-theme" } as const;
+const STORE_KEYS = {
+  url: "grok-gateway",
+  secret: "grok-secret",
+  theme: "grok-theme",
+  /** This browser's answer about the widget rail; `""` means it has not said. */
+  rail: "grok-rail",
+} as const;
 
 export function remembered(key: keyof typeof STORE_KEYS, fallback = ""): string {
   try {
@@ -185,6 +192,12 @@ export function createGateway() {
   // the one path that always exists, and it is never a *limit* — `session/new`
   // takes any absolute `cwd`, so the picker may leave in either direction.
   const [agentCwd, setAgentCwd] = createSignal(ROOT);
+  // Whether the agent says this account draws the dock. `null` until the wire
+  // says something: the notification arrives when remote settings are refreshed,
+  // which may not happen at all while this page is up, and "not told" is not
+  // "told no". Reset on every connect, because it is the agent's answer and the
+  // next agent may give a different one.
+  const [dockEnabled, setDockEnabled] = createSignal<boolean | null>(null);
   // The slash catalog for the attached session.
   //
   // Two sources, and the seam between them is the point. `initialize` carries
@@ -342,6 +355,16 @@ export function createGateway() {
       roster.apply((params ?? {}) as RosterChanged);
       return;
     }
+    // The remote settings snapshot, broadcast to every client. Dropping it is
+    // how this page came to disagree with the terminal beside it about whether
+    // the dock is on for this account. Only `dock_enabled` is read; a field
+    // that is absent or null is the agent saying nothing about it, which is not
+    // the same as saying no.
+    if (method === "x.ai/settings/update") {
+      const flag = (params as SettingsUpdate | undefined)?.dock_enabled;
+      if (typeof flag === "boolean") setDockEnabled(flag);
+      return;
+    }
     // One batch of `@`-completion results. The leader routes it by the session
     // id in its own params, so a terminal searching in the same session lands
     // here too; the search discards any batch that is not under its own id.
@@ -416,6 +439,7 @@ export function createGateway() {
     setAttached(null);
     attachedOn = null;
     setModels(null);
+    setDockEnabled(null);
     // A new socket is a new client on the leader's books, so the search id from
     // the old one is unusable: its status stream is addressed to a client that
     // no longer exists, and a `close` has nowhere to go. Forget it rather than
@@ -1070,6 +1094,7 @@ export function createGateway() {
     status,
     attached,
     agentCwd,
+    dockEnabled,
     commands,
     models,
     roster,

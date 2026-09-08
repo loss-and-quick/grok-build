@@ -544,6 +544,26 @@ export function visibleSettingRows(rows: readonly SettingRow[]): SettingRow[] {
   return rows.filter((row) => row.surface !== "terminal");
 }
 
+/**
+ * `x.ai/settings/update` — the remote settings snapshot, pushed rather than
+ * asked for.
+ *
+ * Not a reply and not in the catalog above: the shell builds it from the remote
+ * settings it just refreshed and sends it with `forward_fire_and_forget`, which
+ * reaches **every** attached client rather than the one that caused the refresh
+ * (`mvp_agent/mod.rs:2046-2090`). So a cohort flag flipped on the account
+ * arrives here without anyone asking, and a client that ignores the method
+ * disagrees with the terminal next to it about what is turned on.
+ *
+ * Only the field this client acts on is declared. The notification carries
+ * twenty-odd others — announcements, campaigns, gates, tips — and restating
+ * shapes nothing here reads would be inventing a contract to drift from.
+ */
+export interface SettingsUpdate {
+  /** Whether this account's clients draw the consolidated dock. */
+  dock_enabled?: boolean | null;
+}
+
 // ---------------------------------------------------------------------------
 // Permission prompts
 //
