@@ -60,6 +60,69 @@ describe("session update fold", () => {
     expect(call.title).toBe("Read main.rs");
   });
 
+  test("output comes off the raw bytes, which are the only ones still able to erase", () => {
+    // All three channels as they arrive from a real `cargo build`. The stripped
+    // copy lost its `CSI K` and kept its `\r`, so its progress bar is smeared
+    // across the line it was meant to erase and nothing downstream can undo it.
+    const bar = "    Building [==>  ] 2/4: libc                        ";
+    const raw = `\x1b[1m\x1b[96m${bar}\x1b[0m\r\x1b[K\x1b[92m   Compiling\x1b[0m ansidemo\n`;
+    const t = createTranscript();
+    t.apply({
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-1",
+      title: "Execute",
+      kind: "execute",
+      status: "completed",
+      rawOutput: {
+        type: "Bash",
+        exit_code: 0,
+        output: [...new TextEncoder().encode(raw)],
+        output_for_prompt: `exit: 0\n${bar}   Compiling ansidemo\n`,
+      },
+      content: [{ type: "content", content: { type: "text", text: raw } }],
+    } as SessionUpdate);
+    expect((t.entries[0] as ToolCallEntry).output).toBe("   Compiling ansidemo");
+  });
+
+  test("with no bytes at all, the stripped copy is better than nothing", () => {
+    const t = createTranscript();
+    t.apply({
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-1",
+      title: "Execute",
+      kind: "execute",
+      status: "completed",
+      rawOutput: { type: "Bash", exit_code: 0, output_for_prompt: "exit: 0\nhello\n" },
+    } as SessionUpdate);
+    // Minus the `exit:` line, which is framing written for the model and is
+    // already said by the status this client draws.
+    expect((t.entries[0] as ToolCallEntry).output).toBe("hello");
+  });
+
+  test("a command that printed nothing shows nothing, not the description", () => {
+    // Live defect: the first frame of a shell call carries its description on
+    // `content`, and `exit 3` printed nothing — so an update that only ever
+    // wrote non-empty output left the description standing as the command's
+    // output.
+    const t = createTranscript();
+    t.apply({
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-1",
+      title: "Execute `exit 3`",
+      kind: "execute",
+      status: "pending",
+      content: [{ type: "content", content: { type: "text", text: "Exit with status 3." } }],
+    } as SessionUpdate);
+    t.apply({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-1",
+      status: "completed",
+      rawOutput: { type: "Bash", exit_code: 3, output: [], output_for_prompt: "exit: 3\n" },
+      content: [{ type: "content", content: { type: "text", text: "" } }],
+    } as SessionUpdate);
+    expect((t.entries[0] as ToolCallEntry).output).toBe("");
+  });
+
   test("an update for an unknown tool call is dropped, not synthesized", () => {
     const t = createTranscript();
     t.apply({ sessionUpdate: "tool_call_update", toolCallId: "ghost" } as SessionUpdate);

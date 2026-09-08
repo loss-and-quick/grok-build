@@ -9,6 +9,7 @@ import { createStore, produce } from "solid-js/store";
 
 import type { PanelViewModel } from "@grok-build/plugin/generated/PanelViewModel.ts";
 
+import { plainText } from "./ansi.ts";
 import type { ContentBlock, SessionUpdate, ToolCallStatus } from "./wire.ts";
 import { textOf } from "./wire.ts";
 
@@ -86,7 +87,7 @@ export function createTranscript(): Transcript {
           toolCallId: String(update["toolCallId"]),
           title: String(update["title"] ?? ""),
           status: (update["status"] as ToolCallStatus | undefined) ?? "pending",
-          output: toolOutput(update["content"]),
+          output: toolOutput(update["rawOutput"], update["content"]),
         };
         toolCallAt.set(call.toolCallId, entries.length);
         setEntries(entries.length, call);
@@ -97,7 +98,9 @@ export function createTranscript(): Transcript {
         if (at === undefined) return;
         const title = update["title"];
         const status = update["status"];
-        const output = toolOutput(update["content"]);
+        const rawOutput = update["rawOutput"];
+        const content = update["content"];
+        const output = toolOutput(rawOutput, content);
         // One `produce` per update, so a status change touches only the nodes
         // bound to `status` and leaves the output text node alone.
         setEntries(
@@ -106,7 +109,12 @@ export function createTranscript(): Transcript {
             if (entry.kind !== "tool_call") return;
             if (typeof title === "string") entry.title = title;
             if (typeof status === "string") entry.status = status as ToolCallStatus;
-            if (output) entry.output = output;
+            // A frame that carries an output field is authoritative about the
+            // output, *including* when it says there was none. Only writing
+            // non-empty text left the placeholder the first frame carried —
+            // a shell call's description — standing as the output of a command
+            // that printed nothing.
+            if (rawOutput !== undefined || content !== undefined) entry.output = output;
           }),
         );
         return;
@@ -156,15 +164,56 @@ export function createTranscript(): Transcript {
   return { entries, panels, apply };
 }
 
-function toolOutput(content: unknown): string {
-  if (!Array.isArray(content)) return "";
-  const parts: string[] = [];
-  for (const item of content) {
-    if (typeof item !== "object" || item === null) continue;
-    const inner = (item as { content?: unknown }).content;
-    if (typeof inner !== "object" || inner === null) continue;
-    const block = inner as { type?: string; text?: string };
-    if (block.type === "text" && typeof block.text === "string") parts.push(block.text);
+/**
+ * The text a tool call shows.
+ *
+ * `content` is the raw one — the shell puts the untouched PTY stream on it
+ * (`session/acp_conversion.rs`, `tools/notification_bridge.rs`) — and it is the
+ * one used, because it is the only channel that still has everything a
+ * terminal needs. The obvious alternative loses: `ToolOutput::Bash` also
+ * carries `output_for_prompt`, which the shell built by stripping ANSI for the
+ * model, and `strip_str` takes the `CSI K` **out** while leaving the `\r` in.
+ * A `cargo build` therefore arrives on that channel with its progress bar
+ * smeared across the line it was meant to erase, and no client can put it back:
+ * the erase is gone. Read live, the two channels for one build:
+ *
+ *     output_for_prompt  "…Building [====>] 2/4: libc      Compiling ansidemo…"
+ *     content            "…Building [====>] 2/4: libc  \r\x1b[K…Compiling ansidemo…"
+ *
+ * So the raw channel is the better source, `plainText` is what makes it
+ * readable, and `output_for_prompt` is a fallback for a call that sent no
+ * content at all.
+ */
+function toolOutput(rawOutput: unknown, content: unknown): string {
+  const raw =
+    typeof rawOutput === "object" && rawOutput !== null
+      ? (rawOutput as Record<string, unknown>)
+      : {};
+
+  if (raw["type"] === "Bash") {
+    // The typed bytes, which is where the pager reads a shell call's output
+    // from as well (`extract_bash_output_from_value`, `tracker.rs`) — and it has
+    // to be read from here, because `content` on the *first* frame of a shell
+    // call is the description rather than any output at all.
+    if (Array.isArray(raw["output"])) {
+      return plainText(new TextDecoder().decode(Uint8Array.from(raw["output"] as number[])));
+    }
+    if (typeof raw["output_for_prompt"] === "string") {
+      // The `exit: N` line the shell prefixes for the model is not terminal
+      // output, and the status this client draws already says it.
+      return plainText(raw["output_for_prompt"].replace(/^exit: -?\d+\n/, ""));
+    }
   }
-  return parts.join("");
+
+  const parts: string[] = [];
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      if (typeof item !== "object" || item === null) continue;
+      const inner = (item as { content?: unknown }).content;
+      if (typeof inner !== "object" || inner === null) continue;
+      const block = inner as { type?: string; text?: string };
+      if (block.type === "text" && typeof block.text === "string") parts.push(block.text);
+    }
+  }
+  return plainText(parts.join(""));
 }
