@@ -241,14 +241,21 @@ button:disabled {
 
 /* -- main ---------------------------------------------------------------- */
 
-/* Seven rows, and only the transcript grows: folder-trust cards, then the
- * session's header, its permission modals, its panels, its subagents, its
- * transcript and its composer. Counting matters here — an extra child with no
- * row of its own gets an implicit `auto` at the end, which slides the `1fr`
- * onto the panels and squeezes the transcript to nothing. */
+/* Only the transcript grows: folder-trust cards, then the session's header, its
+ * permission modals, its panels, its subagents, its transcript and its
+ * composer.
+ *
+ * This was a grid with the row list written out, and the comment here used to
+ * warn that counting mattered. It did, and the count was wrong — `Subagents`
+ * renders *nothing at all* until a child is spawned, so there were six children
+ * for seven rows, the `1fr` landed on the composer, and the composer grew to
+ * fill the window while the transcript collapsed. Visible only in a browser:
+ * nothing in the test environment lays anything out. A column flexbox states
+ * the rule on the item that grows, so a child that comes and goes cannot move
+ * it. */
 .main {
-  display: grid;
-  grid-template-rows: auto auto auto auto auto 1fr auto;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   padding: 0.75rem;
   gap: 0.75rem;
@@ -266,6 +273,7 @@ button:disabled {
 }
 
 .transcript {
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
 }
@@ -1349,6 +1357,93 @@ button.picker-row:focus-visible {
   color: var(--grok-gray-bright, canvastext);
 }
 
+
+/* -- @-completion --------------------------------------------------------- */
+
+/* Above the composer and growing upward, the way the pager stacks its file
+ * dropdown over the prompt (`bottom_border_y` is the row above the prompt and
+ * the box is drawn up from there). */
+.file-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 0.35rem);
+  z-index: 2;
+  background: var(--grok-bg-light, canvas);
+  border: 1px solid var(--grok-selection-border, canvastext);
+  border-radius: 6px;
+  --file-row-h: 1.6rem;
+}
+
+/* The pager writes `k/n` into the top border itself. A border here is a CSS
+ * edge with nothing to write on, so the count sits on its own line at the top
+ * of the box, right-aligned to the same corner. */
+.file-menu-hint {
+  padding: 0.1rem 0.5rem 0;
+  text-align: right;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.file-list {
+  margin: 0;
+  padding: 0.2rem 0;
+  list-style: none;
+  /* Eight rows before it scrolls — `MAX_DROPDOWN_ROWS`, passed in as
+   * `--file-rows` so the count lives in the Rust and not in this file. A whole
+   * number of rows, for the reason the slash menu's cap is one. */
+  max-height: calc(var(--file-rows) * var(--file-row-h) + 0.4rem);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.file-row {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr);
+  gap: 0 0.5rem;
+  align-items: center;
+  height: var(--file-row-h);
+  padding: 0 0.4rem;
+  cursor: pointer;
+}
+
+.file-row.selected {
+  background: var(--grok-bg-visual, canvas);
+}
+
+.file-row:hover {
+  background: var(--grok-bg-hover, canvas);
+}
+
+.file-caret {
+  color: var(--grok-accent-user, canvastext);
+}
+
+/* One column, not a name beside a dim directory: the pager renders the whole
+ * relative path as one string, because that is the string the matcher scored,
+ * and the highlight runs across all of it. Over-long paths end in an ellipsis
+ * where the pager puts one too — it overwrites the last visible cell with it. */
+.file-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--grok-text-primary, canvastext);
+}
+
+.file-row.selected .file-path {
+  font-weight: bold;
+}
+
+/* The characters the query matched, in the palette's own fuzzy accent — the
+ * pager paints exactly these with `theme.fuzzy_accent`, and the positions come
+ * from the wire rather than from a second matcher in this client. */
+.file-match {
+  color: var(--grok-fuzzy-accent, canvastext);
+}
+
+.file-slash {
+  color: var(--grok-gray, canvastext);
+}
 /* -- sign-in -------------------------------------------------------------- */
 
 /* The user accent, not the warning colour the trust and permission cards use.

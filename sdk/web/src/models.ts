@@ -182,13 +182,13 @@ export function modelRows(state: SessionModelState): PickerRow[] {
  * suffix, which is applied only when the chosen model is also the session's
  * current model.
  *
- * The pager's `match_text` here carries a hidden `"a "`/`"b "`/… sort prefix
- * whose only purpose is to steer `nucleo`'s alphabetical tiebreak
- * (`effort_levels.rs:66-69`). **It is not reproduced.** The modal that actually
- * renders this phase does not rank with `nucleo` at all — it filters with
- * `contains` over `match_text` (`app/modals.rs:642-652`) — so in the terminal
- * today, typing `a` in the effort phase matches the xhigh row through an
- * invisible sort key. Copying that would be copying a bug.
+ * **Nothing here matches on text the row does not draw.** The pager's
+ * `match_text` used to carry a hidden `"a "`/`"b "`/… sort prefix, which made
+ * typing `a` in the effort phase select the xhigh row for no visible reason;
+ * this client never reproduced it. The prefix is gone as of `3e446fad` —
+ * `match_text` is the insert text (`effort_levels.rs`, `build_effort_arg_items`)
+ * and the ordering moved to where the rows are actually ordered — so the two
+ * clients now agree, and they agree on the rule rather than by accident.
  *
  * **`id` is the option's `value`, not its `id`, and the two genuinely differ.**
  * `ReasoningEffortOption` says so in as many words — "`id`/`label` are

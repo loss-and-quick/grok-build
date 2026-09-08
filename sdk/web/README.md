@@ -325,12 +325,12 @@ from a terminal.
   effort menu, not an empty one. An absent, empty, junk or non-array
   `reasoningEfforts` all collapse to the built-in `xhigh/high/medium/low` menu,
   which the wire states as a contract.
-- **A hidden sort prefix is not.** The pager's effort rows carry an invisible
-  `"a "` / `"b "` in `match_text`, there to steer a `nucleo` tiebreak — in a
-  modal that does not rank with `nucleo` but filters with `contains` over that
-  same field. Typing `a ` in the terminal's effort phase therefore matches
-  `xhigh` for no visible reason. It is a bug, it is not copied, and a test pins
-  that it is not.
+- **Matching on text the row never draws is not.** The pager's effort rows
+  carried an invisible `"a "` / `"b "` in `match_text`, there to steer a
+  `nucleo` tiebreak — in a modal that does not rank with `nucleo` but filters
+  with `contains` over that same field, so typing `a ` selected `xhigh` for no
+  visible reason. This client never carried it, the terminal stopped carrying it
+  in `3e446fad`, and a test on each side pins that neither does.
 - **A switch made elsewhere moves this picker.** The shell broadcasts
   `model_changed` to every subscriber of the session, so a terminal on the same
   leader, or a second tab, is reflected here without asking for anything.
@@ -375,6 +375,66 @@ message chunk that a browser already draws, and there is no `/hooks` or
 name *reservation* — the shell never advertises it — so there is nothing to
 hide. A test reads the pager's list and fails when a name lands there without a
 verdict here.
+
+## Finding a file with `@`
+
+Type `@` in the composer and the file list opens. Arrows move (Ctrl-N/P and
+Ctrl-J/K too), PageUp and PageDown move half a screen, Tab or Enter takes the
+row as `@path ` and closes it, the right arrow steps *into* a directory without
+committing it, and Escape closes the list and leaves what was typed. A `@`
+straight after a letter or `_` opens nothing, which is what keeps
+`me@example.com` from becoming a file picker. A query ending in `/` asks for
+directories only; one starting with `!` asks for hidden and ignored files.
+
+**Nothing here matches, ranks or scores.** `x.ai/search/fuzzy/open`, `/change`
+and `/close` run the same `nucleo` matcher over the same `ignore` walk the
+terminal uses, and every batch carries `indices` — the character positions that
+matched — because the agent had them. The rows are drawn from those positions.
+The slash menu one section up computes its own, because the command catalog on
+the wire carries none; that is the whole difference between the two lists, and
+`src/highlight.ts` is the part they share.
+
+Two things about the wire are worth stating, because neither is guessable from
+the method names. `open` returns no results at all — it builds the matcher and
+starts the walk, and only `change` spawns the status stream — so an empty query
+is still sent as a `change`. And `path` arrives absolute while `indices` are
+numbered against the path *relative to the search root*: the matcher strips the
+root before scoring and the poll puts it back before sending. Highlighting the
+delivered string with the delivered offsets lights up characters inside the
+user's home directory instead of inside the file name.
+
+### Who owns the search
+
+The session, not the list. `open` builds a matcher and walks the whole tree, so
+opening one per `@` would re-index the repository on every at-sign; the pager
+does not do that either — its daemon lives as long as the process and the
+dropdown is a view over it. So the search is opened on the first `@`, kept for
+as long as this client stays attached, and closed when it attaches elsewhere or
+disconnects. Re-opening the list is a `change` with an empty query, which is
+what re-walks.
+
+That matters because the agent has no hook for a client going away. A search is
+freed by `close`, or by sitting idle for 300s **and** somebody else calling
+`open` — the only caller of `cleanup_stale`. So if the socket drops with a
+search open, its id is worthless (the stream is addressed to a leader client
+that no longer exists, and a `close` has nowhere to go): this client forgets it
+rather than pretending, and the orphan is collected by the next `open`, which is
+this client's own, the next time anyone types `@`.
+
+Hidden mode swaps the search rather than adding a parameter, because
+`FuzzySearchContext.hidden` is fixed when the search opens. Typing `!` after the
+`@` therefore costs one re-walk, and there is no other way to ask.
+
+The count in the corner is the pager's: shown over indexed, with a `+` when the
+cap bit. The cap is 100 — the agent's own default for `limit` — where the
+terminal's is a thousand, because there a row costs a pointer and here it costs
+bytes in a frame on every keystroke. There is no debounce, which is also the
+pager's behaviour; a query typed while one is in flight replaces it rather than
+queueing behind it.
+
+Verified against a live gateway on this repository — 4483 files indexed, 87721
+with `!` — in a real browser: browsing, a query with sixty hits, one with none,
+one capped at a hundred, directory mode, drilling in, and the email guard.
 
 ## Trying a plugin panel
 

@@ -22,7 +22,9 @@ import { typedResult, type TypedResult } from "../toolresult.ts";
 import type { Gateway } from "../gateway.ts";
 import { sessionLabel } from "../roster.ts";
 import type { ToolCallEntry, TranscriptEntry } from "../transcript.ts";
+import { detectAt, isDirMode, type FuzzyMatch } from "../filesearch.ts";
 import { CommandMenu, createCommandMenu } from "./CommandMenu.tsx";
+import { FileMenu, createFileMenu } from "./FileMenu.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { Panel } from "./Panel.tsx";
@@ -42,14 +44,30 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
   let composer: HTMLTextAreaElement | undefined;
   const tick = createTick();
   const menu = createCommandMenu(() => props.gateway.commands());
+  const files = createFileMenu(props.gateway.fileSearch);
   // The composer's text as state, not only as a DOM value: the menu reads it on
   // every edit, and an accepted row writes it back.
   const [line, setLine] = createSignal("");
+  // Whether the `@`-token under the caret asks for directories only. The pager
+  // draws the trailing `/` from the query's mode rather than each row's kind, so
+  // the flag has to reach the list.
+  const [dirMode, setDirMode] = createSignal(false);
 
   const reread = (): void => {
     if (!composer) return;
     setLine(composer.value);
     menu.sync(composer.value, composer.selectionStart);
+    files.sync(composer.value, composer.selectionStart);
+    const at = detectAt(composer.value, composer.selectionStart);
+    setDirMode(at !== null && isDirMode(at));
+  };
+
+  /** Put an accepted path into the composer and follow it with the caret. */
+  const takeFile = (result: ReturnType<typeof files.accept>): void => {
+    if (!result || !composer) return;
+    composer.value = result.text;
+    composer.setSelectionRange(result.caret, result.caret);
+    reread();
   };
 
   const send = (): void => {
@@ -58,6 +76,8 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
     if (composer) composer.value = "";
     setLine("");
     menu.sync("", 0);
+    files.sync("", 0);
+    setDirMode(false);
     // A slash command is sent as ordinary prompt text, because that *is* the
     // dispatch path: the shell resolves the leading token against the same
     // catalog it advertised, and a plugin's command reaches that plugin's own
@@ -135,7 +155,22 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
             {/* Above the input rather than below it, the way the pager stacks
                 its dropdown over the prompt: the list grows upward, so a long
                 catalog never pushes the line being typed off the screen. */}
-            <CommandMenu menu={menu} onTake={(row) => take(row)} />
+            {/* Only one of the two is ever up: the caret is inside a `/` token
+                or an `@` token, never both, and where it is inside an `@` the
+                file list is the more specific answer. */}
+            <Show
+              when={files.open()}
+              fallback={<CommandMenu menu={menu} onTake={(row) => take(row)} />}
+            >
+              <FileMenu
+                menu={files}
+                dirMode={dirMode()}
+                root={props.gateway.fileSearch.root()}
+                onTake={(row: FuzzyMatch) =>
+                  takeFile(files.accept(composer?.value ?? "", row))
+                }
+              />
+            </Show>
             <textarea
               class="prompt-input"
               rows={3}
@@ -146,12 +181,64 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
               onInput={reread}
               onClick={reread}
               onKeyUp={reread}
-              onFocus={() => menu.revive()}
-              onBlur={() => menu.dismiss()}
+              onFocus={() => {
+                menu.revive();
+                files.revive();
+              }}
+              onBlur={() => {
+                menu.dismiss();
+                files.dismiss();
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
                   event.preventDefault();
                   send();
+                  return;
+                }
+                // The `@`-list first, and its keys are the pager's own
+                // `handle_file_search_key`: the arrows and their Ctrl aliases,
+                // a half-page on PageUp/PageDown, Tab or Enter to take the row,
+                // and the right arrow to step into a directory without
+                // committing it. Escape closes the list and leaves the typed
+                // text exactly where it is, which is what the terminal does.
+                if (files.open()) {
+                  const control = event.ctrlKey;
+                  const down =
+                    event.key === "ArrowDown" ||
+                    (control && (event.key === "n" || event.key === "j"));
+                  const up =
+                    event.key === "ArrowUp" ||
+                    (control && (event.key === "p" || event.key === "k"));
+                  if (down || up) {
+                    event.preventDefault();
+                    files.move(down ? 1 : -1);
+                    return;
+                  }
+                  if (event.key === "PageDown" || (control && event.key === "d")) {
+                    event.preventDefault();
+                    files.page(1);
+                    return;
+                  }
+                  if (event.key === "PageUp" || (control && event.key === "u")) {
+                    event.preventDefault();
+                    files.page(-1);
+                    return;
+                  }
+                  if (event.key === "Tab" || event.key === "Enter") {
+                    event.preventDefault();
+                    takeFile(files.accept(composer?.value ?? ""));
+                    return;
+                  }
+                  if (event.key === "ArrowRight") {
+                    event.preventDefault();
+                    takeFile(files.drill(composer?.value ?? ""));
+                    return;
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    files.dismiss();
+                    return;
+                  }
                   return;
                 }
                 if (!menu.open()) return;

@@ -8,6 +8,7 @@ import {
   type CommandRow,
 } from "../commands.ts";
 import { PROMPT_ARROW } from "../glyphs.ts";
+import { highlightRuns } from "../highlight.ts";
 import type { AvailableCommand } from "../wire.ts";
 
 /**
@@ -164,19 +165,14 @@ function Row(props: { row: CommandRow; selected: boolean; onPick: () => void }):
  * The command name with the characters that spelled the query picked out —
  * `build_highlighted_spans`, which coalesces runs of the same style rather than
  * emitting a span per character.
+ *
+ * The coalescing is shared with the file list; **where the indices come from is
+ * not.** These are computed here, because the command catalog on the wire
+ * carries no match positions. The file list's arrive with the results, and it
+ * computes nothing.
  */
 function Highlighted(props: { text: string; indices: readonly number[] }): JSX.Element {
-  const runs = createMemo(() => {
-    const marked = new Set(props.indices);
-    const out: { text: string; match: boolean }[] = [];
-    for (const [at, character] of [...props.text].entries()) {
-      const match = marked.has(at);
-      const last = out[out.length - 1];
-      if (last && last.match === match) last.text += character;
-      else out.push({ text: character, match });
-    }
-    return out;
-  });
+  const runs = createMemo(() => highlightRuns(props.text, props.indices));
 
   return (
     <For each={runs()}>

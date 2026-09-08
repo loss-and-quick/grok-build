@@ -28,6 +28,7 @@ import {
   undrivableMessage,
 } from "./auth.ts";
 import { GatewayClient, gatewayUrl } from "./client.ts";
+import { FUZZY_STATUS, createFileSearch, type FileSearch } from "./filesearch.ts";
 import type { PanelAction } from "./panel.ts";
 import {
   applyModelChanged,
@@ -250,6 +251,25 @@ export function createGateway() {
   };
 
   /**
+   * `@`-completion, rooted in the attached session's cwd.
+   *
+   * Its lifetime is argued where it lives ({@link createFileSearch}). What
+   * belongs here is only the plumbing it cannot reach: a socket that may not
+   * exist, and the session whose id the leader routes the status stream by.
+   */
+  const fileSearch: FileSearch = createFileSearch({
+    ext: async (method, params) => {
+      if (!client) throw new Error("gateway is not connected");
+      return client.ext(method, params);
+    },
+    session: () => {
+      const current = attached();
+      return current ? { sessionId: current.entry.sessionId, cwd: current.entry.cwd } : null;
+    },
+    say,
+  });
+
+  /**
    * Answer `session/request_permission`.
    *
    * Options are rendered from the `options` array as sent, never a hardcoded id
@@ -322,6 +342,13 @@ export function createGateway() {
       roster.apply((params ?? {}) as RosterChanged);
       return;
     }
+    // One batch of `@`-completion results. The leader routes it by the session
+    // id in its own params, so a terminal searching in the same session lands
+    // here too; the search discards any batch that is not under its own id.
+    if (method === FUZZY_STATUS) {
+      fileSearch.apply(params);
+      return;
+    }
     // One dispatch for all three carriers: standard ACP `session/update`, the
     // grok extension's live `x.ai/session_notification`, and the replay-time
     // `x.ai/session/update`. Same envelope, same `sessionUpdate` tag, so the
@@ -375,6 +402,13 @@ export function createGateway() {
   const connect = async (base: string, secret: string): Promise<void> => {
     client?.close();
     say("connecting…");
+    // A new socket is a new client on the leader's books, so the search id from
+    // the old one is unusable: its status stream is addressed to a client that
+    // no longer exists, and a `close` has nowhere to go. Forget it rather than
+    // pretend. The orphan on the agent falls to the 300s idle sweep, which runs
+    // inside the next `open` — this client's own, the next time anyone types
+    // `@`, so the leak closes itself.
+    fileSearch.forget();
     const next = new GatewayClient(() => new WebSocket(gatewayUrl(base, secret)));
     client = next;
     next.onNotification(onNotification);
@@ -732,6 +766,10 @@ export function createGateway() {
     if (attachedOn?.client === client && attachedOn.sessionId === entry.sessionId) return;
     const asking = client;
     attachedOn = { client: asking, sessionId: entry.sessionId };
+    // The search is rooted in the session being left, so it goes back to the
+    // agent now, while there is still a socket to say so on. Nothing else will
+    // ever tell it: the workspace has no hook on a client going away.
+    fileSearch.release();
     const subagents = createSubagents(entry.sessionId);
     setAttached({ entry, transcript: createTranscript(), subagents });
     // Back to the pre-session builtins until this session advertises its own.
@@ -988,9 +1026,13 @@ export function createGateway() {
   };
 
   const disconnect = (): void => {
+    // Before the socket goes, not after: this is the last moment a `close` can
+    // reach the agent, and `release` writes the frame synchronously.
+    fileSearch.release();
     client?.close();
     client = null;
     setAttached(null);
+    fileSearch.forget();
     // A new connection re-reads the advertised methods and re-runs the eager
     // authenticate. Keeping the old list would offer a login on an agent that
     // may no longer advertise it.
@@ -1017,6 +1059,7 @@ export function createGateway() {
     commands,
     models,
     roster,
+    fileSearch,
     settings,
     auth,
     permissions,

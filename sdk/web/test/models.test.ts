@@ -151,12 +151,12 @@ describe("the two phases render the rows the pager renders", () => {
     ]);
   });
 
-  test("the hidden nucleo sort prefix is NOT carried over", () => {
-    // The pager puts `"a "`, `"b "`, … in `match_text` to steer nucleo's
-    // tiebreak (`effort_levels.rs:66-69`) — but the modal that renders this
-    // phase filters with `contains` over `match_text` (`app/modals.rs:642-652`),
-    // so in the terminal typing `a` matches xhigh through an invisible key.
-    // That is a bug, not a behaviour to reproduce.
+  test("no row matches on text it never draws", () => {
+    // The pager used to put `"a "`, `"b "`, … in `match_text` to steer nucleo's
+    // tiebreak, in a modal that filters with `contains` over that same field
+    // (`app/modals.rs:642-652`), so typing `a` selected xhigh through a key the
+    // row never showed. This client never carried it; the terminal stopped in
+    // `3e446fad` and now pins the same rule on its own side.
     //
     // Queried with the prefix itself, so the assertion is about the key and not
     // about the letter: a bare `a` legitimately matches several descriptions.
