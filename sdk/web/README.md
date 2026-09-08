@@ -307,6 +307,16 @@ would reconcile the whole transcript to update a single text node. Bun stays
 the package manager and test runner; Vite is here only for Solid's JSX
 transform, which the reactivity depends on.
 
+Three runtime dependencies: `solid-js`, `@solidjs/router`, and `markdown-it`.
+The last one is here because the terminal parses panel text with
+`pulldown-cmark` and `PanelBlock::Markdown` promises that renderer's output —
+headings, lists, tables, code — so a parser that knew six constructs was
+publishing a different panel than the plugin wrote. `markdown-it` is configured
+with `html: false`, so a panel's text can never become markup, and it is asked
+for tokens rather than for an HTML string: `Markdown.tsx` builds DOM from those
+nodes, which is why there is no `innerHTML` here and no sanitiser to remember.
+Only `https?:` keeps an `href`, decided in `safeHref` and tested there.
+
 | file | what it holds |
 | --- | --- |
 | `src/wire.ts` | the slice of the protocol this client speaks, and nothing else |
@@ -317,7 +327,7 @@ transform, which the reactivity depends on.
 | `src/directory.ts` | absolute-path arithmetic, and the listing params a picker needs |
 | `src/transcript.ts` | folding `session/update` into a store |
 | `src/commands.ts` | the slash catalog: provenance, matching, reading the composer |
-| `src/markdown.ts` | the panel markdown parser, and which links keep an href |
+| `src/markdown.ts` | the markdown parser's configuration, and which links keep an href |
 | `src/panel.ts` | tone-to-role, and the block-kind exhaustiveness guard |
 | `src/theme.ts` | generated palette to CSS custom properties |
 | `src/App.tsx` | the screen and its routes |
