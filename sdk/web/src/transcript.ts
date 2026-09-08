@@ -140,6 +140,12 @@ export function createTranscript(): Transcript {
       case "plugin_panel": {
         const plugin = String(update["plugin"]);
         const viewModel = update["view_model"] as PanelViewModel;
+        // A write of an object at a store path merges into the record already
+        // there, which is load-bearing rather than incidental: the record keeps
+        // its identity, so a re-publish reaches the widget as a change to the
+        // panel it is already drawing instead of as a second panel replacing
+        // the first. The pager depends on the same distinction — see
+        // `PanelState::merge` and `Panel.tsx`.
         setPanels(panelKey(plugin, viewModel.id), { plugin, viewModel });
         return;
       }

@@ -1,29 +1,89 @@
+import type { PanelBlock } from "@grok-build/plugin/generated/PanelBlock.ts";
 import type { PanelViewModel } from "@grok-build/plugin/generated/PanelViewModel.ts";
-import { For, Match, Switch, type JSX } from "solid-js";
+import { For, Index, Match, Switch, type JSX } from "solid-js";
 
 import { toneColor, type PanelAction } from "../panel.ts";
 import { Markdown } from "./Markdown.tsx";
+
+type BlockOf<K extends PanelBlock["kind"]> = Extract<PanelBlock, { kind: K }>;
+
+/**
+ * The block, if it is of this kind.
+ *
+ * `<Index>` hands the block through an accessor, and TypeScript cannot narrow a
+ * function call the way it narrowed the plain value `<For>` used to pass. This
+ * puts the narrowing back where `<Match>` can carry it, so each arm still reads
+ * only the fields its own variant has.
+ */
+function asKind<K extends PanelBlock["kind"]>(kind: K, block: PanelBlock): BlockOf<K> | null {
+  return block.kind === kind ? (block as BlockOf<K>) : null;
+}
+
+/**
+ * The live text of every field, by input id.
+ *
+ * This is the browser's `LineEditor` map: the pager keeps one editor per input
+ * block inside its own `PanelState` precisely so that a plugin re-publishing
+ * its panel — "on every change (a status tick, a timer)" — cannot rebuild what
+ * a person is halfway through typing (`pager/src/views/plugin_panel.rs:3-7`).
+ *
+ * Keyed by id rather than by position, for the same reason the pager keys it
+ * that way: a re-publish that inserts a block above a field must not count as a
+ * different field.
+ */
+interface Fields {
+  /** Adopt a mounted element for `id`, restoring what was typed into it. */
+  adopt(id: string, field: HTMLInputElement, published: string | null): void;
+  /** Remember an edit, so it survives an element this component has to rebuild. */
+  record(id: string, field: HTMLInputElement): void;
+  /** What a button press carries back, from the fields that are on screen now. */
+  collect(): Record<string, string>;
+}
+
+function createFields(): Fields {
+  const mounted = new Map<string, HTMLInputElement>();
+  const typed = new Map<string, string>();
+  return {
+    adopt(id, field, published) {
+      // The published value seeds a *new* field and is discarded for one this
+      // panel already has — the pager's headline property, tested there as
+      // `merge_reuses_editor_and_discards_new_value`. A plugin that repaints
+      // while someone types must not put its own idea of the value back.
+      field.value = typed.get(id) ?? published ?? "";
+      typed.set(id, field.value);
+      mounted.set(id, field);
+    },
+    record(id, field) {
+      typed.set(id, field.value);
+    },
+    collect() {
+      return Object.fromEntries([...mounted].map(([id, field]) => [id, field.value]));
+    },
+  };
+}
 
 /**
  * One plugin panel.
  *
  * `<Switch>` over `block.kind` is the anti-divergence mechanism applied to the
  * client: `PanelBlock` is a generated tagged union, each `<Match>` narrows to
- * one arm, and the `assertNever` fallback means a new variant in
- * `sdk/plugin/src/generated/PanelBlock.ts` fails to compile here instead of
- * rendering as nothing.
+ * one arm, and the `UnknownBlock` fallback means a new variant in
+ * `sdk/plugin/src/generated/PanelBlock.ts` fails to compile against
+ * `PANEL_BLOCK_KINDS` instead of rendering as nothing.
+ *
+ * The block list is walked with `<Index>`, not `<For>`. `<For>` keys by
+ * reference, and a re-published panel is a fresh array of fresh objects, so
+ * every block's DOM — the `<input>` and its caret included — was torn down and
+ * rebuilt on each of a plugin's status ticks. `<Index>` keeps the node at a
+ * position and moves the data through it, which is the browser's equivalent of
+ * what `PanelState::merge` does in the terminal.
  */
 export function Panel(props: {
   plugin: string;
   viewModel: PanelViewModel;
   onAction: (action: PanelAction) => void;
 }): JSX.Element {
-  // Live values of every `input` block, keyed by the block's id. `PanelActionParams`
-  // says a press delivers these alongside the button, which is what lets a panel
-  // collect an OAuth code and submit it in one gesture.
-  const inputs = new Map<string, HTMLInputElement>();
-  const collect = (): Record<string, string> =>
-    Object.fromEntries([...inputs].map(([id, field]) => [id, field.value]));
+  const fields = createFields();
 
   return (
     <section class="grok-panel">
@@ -32,10 +92,10 @@ export function Panel(props: {
         <span class="grok-panel-source">{props.plugin}</span>
       </header>
       <div class="grok-panel-body">
-        <For each={props.viewModel.blocks}>
+        <Index each={props.viewModel.blocks}>
           {(block) => (
-            <Switch fallback={<UnknownBlock kind={block.kind} />}>
-              <Match when={block.kind === "status" ? block : null}>
+            <Switch fallback={<UnknownBlock kind={block().kind} />}>
+              <Match when={asKind("status", block())}>
                 {(b) => (
                   <div class="grok-panel-status">
                     <For each={b().items}>
@@ -52,7 +112,7 @@ export function Panel(props: {
                 )}
               </Match>
 
-              <Match when={block.kind === "markdown" ? block : null}>
+              <Match when={asKind("markdown", block())}>
                 {(b) => (
                   <div class="grok-panel-markdown">
                     <Markdown text={b().text} />
@@ -60,7 +120,7 @@ export function Panel(props: {
                 )}
               </Match>
 
-              <Match when={block.kind === "table" ? block : null}>
+              <Match when={asKind("table", block())}>
                 {(b) => (
                   <div class="grok-panel-table-wrap">
                     <table class="grok-panel-table">
@@ -86,21 +146,11 @@ export function Panel(props: {
                 )}
               </Match>
 
-              <Match when={block.kind === "input" ? block : null}>
-                {(b) => (
-                  <label class="grok-panel-input">
-                    <span class="grok-panel-input-label">{b().label}</span>
-                    <input
-                      type={b().secret ? "password" : "text"}
-                      placeholder={b().placeholder ?? undefined}
-                      value={b().value ?? ""}
-                      ref={(field) => inputs.set(b().id, field)}
-                    />
-                  </label>
-                )}
+              <Match when={asKind("input", block())}>
+                {(b) => <Field block={b()} fields={fields} />}
               </Match>
 
-              <Match when={block.kind === "actions" ? block : null}>
+              <Match when={asKind("actions", block())}>
                 {(b) => (
                   <div class="grok-panel-actions">
                     <For each={b().buttons}>
@@ -117,7 +167,7 @@ export function Panel(props: {
                             props.onAction({
                               panelId: props.viewModel.id,
                               buttonId: button.id,
-                              inputs: collect(),
+                              inputs: fields.collect(),
                             })
                           }
                         >
@@ -130,9 +180,31 @@ export function Panel(props: {
               </Match>
             </Switch>
           )}
-        </For>
+        </Index>
       </div>
     </section>
+  );
+}
+
+/**
+ * One `input` block.
+ *
+ * The value is written in the `ref` — once, as the element is built — rather
+ * than bound to the block. A binding would re-apply on every re-publish, which
+ * is the behaviour the pager deliberately does not have: it keeps the live
+ * editor for an id it already knows and ignores the value that came with it.
+ */
+function Field(props: { block: BlockOf<"input">; fields: Fields }): JSX.Element {
+  return (
+    <label class="grok-panel-input">
+      <span class="grok-panel-input-label">{props.block.label}</span>
+      <input
+        type={props.block.secret ? "password" : "text"}
+        placeholder={props.block.placeholder ?? undefined}
+        ref={(field) => props.fields.adopt(props.block.id, field, props.block.value)}
+        onInput={(event) => props.fields.record(props.block.id, event.currentTarget)}
+      />
+    </label>
   );
 }
 
