@@ -618,6 +618,52 @@ share one set of editors, so a code typed into the widget is still there in the
 dialog. A plugin that throws while being drawn takes down its own widget and
 nothing else.
 
+### The dock's own sections
+
+The rail carries three of the dock's four — **Subagents**, **Tasks**,
+**Watchers** — above the plugins and below the context window, in the dock's own
+order. Queued is the fourth and belongs to the prompt queue. Each obeys the rule
+that gives the column its shape: a section with a zero count is not drawn, a
+rail with nothing in it is not drawn either, and a list shows two rows and then
+says how many more there are — `MAX_SECTION_ROWS`, taken rather than chosen.
+
+**Watchers is not what the word suggests.** It is not the file, config and
+memory watchers the codebase uses internally, and there is no `/watch` command.
+The dock's watcher rows are running `monitor` background tasks plus scheduled
+`/loop` tasks (`app/agent_view/panes.rs:369-412`, counted at `:434`); Tasks is
+the same store filtered the other way, the backgrounded bash commands that are
+*not* monitors (`:338-367`). Both are things a person asked for and both keep
+running while the session sits idle, which is exactly what a person watching a
+session wants on screen.
+
+**Nothing was added to the wire for either.** A watcher is not a stored thing
+the agent could be asked for; it is a filter, and every frame the filter reads
+already rides the session's own stream and is already replayed by
+`session/load`: `task_backgrounded` (with `monitor_description`, which is what
+makes a row a Monitor rather than a Run), `task_completed`, and
+`scheduled_task_created` / `_fired` / `_deleted`. Acting on a row uses the two
+methods the terminal already calls, `x.ai/task/kill` and `x.ai/scheduler/delete`.
+The one thing the stream cannot say is *when* a task started — the notification
+carries no timestamp, so the terminal dates a replayed task from the moment it
+saw the replay — and `x.ai/task/list` is the agent's own answer to that, the way
+`x.ai/subagent/list_running` is for a fan-out. Until a row has one, its elapsed
+column is an em dash rather than a number it did not earn.
+
+A watcher row's stop is two different actions behind one button: a monitor is a
+process to kill, a loop is a schedule to delete. Which one is decided by looking
+the row up, not by reading the word the row displays — the terminal splits the
+same way, on a `DockWatcherId` that remembers which kind the row came from.
+
+**Tasks and Watchers are wired as far as this client's own half and no further.**
+The fold, the filters, the labels and the kill discipline are all here and
+tested; what a fold needs is frames, and frames arrive in one place — the
+gateway's notification dispatch. `backgroundWork` in `tasks.ts` is where the two
+sections stop, and it names the three lines it is waiting for: the store built
+per attach, `apply(update, isReplay)` beside the fan-out's own, and the two kill
+methods. Until they are there it returns nothing and both sections are simply
+absent — which is what the dock does with a section that has nothing in it, so
+nothing on screen is wrong in the meantime.
+
 ### The context window
 
 `/context` is the most useful thing the terminal had that a browser could not
@@ -700,9 +746,16 @@ refusal to declare would. Only an explicit `"trust"` unblocks.
 
 ## Watching a fan-out
 
-A session that spawns subagents shows them in their own pane above the
-transcript: one row per child, with what it is, what it is doing right now,
-how long it has been at it, and how it ended.
+A session that spawns subagents shows them one row per child, with what it is,
+what it is doing right now, how long it has been at it, and how it ended.
+
+**Where that lives depends on the rail.** With the rail on it is a dock section
+like the terminal's, one line per running child, and **Open** raises the pane
+below — which is the terminal's split too, since Enter on a dock subagent row
+opens the child. With the rail off there is no column to carry that line, so the
+pane goes back above the transcript, where every panel goes when the rail is
+off. Never both at once: two live copies of the same state on one screen is a
+worse answer than either.
 
 The pane is separate from the transcript because a fan-out is *state*, not
 events. Three children each rewrite their own line several times a minute, and
@@ -786,10 +839,11 @@ computation that belongs on the wire:
   `description`, never the prompt the child was actually given. The terminal
   reads it from `meta.json` on disk (`app/subagent.rs:85`, filled by `enrich_from_meta` at `:246`).
   A browser has no disk.
-- **The child's working directory and worktree.** Same file, same reason. So a
-  browser cannot even `session/load` a child by id: it has no `cwd` to send.
-  Child sessions are also excluded from the roster on purpose — their summaries
-  are `hidden` (`agent/roster.rs:276`).
+- **The child's working directory and worktree.** Same file, same reason —
+  though the spawn's own `child_cwd` now covers the `session/load` case for a
+  client that was attached when it happened. Child sessions are excluded from
+  the roster on purpose either way: their summaries are `hidden`
+  (`agent/roster.rs:276`).
 - **The child's transcript before this client attached.** The pane shows what a
   child says from the moment the browser is subscribed. The terminal replays the
   child's `updates.jsonl` from disk when you open it fullscreen.
@@ -797,10 +851,12 @@ computation that belongs on the wire:
   client that missed it can only date the child from the first tick — which is
   why the pane calls `list_running`, whose `startedAtEpochMs` is the only place
   the wire states it.
-- **Which tool call spawned which child.** `subagent_spawned` carries no
-  `tool_call_id`, so the `spawn_subagent` tool call in the parent's transcript
-  and the row in this pane cannot be linked. Both clients live with it; only a
-  wire field would fix it.
+- **Which tool call spawned which child.** This one has since been answered on
+  the wire: `subagent_spawned` now carries an optional `tool_call_id`, and a
+  `child_cwd` beside it, so a client that was attached at spawn can link the row
+  to the call that started it and can `session/load` the child. Neither is read
+  here yet. Absent for harness-internal spawns — goal roles, workflows, plugins,
+  scheduler loops — which answer to no model tool call.
 - **Initializing versus running.** The agent distinguishes them and will report
   the difference through `x.ai/subagent/get`, but it never announces it, so a
   client watching the stream sees a spawned child as running from the first
