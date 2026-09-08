@@ -380,14 +380,24 @@ impl SubagentsConfig {
         }
         LimitBehavior::Queue
     }
+    /// `[subagents] enabled` as an admin pinned it in `requirements.toml`.
+    ///
+    /// Read as a requirement in its own right, not from the merged config the pin is also
+    /// deep-merged into: merged in it lands at priority 3 below, where `GROK_SUBAGENTS` and
+    /// the CLI flag both outrank it and a pinned-off deployment turns back on for anyone
+    /// who exports the variable.
+    fn enabled_requirement(requirements: Option<&toml::Value>) -> Option<bool> {
+        requirements?.get("subagents")?.get("enabled")?.as_bool()
+    }
     /// Resolve the final subagents config from all sources (in priority order):
-    /// 1. CLI flag `--subagents` (absolute highest, always enables)
-    /// 2. `GROK_SUBAGENTS` env var: `1`/`true` enables, `0`/`false` force-disables
-    /// 3. Config file `[subagents] enabled` (the key itself, not the presence of the section)
-    /// 4. Default (enabled)
+    /// 1. `requirements.toml` pin of `[subagents] enabled`
+    /// 2. CLI flag `--subagents` (always enables)
+    /// 3. `GROK_SUBAGENTS` env var: `1`/`true` enables, `0`/`false` force-disables
+    /// 4. Config file `[subagents] enabled` (the key itself, not the presence of the section)
+    /// 5. Default (enabled)
     ///
     /// `enabled` is deliberately not remotely gated.
-    /// Only explicit local intent (CLI flag, `GROK_SUBAGENTS`, `[subagents] enabled`) changes the default.
+    /// Only a local pin or explicit local intent (CLI flag, `GROK_SUBAGENTS`, `[subagents] enabled`) changes the default.
     ///
     /// Project files are excluded from this trust-independent base; Task boundaries overlay them using the parent cwd's authoritative trust verdict.
     pub fn resolve(cli_flag: bool, config: &toml::Value) -> Self {
@@ -395,6 +405,7 @@ impl SubagentsConfig {
         Self::resolve_base_with_sources(
             cli_flag,
             config,
+            Self::enabled_requirement(load_merged_requirements().as_ref()),
             user_grok_root.as_deref(),
             &bundle::bundled_root(),
         )
@@ -402,6 +413,7 @@ impl SubagentsConfig {
     pub(crate) fn resolve_base_with_sources(
         cli_flag: bool,
         config: &toml::Value,
+        enabled_requirement: Option<bool>,
         user_grok_root: Option<&std::path::Path>,
         bundled_root: &std::path::Path,
     ) -> Self {
@@ -416,6 +428,7 @@ impl SubagentsConfig {
             .and_then(|v| v.as_table())
             .is_some_and(|t| t.contains_key("enabled"));
         let resolved = crate::agent::config::resolve_enabled(
+            enabled_requirement,
             if cli_flag { Some(true) } else { None },
             "GROK_SUBAGENTS",
             result.enabled,
@@ -494,6 +507,7 @@ impl ManagedMcpsConfig {
         let has_local_enabled = managed_mcps_table.is_some_and(|t| t.contains_key("enabled"));
         let resolved = crate::agent::config::resolve_enabled(
             None,
+            None,
             "GROK_MANAGED_MCPS_ENABLED",
             result.enabled,
             has_local_enabled,
@@ -504,6 +518,7 @@ impl ManagedMcpsConfig {
         let has_local_gateway_tools =
             managed_mcps_table.is_some_and(|t| t.contains_key("gateway_tools_enabled"));
         let gateway_resolved = crate::agent::config::resolve_enabled(
+            None,
             None,
             "GROK_MANAGED_MCP_GATEWAY_TOOLS_ENABLED",
             result.gateway_tools_enabled,
@@ -1262,6 +1277,10 @@ fn apply_requirements_inner(
     enforce_opt!("cli", "use_leader", config.cli.use_leader);
     enforce_opt!("cli", "show_tips", config.cli.show_tips);
     enforce_opt!("memory", "enabled", config.memory.enabled);
+    // Reports the takeover; the pin itself binds in `SubagentsConfig::resolve`, which reads
+    // it as a requirement so it outranks `GROK_SUBAGENTS` and `--subagents`. Nothing reads
+    // `config.subagents`, and clamping it here would not help: on a settings refresh this
+    // runs before the re-resolve that overwrites the resolved value.
     enforce_val!("subagents", "enabled", config.subagents.enabled);
     enforce_val!("managed_mcps", "enabled", config.managed_mcps.enabled);
     if let Some(val) = req_bool(req, "tools", "respect_gitignore") {

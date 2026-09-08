@@ -846,9 +846,11 @@ pub(crate) fn resolve_string_flag(
     None
 }
 /// Resolve `enabled` for section-based configs (memory, subagents, etc.).
+/// `requirement` is an admin's `requirements.toml` pin, which outranks the CLI flag and the env var.
 /// `has_local_enabled` is whether the TOML section carries the `enabled` key itself.
 /// A section written to tune other keys is not local intent, so the feature flag and the default still apply.
 pub(crate) fn resolve_enabled(
+    requirement: Option<bool>,
     cli_flag: Option<bool>,
     env_var: &str,
     config_enabled: bool,
@@ -862,6 +864,7 @@ pub(crate) fn resolve_enabled(
         None
     };
     BoolFlag::env(env_var)
+        .requirement(requirement)
         .cli(cli_flag)
         .config(config_val)
         .feature_flag(feature_flag_val)

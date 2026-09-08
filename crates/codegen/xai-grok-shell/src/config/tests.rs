@@ -1339,6 +1339,50 @@ fn subagents_config_cli_flag_overrides_env_var() {
         },
     );
 }
+/// An admin pin outranks every local source. Merged into the effective TOML it would sit
+/// below both, so a deployment pinned off would come back for anyone exporting the env var.
+#[test]
+fn subagents_config_requirement_pin_beats_cli_flag_and_env_var() {
+    with_grok_subagents(
+        "1",
+        || {
+            let config: toml::Value = toml::from_str("[subagents]\nenabled = true").unwrap();
+            let bundled = std::path::Path::new("/nonexistent/bundled");
+            let sa = SubagentsConfig::resolve_base_with_sources(
+                true,
+                &config,
+                Some(false),
+                None,
+                bundled,
+            );
+            assert!(
+                !sa.enabled,
+                "a requirements.toml pin must outrank --subagents and GROK_SUBAGENTS=1"
+            );
+            let unpinned = SubagentsConfig::resolve_base_with_sources(
+                false,
+                &config,
+                None,
+                None,
+                bundled,
+            );
+            assert!(unpinned.enabled, "with no pin the local sources still decide");
+        },
+    );
+}
+#[test]
+fn subagents_enabled_requirement_reads_only_the_pinned_key() {
+    let pinned: toml::Value = toml::from_str("[subagents]\nenabled = false\nmax_depth = 2")
+        .unwrap();
+    assert_eq!(SubagentsConfig::enabled_requirement(Some(&pinned)), Some(false));
+    let tuned: toml::Value = toml::from_str("[subagents]\nmax_depth = 2").unwrap();
+    assert_eq!(
+        SubagentsConfig::enabled_requirement(Some(&tuned)),
+        None,
+        "a requirements layer that only tunes the section pins nothing"
+    );
+    assert_eq!(SubagentsConfig::enabled_requirement(None), None);
+}
 #[test]
 fn subagents_config_models_parsed() {
     without_grok_subagents(|| {
@@ -2671,6 +2715,7 @@ fn project_overlay_preserves_source_precedence() {
     let base = SubagentsConfig::resolve_base_with_sources(
         false,
         &config,
+        None,
         Some(&home.join(".grok")),
         &bundled,
     );
@@ -2812,6 +2857,7 @@ fn bundled_personas_and_roles_have_lowest_priority_in_resolve_order() {
     let base = SubagentsConfig::resolve_base_with_sources(
         true,
         &config,
+        None,
         Some(&home.join(".grok")),
         &bundled,
     );
@@ -2850,6 +2896,7 @@ fn bundled_personas_and_roles_have_lowest_priority_in_resolve_order() {
     let base = SubagentsConfig::resolve_base_with_sources(
         true,
         &config,
+        None,
         Some(&home.join(".grok")),
         &bundled,
     );
@@ -2888,6 +2935,7 @@ fn bundled_personas_and_roles_have_lowest_priority_in_resolve_order() {
     let base = SubagentsConfig::resolve_base_with_sources(
         true,
         &config,
+        None,
         Some(&home.join(".grok")),
         &bundled,
     );
@@ -4028,6 +4076,7 @@ fn base_resolver_without_project_cwd_keeps_project_files_out() {
         false,
         &toml::Value::Table(Default::default()),
         None,
+        None,
         &tmp.path().join("bundled"),
     );
     assert!(base.get_role("project").is_none());
@@ -4043,6 +4092,7 @@ fn explicit_grok_root_is_the_only_user_source() {
     let base = SubagentsConfig::resolve_base_with_sources(
         false,
         &toml::Value::Table(Default::default()),
+        None,
         Some(&configured),
         &configured.join("bundled"),
     );

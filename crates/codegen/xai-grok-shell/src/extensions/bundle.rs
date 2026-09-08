@@ -704,6 +704,7 @@ mod tests {
             false,
             &toml::Value::Table(Default::default()),
             None,
+            None,
             &root,
         );
         let (roles, personas) = crate::config::SubagentsConfig::effective_definition_maps(
