@@ -72,6 +72,38 @@ directory's most recent session.
 The theme picker offers the six palettes from `sdk/theme`. Nothing in this
 client names a colour; see "Colour" below.
 
+## Slash commands
+
+Press `/` in the composer and the shell's own catalog opens: its builtins, the
+skills it found on disk, the workflows it knows, and the commands a plugin
+declared in its manifest. Arrows move, Tab or Enter inserts the name with a
+trailing space, Escape closes it, and the command's argument hint stands in as
+the composer's placeholder until arguments are typed.
+
+Nothing is asked of the wire. The catalog arrives as `available_commands_update`
+— a standard ACP session update on a carrier this client already listens to —
+and `session/load` asks the session for one on every attach, so attaching is
+what fills the menu. Choosing a row types `/name args` and sending it is the
+dispatch: the shell resolves the leading token against the catalog it
+advertised, and a plugin's command reaches that plugin's own code.
+
+Each row carries the terminal's provenance badge — `built-in`, `skill · user`,
+`plugin · acme` — because the wire carries provenance: a markdown skill rides
+with `scope` and `path`, and a plugin's manifest command with `pluginCommand`
+and `pluginName`. The terminal shows the badge only on rows in a name collision,
+since it has a `/plugins` screen to ask instead; the browser shows it on every
+row, because this menu is the only place it can say where a command came from.
+
+The terminal hides seven shell-advertised names because it has its own UI for
+them (`BLOCKED_ACP_NAMES`). This client shows all seven, and the reason is in
+`PAGER_BLOCKED` in `src/commands.ts`, per command: every one of them reports
+through `send_host_turn_slash_command_output`, which is an ordinary agent
+message chunk that a browser already draws, and there is no `/hooks` or
+`/plugins` screen here to reach them by instead. `/help` is on that list as a
+name *reservation* — the shell never advertises it — so there is nothing to
+hide. A test reads the pager's list and fails when a name lands there without a
+verdict here.
+
 ## Trying a plugin panel
 
 `test/fixtures/panel-probe` is a plugin that publishes one panel using all five
@@ -189,11 +221,12 @@ transform, which the reactivity depends on.
 | `src/roster.ts` | the roster, grouped by `cwd` |
 | `src/directory.ts` | absolute-path arithmetic, and the listing params a picker needs |
 | `src/transcript.ts` | folding `session/update` into a store |
+| `src/commands.ts` | the slash catalog: provenance, matching, reading the composer |
 | `src/markdown.ts` | the panel markdown parser, and which links keep an href |
 | `src/panel.ts` | tone-to-role, and the block-kind exhaustiveness guard |
 | `src/theme.ts` | generated palette to CSS custom properties |
 | `src/App.tsx` | the screen and its routes |
-| `src/components/` | Roster, Session, Panel, Markdown, Settings, PermissionCard, FolderTrustCard, DirectoryPicker |
+| `src/components/` | Roster, Session, Panel, Markdown, Settings, PermissionCard, FolderTrustCard, DirectoryPicker, CommandMenu |
 
 `src/wire.ts` is hand-written on purpose and the reasoning is at the top of the
 file: the panel types and the palette *are* generated and are imported, never

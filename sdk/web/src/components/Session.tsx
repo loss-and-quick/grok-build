@@ -1,11 +1,13 @@
-import { For, Match, Show, Switch, type JSX } from "solid-js";
+import { For, Match, Show, Switch, createSignal, type JSX } from "solid-js";
 
 import { blendToward, createTick, waveBrightness } from "../animation.ts";
+import { acceptRow, argumentHint, type CommandRow } from "../commands.ts";
 import { ACCENT_BAR, BULLET, PROMPT_ARROW, spinnerFrame } from "../glyphs.ts";
 
 import type { Gateway } from "../gateway.ts";
 import { sessionLabel } from "../roster.ts";
 import type { TranscriptEntry } from "../transcript.ts";
+import { CommandMenu, createCommandMenu } from "./CommandMenu.tsx";
 import { Panel } from "./Panel.tsx";
 import { PermissionCard } from "./PermissionCard.tsx";
 
@@ -20,12 +22,38 @@ import { PermissionCard } from "./PermissionCard.tsx";
 export function Session(props: { gateway: Gateway }): JSX.Element {
   let composer: HTMLTextAreaElement | undefined;
   const tick = createTick();
+  const menu = createCommandMenu(() => props.gateway.commands());
+  // The composer's text as state, not only as a DOM value: the menu reads it on
+  // every edit, and an accepted row writes it back.
+  const [line, setLine] = createSignal("");
+
+  const reread = (): void => {
+    if (!composer) return;
+    setLine(composer.value);
+    menu.sync(composer.value, composer.selectionStart);
+  };
 
   const send = (): void => {
     const text = composer?.value.trim() ?? "";
     if (!text) return;
     if (composer) composer.value = "";
+    setLine("");
+    menu.sync("", 0);
+    // A slash command is sent as ordinary prompt text, because that *is* the
+    // dispatch path: the shell resolves the leading token against the same
+    // catalog it advertised, and a plugin's command reaches that plugin's own
+    // code over `command_invoke`. Nothing here needs a second method.
     void props.gateway.prompt(text);
+  };
+
+  /** Take a row into the composer and put the caret after it. */
+  const take = (chosen?: CommandRow): void => {
+    const row = chosen ?? menu.accept();
+    if (!row || !composer) return;
+    const next = acceptRow(composer.value, row);
+    composer.value = next.text;
+    composer.setSelectionRange(next.caret, next.caret);
+    reread();
   };
 
   return (
@@ -72,15 +100,46 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
               send();
             }}
           >
+            {/* Above the input rather than below it, the way the pager stacks
+                its dropdown over the prompt: the list grows upward, so a long
+                catalog never pushes the line being typed off the screen. */}
+            <CommandMenu menu={menu} onTake={(row) => take(row)} />
             <textarea
               class="prompt-input"
               rows={3}
-              placeholder="Message this session…"
+              placeholder={
+                argumentHint(props.gateway.commands(), line()) ?? "Message this session…"
+              }
               ref={composer}
+              onInput={reread}
+              onClick={reread}
+              onKeyUp={reread}
+              onFocus={() => menu.revive()}
+              onBlur={() => menu.dismiss()}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
                   event.preventDefault();
                   send();
+                  return;
+                }
+                if (!menu.open()) return;
+                // While the menu is up these keys belong to it. Enter takes the
+                // highlighted row rather than sending, which is the pager's own
+                // rule: Enter on `/doctor` accepts and opens the argument phase,
+                // and only a second Enter runs it.
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                  event.preventDefault();
+                  menu.move(event.key === "ArrowDown" ? 1 : -1);
+                  return;
+                }
+                if (event.key === "Tab" || event.key === "Enter") {
+                  event.preventDefault();
+                  take();
+                  return;
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  menu.dismiss();
                 }
               }}
             />

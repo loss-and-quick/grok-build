@@ -100,6 +100,53 @@ live("against a live gateway", () => {
     );
   }, 60_000);
 
+  test("the slash menu fills from the session's own catalog", async () => {
+    // The catalog is not asked for: `session/load` makes the session advertise
+    // one, so attaching is what fills the menu. The badges are the assertion
+    // that matters — a plugin's command reading as built-in is the confusion
+    // `CommandProvenance::Plugin` exists to prevent, and the browser has no
+    // other screen to correct it from.
+    localStorage.clear();
+    const { container: root } = mount();
+
+    (root.querySelector(".connect-url") as HTMLInputElement).value = URL_!;
+    (root.querySelector(".connect-secret") as HTMLInputElement).value = SECRET!;
+    (root.querySelector(".connect-button") as HTMLButtonElement).click();
+
+    const status = () => root.querySelector(".status")?.textContent ?? "";
+    await until(() => status() === "connected");
+    (root.querySelector(".roster-row") as HTMLButtonElement).click();
+    await until(() => status().startsWith("attached to"));
+
+    const input = root.querySelector(".prompt-input") as HTMLTextAreaElement;
+    input.value = "/";
+    input.setSelectionRange(1, 1);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await until(() => root.querySelectorAll(".slash-row").length > 0);
+
+    const names = [...root.querySelectorAll(".slash-name")].map((n) => n.textContent ?? "");
+    const badges = [...root.querySelectorAll(".slash-badge")].map((n) => n.textContent ?? "");
+    // The shell always advertises these two, and the pager hides the second.
+    expect(names).toContain("/compact");
+    expect(names).toContain("/reload-plugins");
+    expect(new Set(badges)).toContain("built-in");
+    // `panel-probe`'s manifest declares one, so there is a plugin row to badge.
+    const probe = names.indexOf("/probe-panel");
+    expect(probe).toBeGreaterThanOrEqual(0);
+    expect(badges[probe]).toBe("plugin · panel-probe");
+
+    // Accepting types the dispatch line and opens the argument phase.
+    input.value = "/probe";
+    input.setSelectionRange(6, 6);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle(50);
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+    );
+    expect(input.value).toBe("/probe-panel ");
+    expect(input.placeholder).toBe("<note>");
+  }, 60_000);
+
   test("sends a prompt and streams the reply back", async () => {
     localStorage.clear();
     const { container: root } = mount();

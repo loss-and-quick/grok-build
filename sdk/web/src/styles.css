@@ -829,3 +829,108 @@ button.picker-row:focus-visible {
 .composer {
   grid-template-columns: 1.25rem 1fr auto;
 }
+
+/* -- the slash-command menu ----------------------------------------------- */
+
+/* Stacked over the prompt, the way the pager stacks its dropdown: the list
+ * grows upward out of the normal flow, so it neither takes a column of the
+ * composer's grid nor pushes the line being typed down the screen. */
+.composer {
+  position: relative;
+}
+
+.slash-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 0.35rem);
+  z-index: 2;
+  margin: 0;
+  padding: 0.2rem 0;
+  list-style: none;
+  /* Eight rows before it scrolls — `MAX_VISIBLE_SUGGESTIONS`, passed in as
+   * `--slash-rows` so the count lives in the Rust and not in this file. The cap
+   * is a whole number of rows because each row is exactly `--slash-row-h` tall:
+   * a cap derived from anything else leaves a half-row clipped at the bottom,
+   * which reads as a rendering fault rather than as "there is more". */
+  --slash-row-h: 1.6rem;
+  max-height: calc(var(--slash-rows) * var(--slash-row-h) + 0.4rem);
+  overflow-y: auto;
+  /* Reserve the scrollbar track so the right-aligned badge is not painted
+   * under it — the pager reserves the same two columns as a gutter. */
+  scrollbar-gutter: stable;
+  background: var(--grok-bg-light, canvas);
+  border: 1px solid var(--grok-selection-border, canvastext);
+  border-radius: 6px;
+  /* The label column is `max-content` on the list and inherited by each row
+   * through `subgrid`, so every description starts at the same column however
+   * long the longest command name is — the pager's `compute_label_column_w`. */
+  display: grid;
+  /* The name column is `max-content` so descriptions align, but floored at 0 so
+   * an extreme name truncates itself instead of overflowing the row — the pager
+   * prioritises the full command name over the description and then truncates
+   * (`compute_label_column_w`, `truncate_str`), and this is that order. */
+  grid-template-columns: 1.25rem minmax(0, max-content) minmax(0, 1fr) auto;
+}
+
+.slash-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  gap: 0 0.5rem;
+  align-items: center;
+  height: var(--slash-row-h);
+  padding: 0 0.4rem;
+  cursor: pointer;
+}
+
+.slash-row.selected {
+  background: var(--grok-bg-visual, canvas);
+}
+
+.slash-row:hover {
+  background: var(--grok-bg-hover, canvas);
+}
+
+.slash-caret {
+  color: var(--grok-accent-user, canvastext);
+}
+
+.slash-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--grok-text-primary, canvastext);
+}
+
+.slash-row.selected .slash-name {
+  font-weight: bold;
+}
+
+/* The characters that spelled the query, in the palette's own fuzzy accent —
+ * `build_highlighted_spans` paints exactly these with `theme.fuzzy_accent`. */
+.slash-match {
+  color: var(--grok-fuzzy-accent, canvastext);
+}
+
+.slash-description {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+/* Right-aligned and dim, as in the pager, where the badge is drawn in
+ * `desc_style` at the far edge of the row. */
+.slash-badge {
+  justify-self: end;
+  white-space: nowrap;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.slash-row.selected .slash-badge,
+.slash-row.selected .slash-description {
+  color: var(--grok-gray-bright, canvastext);
+}
