@@ -1,5 +1,39 @@
 //! Compiled only in `#[cfg(test)]` builds. Import via `crate::test_util`.
 use std::path::{Path, PathBuf};
+
+/// Keep this crate's unit-test binary out of the developer's real `~/.grok`.
+///
+/// `grok_home()` memoises the home for the process, so the first case to
+/// resolve it fixes the path for every case after it and a per-case
+/// `$GROK_HOME` guard only helps whichever case happens to run first. The
+/// binary resolves that memo from the ACP client, `grok sessions`, the memory
+/// trace and the subagent replay, so on an ordinary run something asks long
+/// before any home-aware fixture is built, and the answer is the developer's
+/// live home: the folder-trust store that gates repo-local MCP and LSP
+/// spawning, plus `sessions/` and the worktree database.
+/// Pre-main is the only point where no test thread can have asked yet.
+///
+/// Fixtures cannot substitute for this. [`GrokHomeFixture`] and the disk-replay
+/// helpers write through `grok_home()` precisely because they cannot move it,
+/// so they inherit whatever won the race — including, when a fixture's own
+/// tempdir won it, a home that is deleted out from under the rest of the run
+/// when that fixture drops.
+#[ctor::ctor]
+fn redirect_grok_home_for_tests() {
+    xai_dirs::redirect_grok_home_for_tests();
+}
+
+/// Losing the pin above is invisible from a test run: every case still passes,
+/// having written to the developer's home instead of a temp dir. This is the
+/// assertion that fails when the `#[ctor]` is dropped or stops running.
+#[test]
+fn the_unit_test_binary_never_resolves_the_real_grok_home() {
+    assert_ne!(
+        xai_grok_shell::util::grok_home::grok_home(),
+        xai_dirs::default_grok_home(),
+        "this binary resolved <home>/.grok: the pre-main grok-home pin is gone"
+    );
+}
 /// Minimal `AgentView` for unit tests outside the dispatch/handler modules (which keep their own richer factories).
 pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent_view::AgentView {
     use crate::app::agent::{AgentId, AgentSession, AgentState};
@@ -120,15 +154,18 @@ impl Drop for EnvVarGuard {
         }
     }
 }
-/// Shared GROK_HOME boundary fixture for the resume-by-title startup and pre-sandbox tests.
+/// Session-tree fixture for the resume-by-title startup and pre-sandbox tests.
 ///
-/// `grok_home()` is OnceLock-cached process-wide, so summaries land under the
-/// *resolved* home (possibly the real `~/.grok` when another test pinned the
-/// cache first); cwd-encoded dirnames are tempdir-unique, and cleanup runs on
+/// Writes through `grok_home()`, which the pre-main pin above has already
+/// claimed for a temp directory. Deliberately does not set `$GROK_HOME`:
+/// `grok_home()` is memoised and would ignore it, so the only thing setting it
+/// achieves is to move the *uncached* resolvers to a second directory that this
+/// fixture never writes to — a split the tests would have to know about. The
+/// per-test namespace is the tempdir-unique cwd instead, and cleanup runs on
 /// drop so it survives assertion panics.
-/// Callers must hold `#[serial_test::serial(GROK_HOME)]`.
+/// Callers hold `#[serial_test::serial(GROK_HOME)]` so a case that still does
+/// set `$GROK_HOME` cannot move the resolvers underneath them.
 pub struct GrokHomeFixture {
-    _home: tempfile::TempDir,
     cwd: tempfile::TempDir,
     cleanup: Vec<std::path::PathBuf>,
 }
@@ -146,12 +183,8 @@ impl Default for GrokHomeFixture {
 }
 impl GrokHomeFixture {
     pub fn new() -> Self {
-        let home = tempfile::tempdir().expect("home tempdir");
-        unsafe { std::env::set_var("GROK_HOME", home.path()) };
-        let cwd = tempfile::tempdir().expect("cwd tempdir");
         Self {
-            _home: home,
-            cwd,
+            cwd: tempfile::tempdir().expect("cwd tempdir"),
             cleanup: Vec::new(),
         }
     }

@@ -193,6 +193,8 @@ insta = { workspace = true }
 criterion = { workspace = true }
 tempfile = { workspace = true }
 serial_test = { workspace = true }
+# Pre-main grok-home pin (`test_util::redirect_grok_home_for_tests`).
+ctor = { workspace = true }
 xai-grok-agent = { workspace = true }
 xai-grok-pager-pty-harness = { path = "../xai-grok-pager-pty-harness" }
 # In-process leader-cluster harness (mock inference server; no cycle:
