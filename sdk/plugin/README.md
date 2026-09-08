@@ -472,7 +472,10 @@ anyone who disagrees.
   `declined`).
 - `src/generated/*.ts` — **read-only**, generated from the Rust side via
   `ts-rs`. Do not edit; do not redefine these shapes elsewhere. `src/index.ts`
-  re-exports them.
+  re-exports them. `cargo test -p xai-grok-plugin-protocol` compares them
+  against the Rust DTOs and fails on any drift; regenerate with
+  `GROK_WRITE_PLUGIN_BINDINGS=1 cargo test -p xai-grok-plugin-protocol
+  --test generated_bindings`.
 - `test/` — `bun test` suite exercising the frame codec, request/response
   correlation (including out-of-order ids and concurrent-dispatch
   deadlock avoidance), the `definePlugin` handshake/dispatch/shutdown paths,

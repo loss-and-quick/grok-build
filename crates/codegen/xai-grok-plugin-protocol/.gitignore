@@ -1,2 +1,4 @@
-# ts-rs default export base; real bindings go to sdk/plugin/src/generated (empty here).
+# ts-rs's default export base. Nothing writes here any more — the destination
+# lives in tests/generated_bindings.rs — but an accidental default-config export
+# would land here, and it is not the artifact.
 /bindings/

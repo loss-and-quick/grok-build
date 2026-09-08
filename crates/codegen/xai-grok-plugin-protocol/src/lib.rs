@@ -2,8 +2,9 @@
 //!
 //! Transport is bidirectional JSON-RPC 2.0 over stdio (newline-delimited compact
 //! JSON). This crate is the *only* surface plugins see; core internals refactor
-//! freely behind it. Every type derives `ts_rs::TS` and exports to
-//! `sdk/plugin/src/generated/` via `cargo test` (see `bindings_export`).
+//! freely behind it. Every type derives `ts_rs::TS`; the checked-in TypeScript in
+//! `sdk/plugin/src/generated/` is compared against these types by
+//! `tests/generated_bindings.rs`, which is also the only thing that writes it.
 //!
 //! Evolution is additive-only: new methods/fields/events never break older
 //! plugins. Optional fields are `Option<_>` + `#[serde(default)]`; no type uses
@@ -32,10 +33,6 @@ use ts_rs::TS;
 /// session.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-// Shared export destination for every binding: repo-root `sdk/plugin/src/generated/`.
-// Path is relative to ts-rs's default base (`<crate>/bindings`), so four `..`
-// climb crate → codegen → crates → repo root. `cargo test` sets CWD to the crate.
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared vocabulary
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,7 +41,6 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// plugin-only `Replace`/`Intercept` seams. Shared vocabulary, both directions.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum GateKindDto {
     Observe,
     Tool,
@@ -57,7 +53,6 @@ pub enum GateKindDto {
 /// from `pre_tool_use` onward.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum DecisionDto {
     Allow,
     Deny,
@@ -66,7 +61,6 @@ pub enum DecisionDto {
 /// Severity of a `log_emit` line. Shared vocabulary, plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum LogLevelDto {
     Debug,
     Info,
@@ -81,7 +75,6 @@ pub enum LogLevelDto {
 /// the UI.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum EventName {
     // Live: the 15 events bridged from `xai-grok-hooks`.
     SessionStart,
@@ -186,7 +179,6 @@ impl std::fmt::Display for EventName {
 /// phase; lowercase on the wire.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
 #[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum SubagentStopPhaseDto {
     Gate,
     Observe,
@@ -195,7 +187,6 @@ pub enum SubagentStopPhaseDto {
 /// Mirror of `xai-grok-hooks::event::BackgroundTaskType`. snake_case wire.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum BackgroundTaskTypeDto {
     Shell,
     Monitor,
@@ -205,7 +196,6 @@ pub enum BackgroundTaskTypeDto {
 /// Mirror of `xai-grok-hooks::event::StopFailureKind`. snake_case wire.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum StopFailureKindDto {
     RateLimit,
     AuthenticationFailed,
@@ -219,7 +209,6 @@ pub enum StopFailureKindDto {
 /// background task in a `Stop` payload. camelCase wire (`type`, `agentType`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct StopBackgroundTaskDto {
     pub id: String,
     pub r#type: BackgroundTaskTypeDto,
@@ -236,7 +225,6 @@ pub struct StopBackgroundTaskDto {
 /// scheduled wakeup in a `Stop` payload. camelCase wire.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct StopSessionCronDto {
     pub id: String,
     pub schedule: String,
@@ -248,7 +236,6 @@ pub struct StopSessionCronDto {
 /// in a `ProviderResponse` payload. Both field names are already the wire
 /// tokens, so no rename.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ProviderResponseToolCallDto {
     pub id: String,
     pub name: String,
@@ -262,7 +249,7 @@ pub struct ProviderResponseToolCallDto {
 /// fired; the rest identify the session and its fire-site context.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct HookEnvelopeCommon {
     pub hook_event_name: EventName,
     pub session_id: String,
@@ -282,7 +269,6 @@ pub struct HookEnvelopeCommon {
 /// `session_start` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct SessionStartPayload {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -294,7 +280,6 @@ pub struct SessionStartPayload {
 /// `session_end` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct SessionEndPayload {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -312,7 +297,6 @@ pub struct SessionEndPayload {
 /// `stop` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct StopPayload {
     pub reason: String,
     pub stop_hook_active: bool,
@@ -327,7 +311,6 @@ pub struct StopPayload {
 /// `stop_failure` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct StopFailurePayload {
     pub error: StopFailureKindDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -341,7 +324,6 @@ pub struct StopFailurePayload {
 /// Mirror of `xai-grok-hooks::event::StopCancelledReason`. snake_case wire.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum StopCancelledReasonDto {
     UserInterrupt,
     PermissionRejected,
@@ -354,7 +336,6 @@ pub enum StopCancelledReasonDto {
 /// Mirror of `xai-grok-hooks::event::CancelledBy`. snake_case wire.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum CancelledByDto {
     User,
     Runtime,
@@ -364,7 +345,6 @@ pub enum CancelledByDto {
 /// `stop_cancelled` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct StopCancelledPayload {
     pub reason: StopCancelledReasonDto,
     pub cancelled_by: CancelledByDto,
@@ -381,7 +361,6 @@ pub struct StopCancelledPayload {
 /// `pre_tool_use` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PreToolUsePayload {
     pub tool_name: String,
     pub tool_use_id: String,
@@ -395,7 +374,6 @@ pub struct PreToolUsePayload {
 /// `post_tool_use` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PostToolUsePayload {
     pub tool_name: String,
     pub tool_use_id: String,
@@ -416,7 +394,6 @@ pub struct PostToolUsePayload {
 /// `post_tool_use_failure` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PostToolUseFailurePayload {
     pub tool_name: String,
     pub tool_use_id: String,
@@ -436,7 +413,6 @@ pub struct PostToolUseFailurePayload {
 /// `permission_denied` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PermissionDeniedPayload {
     pub tool_name: String,
     pub tool_use_id: String,
@@ -448,7 +424,6 @@ pub struct PermissionDeniedPayload {
 /// `user_prompt_submit` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct UserPromptSubmitPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
@@ -459,7 +434,6 @@ pub struct UserPromptSubmitPayload {
 /// `notification` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct NotificationPayload {
     pub notification_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -473,7 +447,6 @@ pub struct NotificationPayload {
 /// `subagent_start` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct SubagentStartPayload {
     pub subagent_id: String,
     pub subagent_type: String,
@@ -484,7 +457,6 @@ pub struct SubagentStartPayload {
 /// `subagent_stop` payload (also the payload of the `subagent_end` alias).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct SubagentStopPayload {
     pub phase: SubagentStopPhaseDto,
     pub subagent_id: String,
@@ -498,7 +470,6 @@ pub struct SubagentStopPayload {
 /// `pre_compact` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PreCompactPayload {
     pub source: String,
 }
@@ -506,7 +477,6 @@ pub struct PreCompactPayload {
 /// `post_compact` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PostCompactPayload {
     pub source: String,
 }
@@ -514,7 +484,6 @@ pub struct PostCompactPayload {
 /// `provider_request` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ProviderRequestPayload {
     pub endpoint: String,
     pub model: String,
@@ -530,7 +499,6 @@ pub struct ProviderRequestPayload {
 /// `provider_response` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ProviderResponsePayload {
     pub base_url: String,
     pub endpoint: String,
@@ -540,7 +508,6 @@ pub struct ProviderResponsePayload {
 /// `provider_error` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ProviderErrorPayload {
     pub error_class: String,
     pub model: String,
@@ -552,7 +519,6 @@ pub struct ProviderErrorPayload {
 /// `subagent_resolve` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct SubagentResolvePayload {
     pub subagent_id: String,
     pub subagent_type: String,
@@ -566,7 +532,6 @@ pub struct SubagentResolvePayload {
 /// `resolve_credential` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ResolveCredentialPayload {
     pub reason: String,
     pub base_url: String,
@@ -577,7 +542,6 @@ pub struct ResolveCredentialPayload {
 /// `refresh_credential` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct RefreshCredentialPayload {
     pub reason: String,
     pub base_url: String,
@@ -592,7 +556,6 @@ pub struct RefreshCredentialPayload {
 /// `start_oauth_flow` payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct StartOauthFlowPayload {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -609,7 +572,7 @@ pub struct StartOauthFlowPayload {
 /// `GROK_LEADER_SOCKET`): a plugin may connect to it as one more headless ACP
 /// client. `None` outside leader mode.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct HostCapabilities {
     pub storage: bool,
     #[serde(default)]
@@ -618,7 +581,6 @@ pub struct HostCapabilities {
 
 /// `initialize` request params. Core→plugin, handshake.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct InitializeParams {
     pub protocol_version: u32,
     pub plugin_name: String,
@@ -636,7 +598,7 @@ pub struct InitializeParams {
 /// catalog is built before any sidecar starts), and the host warns when the
 /// two drift.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct InitializeResult {
     pub protocol_version: u32,
     #[serde(default)]
@@ -660,7 +622,6 @@ pub struct InitializeResult {
 /// `hook_invoke` request params. Core→plugin. `timeout_ms` bounds the
 /// plugin's reply (fail-open on timeout).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct HookInvokeParams {
     pub invocation_id: String,
     pub event: String,
@@ -677,7 +638,7 @@ pub struct HookInvokeParams {
 /// `continue` on the wire.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub enum HookInvokeResult {
     /// Observe gate: acknowledged, no control. `additional_context` is text the
     /// hook wants the model to see; the observe gate has no decision to carry it
@@ -725,7 +686,7 @@ pub enum HookInvokeResult {
 /// The masking of outbound requests (rewriting the credential onto the wire) is
 /// handled by the existing `provider_request` seam, not by this type.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct PluginCredentialDto {
     /// The bearer token to send on outbound requests.
     pub token: String,
@@ -764,7 +725,6 @@ fn default_true() -> bool {
 /// `tools` array parses into this shape, and `initialize` replies carry the
 /// code-registered handlers for drift warnings.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ToolDescriptorDto {
     /// Bare tool name (no plugin prefix); the host namespaces it for the model.
     pub name: String,
@@ -778,7 +738,6 @@ pub struct ToolDescriptorDto {
 /// `agent` names the caller: `"main"` for the root session, otherwise the
 /// subagent type label.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ToolCallContextDto {
     pub session_id: String,
     /// Working directory the call runs in (per-call, not session-static).
@@ -790,7 +749,6 @@ pub struct ToolCallContextDto {
 /// declared; `timeout_ms` is the host's hard deadline (informational to the
 /// plugin — the host enforces it).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ToolInvokeParams {
     pub invocation_id: String,
     pub tool: String,
@@ -805,7 +763,6 @@ pub struct ToolInvokeParams {
 /// returned to the conversation; `is_error` marks it as a failed call
 /// (surfaced to the model exactly like an MCP tool error).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ToolInvokeResult {
     pub content: String,
     #[serde(default)]
@@ -820,7 +777,6 @@ pub struct ToolInvokeResult {
 /// aborts that handler's `AbortSignal`. Best-effort: the host does not wait
 /// for a reply and the tool result (if any) is discarded.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ToolCancelParams {
     pub invocation_id: String,
 }
@@ -845,7 +801,7 @@ pub struct ToolCancelParams {
 /// the code-registered handlers for drift warnings — exactly like
 /// [`ToolDescriptorDto`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct CommandDescriptorDto {
     /// Bare command name, with no plugin prefix and no leading `/`; the host
     /// qualifies it as `<plugin>:<name>` when the bare name is already taken.
@@ -865,7 +821,6 @@ pub struct CommandDescriptorDto {
 /// carries, and `timeout_ms` is the host's hard deadline (informational to the
 /// plugin — the host enforces it).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct CommandInvokeParams {
     pub invocation_id: String,
     pub command: String,
@@ -885,7 +840,7 @@ pub struct CommandInvokeParams {
 /// drive the host's.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub enum CommandInvokeResult {
     /// The plugin did the work itself and the turn ends here — no model call.
     /// `text` is shown to the user when present; a plugin that published a
@@ -915,7 +870,6 @@ pub enum CommandInvokeResult {
 /// `shutdown` notification params. Core→plugin. The plugin must exit
 /// within ~2s or it is SIGKILLed.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ShutdownParams {
     pub reason: String,
 }
@@ -927,7 +881,7 @@ pub struct ShutdownParams {
 /// `log_emit` notification params. Plugin→core. `fields` is optional
 /// structured context.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct LogEmitParams {
     pub level: LogLevelDto,
     pub message: String,
@@ -942,14 +896,13 @@ pub struct LogEmitParams {
 
 /// `storage_get` request params. Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct StorageGetParams {
     pub key: String,
 }
 
 /// `storage_get` reply. Plugin→core. `value` is `None` when absent.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct StorageGetResult {
     #[serde(default)]
     #[ts(type = "unknown", optional = nullable)]
@@ -958,7 +911,6 @@ pub struct StorageGetResult {
 
 /// `storage_set` request params. Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct StorageSetParams {
     pub key: String,
     #[ts(type = "unknown")]
@@ -967,12 +919,10 @@ pub struct StorageSetParams {
 
 /// `storage_set` reply (empty). Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct StorageSetResult {}
 
 /// `storage_delete` request params. Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct StorageDeleteParams {
     pub key: String,
 }
@@ -980,14 +930,13 @@ pub struct StorageDeleteParams {
 /// `storage_delete` reply. Plugin→core. `existed` reports whether a
 /// value was present.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct StorageDeleteResult {
     pub existed: bool,
 }
 
 /// `storage_list` request params. Plugin→core. `prefix` filters keys.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct StorageListParams {
     #[serde(default)]
     pub prefix: Option<String>,
@@ -995,7 +944,6 @@ pub struct StorageListParams {
 
 /// `storage_list` reply. Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct StorageListResult {
     #[serde(default)]
     pub keys: Vec<String>,
@@ -1007,13 +955,11 @@ pub struct StorageListResult {
 
 /// `config_get` request params (empty). Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ConfigGetParams {}
 
 /// `config_get` reply. Plugin→core. `value` is the plugin config from
 /// the manifest/settings.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ConfigGetResult {
     #[ts(type = "unknown")]
     pub value: serde_json::Value,
@@ -1035,7 +981,7 @@ pub struct ConfigGetResult {
 /// model-initiated Task call (type allow-list, toggle, model catalog);
 /// validation failures surface as the terminal result of `agent_wait`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct AgentSpawnParams {
     #[serde(default)]
     pub agent_type: Option<String>,
@@ -1059,7 +1005,6 @@ pub struct AgentSpawnParams {
 
 /// `agent_spawn` reply. Plugin→core. `id` keys every other `agent_*` call.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentSpawnResult {
     pub id: String,
 }
@@ -1067,7 +1012,6 @@ pub struct AgentSpawnResult {
 /// Subagent lifecycle status. Shared vocabulary, plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum AgentStatusDto {
     Running,
     Completed,
@@ -1078,7 +1022,7 @@ pub enum AgentStatusDto {
 /// `agent_wait` request params. Plugin→core. `timeout_ms` defaults to 30 000;
 /// on timeout the reply carries `status: running` (poll again or cancel).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct AgentWaitParams {
     pub id: String,
     #[serde(default)]
@@ -1089,7 +1033,7 @@ pub struct AgentWaitParams {
 /// `agent_wait` reply. Plugin→core. Terminal when `status != running`:
 /// `output`/`error` and the usage counters are then populated inline.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct AgentWaitResult {
     pub status: AgentStatusDto,
     #[serde(default)]
@@ -1109,7 +1053,7 @@ pub struct AgentWaitResult {
 /// `timeout_ms` (default 0 = reply immediately) bounds how long the host may
 /// hold the request open waiting for a new event.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct AgentEventsParams {
     pub id: String,
     #[serde(default)]
@@ -1123,7 +1067,6 @@ pub struct AgentEventsParams {
 /// Kind of one subagent progress event. Shared vocabulary, plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum AgentEventKindDto {
     /// The spawn was accepted (seq 0; `data` carries the resolved request).
     Spawned,
@@ -1137,7 +1080,6 @@ pub enum AgentEventKindDto {
 
 /// One subagent progress event. Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentEventDto {
     #[ts(type = "number")]
     pub seq: u64,
@@ -1151,7 +1093,6 @@ pub struct AgentEventDto {
 /// per-subagent buffer is capped: a slow consumer may observe a seq gap
 /// (oldest progress events dropped first).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentEventsResult {
     #[serde(default)]
     pub events: Vec<AgentEventDto>,
@@ -1162,7 +1103,6 @@ pub struct AgentEventsResult {
 
 /// `agent_list` request params (empty). Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentListParams {}
 
 /// One spawnable agent type, with the metadata a plugin needs to present a
@@ -1170,7 +1110,6 @@ pub struct AgentListParams {}
 /// agent's `.md` frontmatter; `model` is the agent's explicit model override
 /// (absent when the agent inherits the parent session's model).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentDescriptorDto {
     /// The spawnable type name (qualified `plugin:agent` for plugin agents).
     pub name: String,
@@ -1184,7 +1123,6 @@ pub struct AgentDescriptorDto {
 /// `agent_list` reply. Plugin→core. Spawnable agent types for this session
 /// (sorted; filtered by config toggles), each with name/description/model.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentListResult {
     #[serde(default)]
     pub agents: Vec<AgentDescriptorDto>,
@@ -1192,7 +1130,6 @@ pub struct AgentListResult {
 
 /// `agent_cancel` request params. Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentCancelParams {
     pub id: String,
 }
@@ -1200,7 +1137,6 @@ pub struct AgentCancelParams {
 /// `agent_cancel` outcome. Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum AgentCancelOutcomeDto {
     Cancelled,
     AlreadyFinished,
@@ -1209,7 +1145,6 @@ pub enum AgentCancelOutcomeDto {
 
 /// `agent_cancel` reply. Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentCancelResult {
     pub outcome: AgentCancelOutcomeDto,
 }
@@ -1233,7 +1168,6 @@ pub struct AgentCancelResult {
 /// Deliberately text-only: no images/attachments, and no slash-command
 /// expansion — a correction is not a command invocation.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentMessageParams {
     /// A subagent id this plugin spawned (via `agent_spawn`/`agent_send`).
     pub id: String,
@@ -1249,7 +1183,6 @@ pub struct AgentMessageParams {
 /// the outcome is *known*, not once the text is posted.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum AgentMessageOutcomeDto {
     /// Admitted by the live child: it becomes model-visible at the child's next
     /// safe point, or as a queued turn if the child is between turns. Nothing
@@ -1277,7 +1210,6 @@ pub enum AgentMessageOutcomeDto {
 
 /// `agent_message` reply. Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentMessageResult {
     pub outcome: AgentMessageOutcomeDto,
 }
@@ -1301,7 +1233,7 @@ pub struct AgentMessageResult {
 /// `resume_from` mint a new id, `agent_message` / `send_subagent_message` keep
 /// the old one.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct AgentSendParams {
     /// A terminal subagent id previously returned by `agent_spawn`/`agent_send`
     /// for this plugin.
@@ -1319,7 +1251,6 @@ pub struct AgentSendParams {
 /// continuation (the prior id stays terminal); key subsequent `agent_*` calls
 /// on it.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AgentSendResult {
     pub id: String,
 }
@@ -1343,7 +1274,6 @@ pub struct AgentSendResult {
 /// plugin→core. Defaults to `neutral` when a plugin omits it.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum PanelTone {
     #[default]
     Neutral,
@@ -1354,7 +1284,6 @@ pub enum PanelTone {
 
 /// One key/value chip in a [`PanelBlock::Status`] block. Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PanelStatusItem {
     pub label: String,
     pub value: String,
@@ -1366,7 +1295,7 @@ pub struct PanelStatusItem {
 /// optional single-character keybind the pager binds while the panel is focused;
 /// activating any button routes [`PanelActionParams`] back to the plugin.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct PanelButton {
     pub id: String,
     pub label: String,
@@ -1379,7 +1308,6 @@ pub struct PanelButton {
 /// at once, top to bottom.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub enum PanelBlock {
     /// A row of status chips, each `label: value` coloured by its `tone`.
     Status { items: Vec<PanelStatusItem> },
@@ -1418,7 +1346,6 @@ pub enum PanelBlock {
 /// the `ui_publish_panel` request params. `id` is the plugin's own stable key
 /// for the panel (re-publishing the same `id` replaces it, latest-wins).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PanelViewModel {
     pub id: String,
     pub title: String,
@@ -1428,20 +1355,17 @@ pub struct PanelViewModel {
 
 /// `ui_publish_panel` reply (empty). Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PanelPublishResult {}
 
 /// `ui_close_panel` request params. Plugin→core. Removes the panel with this
 /// `id`; no-op when unknown.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PanelCloseParams {
     pub id: String,
 }
 
 /// `ui_close_panel` reply (empty). Plugin→core.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PanelCloseResult {}
 
 /// `panel_action` notification params. Core→plugin. Fired when the user
@@ -1452,7 +1376,6 @@ pub struct PanelCloseResult {}
 /// alongside the button. Best-effort, like `tool_cancel` — the host does not
 /// wait for a reply.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct PanelActionParams {
     pub panel_id: String,
     pub button_id: String,
@@ -1475,7 +1398,6 @@ pub struct PanelActionParams {
 /// `auth_publish_url` request params. Plugin→core. `url` is the authorize URL
 /// the user must visit; the core's login screen shows it verbatim.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AuthPublishUrlParams {
     pub url: String,
 }
@@ -1484,7 +1406,6 @@ pub struct AuthPublishUrlParams {
 /// waiting for a URL (e.g. the flow ran outside `/login`, or it was already
 /// cancelled), so a plugin can fall back to its own UI.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct AuthPublishUrlResult {
     pub shown: bool,
 }
@@ -1492,7 +1413,7 @@ pub struct AuthPublishUrlResult {
 /// `auth_await_code` request params. Plugin→core. `timeout_ms` bounds the wait;
 /// `None` waits for the whole remaining hook deadline.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct AuthAwaitCodeParams {
     #[serde(default)]
     #[ts(type = "number | null", optional = nullable)]
@@ -1503,126 +1424,10 @@ pub struct AuthAwaitCodeParams {
 /// `None` when the wait ended without one (cancelled login, timeout, or no
 /// login running).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+#[ts(optional_fields = nullable)]
 pub struct AuthAwaitCodeResult {
     #[serde(default)]
     pub code: Option<String>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ts-rs export
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod bindings_export {
-    use super::*;
-
-    /// Regenerate every binding into `sdk/plugin/src/generated/`. `#[ts(export)]`
-    /// also emits a hidden per-type test; this is the single explicit entry
-    /// point that fails loudly if any type cannot export.
-    #[test]
-    fn export_all_bindings() {
-        let cfg = ts_rs::Config::from_env();
-        macro_rules! export {
-            ($($t:ty),+ $(,)?) => {$(
-                <$t as TS>::export(&cfg)
-                    .unwrap_or_else(|e| panic!("exporting {}: {e}", stringify!($t)));
-            )+};
-        }
-        export!(
-            GateKindDto,
-            DecisionDto,
-            LogLevelDto,
-            EventName,
-            HookEnvelopeCommon,
-            SubagentStopPhaseDto,
-            BackgroundTaskTypeDto,
-            StopFailureKindDto,
-            StopCancelledReasonDto,
-            CancelledByDto,
-            StopBackgroundTaskDto,
-            StopSessionCronDto,
-            ProviderResponseToolCallDto,
-            SessionStartPayload,
-            SessionEndPayload,
-            StopPayload,
-            StopFailurePayload,
-            StopCancelledPayload,
-            PreToolUsePayload,
-            PostToolUsePayload,
-            PostToolUseFailurePayload,
-            PermissionDeniedPayload,
-            UserPromptSubmitPayload,
-            NotificationPayload,
-            SubagentStartPayload,
-            SubagentStopPayload,
-            PreCompactPayload,
-            PostCompactPayload,
-            ProviderRequestPayload,
-            ProviderResponsePayload,
-            ProviderErrorPayload,
-            SubagentResolvePayload,
-            ResolveCredentialPayload,
-            RefreshCredentialPayload,
-            StartOauthFlowPayload,
-            HostCapabilities,
-            InitializeParams,
-            InitializeResult,
-            HookInvokeParams,
-            HookInvokeResult,
-            PluginCredentialDto,
-            ToolDescriptorDto,
-            ToolCallContextDto,
-            ToolInvokeParams,
-            ToolInvokeResult,
-            ToolCancelParams,
-            ShutdownParams,
-            LogEmitParams,
-            StorageGetParams,
-            StorageGetResult,
-            StorageSetParams,
-            StorageSetResult,
-            StorageDeleteParams,
-            StorageDeleteResult,
-            StorageListParams,
-            StorageListResult,
-            ConfigGetParams,
-            ConfigGetResult,
-            AgentSpawnParams,
-            AgentSpawnResult,
-            AgentStatusDto,
-            AgentDescriptorDto,
-            AgentWaitParams,
-            AgentWaitResult,
-            AgentEventsParams,
-            AgentEventKindDto,
-            AgentEventDto,
-            AgentEventsResult,
-            AgentListParams,
-            AgentListResult,
-            AgentCancelParams,
-            AgentCancelOutcomeDto,
-            AgentCancelResult,
-            AgentSendParams,
-            AgentSendResult,
-            AgentMessageParams,
-            AgentMessageOutcomeDto,
-            AgentMessageResult,
-            PanelTone,
-            PanelStatusItem,
-            PanelButton,
-            PanelBlock,
-            PanelViewModel,
-            PanelPublishResult,
-            PanelCloseParams,
-            PanelCloseResult,
-            PanelActionParams,
-            AuthPublishUrlParams,
-            AuthPublishUrlResult,
-            AuthAwaitCodeParams,
-            AuthAwaitCodeResult,
-        );
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
