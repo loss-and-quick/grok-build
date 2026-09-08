@@ -228,6 +228,11 @@ struct SubagentSnapshotDto {
     started_at_epoch_ms: u64,
     duration_ms: u64,
     status: String,
+    /// Named persona applied to this subagent, as `subagent_spawned` reported it.
+    /// Carried by every snapshot the coordinator answers with, including the queued and
+    /// initializing ones a spawn notification never covers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    persona: Option<String>,
     // ── Running fields (present only when status == "running") ────
     #[serde(skip_serializing_if = "Option::is_none")]
     turn_count: Option<u32>,
@@ -283,6 +288,7 @@ impl SubagentSnapshotDto {
             started_at_epoch_ms: snap.started_at_epoch_ms,
             duration_ms: snap.duration_ms,
             status: String::new(),
+            persona: snap.persona,
             turn_count: None,
             tool_call_count: None,
             tokens_used: None,
@@ -639,6 +645,41 @@ mod tests {
         // Completed-only fields should be absent
         assert!(json.get("output").is_none());
         assert!(json.get("failureError").is_none());
+    }
+
+    /// The snapshot has carried a persona all along; the response used to drop it,
+    /// leaving a client that missed the spawn notification unable to tell which
+    /// persona a child is running under.
+    #[test]
+    fn snapshot_dto_reports_the_persona_the_snapshot_carries() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-p".into(),
+            subagent_type: "general-purpose".into(),
+            description: "review the diff".into(),
+            started_at_epoch_ms: 1000,
+            duration_ms: 0,
+            persona: Some("implementer".into()),
+            status: SubagentSnapshotStatus::Initializing,
+        };
+        let dto =
+            SubagentSnapshotDto::from_snapshot(snap, "p".into(), "c".into(), Default::default());
+        let json = serde_json::to_value(&dto).expect("should serialize");
+        assert_eq!(json["status"], "initializing");
+        assert_eq!(json["persona"], "implementer");
+
+        let none = SubagentSnapshot {
+            subagent_id: "sub-n".into(),
+            subagent_type: "explore".into(),
+            description: "scan src/".into(),
+            started_at_epoch_ms: 1000,
+            duration_ms: 0,
+            persona: None,
+            status: SubagentSnapshotStatus::Initializing,
+        };
+        let dto =
+            SubagentSnapshotDto::from_snapshot(none, "p".into(), "c".into(), Default::default());
+        let json = serde_json::to_value(&dto).expect("should serialize");
+        assert!(json.get("persona").is_none());
     }
 
     #[test]
