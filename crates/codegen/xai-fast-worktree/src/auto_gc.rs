@@ -819,6 +819,7 @@ mod tests {
         let _g = env_guard();
         let _cwd_lock = crate::api::cwd_test_guard();
         clear_auto_gc_env();
+        let _home = crate::test_support::isolated_home();
         let tmp = tempfile::TempDir::new().unwrap();
         let db = WorktreeDb::open(tmp.path()).unwrap();
 
@@ -906,6 +907,7 @@ mod tests {
         // never-expire is age-only; dead Manual still unregisters.
         let _g = env_guard();
         clear_auto_gc_env();
+        let _home = crate::test_support::isolated_home();
         let tmp = tempfile::TempDir::new().unwrap();
         let db = WorktreeDb::open(tmp.path()).unwrap();
         db.register(&make_rec(
@@ -934,6 +936,7 @@ mod tests {
     fn orphan_cleaners_gating() {
         let _g = env_guard();
         clear_auto_gc_env();
+        let _home = crate::test_support::isolated_home();
 
         let tmp = tempfile::TempDir::new().unwrap();
         let db = WorktreeDb::open(tmp.path()).unwrap();
@@ -982,6 +985,7 @@ mod tests {
     #[test]
     fn maybe_auto_gc_enable_disable_table() {
         let _g = env_guard();
+        let _home = crate::test_support::isolated_home();
         for (env_kill, enabled, expected, stamps) in [
             (true, true, AutoGcOutcome::Disabled, false),
             (false, false, AutoGcOutcome::Disabled, false),
@@ -1139,6 +1143,7 @@ mod tests {
     fn unparseable_stamp_fails_open_and_restamps() {
         let _g = env_guard();
         clear_auto_gc_env();
+        let _home = crate::test_support::isolated_home();
         let tmp = tempfile::TempDir::new().unwrap();
         let db = WorktreeDb::open(tmp.path()).unwrap();
         db.set_meta(META_LAST_AUTO_GC_AT, "not-a-number").unwrap();
@@ -1157,6 +1162,7 @@ mod tests {
         // Stamp write failure must not turn a successful GC into Err for hooks.
         let _g = env_guard();
         clear_auto_gc_env();
+        let _home = crate::test_support::isolated_home();
         let tmp = tempfile::TempDir::new().unwrap();
         let db = WorktreeDb::open(tmp.path()).unwrap();
         db.execute_batch_for_test(

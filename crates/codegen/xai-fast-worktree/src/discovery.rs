@@ -888,8 +888,8 @@ mod tests {
 
     #[test]
     fn rebuild_scans_xdg_grove_without_grove_data_dir() {
-        let mut fx = crate::db::GrokHomeFixture::new();
-        let grove = fx.isolate_xdg_grove_data();
+        let fx = crate::db::GrokHomeFixture::new();
+        let grove = fx.grove_data_dir();
         assert!(
             std::env::var_os("GROVE_DATA_DIR").is_none(),
             "production path must not rely on GROVE_DATA_DIR"

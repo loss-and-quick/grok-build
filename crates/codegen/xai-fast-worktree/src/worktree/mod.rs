@@ -1584,6 +1584,7 @@ mod tests {
         // The partial worktree dir AND its `.git/worktrees/<name>` registration
         // must both be cleaned up, so a later create at the same dest isn't
         // blocked by a stale registration.
+        let _home = crate::test_support::isolated_home();
         xai_test_utils::require_git!();
         use crate::CreationMode;
         use tokio_util::sync::CancellationToken;
@@ -1623,6 +1624,7 @@ mod tests {
         // covers the join-before-teardown ORDERING structurally (no timing
         // fault-injection); the unconditional join in execute.rs makes it safe
         // regardless of thread timing.
+        let _home = crate::test_support::isolated_home();
         xai_test_utils::require_git!();
         use tokio_util::sync::CancellationToken;
 
@@ -1651,6 +1653,7 @@ mod tests {
         // reclaim the dir AND deregister `.git/worktrees/<name>` — proves the
         // guard fires on the error path, not only on cancel. An invalid
         // ignored-files glob makes the ignored-copy phase fail deterministically.
+        let _home = crate::test_support::isolated_home();
         xai_test_utils::require_git!();
         use crate::{CreationMode, IgnoredFilesMode};
 
@@ -1687,6 +1690,7 @@ mod tests {
     fn test_standalone_hard_error_reclaims_dest() {
         // A hard (non-cancel) error after the guard is armed (a bogus non-HEAD
         // ref → checkout fails) must reclaim the partial standalone dest.
+        let _home = crate::test_support::isolated_home();
         xai_test_utils::require_git!();
 
         let temp = TempDir::new().unwrap();

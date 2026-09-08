@@ -81,6 +81,7 @@ fn unregister_worktree_removes_by_path() {
 
 #[test]
 fn gc_removes_dead_records() {
+    let _home = crate::test_support::isolated_home();
     let tmp = tempfile::TempDir::new().unwrap();
     let db = db_at(&tmp);
 
@@ -104,6 +105,7 @@ fn gc_removes_dead_records() {
 
 #[test]
 fn gc_skips_alive_pids() {
+    let _home = crate::test_support::isolated_home();
     let tmp = tempfile::TempDir::new().unwrap();
     let db = db_at(&tmp);
     let my_pid = std::process::id();
@@ -165,6 +167,7 @@ fn gc_dry_run_preserves_records() {
 
 #[test]
 fn gc_force_overrides_liveness() {
+    let _home = crate::test_support::isolated_home();
     let tmp = tempfile::TempDir::new().unwrap();
     let db = db_at(&tmp);
 
@@ -184,6 +187,7 @@ fn gc_force_overrides_liveness() {
 
 #[test]
 fn gc_clamps_extreme_max_age_without_overflow() {
+    let _home = crate::test_support::isolated_home();
     let tmp = tempfile::TempDir::new().unwrap();
     let db = db_at(&tmp);
     let dir = deletable_linked_worktree(tmp.path(), "fresh-wt");
@@ -211,6 +215,7 @@ fn gc_clamps_extreme_max_age_without_overflow() {
 
 #[test]
 fn gc_honors_last_accessed_time() {
+    let _home = crate::test_support::isolated_home();
     let tmp = tempfile::TempDir::new().unwrap();
     let db = db_at(&tmp);
     let fresh = deletable_linked_worktree(tmp.path(), "fresh-access");
@@ -272,6 +277,7 @@ fn wait_until(pred: impl Fn() -> bool) -> bool {
 #[test]
 fn gc_cwd_guard_skips_then_reclaims_expired_worktree() {
     let _cwd_lock = crate::api::cwd_test_guard();
+    let _home = crate::test_support::isolated_home();
     let tmp = tempfile::TempDir::new().unwrap();
     let db = db_at(&tmp);
     let dir = deletable_linked_worktree(tmp.path(), "cwd-wt");
@@ -497,6 +503,7 @@ fn gc_keeps_an_expired_path_that_is_not_a_repository_but_holds_files() {
 
 #[test]
 fn gc_counts_a_kept_worktree_apart_from_a_busy_one() {
+    let _home = crate::test_support::isolated_home();
     let tmp = tempfile::TempDir::new().unwrap();
     let db = db_at(&tmp);
     let dir = deletable_linked_worktree(tmp.path(), "kept-wt");
@@ -525,6 +532,7 @@ fn gc_counts_a_kept_worktree_apart_from_a_busy_one() {
 /// any work.
 #[test]
 fn gc_asks_the_source_repository_about_a_standalone_worktree() {
+    let _home = crate::test_support::isolated_home();
     xai_test_utils::require_git!();
     let tmp = tempfile::TempDir::new().unwrap();
     let db = db_at(&tmp);
@@ -837,6 +845,7 @@ fn gc_in_use_path_skips_age_expiry_including_dry_run() {
 
 #[test]
 fn gc_in_use_path_pre_remove_recheck() {
+    let _home = crate::test_support::isolated_home();
     let tmp = tempfile::TempDir::new().unwrap();
     let db = db_at(&tmp);
     let dir = deletable_linked_worktree(tmp.path(), "prot-real");
@@ -860,6 +869,7 @@ fn gc_in_use_path_pre_remove_recheck() {
 
 #[test]
 fn force_does_not_override_never_expire_kinds() {
+    let _home = crate::test_support::isolated_home();
     let tmp = tempfile::TempDir::new().unwrap();
     let db = db_at(&tmp);
     let dir = deletable_linked_worktree(tmp.path(), "manual-force");
@@ -881,6 +891,7 @@ fn force_does_not_override_never_expire_kinds() {
 
 #[test]
 fn gc_never_expire_manual_age_only_not_dead() {
+    let _home = crate::test_support::isolated_home();
     let tmp = tempfile::TempDir::new().unwrap();
     let db = db_at(&tmp);
     let manual_dir = deletable_linked_worktree(tmp.path(), "manual-alive");
@@ -947,6 +958,7 @@ fn gc_never_expire_manual_age_only_not_dead() {
 /// and `effective_max_age_precedence`; this pins the disk effect.
 #[test]
 fn per_kind_age_expiry_reclaims_listed_kinds_and_keeps_the_rest() {
+    let _home = crate::test_support::isolated_home();
     const HOUR: i64 = 3600;
     const ANCIENT: i64 = 10 * 365 * 86400;
     struct Case {

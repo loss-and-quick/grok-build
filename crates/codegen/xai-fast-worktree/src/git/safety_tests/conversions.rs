@@ -2,6 +2,7 @@ use super::*;
 
 #[test]
 fn snapshotted_subagent_worktree_goes_and_its_work_stays() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("");
     let worktree = fixture.linked_worktree("subagent");
     std::fs::write(worktree.join("tracked.txt"), "edited\n").unwrap();

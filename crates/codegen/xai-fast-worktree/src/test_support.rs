@@ -128,3 +128,33 @@ pub(crate) fn publish(at: &Path, branch: &str) {
     );
     run_git(at, &["fetch", "origin"]);
 }
+
+/// Confine a test to a private grok home, `$HOME` and grove data dir for as
+/// long as the returned guard lives.
+///
+/// For any test whose production path registers, unregisters or garbage-collects
+/// a worktree: those resolve the home fresh from the environment on every call,
+/// so without this they write the developer's real `~/.grok/worktrees.db` and
+/// `~/.local/share/grove`. The pre-main memo in `xai-dirs` cannot cover them —
+/// it pins the cached lookup, and these deliberately do not use it.
+///
+/// Feature-agnostic on purpose: most of these tests also compile without
+/// `metadata`, where the database the guard isolates does not exist and there is
+/// nothing to confine, so the guard is nothing there rather than a `cfg` at every
+/// call site.
+#[cfg(feature = "metadata")]
+pub(crate) fn isolated_home() -> crate::db::GrokHomeFixture {
+    crate::db::GrokHomeFixture::new()
+}
+
+/// Stand-in guard for a build with no database: it isolates nothing because
+/// there is nothing to isolate. A named type rather than `()` so the call sites
+/// read identically in both builds.
+#[cfg(not(feature = "metadata"))]
+pub(crate) struct NoHomeToIsolate;
+
+/// See the `metadata` counterpart; without the database there is nothing to isolate.
+#[cfg(not(feature = "metadata"))]
+pub(crate) fn isolated_home() -> NoHomeToIsolate {
+    NoHomeToIsolate
+}

@@ -2,6 +2,7 @@ use super::*;
 
 #[test]
 fn modified_or_untracked_file_keeps_the_worktree() {
+    let _home = crate::test_support::isolated_home();
     use KeepReason::{Dirty, IgnoredContent};
     use Safety::{Delete, Keep};
     let cases: &[(&str, &str, &str, Safety)] = &[
@@ -146,6 +147,7 @@ fn staged_path_no_snapshot_can_carry_keeps_the_worktree() {
 
 #[test]
 fn user_status_untracked_config_does_not_change_the_dirty_verdict() {
+    let _home = crate::test_support::isolated_home();
     for setting in ["no", "all"] {
         let fixture = Fixture::new("target/\n");
         run_git(
@@ -195,6 +197,7 @@ fn git_directory_in_the_working_tree_keeps_the_worktree() {
 #[cfg(unix)]
 #[test]
 fn pruned_symlink_keeps_the_worktree_and_an_empty_one_does_not() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("");
     let empty = fixture.linked_worktree("empty-dot-git");
     std::fs::create_dir_all(empty.join("testdata/.git")).unwrap();
@@ -338,6 +341,7 @@ fn dirty_submodule_keeps_the_worktree_whatever_was_captured() {
 
 #[test]
 fn a_build_directory_goes_only_where_the_repository_excludes_it() {
+    let _home = crate::test_support::isolated_home();
     for (name, ignore_lines, expected) in [
         ("excluded", "/target/\n", Safety::Delete),
         ("named-only", "", Safety::Keep(KeepReason::Dirty)),
@@ -395,6 +399,7 @@ fn a_build_directory_goes_only_where_the_repository_excludes_it() {
 
 #[test]
 fn a_cachedir_tag_dir_is_not_treated_as_dirt() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("debug/\n");
     let worktree = fixture.linked_worktree("tagged-target");
     let built = worktree.join(".rmt-target");
@@ -432,6 +437,7 @@ fn a_cachedir_tag_at_the_root_does_not_ignore_the_worktree() {
 #[cfg(unix)]
 #[test]
 fn removing_a_worktree_deletes_bazel_symlinks_not_their_targets() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("/bazel-*\n");
     let worktree = fixture.linked_worktree("bazel");
     let output_base = fixture.source.with_file_name("output-base");

@@ -1656,6 +1656,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_worktrees_in_with_plain_worktrees() {
+        let _home = crate::test_support::isolated_home();
         xai_test_utils::require_git!();
         use xai_test_utils::git::{git_commit_all, init_git_repo};
 
@@ -1688,6 +1689,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_worktrees_in_with_nested_dirs() {
+        let _home = crate::test_support::isolated_home();
         xai_test_utils::require_git!();
         use xai_test_utils::git::{git_commit_all, init_git_repo};
 
@@ -1721,6 +1723,7 @@ mod tests {
         // A worktree exposed as a symlink whose snapshot was already deleted is a
         // dangling symlink; it must be unlinked, not skipped (`is_dir()` follows
         // the link and returns false, which would leak it).
+        let _home = crate::test_support::isolated_home();
         let tmp = tempfile::TempDir::new().unwrap();
         let worktrees_dir = tmp.path().join("worktrees");
         std::fs::create_dir(&worktrees_dir).unwrap();
@@ -1742,6 +1745,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_cleanup_worktrees_in_removes_nested_dangling_symlink() {
+        let _home = crate::test_support::isolated_home();
         let tmp = tempfile::TempDir::new().unwrap();
         let worktrees_dir = tmp.path().join("worktrees");
         // A grouping dir with NO `.git`, so cleanup recurses into it.
@@ -1770,6 +1774,7 @@ mod tests {
 
     #[test]
     fn test_remove_worktree_with_delegate_no_delegate() {
+        let _home = crate::test_support::isolated_home();
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("nonexistent");
         let result = remove_worktree_with_delegate(&path, None);
@@ -1782,6 +1787,7 @@ mod tests {
 
     #[test]
     fn test_remove_worktree_with_delegate_existing_dir() {
+        let _home = crate::test_support::isolated_home();
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("some-dir");
         std::fs::create_dir(&path).unwrap();

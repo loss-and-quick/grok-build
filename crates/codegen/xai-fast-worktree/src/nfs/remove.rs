@@ -266,6 +266,7 @@ mod tests {
     use tempfile::TempDir;
     #[test]
     fn non_nfs_path_returns_none() {
+        let _home = crate::test_support::isolated_home();
         let tmp = TempDir::new().unwrap();
         let p = tmp.path().join("plain");
         std::fs::create_dir(&p).unwrap();
@@ -273,6 +274,7 @@ mod tests {
     }
     #[test]
     fn rm_planted_marker_does_not_delete_victim_backing() {
+        let _home = crate::test_support::isolated_home();
         let tmp = TempDir::new().unwrap();
         let data = tmp.path().join("grove");
         let victim_id = "wt-victim";
@@ -334,6 +336,7 @@ mod tests {
     }
     #[test]
     fn marker_lookup_finds_dest() {
+        let _home = crate::test_support::isolated_home();
         let tmp = TempDir::new().unwrap();
         let data = tmp.path().join("grove");
         let dest = tmp.path().join("wt");

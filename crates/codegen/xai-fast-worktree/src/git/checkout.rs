@@ -942,6 +942,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_survives_worktree_removal() {
+        let _home = crate::test_support::isolated_home();
         xai_test_utils::require_git!();
         let temp = TempDir::new().unwrap();
         let (repo_path, wt) = repo_with_worktree(&temp);
@@ -1057,6 +1058,7 @@ mod tests {
 
     #[test]
     fn test_rehydrate_round_trip_restores_working_state() {
+        let _home = crate::test_support::isolated_home();
         xai_test_utils::require_git!();
         let temp = TempDir::new().unwrap();
 
@@ -1141,6 +1143,7 @@ mod tests {
 
     #[test]
     fn test_rehydrate_base_missing_falls_back_to_snapshot() {
+        let _home = crate::test_support::isolated_home();
         xai_test_utils::require_git!();
         let temp = TempDir::new().unwrap();
         let (repo_path, wt) = repo_with_worktree(&temp);
@@ -1191,6 +1194,7 @@ mod tests {
 
     #[test]
     fn test_rehydrate_self_heals_over_leftover_dest_dir() {
+        let _home = crate::test_support::isolated_home();
         xai_test_utils::require_git!();
         let temp = TempDir::new().unwrap();
         let (repo_path, wt) = repo_with_worktree(&temp);
@@ -1224,6 +1228,7 @@ mod tests {
     /// paths were not visible from the container mount namespace.
     #[test]
     fn test_rehydrate_clears_only_its_own_stale_registration() {
+        let _home = crate::test_support::isolated_home();
         xai_test_utils::require_git!();
         let temp = TempDir::new().unwrap();
         let (repo_path, wt) = repo_with_worktree(&temp);
@@ -1264,6 +1269,7 @@ mod tests {
 
     #[test]
     fn test_transfer_snapshot_to_repo_makes_standalone_ref_durable() {
+        let _home = crate::test_support::isolated_home();
         xai_test_utils::require_git!();
         let temp = TempDir::new().unwrap();
         let repo_path = temp.path().join("repo");

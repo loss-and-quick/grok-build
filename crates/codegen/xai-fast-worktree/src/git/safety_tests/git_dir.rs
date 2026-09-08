@@ -2,6 +2,7 @@ use super::*;
 
 #[test]
 fn transient_session_files_in_the_registration_dir_do_not_keep_the_worktree() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("");
     let worktree = fixture.linked_worktree("session-leftovers");
     let git_dir = fixture.source.join(".git/worktrees/session-leftovers");
@@ -210,6 +211,7 @@ fn a_store_under_the_registration_keeps_the_worktree() {
 /// worktree, and no keep-direction test would notice.
 #[test]
 fn an_lfs_object_the_survivor_also_holds_does_not_keep_the_worktree() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("");
     let worktree = fixture.snapshot_worktree("lfs-shared");
     let relative = "lfs/objects/26/cc/26ccfbb9deadbeef";

@@ -472,10 +472,19 @@ static GROK_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Test-only isolation for code that resolves the DB via `open_default()`.
 ///
 /// Holds [`GROK_HOME_ENV_LOCK`] (serializing concurrent setters), points
-/// `GROK_HOME` at a fresh private tmp dir, and restores the prior value on drop.
+/// `GROK_HOME`, `HOME` and `XDG_DATA_HOME` at a fresh private tmp dir with
+/// `GROVE_DATA_DIR` unset, and restores the previous values on drop.
 /// Use instead of hand-rolling the lock + restore guard + tmp dir per test.
 ///
-/// `Drop` restores `GROK_HOME` before `_lock` releases, so the env is correct
+/// All four are claimed up front rather than on request: the resolvers this
+/// crate reaches read the environment fresh every call, so `$GROK_HOME` alone
+/// still leaves grove pin-GC walking `$HOME/.local/share/grove`, and a test
+/// that never asked about grove had no way to know it would be scanned.
+/// `$HOME` covers what the pre-main memo in `xai-dirs` cannot: that memo pins
+/// only the cached `grok_home()`, while [`resolve_grok_home`] here is uncached
+/// by design.
+///
+/// `Drop` restores the environment before `_lock` releases, so it is correct
 /// before another waiting setter proceeds.
 #[cfg(test)]
 pub(crate) struct GrokHomeFixture {
@@ -484,10 +493,10 @@ pub(crate) struct GrokHomeFixture {
     prev_xdg_data_home: Option<std::ffi::OsString>,
     prev_grove_data_dir: Option<std::ffi::OsString>,
     prev_home: Option<std::ffi::OsString>,
-    touched_grove_env: bool,
     /// The isolated grok home; pass to `WorktreeDb::open` to read the same DB
     /// `open_default()` writes to.
     pub home: PathBuf,
+    grove: PathBuf,
     _tmp: tempfile::TempDir,
 }
 
@@ -498,6 +507,9 @@ impl GrokHomeFixture {
         let tmp = tempfile::TempDir::new().unwrap();
         let home = tmp.path().join("grok-home");
         std::fs::create_dir_all(&home).unwrap();
+        let xdg = tmp.path().join("xdg-data");
+        let grove = xdg.join("grove");
+        std::fs::create_dir_all(&grove).unwrap();
         // Warm up the DB (journal-mode conversion + schema) before exposing it
         // via GROK_HOME, sparing the test hot loop set_journal_mode's retry
         // sleeps. This open has exclusive access (nothing reaches the path
@@ -505,39 +517,32 @@ impl GrokHomeFixture {
         // race fix.
         let _ = WorktreeDb::open(&home);
         let prev = std::env::var_os("GROK_HOME");
+        let prev_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
+        let prev_grove_data_dir = std::env::var_os("GROVE_DATA_DIR");
+        let prev_home = std::env::var_os("HOME");
         // SAFETY: the fixture holds the GROK_HOME env lock for its whole
         // lifetime, so no other test thread reads or writes the environment.
-        unsafe { std::env::set_var("GROK_HOME", &home) };
+        unsafe {
+            std::env::set_var("GROK_HOME", &home);
+            std::env::set_var("XDG_DATA_HOME", &xdg);
+            std::env::remove_var("GROVE_DATA_DIR");
+            std::env::set_var("HOME", tmp.path());
+        }
         Self {
             _lock: lock,
             prev,
-            prev_xdg_data_home: None,
-            prev_grove_data_dir: None,
-            prev_home: None,
-            touched_grove_env: false,
+            prev_xdg_data_home,
+            prev_grove_data_dir,
+            prev_home,
             home,
+            grove,
             _tmp: tmp,
         }
     }
 
-    /// Point grove lookup at `$XDG_DATA_HOME/grove` with `GROVE_DATA_DIR` unset
-    /// and `HOME` confined to this fixture so pin-GC cannot touch the host.
-    pub(crate) fn isolate_xdg_grove_data(&mut self) -> PathBuf {
-        if !self.touched_grove_env {
-            self.prev_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
-            self.prev_grove_data_dir = std::env::var_os("GROVE_DATA_DIR");
-            self.prev_home = std::env::var_os("HOME");
-            self.touched_grove_env = true;
-        }
-        let xdg = self._tmp.path().join("xdg-data");
-        let grove = xdg.join("grove");
-        std::fs::create_dir_all(&grove).unwrap();
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", &xdg);
-            std::env::remove_var("GROVE_DATA_DIR");
-            std::env::set_var("HOME", self._tmp.path());
-        }
-        grove
+    /// The grove data dir this fixture confined pin-GC to (`$XDG_DATA_HOME/grove`).
+    pub(crate) fn grove_data_dir(&self) -> PathBuf {
+        self.grove.clone()
     }
 }
 
@@ -551,19 +556,17 @@ impl Drop for GrokHomeFixture {
                 Some(p) => std::env::set_var("GROK_HOME", p),
                 None => std::env::remove_var("GROK_HOME"),
             }
-            if self.touched_grove_env {
-                match self.prev_xdg_data_home.take() {
-                    Some(p) => std::env::set_var("XDG_DATA_HOME", p),
-                    None => std::env::remove_var("XDG_DATA_HOME"),
-                }
-                match self.prev_grove_data_dir.take() {
-                    Some(p) => std::env::set_var("GROVE_DATA_DIR", p),
-                    None => std::env::remove_var("GROVE_DATA_DIR"),
-                }
-                match self.prev_home.take() {
-                    Some(p) => std::env::set_var("HOME", p),
-                    None => std::env::remove_var("HOME"),
-                }
+            match self.prev_xdg_data_home.take() {
+                Some(p) => std::env::set_var("XDG_DATA_HOME", p),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+            match self.prev_grove_data_dir.take() {
+                Some(p) => std::env::set_var("GROVE_DATA_DIR", p),
+                None => std::env::remove_var("GROVE_DATA_DIR"),
+            }
+            match self.prev_home.take() {
+                Some(p) => std::env::set_var("HOME", p),
+                None => std::env::remove_var("HOME"),
             }
         }
     }

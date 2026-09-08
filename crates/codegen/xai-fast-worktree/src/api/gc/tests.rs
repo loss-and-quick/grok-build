@@ -398,8 +398,8 @@ fn run_pass_prunes_orphan_grove_pins_after_grace() {
     xai_test_utils::require_git!();
     use xai_test_utils::git::{git_commit_all, init_git_repo};
 
-    let mut fx = crate::db::GrokHomeFixture::new();
-    let grove = fx.isolate_xdg_grove_data();
+    let fx = crate::db::GrokHomeFixture::new();
+    let grove = fx.grove_data_dir();
     let repo = fx.home.join("src-repo");
     std::fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);

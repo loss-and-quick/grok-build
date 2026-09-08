@@ -75,6 +75,7 @@ fn git_configuration_in_the_environment_does_not_reach_the_snapshot() {
 
 #[test]
 fn no_combination_of_working_tree_shapes_loses_uncarried_work() {
+    let _home = crate::test_support::isolated_home();
     struct Shape {
         name: &'static str,
         write: fn(&Path),

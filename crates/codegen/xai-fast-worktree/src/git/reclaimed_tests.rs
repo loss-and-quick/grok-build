@@ -43,6 +43,7 @@ impl Fixture {
 
 #[test]
 fn a_reclaimed_worktree_leaves_its_commits_readable() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new();
     let (worktree, discarded) = fixture.worktree_with_a_discarded_commit("reset-away", None);
 
@@ -108,6 +109,7 @@ fn only_the_tip_of_a_discarded_chain_is_named() {
 
 #[test]
 fn a_name_whose_commit_something_else_holds_is_collected() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new();
     let (worktree, discarded) = fixture.worktree_with_a_discarded_commit("merged-since", None);
     expect_one_reclaimable_name(&worktree);
@@ -134,6 +136,7 @@ fn a_name_whose_commit_something_else_holds_is_collected() {
 
 #[test]
 fn a_name_older_than_its_lifetime_is_collected() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new();
     let (worktree, discarded) = fixture.worktree_with_a_discarded_commit("forgotten", None);
     expect_one_reclaimable_name(&worktree);
@@ -160,6 +163,7 @@ fn a_name_older_than_its_lifetime_is_collected() {
 
 #[test]
 fn a_just_reclaimed_name_survives_even_when_its_commit_is_old() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new();
     let (worktree, discarded) =
         fixture.worktree_with_a_discarded_commit("ancient-tip", Some(LONG_AGO));

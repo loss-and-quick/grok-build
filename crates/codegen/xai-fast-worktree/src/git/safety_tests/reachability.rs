@@ -3,6 +3,7 @@ use xai_test_utils::git::reflog_only_commit;
 
 #[test]
 fn commit_no_remote_holds_keeps_the_worktree() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("");
     let worktree = fixture.linked_worktree("committed");
     std::fs::write(worktree.join("tracked.txt"), "two\n").unwrap();
@@ -26,6 +27,7 @@ fn commit_no_remote_holds_keeps_the_worktree() {
 
 #[test]
 fn commit_only_orig_head_holds_does_not_keep_the_worktree() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("");
     let worktree = fixture.linked_worktree("reset-hard");
     std::fs::write(worktree.join("tracked.txt"), "discarded\n").unwrap();
@@ -92,6 +94,7 @@ fn child_on_a_commit_of_its_own_keeps_the_parent() {
 
 #[test]
 fn commit_a_surviving_branch_holds_lets_the_worktree_go() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("");
     let worktree = fixture.linked_worktree("branched");
     run_git(&worktree, &["checkout", "-b", "saved"]);
@@ -109,6 +112,7 @@ fn commit_a_surviving_branch_holds_lets_the_worktree_go() {
 
 #[test]
 fn standalone_worktree_goes_only_when_a_remote_holds_every_local_ref() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("");
 
     let unpushed = fixture.standalone_worktree("standalone-unpushed");
@@ -130,6 +134,7 @@ fn standalone_worktree_goes_only_when_a_remote_holds_every_local_ref() {
 
 #[test]
 fn snapshot_of_the_source_goes_when_the_source_still_holds_it() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("");
     fixture.add_source_clutter();
     let worktree = fixture.snapshot_worktree("pristine-snapshot");
@@ -153,6 +158,7 @@ fn snapshot_of_the_source_goes_when_the_source_still_holds_it() {
 
 #[test]
 fn commit_the_source_reaches_but_does_not_name_lets_the_snapshot_go() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("");
     std::fs::write(fixture.source.join("tracked.txt"), "two\n").unwrap();
     run_git(&fixture.source, &["commit", "-am", "second"]);
@@ -170,6 +176,7 @@ fn commit_the_source_reaches_but_does_not_name_lets_the_snapshot_go() {
 
 #[test]
 fn repository_that_keeps_no_reflog_is_still_judged() {
+    let _home = crate::test_support::isolated_home();
     let fixture = Fixture::new("");
     let worktree = fixture.standalone_worktree("no-reflog");
     run_git(&worktree, &["config", "core.logAllRefUpdates", "false"]);
