@@ -30,6 +30,19 @@ const STRUCTURED_OUTPUT_MAX_RETRIES: u32 = 3;
 /// dispose. The child completion path's bounded parent awaits are sized to
 /// fit inside this (compile-time asserted at `PARENT_ACK_TIMEOUT`).
 pub(crate) const SUBAGENT_USAGE_DRAIN: std::time::Duration = std::time::Duration::from_secs(120);
+/// What a plugin-declared slash command's reply means for the turn, once the
+/// wire result and every way the dispatch can fail have been reduced to the
+/// three things the turn can actually do.
+enum PluginCommandTurn {
+    /// Ask the model, carrying the plugin's text in the same
+    /// `<skill_information>` envelope a `commands/*.md` body rides in.
+    Prompt(String),
+    /// Show this to the user and end the turn without calling the model.
+    Message(String),
+    /// End the turn with nothing to show — the plugin did its work elsewhere
+    /// (published a panel, wrote storage) and had nothing to say.
+    Quiet,
+}
 /// What a `StructuredOutput` tool call means for the turn (see
 /// `handle_structured_output_tool_call`).
 enum StructuredOutputStep {
@@ -267,6 +280,66 @@ impl SessionActor {
         }
         user_images
     }
+    /// Run one plugin-declared slash command in its sidecar and reduce the
+    /// reply to what this turn does next.
+    ///
+    /// Every failure — no plugin host, an untrusted or unregistered plugin, a
+    /// sidecar that will not start, a deadline, a crash mid-call, a reply that
+    /// will not parse — comes back as a [`PluginCommandTurn::Message`] the user
+    /// reads, and the model is never called. The host bounds the wait, so a
+    /// wedged sidecar refuses the command instead of hanging the prompt behind
+    /// it. Nothing here can leave the user with a `/` command that never
+    /// returns.
+    async fn run_plugin_command(
+        &self,
+        plugin: &str,
+        command: &str,
+        args: &str,
+        timeout_ms: u64,
+    ) -> PluginCommandTurn {
+        let Some(host) = self.plugin_host.clone() else {
+            return PluginCommandTurn::Message(format!(
+                "/{command} is unavailable: this session has no plugin host."
+            ));
+        };
+        // A slash command is typed at a session's own prompt by a person, so
+        // the caller is always the root agent; the subagent labels a tool call
+        // can carry have no equivalent here.
+        let context = xai_grok_plugin_host::ToolCallContextDto {
+            session_id: self.session_id_string(),
+            cwd: self.session_info.cwd.clone(),
+            agent: "main".to_string(),
+        };
+        match host
+            .invoke_command(plugin, command, args, context, timeout_ms)
+            .await
+        {
+            Ok(xai_grok_plugin_host::CommandInvokeResult::Handled { text }) => {
+                match text.filter(|t| !t.trim().is_empty()) {
+                    Some(text) => PluginCommandTurn::Message(text),
+                    None => PluginCommandTurn::Quiet,
+                }
+            }
+            Ok(xai_grok_plugin_host::CommandInvokeResult::Prompt { text })
+                if !text.trim().is_empty() =>
+            {
+                PluginCommandTurn::Prompt(text)
+            }
+            // An empty prompt is nothing to ask the model; spending a turn on
+            // it would be worse than saying nothing.
+            Ok(xai_grok_plugin_host::CommandInvokeResult::Prompt { .. }) => {
+                PluginCommandTurn::Quiet
+            }
+            Ok(xai_grok_plugin_host::CommandInvokeResult::Declined { reason }) => {
+                PluginCommandTurn::Message(format!("/{command}: {reason}"))
+            }
+            Err(e) => {
+                tracing::warn!(plugin = %plugin, command = %command, error = %e.message,
+                    "plugin slash command dispatch failed");
+                PluginCommandTurn::Message(format!("/{command} failed: {}", e.message))
+            }
+        }
+    }
     pub(super) fn persist_host_turn_user_echo(&self, text: &str, prompt_id: &str) {
         let text = text.trim();
         if text.is_empty() {
@@ -465,12 +538,14 @@ impl SessionActor {
                 let availability = self.command_availability().await;
                 let (workflow_registry, named_workflows) = self
                     .named_workflow_snapshot();
+                let plugin_commands = self.plugin_slash_commands();
                 let resolved = slash_commands::resolve_human_intent(
                     prompt_blocks,
                     &slash_skills,
                     availability,
                     skill_rewrite,
                     &named_workflows,
+                    &plugin_commands,
                     loop_fire_mode,
                 );
                 (resolved, slash_skills, Some(workflow_registry))
@@ -586,6 +661,57 @@ impl SessionActor {
                             self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
                         }
                         return self.execute_builtin_slash_command(action).await;
+                    }
+                }
+            }
+            Err(SlashCommandOutcome::PluginCommand {
+                blocks: original_blocks,
+                plugin,
+                command,
+                args,
+                timeout_ms,
+                advertised_name,
+            }) => {
+                {
+                    let span = tracing::Span::current();
+                    span.record("command_name", advertised_name.as_str());
+                    span.record("command_source", "plugin");
+                }
+                otel_command_name = Some(advertised_name.clone());
+                xai_grok_telemetry::session_ctx::log_event(
+                    xai_grok_telemetry::events::SlashCommandUsed {
+                        command: advertised_name.clone(),
+                        args_provided: !args.is_empty(),
+                    },
+                );
+                match self
+                    .run_plugin_command(&plugin, &command, &args, timeout_ms)
+                    .await
+                {
+                    // The plugin composed a prompt. The user's own line stays
+                    // the visible message and the plugin's text rides in the
+                    // envelope a markdown command's body would have — so the
+                    // two ways of declaring a command reach the model
+                    // identically.
+                    PluginCommandTurn::Prompt(text) => {
+                        pending_skill_information =
+                            Some(slash_commands::build_plugin_command_information(
+                                &advertised_name,
+                                &args,
+                                &text,
+                            ));
+                        original_blocks
+                    }
+                    PluginCommandTurn::Message(msg) => {
+                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                        self.mark_front_message_committed().await;
+                        self.send_host_turn_slash_command_output(&msg).await;
+                        return ok_end_turn(0, None);
+                    }
+                    PluginCommandTurn::Quiet => {
+                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                        self.mark_front_message_committed().await;
+                        return ok_end_turn(0, None);
                     }
                 }
             }

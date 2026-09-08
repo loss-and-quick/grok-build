@@ -310,7 +310,9 @@ impl SessionActor {
         let availability = self.build_command_availability(&tool_names, has_workflow_runs);
         self.maybe_reconcile_active_goal_without_plan().await;
         let (_, workflows) = self.named_workflow_snapshot();
-        let commands = slash_commands::available_commands(&skills, availability, &workflows);
+        let plugin_commands = self.plugin_slash_commands();
+        let commands =
+            slash_commands::available_commands(&skills, availability, &workflows, &plugin_commands);
         let meta = Some(slash_commands::build_tools_meta(&tool_names));
         tracing::info!(
             session_id = %self.session_info.id.0,

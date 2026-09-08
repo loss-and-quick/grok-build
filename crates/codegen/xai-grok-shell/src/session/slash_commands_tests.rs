@@ -17,8 +17,20 @@ fn resolve(
         availability,
         skill_rewrite,
         workflows,
+        &[],
         LoopFireMode::Detached,
     )
+}
+
+/// Shadows [`super::available_commands`] for the cases with no plugin-declared
+/// commands, on the same reasoning as `resolve` above. Tests that care about
+/// them call `super::available_commands` directly.
+fn available_commands(
+    skills: &[SkillInfo],
+    availability: CommandAvailability,
+    workflows: &[crate::session::workflow::registry::WorkflowListing],
+) -> Vec<acp::AvailableCommand> {
+    super::available_commands(skills, availability, workflows, &[])
 }
 
 #[test]
@@ -488,6 +500,7 @@ fn resolve_loop_expands_for_the_sessions_fire_mode() {
             &[],
             all_gated(),
             SkillSlashRewrite::default(),
+            &[],
             &[],
             mode,
         )
@@ -2291,4 +2304,179 @@ fn goal_tracker_account_elapsed_flushes_delta() {
     tracker.account_elapsed();
     let after = tracker.snapshot().unwrap().elapsed_ms;
     assert!(after > 0, "elapsed should be > 0 after account_elapsed");
+}
+
+// ── Plugin-declared slash commands (manifest `slashCommands`) ────────
+
+fn plugin_command(plugin: &str, name: &str) -> PluginSlashCommand {
+    PluginSlashCommand {
+        plugin: plugin.to_string(),
+        name: name.to_string(),
+        description: format!("{name} from {plugin}"),
+        argument_hint: Some("<env>".to_string()),
+        timeout_ms: 0,
+    }
+}
+
+/// A `commands/*.md` file reaches the catalog as a plugin skill; this is that
+/// shape, so a collision with a `slashCommands` entry can be exercised.
+fn markdown_plugin_command(plugin: &str, name: &str) -> SkillInfo {
+    let mut skill = make_skill(name, true);
+    skill.plugin_name = Some(plugin.to_string());
+    skill.path = format!("/plugins/{plugin}/commands/{name}.md");
+    skill
+}
+
+#[test]
+fn plugin_command_is_advertised_bare_and_marked_as_handler_backed() {
+    let commands =
+        super::available_commands(&[], all_gated(), &[], &[plugin_command("deployer", "ship")]);
+    let ship = commands
+        .iter()
+        .find(|c| c.name == "ship")
+        .expect("plugin command is advertised under its bare name");
+    assert_eq!(ship.description, "ship from deployer");
+    let meta = ship.meta.as_ref().expect("plugin commands carry _meta");
+    assert_eq!(meta.get("pluginCommand"), Some(&serde_json::json!(true)));
+    assert_eq!(meta.get("pluginName"), Some(&serde_json::json!("deployer")));
+    assert_eq!(
+        meta.get("qualifiedName"),
+        Some(&serde_json::json!("deployer:ship"))
+    );
+    // `path` and `scope` are what a client reads to treat an entry as a
+    // markdown skill it should expand; a handler-backed command must not look
+    // like one.
+    assert!(meta.get("path").is_none());
+    assert!(meta.get("scope").is_none());
+    assert!(matches!(
+        ship.input.as_ref(),
+        Some(acp::AvailableCommandInput::Unstructured(hint)) if hint.hint == "<env>"
+    ));
+}
+
+#[test]
+fn plugin_command_yields_the_bare_name_to_a_builtin_and_to_markdown() {
+    let skills = vec![markdown_plugin_command("deployer", "ship")];
+    let commands = super::available_commands(
+        &skills,
+        all_gated(),
+        &[],
+        &[
+            // Collides with the plugin's own `commands/ship.md`.
+            plugin_command("deployer", "ship"),
+            // Collides with a shell builtin.
+            plugin_command("deployer", "compact"),
+        ],
+    );
+    let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+    assert!(
+        names.contains(&"deployer:ship"),
+        "the markdown command keeps the bare name, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"deployer:compact"),
+        "a builtin-colliding command falls back to the qualified name, got: {names:?}"
+    );
+    // The bare spellings still belong to the markdown command and the builtin.
+    let bare_ship = commands.iter().find(|c| c.name == "ship").unwrap();
+    assert!(
+        bare_ship
+            .meta
+            .as_ref()
+            .is_some_and(|m| m.contains_key("path")),
+        "bare /ship must still be the markdown command"
+    );
+    let bare_compact = commands.iter().find(|c| c.name == "compact").unwrap();
+    assert!(
+        bare_compact.meta.is_none(),
+        "bare /compact must still be the builtin"
+    );
+}
+
+#[test]
+fn resolve_routes_a_plugin_command_to_its_sidecar_with_the_typed_args() {
+    let declared = [plugin_command("deployer", "ship")];
+    let outcome = super::resolve_human_intent(
+        vec![text_block("/ship staging --dry-run")],
+        &[],
+        all_gated(),
+        SkillSlashRewrite::default(),
+        &[],
+        &declared,
+        LoopFireMode::Detached,
+    )
+    .unwrap_err();
+    let SlashCommandOutcome::PluginCommand {
+        plugin,
+        command,
+        args,
+        advertised_name,
+        ..
+    } = outcome
+    else {
+        panic!("expected PluginCommand");
+    };
+    assert_eq!(plugin, "deployer");
+    // The bare declared name goes on the wire whichever spelling was typed.
+    assert_eq!(command, "ship");
+    assert_eq!(args, "staging --dry-run");
+    assert_eq!(advertised_name, "ship");
+}
+
+#[test]
+fn resolve_routes_the_qualified_spelling_and_an_empty_arg_line() {
+    let declared = [
+        plugin_command("deployer", "ship"),
+        plugin_command("other", "ship"),
+    ];
+    let outcome = super::resolve_human_intent(
+        vec![text_block("/other:ship")],
+        &[],
+        all_gated(),
+        SkillSlashRewrite::default(),
+        &[],
+        &declared,
+        LoopFireMode::Detached,
+    )
+    .unwrap_err();
+    let SlashCommandOutcome::PluginCommand {
+        plugin,
+        command,
+        args,
+        ..
+    } = outcome
+    else {
+        panic!("expected PluginCommand");
+    };
+    assert_eq!((plugin.as_str(), command.as_str()), ("other", "ship"));
+    assert_eq!(args, "", "a bare invocation sends empty args, not the name");
+}
+
+#[test]
+fn an_undeclared_plugin_command_is_ordinary_text() {
+    // The catalog is the only gate: a command an untrusted or disabled plugin
+    // would have contributed simply is not in the list handed to resolve, so
+    // the line passes through to the model untouched instead of dispatching.
+    let passthrough = super::resolve_human_intent(
+        vec![text_block("/ship staging")],
+        &[],
+        all_gated(),
+        SkillSlashRewrite::default(),
+        &[],
+        &[],
+        LoopFireMode::Detached,
+    );
+    let blocks = passthrough.expect("no plugin command means no interception");
+    let acp::ContentBlock::Text(tb) = &blocks[0] else {
+        panic!("expected a text block");
+    };
+    assert_eq!(tb.text, "/ship staging");
+}
+
+#[test]
+fn a_plugin_command_prompt_reply_rides_the_markdown_envelope() {
+    let information = super::build_plugin_command_information("ship", "staging", "Deploy it.");
+    assert!(information.contains("<skill_information>"));
+    assert!(information.contains(r#"<skill name="ship" args="staging">"#));
+    assert!(information.contains("Deploy it."));
 }

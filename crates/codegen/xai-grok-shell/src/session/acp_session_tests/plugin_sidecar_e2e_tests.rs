@@ -41,6 +41,8 @@ const DENY_REASON: &str = "demo-hooks denied: tool input contained the demo mark
 const STOP_CONTEXT: &str = "demo-hooks: remember to run the demo checklist before stopping";
 const SESSION_START_CONTEXT: &str =
     "demo-hooks: this session was started with the demo plugin loaded";
+/// What the demo's `/greet` answers with no arguments.
+const GREET_DEFAULT: &str = "demo-hooks: hello from the plugin's own code";
 
 /// Repo root, derived from this crate's manifest dir (`crates/codegen/xai-grok-shell`).
 fn repo_root() -> PathBuf {
@@ -151,6 +153,7 @@ fn build_host(data_dir: PathBuf) -> Arc<PluginHost> {
         network: false,
         config: serde_json::json!({}),
         declared_tools: vec!["echo".to_string()],
+        declared_commands: vec!["greet".to_string(), "ask".to_string()],
         workspace_root: repo_root(),
         session_id: "e2e-session".to_string(),
         leader_socket: None,
@@ -563,6 +566,126 @@ async fn demo_plugin_tool_invoke_round_trips_with_call_context() {
         panic!("expected MCP-shaped output, got {output:?}");
     };
     assert!(mcp.is_error, "unregistered tool must be an error result");
+
+    host.dispose().await;
+}
+
+/// A plugin-declared slash command reaches the plugin's **code**, with the
+/// arguments the user typed, and each of the three replies comes back intact.
+///
+/// This is the whole point of the feature: `/greet` runs the handler in
+/// `examples/plugins/demo-hooks/index.ts`, not a markdown file.
+#[tokio::test]
+async fn demo_plugin_slash_command_reaches_the_plugins_code_with_its_arguments() {
+    use xai_grok_plugin_host::CommandInvokeResult;
+
+    if !runtime_available() {
+        eprintln!(
+            "SKIP demo_plugin_slash_command_reaches_the_plugins_code_with_its_arguments: \
+             no JS runtime the SDK launcher accepts (bun, deno or node >=22) on PATH"
+        );
+        return;
+    }
+
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    let host = build_host(data_dir.path().to_path_buf());
+    let ctx = xai_grok_plugin_host::ToolCallContextDto {
+        session_id: "e2e-session".to_string(),
+        cwd: "/per/call/dir".to_string(),
+        agent: "main".to_string(),
+    };
+
+    // Arguments the user typed reach the handler verbatim.
+    let result = host
+        .invoke_command("demo-hooks", "greet", "Ada", ctx.clone(), 0)
+        .await
+        .expect("command runs");
+    assert_eq!(
+        result,
+        CommandInvokeResult::Handled {
+            text: Some("demo-hooks: hello, Ada".to_string())
+        }
+    );
+
+    // No arguments: the handler's own default, computed in TypeScript.
+    let result = host
+        .invoke_command("demo-hooks", "greet", "", ctx.clone(), 0)
+        .await
+        .expect("command runs");
+    let CommandInvokeResult::Handled { text: Some(text) } = result else {
+        panic!("expected handled text, got {result:?}");
+    };
+    assert_eq!(text, GREET_DEFAULT);
+
+    // The plugin can refuse, and the refusal carries its reason.
+    let result = host
+        .invoke_command("demo-hooks", "greet", "nobody", ctx.clone(), 0)
+        .await
+        .expect("command runs");
+    assert_eq!(
+        result,
+        CommandInvokeResult::Declined {
+            reason: "there is nobody to greet".to_string()
+        }
+    );
+
+    // The plugin can compose a prompt for the model instead of answering.
+    let result = host
+        .invoke_command("demo-hooks", "ask", "why is the sky blue", ctx.clone(), 0)
+        .await
+        .expect("command runs");
+    let CommandInvokeResult::Prompt { text } = result else {
+        panic!("expected a prompt reply, got {result:?}");
+    };
+    assert!(text.contains("why is the sky blue"), "{text}");
+
+    // A command the sidecar never registered is refused promptly by the SDK —
+    // nothing waits for the host's deadline.
+    let result = host
+        .invoke_command("demo-hooks", "ghost", "", ctx, 0)
+        .await
+        .expect("unknown command still yields a reply, not a dispatch error");
+    let CommandInvokeResult::Declined { reason } = result else {
+        panic!("expected a refusal for an unregistered command, got {result:?}");
+    };
+    assert!(
+        reason.contains("not a command this plugin serves"),
+        "{reason}"
+    );
+
+    host.dispose().await;
+}
+
+/// The trust gate, at the layer that actually dispatches: a plugin the user has
+/// not trusted is never registered with the host, so its command cannot reach
+/// any sidecar even when something names it directly.
+#[tokio::test]
+async fn an_untrusted_plugins_command_never_reaches_a_sidecar() {
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    // `build_host` registers only `demo-hooks` — exactly the shape an untrusted
+    // plugin has, since `registered_sidecar_plugins` filters on
+    // `active_plugins()` (`enabled && trusted`) before anything is registered.
+    let host = build_host(data_dir.path().to_path_buf());
+
+    let err = host
+        .invoke_command(
+            "untrusted-plugin",
+            "greet",
+            "Ada",
+            xai_grok_plugin_host::ToolCallContextDto {
+                session_id: "e2e-session".to_string(),
+                cwd: "/per/call/dir".to_string(),
+                agent: "main".to_string(),
+            },
+            0,
+        )
+        .await
+        .expect_err("an unregistered plugin must not be dispatched to");
+    assert!(
+        err.message.contains("no plugin registered"),
+        "got: {}",
+        err.message
+    );
 
     host.dispose().await;
 }

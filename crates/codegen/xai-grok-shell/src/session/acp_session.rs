@@ -1320,6 +1320,18 @@ impl SessionActor {
         self.maybe_reconcile_active_goal_without_plan().await;
         availability
     }
+    /// The plugin-declared slash commands this session advertises and resolves.
+    ///
+    /// Read from the session's own registry snapshot (updated by
+    /// `/plugins reload`), so trusting or disabling a plugin takes effect on the
+    /// next advertise without a restart. Empty when the session has no registry.
+    pub(super) fn plugin_slash_commands(&self) -> Vec<slash_commands::PluginSlashCommand> {
+        self.plugin_registry
+            .borrow()
+            .as_deref()
+            .map(crate::session::plugin_host::plugin_slash_commands)
+            .unwrap_or_default()
+    }
     /// Compute command availability without workflow-manager reads or goal reconciliation.
     async fn command_availability_for_skill_projection(
         &self,

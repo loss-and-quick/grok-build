@@ -1940,10 +1940,12 @@ pub(super) async fn run_session(
                             let availability =
                                 session.build_command_availability(&tool_names, has_runs);
                             let (_, workflows) = session.named_workflow_snapshot();
+                            let plugin_commands = session.plugin_slash_commands();
                             let commands = slash_commands::available_commands(
                                 &skills,
                                 availability,
                                 &workflows,
+                                &plugin_commands,
                             );
                             let _ = respond_to.send(slash_commands::ListCommandsResponse {
                                 commands,

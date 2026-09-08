@@ -408,6 +408,7 @@ fn registered_sidecar_plugins(
                 // `[plugins.<name>]` config.toml entries shallow-merged on top.
                 config: merge_plugin_config(&spec.config, plugin_config.get(&plugin.name)),
                 declared_tools: spec.tools.iter().map(|t| t.name.clone()).collect(),
+                declared_commands: spec.commands.iter().map(|c| c.name.clone()).collect(),
                 workspace_root: workspace_root.to_path_buf(),
                 session_id: session_id.to_string(),
                 leader_socket: leader_socket.map(|s| s.to_string()),
@@ -937,6 +938,37 @@ pub(crate) fn plugin_sidecar_tool_registrations(
     out
 }
 
+/// Gather the slash commands every *active* sidecar plugin declares, in
+/// registry order.
+///
+/// `active_plugins()` is `enabled && trusted`, the same gate that decides
+/// whether a plugin's sidecar is registered with the host at all
+/// (`registered_sidecar_plugins`). Reusing it here means an untrusted or
+/// disabled plugin's command is never advertised and never resolvable, so the
+/// name it wanted is just ordinary text that reaches the model — and even if a
+/// stale catalog somehow named one, the host has no entry for that plugin and
+/// the dispatch fails closed with "no plugin registered as ...".
+pub(crate) fn plugin_slash_commands(
+    registry: &PluginRegistry,
+) -> Vec<crate::session::slash_commands::PluginSlashCommand> {
+    let mut out = Vec::new();
+    for plugin in registry.active_plugins() {
+        let Some(spec) = plugin.sidecar_spec() else {
+            continue;
+        };
+        for command in &spec.commands {
+            out.push(crate::session::slash_commands::PluginSlashCommand {
+                plugin: plugin.name.clone(),
+                name: command.name.clone(),
+                description: command.description.clone(),
+                argument_hint: command.argument_hint.clone(),
+                timeout_ms: command.timeout_ms,
+            });
+        }
+    }
+    out
+}
+
 /// Whether `qualified_name` addresses a manifest-declared sidecar tool of an
 /// active plugin.
 ///
@@ -1279,6 +1311,70 @@ mod tests {
             conflict: None,
             load_error: None,
         }
+    }
+
+    /// Give a discovered plugin one manifest-declared slash command.
+    fn with_slash_command(
+        mut dp: xai_grok_agent::plugins::discovery::DiscoveredPlugin,
+        name: &str,
+    ) -> xai_grok_agent::plugins::discovery::DiscoveredPlugin {
+        dp.manifest.slash_commands =
+            Some(vec![xai_grok_agent::plugins::ManifestSlashCommandSpec {
+                name: name.to_string(),
+                description: Some(format!("the {name} command")),
+                argument_hint: None,
+                timeout_ms: None,
+            }]);
+        dp
+    }
+
+    /// The trust gate on the command catalog. A plugin that is not
+    /// `enabled && trusted` must contribute no slash command: the name never
+    /// reaches the `/` menu and never resolves, so nothing can dispatch to a
+    /// sidecar the user has not vouched for.
+    #[test]
+    fn only_a_trusted_enabled_plugin_contributes_slash_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let trusted = plugin_registry(
+            vec![with_slash_command(
+                discovered_plugin(tmp.path(), "deployer", true, true),
+                "ship",
+            )],
+            &["deployer"],
+        );
+        let commands = plugin_slash_commands(&trusted);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].plugin, "deployer");
+        assert_eq!(commands[0].name, "ship");
+
+        // Enabled but untrusted.
+        let untrusted = plugin_registry(
+            vec![with_slash_command(
+                discovered_plugin(tmp.path(), "shady", true, false),
+                "ship",
+            )],
+            &["shady"],
+        );
+        assert!(untrusted.get("shady").unwrap().enabled);
+        assert!(
+            plugin_slash_commands(&untrusted).is_empty(),
+            "an untrusted plugin's command must not be advertised or dispatchable"
+        );
+
+        // Trusted but disabled (absent from the config `enabled` list).
+        let disabled = plugin_registry(
+            vec![with_slash_command(
+                discovered_plugin(tmp.path(), "dormant", true, true),
+                "ship",
+            )],
+            &[],
+        );
+        assert!(!disabled.get("dormant").unwrap().enabled);
+        assert!(
+            plugin_slash_commands(&disabled).is_empty(),
+            "a disabled plugin's command must not be advertised or dispatchable"
+        );
     }
 
     /// The `hooks` block a test plugin declares: one `post_tool_use` command
@@ -1808,6 +1904,7 @@ mod tests {
             )),
             network: None,
             tools: None,
+            slash_commands: None,
             config: Some(serde_json::json!({ "participants": ["default"], "rounds": 1 })),
             oauth_label: None,
             settings: None,

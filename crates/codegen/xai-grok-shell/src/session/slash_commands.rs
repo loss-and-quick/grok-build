@@ -604,6 +604,7 @@ pub(crate) fn is_reserved_slash_name(name: &str) -> bool {
 struct EffectiveCommandCatalog<'a> {
     builtins: Vec<&'a BuiltinCommand>,
     skills: EffectiveSkillCatalog<'a>,
+    plugin_commands: Vec<EffectivePluginCommand<'a>>,
     workflows: Vec<&'a crate::session::workflow::registry::WorkflowListing>,
 }
 struct EffectiveSkillCatalog<'a> {
@@ -613,6 +614,37 @@ struct EffectiveSkillCatalog<'a> {
 struct SkillCommand<'a> {
     name: String,
     skill: &'a SkillInfo,
+}
+/// One slash command a trusted, enabled sidecar plugin declares in its manifest
+/// (`slashCommands`), as gathered by
+/// [`crate::session::plugin_host::plugin_slash_commands`]. Unlike a
+/// `commands/*.md` file, which reaches this catalog as a [`SkillInfo`] and is
+/// substituted into the user's message, this one dispatches to the plugin's own
+/// code over `command_invoke`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PluginSlashCommand {
+    /// Owning plugin's kebab-case name — the `command_invoke` dispatch target.
+    pub plugin: String,
+    /// Bare command name as declared; what is sent on the wire regardless of
+    /// which spelling the user typed.
+    pub name: String,
+    pub description: String,
+    pub argument_hint: Option<String>,
+    /// `0` → the host's default command deadline.
+    pub timeout_ms: u64,
+}
+impl PluginSlashCommand {
+    /// The `<plugin>:<name>` spelling used when the bare name is taken. Mirrors
+    /// `format_skill_name`, which produces the same shape for plugin skills, so
+    /// the two kinds cannot collide on a qualified name without noticing.
+    fn qualified_name(&self) -> String {
+        format!("{}:{}", self.plugin, self.name)
+    }
+}
+struct EffectivePluginCommand<'a> {
+    /// Advertised name: the bare one when it was free, else the qualified one.
+    name: String,
+    command: &'a PluginSlashCommand,
 }
 fn exact_workflow_projection<'a>(
     command: &BuiltinCommand,
@@ -693,11 +725,64 @@ impl<'a> EffectiveSkillCatalog<'a> {
             .map(|command| command.skill)
     }
 }
+/// Claim an advertised name for every plugin-declared command, by the rule
+/// [`EffectiveSkillCatalog::build`] already applies to skills: the bare name
+/// when it is unique among candidates and not already taken, else
+/// `<plugin>:<name>`, else nothing.
+///
+/// Runs *after* the skill catalog and inherits its `taken` set, which is what
+/// resolves a collision between a plugin's `commands/*.md` file and its
+/// `slashCommands` entry of the same name: the markdown one is a skill, it
+/// claimed the bare name first, and the handler-backed one falls back to the
+/// qualified spelling. Deliberate — the markdown contract predates this one and
+/// keeping it whole is worth more than the bare name.
+///
+/// Returns the claimed set alongside the commands, extended with every bare
+/// name a candidate wanted (whether or not it won), so a workflow cannot then
+/// take one — the same trailing `taken.extend` the skill catalog does.
+fn build_plugin_commands<'a>(
+    commands: &'a [PluginSlashCommand],
+    taken: &HashSet<String>,
+) -> (Vec<EffectivePluginCommand<'a>>, HashSet<String>) {
+    let mut taken = taken.clone();
+    let mut bare_counts: HashMap<String, usize> = HashMap::new();
+    let mut qualified_counts: HashMap<String, usize> = HashMap::new();
+    for command in commands {
+        *bare_counts.entry(slash_key(&command.name)).or_default() += 1;
+        *qualified_counts
+            .entry(slash_key(&command.qualified_name()))
+            .or_default() += 1;
+    }
+    let mut effective = Vec::new();
+    for command in commands {
+        let bare_key = slash_key(&command.name);
+        let name = if bare_counts.get(&bare_key) == Some(&1) && !taken.contains(&bare_key) {
+            bare_key
+        } else {
+            let qualified = slash_key(&command.qualified_name());
+            if qualified_counts.get(&qualified) != Some(&1) || taken.contains(&qualified) {
+                tracing::debug!(
+                    plugin = %command.plugin,
+                    command = %command.name,
+                    %qualified,
+                    "plugin command not advertised: both its bare and qualified names are taken"
+                );
+                continue;
+            }
+            qualified
+        };
+        taken.insert(name.clone());
+        effective.push(EffectivePluginCommand { name, command });
+    }
+    taken.extend(bare_counts.into_keys());
+    (effective, taken)
+}
 impl<'a> EffectiveCommandCatalog<'a> {
     fn build(
         skills: &'a [SkillInfo],
         availability: CommandAvailability,
         workflows: &'a [crate::session::workflow::registry::WorkflowListing],
+        plugin_commands: &'a [PluginSlashCommand],
     ) -> Self {
         let builtins: Vec<_> = BUILTIN_COMMANDS
             .iter()
@@ -705,7 +790,9 @@ impl<'a> EffectiveCommandCatalog<'a> {
             .filter(|builtin| availability.allows(builtin.gate))
             .collect();
         let effective_skills = EffectiveSkillCatalog::build(skills, &builtins);
-        let taken = &effective_skills.taken;
+        let (effective_plugin_commands, claimed) =
+            build_plugin_commands(plugin_commands, &effective_skills.taken);
+        let taken = &claimed;
         let effective_workflows = if availability.allows(BuiltinGate::WorkflowLaunches) {
             let mut counts: HashMap<String, usize> = HashMap::new();
             for workflow in workflows {
@@ -731,8 +818,17 @@ impl<'a> EffectiveCommandCatalog<'a> {
         Self {
             builtins,
             skills: effective_skills,
+            plugin_commands: effective_plugin_commands,
             workflows: effective_workflows,
         }
+    }
+    /// Looks up a plugin-declared command by its advertised (effective) name.
+    fn plugin_command(&self, name: &str) -> Option<&'a PluginSlashCommand> {
+        let key = slash_key(name);
+        self.plugin_commands
+            .iter()
+            .find(|command| command.name == key)
+            .map(|command| command.command)
     }
     /// Looks up a skill by its advertised (effective) name.
     fn skill(&self, name: &str) -> Option<&'a SkillInfo> {
@@ -769,10 +865,14 @@ pub(super) fn available_commands(
     skills: &[SkillInfo],
     availability: CommandAvailability,
     workflows: &[crate::session::workflow::registry::WorkflowListing],
+    plugin_commands: &[PluginSlashCommand],
 ) -> Vec<acp::AvailableCommand> {
-    let catalog = EffectiveCommandCatalog::build(skills, availability, workflows);
+    let catalog = EffectiveCommandCatalog::build(skills, availability, workflows, plugin_commands);
     let mut commands = Vec::with_capacity(
-        catalog.builtins.len() + catalog.skills.commands.len() + catalog.workflows.len(),
+        catalog.builtins.len()
+            + catalog.skills.commands.len()
+            + catalog.plugin_commands.len()
+            + catalog.workflows.len(),
     );
     commands.extend(catalog.builtins.iter().map(|builtin| {
         acp::AvailableCommand::new(builtin.name.to_string(), builtin.description.to_string())
@@ -820,6 +920,30 @@ pub(super) fn available_commands(
             ))
         }))
         .meta(Some(meta_map))
+    }));
+    commands.extend(catalog.plugin_commands.iter().map(|entry| {
+        let command = entry.command;
+        // Deliberately no `path`/`scope`: those two keys are what a client
+        // reads to classify an entry as a markdown skill it should render and
+        // expand as one (see the pager's `SkillMeta::parse`). A handler-backed
+        // command has no file to point at, and `pluginCommand` is the key that
+        // says so. Clients that know nothing about it still pass `/name args`
+        // through to the shell, which is exactly the dispatch path.
+        let meta = serde_json::json!({
+            "pluginCommand": true,
+            "pluginName": command.plugin,
+            "bareName": command.name,
+            "qualifiedName": slash_key(&command.qualified_name()),
+        })
+        .as_object()
+        .cloned();
+        acp::AvailableCommand::new(entry.name.clone(), command.description.clone())
+            .input(command.argument_hint.as_ref().map(|hint| {
+                acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
+                    hint.clone(),
+                ))
+            }))
+            .meta(meta)
     }));
     commands.extend(catalog.workflows.iter().map(|workflow| {
         let meta = serde_json::json!({
@@ -1188,7 +1312,7 @@ pub(crate) async fn list_commands(
         }
         let skills = product_skill_infos(auth).await.unwrap_or_default();
         return Ok(ListCommandsResponse {
-            commands: available_commands(&skills, availability, &[]),
+            commands: available_commands(&skills, availability, &[], &[]),
             tools: None,
         });
     }
@@ -1205,8 +1329,11 @@ pub(crate) async fn list_commands(
             .flatten()
             .map(std::path::Path::new),
     );
+    let plugin_commands = plugin_registry
+        .map(crate::session::plugin_host::plugin_slash_commands)
+        .unwrap_or_default();
     Ok(ListCommandsResponse {
-        commands: available_commands(&skills, availability, &workflows),
+        commands: available_commands(&skills, availability, &workflows, &plugin_commands),
         tools: None,
     })
 }
@@ -1237,6 +1364,25 @@ pub(super) enum SlashCommandOutcome {
         blocks: Vec<acp::ContentBlock>,
         /// Parsed skill references (one per detected `/{skill}` token).
         skills: Vec<ParsedSkillRef>,
+    },
+    /// A command a sidecar plugin declared in its manifest. The turn hands it
+    /// to that plugin's code over `command_invoke` and acts on the reply; the
+    /// model is only involved if the plugin asks for it.
+    PluginCommand {
+        /// The original prompt blocks, preserved verbatim like
+        /// [`Self::InvokeSkill`]'s: when the plugin answers with a prompt, the
+        /// user's own line is still what the transcript shows.
+        blocks: Vec<acp::ContentBlock>,
+        /// Dispatch target — the plugin's kebab-case name.
+        plugin: String,
+        /// Bare command name as declared, whichever spelling was typed.
+        command: String,
+        /// Everything after the command name, trimmed.
+        args: String,
+        /// Per-command deadline from the manifest; `0` means the host default.
+        timeout_ms: u64,
+        /// The name as advertised, for the user echo and telemetry.
+        advertised_name: String,
     },
 }
 #[derive(Debug)]
@@ -1407,7 +1553,7 @@ pub(crate) fn parse_skill_references(
     skills: &[SkillInfo],
     availability: CommandAvailability,
 ) -> Option<Vec<ParsedSkillRef>> {
-    let catalog = EffectiveCommandCatalog::build(skills, availability, &[]);
+    let catalog = EffectiveCommandCatalog::build(skills, availability, &[], &[]);
     parse_skill_references_with_catalog(text, &catalog)
 }
 fn parse_skill_references_with_catalog(
@@ -1480,6 +1626,19 @@ fn parse_skill_references_with_catalog(
             })
             .collect(),
     )
+}
+/// Wrap a plugin command's `prompt` reply in the same `<skill_information>`
+/// envelope a `commands/*.md` body gets.
+///
+/// The point of the shared envelope is that the model cannot tell the two
+/// apart: a plugin that used to ship a markdown file and now composes the same
+/// text in code produces byte-identical context. No `<skills_referenced>` index
+/// is emitted — there is no file to name.
+pub(super) fn build_plugin_command_information(name: &str, args: &str, text: &str) -> String {
+    use xai_grok_tools::implementations::skills::skill::{
+        build_skill_block, build_skill_information,
+    };
+    build_skill_information(&[build_skill_block(name, args, text)], &[])
 }
 /// Load each parsed skill's SKILL.md, apply substitutions, and build the `<skill_information>` envelope.
 ///
@@ -1596,6 +1755,7 @@ pub(super) fn resolve_human_intent(
     availability: CommandAvailability,
     _skill_rewrite: SkillSlashRewrite,
     workflows: &[crate::session::workflow::registry::WorkflowListing],
+    plugin_commands: &[PluginSlashCommand],
     loop_fire_mode: LoopFireMode,
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
     let crate::session::slash_authority::AuthorityResolution::HumanIntent { command_name, args } =
@@ -1636,7 +1796,7 @@ pub(super) fn resolve_human_intent(
             skills: vec![],
         });
     }
-    let catalog = EffectiveCommandCatalog::build(skills, availability, workflows);
+    let catalog = EffectiveCommandCatalog::build(skills, availability, workflows, plugin_commands);
     if let Some(builtin) = catalog.builtins.iter().find(|builtin| {
         slash_key(builtin.name) == command_key
             || builtin
@@ -1649,6 +1809,26 @@ pub(super) fn resolve_human_intent(
             return Ok(prompt_blocks);
         }
         return Err(SlashCommandOutcome::Builtin(action));
+    }
+    // Before the skill scan, but only on an exact advertised name — the catalog
+    // already gave a colliding markdown command the bare spelling, so this can
+    // never shadow one.
+    if let Some(command) = catalog.plugin_command(&command_key) {
+        // Bind everything borrowed out of `prompt_blocks` before moving it.
+        let (plugin, name, timeout_ms) = (
+            command.plugin.clone(),
+            command.name.clone(),
+            command.timeout_ms,
+        );
+        let args = args.trim().to_string();
+        return Err(SlashCommandOutcome::PluginCommand {
+            blocks: prompt_blocks,
+            plugin,
+            command: name,
+            args,
+            timeout_ms,
+            advertised_name: command_key,
+        });
     }
     let full_text = prompt_blocks
         .iter()
