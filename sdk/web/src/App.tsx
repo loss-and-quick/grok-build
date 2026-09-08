@@ -3,6 +3,7 @@ import { createEffect, createSignal, For, on, onMount, Show, type JSX } from "so
 import { THEMES, type ThemeName } from "@grok-build/theme";
 
 import { DirectoryPicker } from "./components/DirectoryPicker.tsx";
+import { FolderTrustCard } from "./components/FolderTrustCard.tsx";
 import { Roster } from "./components/Roster.tsx";
 import { Session } from "./components/Session.tsx";
 import { Settings } from "./components/Settings.tsx";
@@ -58,7 +59,20 @@ export function App(props: { children?: JSX.Element }): JSX.Element {
         <RosterPane />
         <Settings gateway={gateway} />
       </aside>
-      <main class="main">{props.children}</main>
+      <main class="main">
+        {/* Above the session rather than inside it. The leader routes a
+            folder-trust request to the client that opened the session and
+            never replays it, so it can arrive before that session is attached
+            or while another is on screen — and a card dropped for either
+            reason is a project whose MCP servers, hooks, plugins and LSP go
+            off without a word. */}
+        <div class="trusts">
+          <For each={gateway.folderTrusts}>
+            {(pending) => <FolderTrustCard pending={pending} />}
+          </For>
+        </div>
+        {props.children}
+      </main>
     </div>
   );
 }

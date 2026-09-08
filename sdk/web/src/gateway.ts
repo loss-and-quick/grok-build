@@ -16,6 +16,10 @@ import { LIST_PARAMS, ROOT } from "./directory.ts";
 import {
   PROTOCOL_VERSION,
   visibleSettingRows,
+  FOLDER_TRUST_DISMISSED,
+  type FolderTrustOutcome,
+  type FolderTrustRequest,
+  type FolderTrustResponse,
   type FsExistsResponse,
   type FsListResponse,
   type InitializeResponse,
@@ -40,6 +44,27 @@ export interface PendingPermission {
   title: string;
   request: RequestPermissionRequest;
   answer: (response: RequestPermissionResponse) => void;
+}
+
+/**
+ * A folder-trust card waiting for an answer.
+ *
+ * Not keyed to the attached session, and not stored on it. The leader routes
+ * this request to whichever client opened the session and never replays it, so
+ * it can arrive before that session is attached — or while another one is on
+ * screen. Discarding it in either case would leave the project's MCP servers,
+ * hooks, plugins and LSP silently off, which is the failure the card exists to
+ * prevent.
+ */
+export interface PendingFolderTrust {
+  sessionId: string;
+  cwd: string;
+  workspace: string;
+  configKinds: string[];
+  /** Answer it: `"trust"` grants, `"reject"` declines for the agent's lifetime. */
+  decide: (outcome: FolderTrustOutcome) => void;
+  /** Leave it undecided, so the next session in this workspace asks again. */
+  dismiss: () => void;
 }
 
 export interface Attached {
@@ -81,6 +106,7 @@ export function createGateway() {
     locks: {},
   });
   const [permissions, setPermissions] = createStore<PendingPermission[]>([]);
+  const [folderTrusts, setFolderTrusts] = createStore<PendingFolderTrust[]>([]);
   const roster: Roster = createRoster();
 
   let client: GatewayClient | null = null;
@@ -111,6 +137,49 @@ export function createGateway() {
         title: request.toolCall?.title ?? "Permission requested",
         request,
         answer: settle,
+      });
+    });
+
+  /**
+   * Answer `x.ai/folder_trust/request`.
+   *
+   * Three outcomes, and they are genuinely three. `"trust"` persists the grant
+   * and hot-reloads that workspace's MCP servers, hooks and plugins for every
+   * resident session on it. `"reject"` leaves it gated and keeps the agent's
+   * per-workspace dedup key, so it is never asked again for the agent's
+   * lifetime. Dismissal rejects this promise instead, which reaches the agent
+   * as a JSON-RPC error: it reads that as "not a decision", releases the key
+   * and asks the next session in that workspace afresh.
+   *
+   * What none of the three may be is *silence*. The agent waits half an hour on
+   * this round-trip, and the session sits with its project configuration off
+   * for all of it.
+   */
+  const askFolderTrust = (request: FolderTrustRequest): Promise<FolderTrustResponse> =>
+    new Promise((resolve, reject) => {
+      const sessionId = request.sessionId ?? "";
+      const close = (): void => {
+        setFolderTrusts((all) => all.filter((t) => t.sessionId !== sessionId));
+      };
+      setFolderTrusts(folderTrusts.length, {
+        sessionId,
+        cwd: request.cwd ?? "",
+        workspace: request.workspace ?? "",
+        configKinds: request.configKinds ?? [],
+        decide: (outcome) => {
+          close();
+          say(
+            outcome === "trust"
+              ? `trusted ${request.workspace}`
+              : `left ${request.workspace} untrusted`,
+          );
+          resolve({ outcome });
+        },
+        dismiss: () => {
+          close();
+          say(`${request.workspace} left undecided; it will be asked again`);
+          reject(new Error(FOLDER_TRUST_DISMISSED));
+        },
       });
     });
 
@@ -154,11 +223,15 @@ export function createGateway() {
     // side, so silence parks the session actor for every client attached to it.
     // Anything else this client does not implement is refused, which at least
     // releases the caller.
-    next.onRequest((method, params) =>
-      method === "session/request_permission"
-        ? askPermission(params as RequestPermissionRequest)
-        : undefined,
-    );
+    next.onRequest((method, params) => {
+      if (method === "session/request_permission") {
+        return askPermission(params as RequestPermissionRequest);
+      }
+      if (method === "x.ai/folder_trust/request") {
+        return askFolderTrust(params as FolderTrustRequest);
+      }
+      return undefined;
+    });
 
     try {
       await next.connect();
@@ -339,6 +412,7 @@ export function createGateway() {
     roster,
     settings,
     permissions,
+    folderTrusts,
     connect,
     disconnect,
     attach,

@@ -421,6 +421,81 @@ export interface RequestPermissionResponse {
   outcome: RequestPermissionOutcome;
 }
 
+// ---------------------------------------------------------------------------
+// Folder trust — crates/codegen/xai-grok-shell/src/agent/mvp_agent/folder_trust_prompt.rs
+//
+// A session opened in a directory that is not in `trusted_folders.toml`
+// resolves *untrusted*, and that project's MCP servers, hooks, plugins, LSP and
+// permission rules are silently dropped. `x.ai/folder_trust/request` is the
+// agent asking a human about it, and a client that does not answer is a client
+// whose sessions quietly lose their project's configuration.
+//
+// The leader routes this one driver-only rather than broadcasting it, unlike a
+// permission modal: it is not a tool call, so it has no `toolCallId` to cache,
+// replay or retract by — and a durable security grant is the wrong thing to put
+// in front of every attached client (`leader/server.rs`,
+// `is_interaction_request`). It therefore lands on the client that opened the
+// session, once, and is never replayed.
+// ---------------------------------------------------------------------------
+
+/** Params of `x.ai/folder_trust/request`. Every field is always present. */
+export interface FolderTrustRequest {
+  /** The leader routes on this; a request without it never arrives at all. */
+  sessionId: string;
+  /** The session's own root. */
+  cwd: string;
+  /**
+   * The canonical workspace key — the scope the grant actually covers, which
+   * may be an *ancestor* of `cwd`. Worth showing when the two differ: agreeing
+   * trusts more than the directory this session sits in.
+   */
+  workspace: string;
+  /** Why the folder is gated: the repo-local config kinds found in it. */
+  configKinds: string[];
+}
+
+/**
+ * The two answers the wire has.
+ *
+ * The agent's enum carries `#[serde(other)]`, so *anything* that is not
+ * `"trust"` decodes to `Reject` — fail-closed by construction. Which means a
+ * misspelled outcome silently declines rather than erroring, and this type
+ * exists so no such string can be written here.
+ */
+export type FolderTrustOutcome = "trust" | "reject";
+
+/**
+ * The response body — **bare**, not wrapped.
+ *
+ * Unlike an `x.ai/*` call this client makes, this one is parsed straight off
+ * the raw payload (`serde_json::from_str::<FolderTrustResponse>`), so there is
+ * no `ExtMethodResult` envelope around it in either direction.
+ */
+export interface FolderTrustResponse {
+  outcome: FolderTrustOutcome;
+}
+
+/**
+ * The third outcome, which is not a value.
+ *
+ * The terminal supports trust, reject and *dismiss*, and the three differ in a
+ * way that matters: a reject keeps the agent's per-workspace dedup key, so the
+ * question is never asked again for the life of the agent, while a dismissal
+ * releases it and the next session in that workspace asks afresh. Both leave
+ * the folder untrusted.
+ *
+ * The pager expresses dismissal by dropping the response channel unanswered. A
+ * browser has no channel to drop, so the equivalent is a JSON-RPC *error*
+ * reply: the agent reads any transport failure as "not a decision", releases
+ * the key and stays gated — the same three-way behaviour, reached the only way
+ * a socket allows. Staying silent would work too and is worse: it parks the
+ * round-trip for the agent's full thirty-minute timeout.
+ *
+ * What must never be sent is `{"outcome": "dismiss"}`. That decodes to
+ * `Reject`, which is the one outcome dismissal is meant not to be.
+ */
+export const FOLDER_TRUST_DISMISSED = "folder trust left undecided by the user";
+
 /**
  * `session/new` — the request that fixes a session's root.
  *

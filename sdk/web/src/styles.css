@@ -144,9 +144,14 @@ button:disabled {
 
 /* -- main ---------------------------------------------------------------- */
 
+/* Six rows, and only the transcript grows: folder-trust cards, then the
+ * session's header, its permission modals, its panels, its transcript and its
+ * composer. Counting matters here — an extra child with no row of its own gets
+ * an implicit `auto` at the end, which slides the `1fr` onto the panels and
+ * squeezes the transcript to nothing. */
 .main {
   display: grid;
-  grid-template-rows: auto auto auto 1fr auto;
+  grid-template-rows: auto auto auto auto 1fr auto;
   min-height: 0;
   padding: 0.75rem;
   gap: 0.75rem;
@@ -620,6 +625,97 @@ button.picker-row:focus-visible {
 
 .picker-open {
   border-color: var(--grok-accent-success, canvastext);
+}
+
+/* -- folder trust --------------------------------------------------------- */
+
+/* Warning, like the permission modal, because it is the same kind of moment:
+ * the session is running and something is waiting on a person. */
+.trust {
+  padding: 0.6rem;
+  margin-bottom: 0.5rem;
+  background: var(--grok-bg-highlight, canvas);
+  border: 1px solid var(--grok-warning, canvastext);
+  border-radius: 6px;
+}
+
+.trust-title {
+  margin-bottom: 0.4rem;
+  color: var(--grok-warning, canvastext);
+  overflow-wrap: anywhere;
+}
+
+.trust-diamond {
+  margin-right: 0.4rem;
+}
+
+.trust-scope {
+  margin-bottom: 0.4rem;
+  color: var(--grok-text-secondary, canvastext);
+  overflow-wrap: anywhere;
+}
+
+.trust-path {
+  color: var(--grok-path, canvastext);
+}
+
+.trust-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
+.trust-kinds-label {
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.trust-kind {
+  padding: 0 0.4rem;
+  background: var(--grok-bg-dark, canvas);
+  border-radius: 999px;
+  color: var(--grok-accent-skill, canvastext);
+}
+
+.trust-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+/* One option per row, unlike the permission modal's chips: each carries a
+ * sentence saying what it costs, and three of those side by side would be
+ * unreadable at any sidebar width. */
+.trust-option {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 0.35rem;
+  align-items: baseline;
+  text-align: left;
+}
+
+.trust-key {
+  color: var(--grok-accent-user, canvastext);
+}
+
+.trust-marker {
+  color: var(--grok-gray, canvastext);
+}
+
+.trust-consequence {
+  grid-column: 3;
+  font-size: 0.8rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.trust-trust {
+  border-color: var(--grok-accent-success, canvastext);
+}
+
+.trust-reject {
+  border-color: var(--grok-accent-error, canvastext);
 }
 
 /* -- settings (read-only) ------------------------------------------------- */

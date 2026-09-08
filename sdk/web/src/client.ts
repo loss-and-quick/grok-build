@@ -38,6 +38,16 @@ export type JsonRpcFrame = JsonRpcRequest | JsonRpcNotification | JsonRpcRespons
 /** JSON-RPC's own code for "I do not implement that". */
 export const METHOD_NOT_FOUND = -32601;
 
+/**
+ * JSON-RPC's code for a handler that ran and could not produce a result.
+ *
+ * Distinct from {@link METHOD_NOT_FOUND} on purpose. A refusal to answer
+ * `x.ai/folder_trust/request` is how this client says "the user dismissed the
+ * card", and reporting that as "method not found" would tell the next reader —
+ * and any log — that the browser has no card at all, which stopped being true.
+ */
+export const INTERNAL_ERROR = -32603;
+
 export type NotificationHandler = (method: string, params: unknown) => void;
 export type RequestHandler = (method: string, params: unknown) => Promise<unknown> | undefined;
 
@@ -213,10 +223,14 @@ export class GatewayClient {
     try {
       this.send({ jsonrpc: "2.0", id, result: await answered });
     } catch (e) {
+      // A handler that took the request and then declined is not a handler that
+      // does not exist. The agent treats every error the same — for folder
+      // trust, "not a decision", which releases its dedup key — but the code is
+      // what a person reads when they ask why a card went unanswered.
       this.send({
         jsonrpc: "2.0",
         id,
-        error: { code: METHOD_NOT_FOUND, message: String(e) },
+        error: { code: INTERNAL_ERROR, message: String(e) },
       });
     }
   }

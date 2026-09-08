@@ -94,6 +94,33 @@ Start a session and the panel appears. Type into a field and press **Echo**: the
 press routes back through `x.ai/plugins/panel_action`, the plugin republishes the
 panel with what it received, and the new version replaces the old one.
 
+## Folder trust
+
+A session opened in a directory that is not in `trusted_folders.toml` resolves
+**untrusted**, and that project's MCP servers, hooks, plugins, LSP and permission
+rules are dropped without a word. The agent asks about it with
+`x.ai/folder_trust/request`, and this client answers it.
+
+Three outcomes, because the terminal has three and they differ. **Trust** grants
+the workspace and hot-reloads it. **Leave untrusted** declines, and the agent
+keeps its per-workspace key, so nothing asks again. **Ask me next time** leaves
+it undecided: the pager expresses that by dropping the response channel, and a
+browser reaches the same place by answering with a JSON-RPC error, which the
+agent reads as "not a decision" — it stays gated and releases the key. Sending
+`{"outcome": "dismiss"}` would be a *reject*, because the agent's enum decodes
+anything but `"trust"` that way.
+
+The card is drawn above the session rather than inside it. The leader routes
+this request to the client that opened the session and never replays it, so it
+can arrive before that session is attached, and a card dropped for that reason
+is a project silently running without its own configuration.
+
+**The gateway does not send it yet.** `browser_capabilities()` in
+`crates/codegen/xai-grok-shell/src/agent/web_gateway.rs` pins
+`interactive_trust: Some(false)`, which is what suppresses the request for every
+browser. That was correct while nothing here could answer; the comment there
+names the one line to flip.
+
 ## Tests
 
 ```sh
@@ -164,7 +191,7 @@ transform, which the reactivity depends on.
 | `src/panel.ts` | tone-to-role, and the block-kind exhaustiveness guard |
 | `src/theme.ts` | generated palette to CSS custom properties |
 | `src/App.tsx` | the screen and its routes |
-| `src/components/` | Roster, Session, Panel, Markdown, Settings, PermissionCard, DirectoryPicker |
+| `src/components/` | Roster, Session, Panel, Markdown, Settings, PermissionCard, FolderTrustCard, DirectoryPicker |
 
 `src/wire.ts` is hand-written on purpose and the reasoning is at the top of the
 file: the panel types and the palette *are* generated and are imported, never
