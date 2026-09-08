@@ -34,7 +34,8 @@ use xai_grok_hooks::invoker::{
     PluginHookFuture, PluginHookInvoker, PluginHookRequest, PluginHookResponse, PluginInvokeError,
 };
 use xai_grok_plugin_protocol::{
-    DecisionDto, GateKindDto, HookInvokeResult, ToolCallContextDto, ToolInvokeResult,
+    CommandInvokeResult, DecisionDto, GateKindDto, HookInvokeResult, ToolCallContextDto,
+    ToolInvokeResult,
 };
 
 use crate::capabilities::{PluginCapabilities, storage_path};
@@ -55,6 +56,12 @@ const DEFAULT_INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Deliberately longer than the hook default: tool handlers legitimately do
 /// real work (spawn subagents, batch storage) where a hook must stay snappy.
 const DEFAULT_TOOL_INVOKE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Fallback `command_invoke` timeout when a command carries `timeout_ms == 0`.
+/// Deliberately far shorter than the tool default: a tool call happens inside a
+/// turn the user is already waiting on, but a slash command is the user's
+/// keystroke — the prompt is blocked until this resolves, and a `/` command
+/// that hangs is worse than one that refuses.
+const DEFAULT_COMMAND_INVOKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Produces the spawn `Command` for a plugin. Overridable in tests to inject a
 /// fake sidecar; production uses [`crate::spawn::build_command`].
@@ -522,6 +529,24 @@ impl PluginHost {
             }
         }
 
+        // Slash-command drift, on the same terms: the manifest is what the `/`
+        // menu was built from, and neither direction is fatal.
+        let command_handlers: HashSet<&str> =
+            init.commands.iter().map(|c| c.name.as_str()).collect();
+        for declared in &spec.declared_commands {
+            if !command_handlers.contains(declared.as_str()) {
+                tracing::warn!(plugin = %spec.name, command = %declared,
+                    "manifest declares a slash command the sidecar registered no handler for");
+            }
+        }
+        for handler in &init.commands {
+            if !spec.declared_commands.iter().any(|d| d == &handler.name) {
+                tracing::warn!(plugin = %spec.name, command = %handler.name,
+                    "sidecar registered a slash-command handler the manifest does not declare; \
+                     it is not in the `/` menu");
+            }
+        }
+
         tracing::debug!(plugin = %spec.name, subscriptions = ?state.subscriptions, "sidecar handshaked");
         Ok(sidecar)
     }
@@ -732,6 +757,89 @@ impl PluginHost {
             }
             Err(crate::sidecar::SidecarError::Rpc(e)) => Err(PluginInvokeError::new(format!(
                 "plugin '{plugin}' tool '{tool}' failed: {e}"
+            ))),
+        }
+    }
+
+    /// Run one plugin-declared slash command (`command_invoke`) in the plugin's
+    /// sidecar.
+    ///
+    /// `command` is the bare (unqualified) name as declared in the manifest and
+    /// `args` is the rest of the line the user typed. `timeout_ms == 0` selects
+    /// [`DEFAULT_COMMAND_INVOKE_TIMEOUT`].
+    ///
+    /// A request, not a notification like `deliver_panel_action`: a slash
+    /// command has to answer, because the reply is what decides whether the
+    /// user sees anything and whether the model is asked. Every way this can
+    /// fail — unregistered (which is also how an untrusted plugin looks from
+    /// here), disabled, backing off, refusing to start, timing out, crashing
+    /// mid-call, answering with a shape that will not parse — resolves to an
+    /// `Err` the caller turns into a visible refusal. The prompt is blocked on
+    /// this call, so it must never be able to hang.
+    pub async fn invoke_command(
+        &self,
+        plugin: &str,
+        command: &str,
+        args: &str,
+        context: ToolCallContextDto,
+        timeout_ms: u64,
+    ) -> Result<CommandInvokeResult, PluginInvokeError> {
+        let entry = {
+            let plugins = self.plugins.lock().expect("registry poisoned");
+            plugins.get(plugin).cloned()
+        };
+        let Some(entry) = entry else {
+            return Err(PluginInvokeError::new(format!(
+                "no plugin registered as '{plugin}'"
+            )));
+        };
+
+        // Same locking discipline as `invoke_tool`: the state guard is held
+        // only to obtain a live sidecar, never across the round-trip.
+        let sidecar = {
+            let mut state = entry.state.lock().await;
+            self.ensure_alive(&entry, &mut state).await?
+        };
+
+        let invocation_id = format!(
+            "cinv-{}",
+            self.next_invocation.fetch_add(1, Ordering::Relaxed)
+        );
+        let timeout = if timeout_ms == 0 {
+            DEFAULT_COMMAND_INVOKE_TIMEOUT
+        } else {
+            Duration::from_millis(timeout_ms)
+        };
+        let params = json!({
+            "invocation_id": invocation_id,
+            "command": command,
+            "args": args,
+            "context": context,
+            "timeout_ms": timeout.as_millis() as u64,
+        });
+
+        match sidecar.call("command_invoke", params, timeout).await {
+            Ok(value) => {
+                self.reset_crashes(&entry).await;
+                serde_json::from_value::<CommandInvokeResult>(value).map_err(|e| {
+                    PluginInvokeError::new(format!(
+                        "plugin '{plugin}' returned a bad result for command '{command}': {e}"
+                    ))
+                })
+            }
+            Err(crate::sidecar::SidecarError::Timeout) => Err(PluginInvokeError::new(format!(
+                "plugin '{plugin}' command '{command}' timed out after {} ms",
+                timeout.as_millis()
+            ))),
+            Err(crate::sidecar::SidecarError::Closed) => {
+                let mut state = entry.state.lock().await;
+                self.note_crash(&mut state, plugin, "transport closed during command_invoke");
+                Err(PluginInvokeError::new(format!(
+                    "plugin '{plugin}' crashed during command '{command}'"
+                )))
+            }
+            Err(crate::sidecar::SidecarError::Rpc(e)) => Err(PluginInvokeError::new(format!(
+                "plugin '{plugin}' command '{command}' failed: {e}"
             ))),
         }
     }

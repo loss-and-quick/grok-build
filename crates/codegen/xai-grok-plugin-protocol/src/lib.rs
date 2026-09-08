@@ -645,6 +645,12 @@ pub struct InitializeResult {
     pub plugin_version: Option<String>,
     #[serde(default)]
     pub tools: Vec<ToolDescriptorDto>,
+    /// The slash-command handlers the plugin's code registered. Informational
+    /// on exactly the same terms as `tools`: the manifest's `slashCommands`
+    /// array is what the `/` menu is built from, and the host warns when the
+    /// two drift.
+    #[serde(default)]
+    pub commands: Vec<CommandDescriptorDto>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -817,6 +823,89 @@ pub struct ToolInvokeResult {
 #[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
 pub struct ToolCancelParams {
     pub invocation_id: String,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// command_invoke (core→plugin request) — plugin-declared slash commands.
+//
+// A plugin's manifest declares slash commands (`slashCommands`); the shell
+// advertises them in the same catalog the builtins and skills ride, and when
+// the user types one, this RPC runs the plugin's own handler with whatever
+// they typed after the name.
+//
+// It is a *request*, not a notification like `panel_action`: the user is
+// waiting at the prompt, so the reply is what decides whether anything is
+// shown, whether the model is asked, or whether the command was refused. The
+// host bounds the wait, so a sidecar that never answers becomes a refusal
+// rather than a hung prompt.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One slash command a plugin serves. Shared vocabulary: the manifest's
+/// `slashCommands` array parses into this shape, and `initialize` replies carry
+/// the code-registered handlers for drift warnings — exactly like
+/// [`ToolDescriptorDto`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+pub struct CommandDescriptorDto {
+    /// Bare command name, with no plugin prefix and no leading `/`; the host
+    /// qualifies it as `<plugin>:<name>` when the bare name is already taken.
+    pub name: String,
+    pub description: String,
+    /// Free-text usage hint shown beside the name in the `/` menu — the same
+    /// `argument-hint` idiom skills and builtins use. The arguments themselves
+    /// are unparsed text.
+    #[serde(default)]
+    pub argument_hint: Option<String>,
+}
+
+/// `command_invoke` request params. Core→plugin. `command` is the bare name as
+/// declared, never the `<plugin>:<name>` qualified form the user may have
+/// typed; `args` is the rest of the line verbatim (trimmed, empty when the user
+/// typed only the name). `context` is the same per-call context `tool_invoke`
+/// carries, and `timeout_ms` is the host's hard deadline (informational to the
+/// plugin — the host enforces it).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/")]
+pub struct CommandInvokeParams {
+    pub invocation_id: String,
+    pub command: String,
+    pub args: String,
+    pub context: ToolCallContextDto,
+    #[ts(type = "number")]
+    pub timeout_ms: u64,
+}
+
+/// `command_invoke` reply. Plugin→core. Internally tagged on `kind` (mirrors
+/// [`HookInvokeResult`] and [`PanelBlock`]).
+///
+/// These three variants are the whole capability: a command may render, it may
+/// hand the model a prompt, or it may refuse. What it may *not* do is steer a
+/// turn already in flight, change session settings, or stand in for a builtin
+/// — a plugin command is an entry point to the plugin's own code, not a way to
+/// drive the host's.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../../sdk/plugin/src/generated/", optional_fields = nullable)]
+pub enum CommandInvokeResult {
+    /// The plugin did the work itself and the turn ends here — no model call.
+    /// `text` is shown to the user when present; a plugin that published a
+    /// panel (`ui_publish_panel`) mid-handler usually has nothing left to say
+    /// and omits it, so `{"kind":"handled"}` stays valid.
+    Handled {
+        // Skipped when absent for the same reason `Observed` skips its own
+        // optional field: the bare form is the common reply and must keep
+        // serializing to exactly `{"kind":"handled"}`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
+    /// Ask the model, with `text` as the prompt. This is what a `commands/*.md`
+    /// file does today; the plugin now composes the prompt in code instead of
+    /// shipping it as a file.
+    Prompt { text: String },
+    /// The plugin refuses this invocation (bad arguments, not signed in, a
+    /// precondition only it knows about). `reason` is shown to the user and the
+    /// turn ends; the model is never called.
+    Declined { reason: String },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1591,6 +1680,11 @@ mod tests {
                     description: "echo back".into(),
                     input_schema: json!({ "type": "object" }),
                 }],
+                commands: vec![CommandDescriptorDto {
+                    name: "status".into(),
+                    description: "show status".into(),
+                    argument_hint: Some("[env]".into()),
+                }],
             },
             json!({
                 "protocol_version": 1,
@@ -1600,6 +1694,11 @@ mod tests {
                     "name": "echo",
                     "description": "echo back",
                     "input_schema": { "type": "object" },
+                }],
+                "commands": [{
+                    "name": "status",
+                    "description": "show status",
+                    "argument_hint": "[env]",
                 }],
             }),
         );
@@ -2596,5 +2695,88 @@ mod tests {
                 "errorDetails": "429",
             }),
         );
+    }
+
+    /// `command_invoke` both ways: the request carries the typed args and the
+    /// same per-call context `tool_invoke` uses.
+    #[test]
+    fn command_invoke_round_trip() {
+        round_trip(
+            &CommandInvokeParams {
+                invocation_id: "cinv-1".into(),
+                command: "deploy".into(),
+                args: "staging --dry-run".into(),
+                context: ToolCallContextDto {
+                    session_id: "sess-1".into(),
+                    cwd: "/proj".into(),
+                    agent: "main".into(),
+                },
+                timeout_ms: 10_000,
+            },
+            json!({
+                "invocation_id": "cinv-1",
+                "command": "deploy",
+                "args": "staging --dry-run",
+                "context": { "session_id": "sess-1", "cwd": "/proj", "agent": "main" },
+                "timeout_ms": 10_000,
+            }),
+        );
+    }
+
+    /// The reply's three variants, tagged on `kind`. A bare `handled` must keep
+    /// serializing to exactly `{"kind":"handled"}` — the SDK sends it whenever
+    /// a handler returns nothing, which is the common case.
+    #[test]
+    fn command_invoke_result_variants_round_trip() {
+        round_trip(
+            &CommandInvokeResult::Handled { text: None },
+            json!({ "kind": "handled" }),
+        );
+        round_trip(
+            &CommandInvokeResult::Handled {
+                text: Some("done".into()),
+            },
+            json!({ "kind": "handled", "text": "done" }),
+        );
+        round_trip(
+            &CommandInvokeResult::Prompt {
+                text: "review the diff".into(),
+            },
+            json!({ "kind": "prompt", "text": "review the diff" }),
+        );
+        round_trip(
+            &CommandInvokeResult::Declined {
+                reason: "not signed in".into(),
+            },
+            json!({ "kind": "declined", "reason": "not signed in" }),
+        );
+
+        // An unknown `kind` must not silently decode as one of these — the host
+        // turns the parse failure into a visible refusal.
+        assert!(
+            serde_json::from_value::<CommandInvokeResult>(json!({ "kind": "handled_maybe" }))
+                .is_err()
+        );
+    }
+
+    /// A command descriptor's `argument_hint` is optional in both directions:
+    /// a handshake that omits it decodes as `None` rather than failing.
+    #[test]
+    fn command_descriptor_round_trip() {
+        round_trip(
+            &CommandDescriptorDto {
+                name: "deploy".into(),
+                description: "Deploy it".into(),
+                argument_hint: Some("<env>".into()),
+            },
+            json!({
+                "name": "deploy",
+                "description": "Deploy it",
+                "argument_hint": "<env>",
+            }),
+        );
+        let d: CommandDescriptorDto =
+            serde_json::from_value(json!({ "name": "d", "description": "" })).unwrap();
+        assert_eq!(d.argument_hint, None);
     }
 }

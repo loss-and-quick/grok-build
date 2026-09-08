@@ -39,6 +39,7 @@ fn host_with(env: &[(&'static str, String)], backoff: Duration) -> (PluginHost, 
         network: false,
         config: serde_json::json!({ "k": "v" }),
         declared_tools: vec!["echo".to_string()],
+        declared_commands: vec!["probe".to_string()],
         workspace_root: ws.path().to_path_buf(),
         session_id: "sess-1".to_string(),
         leader_socket: None,
@@ -115,6 +116,7 @@ async fn assert_hardener_saw_no_network(launch: PluginLaunch) {
         network: false,
         config: serde_json::json!({}),
         declared_tools: vec![],
+        declared_commands: vec![],
         workspace_root: ws.path().to_path_buf(),
         session_id: "sess-1".to_string(),
         leader_socket: None,
@@ -663,6 +665,7 @@ async fn a_hardener_that_cannot_confine_fails_the_start() {
         network: false,
         config: serde_json::json!({}),
         declared_tools: vec![],
+        declared_commands: vec![],
         workspace_root: ws.path().to_path_buf(),
         session_id: "sess-1".to_string(),
         leader_socket: None,
@@ -719,4 +722,171 @@ fn wrap_command_prepends_the_wrapper_and_keeps_argv_cwd_and_env() {
             Some(std::ffi::OsStr::new("/run/leader.sock"))
         )]
     );
+}
+
+// ── command_invoke: plugin-declared slash commands ───────────────────
+
+#[tokio::test]
+async fn command_invoke_round_trips_with_args_and_call_context() {
+    let (host, _d, _w) = host_with(&[("FAKE_MODE", "normal".into())], Duration::from_millis(10));
+
+    let result = host
+        .invoke_command(
+            "p",
+            "probe",
+            "staging --dry-run",
+            xai_grok_plugin_protocol::ToolCallContextDto {
+                session_id: "sess-9".into(),
+                cwd: "/work/dir".into(),
+                agent: "main".into(),
+            },
+            5_000,
+        )
+        .await
+        .unwrap();
+
+    let xai_grok_plugin_protocol::CommandInvokeResult::Handled { text } = result else {
+        panic!("expected a handled reply, got {result:?}");
+    };
+    // The fixture echoes the command name, the typed args, and every per-call
+    // context field back into the text.
+    let text = text.expect("the fixture answers with text");
+    assert!(text.contains("command=probe"), "{text}");
+    assert!(text.contains("args=staging --dry-run"), "{text}");
+    assert!(text.contains("session=sess-9"), "{text}");
+    assert!(text.contains("cwd=/work/dir"), "{text}");
+    assert!(text.contains("agent=main"), "{text}");
+
+    host.dispose().await;
+}
+
+#[tokio::test]
+async fn command_invoke_carries_every_reply_variant() {
+    for (mode, check) in [
+        (
+            "silent",
+            Box::new(|r: &xai_grok_plugin_protocol::CommandInvokeResult| {
+                matches!(
+                    r,
+                    xai_grok_plugin_protocol::CommandInvokeResult::Handled { text: None }
+                )
+            }) as Box<dyn Fn(&_) -> bool>,
+        ),
+        (
+            "prompt",
+            Box::new(|r: &xai_grok_plugin_protocol::CommandInvokeResult| {
+                matches!(
+                    r,
+                    xai_grok_plugin_protocol::CommandInvokeResult::Prompt { text }
+                        if text.contains("prompt from 'probe': args here")
+                )
+            }),
+        ),
+        (
+            "declined",
+            Box::new(|r: &xai_grok_plugin_protocol::CommandInvokeResult| {
+                matches!(
+                    r,
+                    xai_grok_plugin_protocol::CommandInvokeResult::Declined { reason }
+                        if reason.contains("declined on purpose")
+                )
+            }),
+        ),
+    ] {
+        let (host, _d, _w) = host_with(
+            &[
+                ("FAKE_MODE", "normal".into()),
+                ("FAKE_COMMAND_MODE", mode.into()),
+            ],
+            Duration::from_millis(10),
+        );
+        let result = host
+            .invoke_command("p", "probe", "args here", test_ctx(), 5_000)
+            .await
+            .unwrap();
+        assert!(check(&result), "mode {mode} produced {result:?}");
+        host.dispose().await;
+    }
+}
+
+#[tokio::test]
+async fn command_invoke_for_an_unregistered_plugin_is_refused_not_dispatched() {
+    // The trust gate upstream never registers an untrusted plugin, so this is
+    // exactly what a command naming one looks like from here.
+    let (host, _d, _w) = host_with(&[("FAKE_MODE", "normal".into())], Duration::from_millis(10));
+
+    let err = host
+        .invoke_command("untrusted-plugin", "probe", "", test_ctx(), 5_000)
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.contains("no plugin registered"),
+        "got: {}",
+        err.message
+    );
+
+    host.dispose().await;
+}
+
+#[tokio::test]
+async fn command_invoke_times_out_without_counting_a_crash() {
+    let (host, _d, _w) = host_with(
+        &[
+            ("FAKE_MODE", "normal".into()),
+            ("FAKE_COMMAND_MODE", "hang".into()),
+        ],
+        Duration::from_millis(10),
+    );
+
+    let err = host
+        .invoke_command("p", "probe", "", test_ctx(), 150)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("timed out"), "got: {}", err.message);
+
+    // A slow command is not a crash: no restart/backoff pressure.
+    let status = host.status().await;
+    assert_eq!(status[0].state, PluginState::Running);
+    assert_eq!(status[0].consecutive_crashes, 0);
+
+    host.dispose().await;
+}
+
+#[tokio::test]
+async fn command_invoke_sidecar_crash_is_an_error_not_a_hang() {
+    let (host, _d, _w) = host_with(
+        &[
+            ("FAKE_MODE", "normal".into()),
+            ("FAKE_COMMAND_MODE", "crash".into()),
+        ],
+        Duration::from_millis(10),
+    );
+
+    let err = host
+        .invoke_command("p", "probe", "", test_ctx(), 5_000)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("crashed"), "got: {}", err.message);
+
+    let status = host.status().await;
+    assert_eq!(status[0].consecutive_crashes, 1);
+}
+
+#[tokio::test]
+async fn command_invoke_unparsable_reply_is_an_error_not_a_silent_pass() {
+    let (host, _d, _w) = host_with(
+        &[
+            ("FAKE_MODE", "normal".into()),
+            ("FAKE_COMMAND_MODE", "garbage".into()),
+        ],
+        Duration::from_millis(10),
+    );
+
+    let err = host
+        .invoke_command("p", "probe", "", test_ctx(), 5_000)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("bad result"), "got: {}", err.message);
+
+    host.dispose().await;
 }

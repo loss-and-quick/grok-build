@@ -59,7 +59,7 @@ pub use supervisor::{PluginHost, SpawnHardener, wrap_command};
 // Re-exported so tool-surface integrations (the shell) can name the
 // `tool_invoke` wire shapes without a direct protocol dependency (the same
 // idiom as `orchestration::AgentStatusDto`).
-pub use xai_grok_plugin_protocol::{ToolCallContextDto, ToolInvokeResult};
+pub use xai_grok_plugin_protocol::{CommandInvokeResult, ToolCallContextDto, ToolInvokeResult};
 
 /// A plugin registered with the host: everything needed to spawn and hand-shake
 /// its sidecar. Cloneable so the host can rebuild `initialize` params on restart.
@@ -89,6 +89,10 @@ pub struct RegisteredPlugin {
     /// drift warning at handshake against the code-registered handlers the
     /// sidecar reports in `InitializeResult::tools`.
     pub declared_tools: Vec<String>,
+    /// Bare slash-command names the manifest declares (the `/` menu is built
+    /// from the manifest before any sidecar starts). Used only for the same
+    /// handshake drift warning [`Self::declared_tools`] drives.
+    pub declared_commands: Vec<String>,
     /// Workspace root; the sidecar's cwd.
     pub workspace_root: PathBuf,
     /// Session id, forwarded at `initialize`.

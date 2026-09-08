@@ -45,6 +45,7 @@ fn host_with(env: &[(&'static str, String)]) -> (PluginHost, TempDir, TempDir) {
         network: false,
         config: serde_json::json!({}),
         declared_tools: vec![],
+        declared_commands: vec![],
         workspace_root: ws.path().to_path_buf(),
         session_id: "sess-1".to_string(),
         leader_socket: None,

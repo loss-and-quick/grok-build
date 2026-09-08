@@ -39,13 +39,23 @@
 //!                              in flight), then echo the stored value.
 //!     - `hang`               — never reply to `tool_invoke`.
 //!     - `crash`              — exit(1) on the first `tool_invoke`.
+//! - `FAKE_COMMAND_MODE` (independent of both; governs `command_invoke`):
+//!     - `handled` (default)  — reply `handled` with text echoing the command,
+//!                              its args, and the per-call context.
+//!     - `silent`             — reply a bare `{ "kind": "handled" }`.
+//!     - `prompt`             — reply `prompt` with the args as the prompt text.
+//!     - `declined`           — reply `declined` with a fixed reason.
+//!     - `garbage`            — reply a shape the result type cannot parse.
+//!     - `hang`               — never reply to `command_invoke`.
+//!     - `crash`              — exit(1) on the first `command_invoke`.
 
 use std::io::{BufRead, StdinLock, Write};
 
 use serde_json::{Value, json};
 use xai_grok_plugin_protocol::{
-    DecisionDto, GateKindDto, HookInvokeParams, HookInvokeResult, InitializeResult,
-    PROTOCOL_VERSION, ToolDescriptorDto, ToolInvokeParams, ToolInvokeResult,
+    CommandDescriptorDto, CommandInvokeParams, CommandInvokeResult, DecisionDto, GateKindDto,
+    HookInvokeParams, HookInvokeResult, InitializeResult, PROTOCOL_VERSION, ToolDescriptorDto,
+    ToolInvokeParams, ToolInvokeResult,
 };
 
 fn env(key: &str) -> Option<String> {
@@ -111,6 +121,11 @@ fn main() {
                         name: "echo".to_string(),
                         description: "echo fixture tool".to_string(),
                         input_schema: json!({ "type": "object" }),
+                    }],
+                    commands: vec![CommandDescriptorDto {
+                        name: "probe".to_string(),
+                        description: "probe fixture command".to_string(),
+                        argument_hint: Some("[args]".to_string()),
                     }],
                 };
                 reply_ok(&id, serde_json::to_value(result).unwrap());
@@ -227,6 +242,48 @@ fn main() {
                             params.context.agent,
                         ),
                         is_error: false,
+                    },
+                };
+                reply_ok(&id, serde_json::to_value(result).unwrap());
+            }
+            Some("command_invoke") => {
+                let command_mode =
+                    env("FAKE_COMMAND_MODE").unwrap_or_else(|| "handled".to_string());
+                match command_mode.as_str() {
+                    "crash" => std::process::exit(1),
+                    "hang" => {
+                        // Drain and never reply until the pipe closes, so the
+                        // host's own deadline is the only thing that ends it.
+                        while reader.read_line(&mut line).unwrap_or(0) != 0 {}
+                        return;
+                    }
+                    "garbage" => {
+                        reply_ok(&id, json!({ "kind": "not_a_variant" }));
+                        continue;
+                    }
+                    _ => {}
+                }
+                let params: CommandInvokeParams =
+                    serde_json::from_value(msg.get("params").cloned().unwrap_or(Value::Null))
+                        .expect("valid command_invoke params");
+
+                let result = match command_mode.as_str() {
+                    "silent" => CommandInvokeResult::Handled { text: None },
+                    "prompt" => CommandInvokeResult::Prompt {
+                        text: format!("prompt from '{}': {}", params.command, params.args),
+                    },
+                    "declined" => CommandInvokeResult::Declined {
+                        reason: format!("command '{}' declined on purpose", params.command),
+                    },
+                    _ => CommandInvokeResult::Handled {
+                        text: Some(format!(
+                            "ran command={} args={} session={} cwd={} agent={}",
+                            params.command,
+                            params.args,
+                            params.context.session_id,
+                            params.context.cwd,
+                            params.context.agent,
+                        )),
                     },
                 };
                 reply_ok(&id, serde_json::to_value(result).unwrap());
