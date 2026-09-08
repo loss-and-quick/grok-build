@@ -21,6 +21,7 @@ import {
 import { GatewayClient, gatewayUrl } from "./client.ts";
 import type { PanelAction } from "./panel.ts";
 import { createRoster, type Roster } from "./roster.ts";
+import { createSubagents, type Subagents } from "./subagents.ts";
 import { createTranscript, type Transcript } from "./transcript.ts";
 import { LIST_PARAMS, ROOT } from "./directory.ts";
 import {
@@ -32,12 +33,14 @@ import {
   type AuthUrlResponse,
   type AuthenticateResponse,
   type AvailableCommand,
+  type CancelSubagentResponse,
   type FolderTrustOutcome,
   type FolderTrustRequest,
   type FolderTrustResponse,
   type FsExistsResponse,
   type FsListResponse,
   type InitializeResponse,
+  type ListRunningSubagentsResponse,
   type NewSessionResponse,
   type PanelActionResponse,
   type PromptResponse,
@@ -130,6 +133,15 @@ const AUTH_URL_POLL_GAP_MS = 50;
 export interface Attached {
   entry: RosterEntry;
   transcript: Transcript;
+  /**
+   * The children this session has spawned.
+   *
+   * Per attach, like the transcript: a fan-out belongs to the session that
+   * launched it, and `session/load` replays that session's own
+   * `subagent_spawned` and `subagent_finished` rows, so the list rebuilds
+   * itself on every attach rather than being carried between sessions.
+   */
+  subagents: Subagents;
 }
 
 const STORE_KEYS = { url: "grok-gateway", secret: "grok-secret", theme: "grok-theme" } as const;
@@ -286,8 +298,21 @@ export function createGateway() {
       const notification = params as SessionNotification | undefined;
       const current = attached();
       if (!notification?.update || !current) return;
-      if (notification.sessionId !== current.entry.sessionId) return;
       const update = notification.update;
+      // A subagent's own session is a session this client is subscribed to
+      // without ever having asked: the leader copies the parent's subscriber
+      // set onto each child at spawn (`leader/server.rs:2315`). Its frames
+      // arrive with the *child's* session id, so a client that only recognises
+      // the attached one throws away the entire fan-out. They are not the
+      // attached session's transcript, though — they feed the child's row.
+      if (notification.sessionId !== current.entry.sessionId) {
+        if (!current.subagents.childSessions().has(notification.sessionId)) return;
+        // A grandchild's spawn is announced on its own parent's id, so the
+        // lifecycle fold sees it here rather than on the attached session.
+        current.subagents.apply(notification.sessionId, update);
+        current.subagents.applyChild(notification.sessionId, update);
+        return;
+      }
       if (update.sessionUpdate === "available_commands_update") {
         const advertised = (update as Record<string, unknown>)["availableCommands"];
         setCommands(Array.isArray(advertised) ? (advertised as AvailableCommand[]) : []);
@@ -299,6 +324,7 @@ export function createGateway() {
         pending?.answer({ outcome: { outcome: "cancelled" } });
         return;
       }
+      current.subagents.apply(notification.sessionId, update);
       current.transcript.apply(update);
     }
   };
@@ -659,7 +685,8 @@ export function createGateway() {
 
   const attach = async (entry: RosterEntry): Promise<void> => {
     if (!client) return;
-    setAttached({ entry, transcript: createTranscript() });
+    const subagents = createSubagents(entry.sessionId);
+    setAttached({ entry, transcript: createTranscript(), subagents });
     // Back to the pre-session builtins until this session advertises its own.
     // `session/load` triggers that advertisement, so the gap is one round-trip
     // wide — and during it the menu offers only what every session has.
@@ -676,7 +703,95 @@ export function createGateway() {
       say(`attached to ${entry.sessionId}`);
     } catch (e) {
       say(`load failed: ${String(e)}`);
+      return;
     }
+    await seedRunningSubagents(entry.sessionId, subagents);
+  };
+
+  /**
+   * Ask which children are running right now.
+   *
+   * The replay a `session/load` performs carries every `subagent_spawned` and
+   * `subagent_finished` this session ever wrote, so *which* children exist is
+   * already known by the time this runs. What replay cannot carry is progress:
+   * those ticks are deliberately never persisted (`agent/subagent/mod.rs:2049`),
+   * so a client attaching into a live fan-out would show counters and an
+   * elapsed time of "unknown" until each child's next tick — two seconds for a
+   * busy child, eight for a quiet one.
+   *
+   * `x.ai/subagent/list_running` is the answer the shell itself names for this
+   * case (`agent/subagent/mod.rs:2050`). A failure is not reported: the stream
+   * fills the same fields a moment later, so the only cost is the wait this
+   * call existed to skip.
+   */
+  const seedRunningSubagents = async (sessionId: string, subagents: Subagents): Promise<void> => {
+    if (!client) return;
+    try {
+      const response = (await client.ext("x.ai/subagent/list_running", {
+        sessionId,
+      })) as ListRunningSubagentsResponse;
+      subagents.seed(sessionId, response?.subagents ?? []);
+    } catch {
+      // See above: the stream reports the same thing, only later.
+    }
+  };
+
+  /**
+   * Stop a running child.
+   *
+   * Destructive and not undoable: the child's turn is cancelled where it
+   * stands, and whatever it had done is not handed back to the parent. The
+   * card arms the button before it sends, which is this client's own decision
+   * and is argued in the README.
+   *
+   * The three outcomes differ in one way that matters: only `cancelled` is
+   * followed by a `subagent_finished`. For `already_finished` and `not_found`
+   * nothing more is coming, so the row would sit marked "stopping…" forever if
+   * this waited for an event — which is why the pager finalizes those two
+   * itself (`app/effects/helpers.rs:1176`) and so does this.
+   */
+  const cancelSubagent = async (subagentId: string): Promise<void> => {
+    const current = attached();
+    if (!client || !current) return;
+    current.subagents.markKillSent(subagentId, performance.now());
+    say(`stopping ${subagentId}…`);
+    let response: CancelSubagentResponse | undefined;
+    try {
+      response = (await client.ext("x.ai/subagent/cancel", {
+        sessionId: current.entry.sessionId,
+        subagentId,
+      })) as CancelSubagentResponse;
+    } catch (e) {
+      // The RPC failed, so the child may well still be running. Clear the mark
+      // and leave the row alone rather than reporting a stop that never
+      // happened — the pager's `RpcFailed` rule (`effects/helpers.rs:1177`).
+      current.subagents.clearKill(subagentId);
+      say(`could not stop ${subagentId}: ${String(e)}`);
+      return;
+    }
+    // `outcome` is the typed answer; `cancelled` is what an older shell sends
+    // instead, and it only ever means "a live child was stopped".
+    const kind = response?.outcome?.kind ?? (response?.cancelled ? "cancelled" : "not_found");
+    if (kind === "cancelled") {
+      say(`stopping ${subagentId}; waiting for it to finish`);
+      return;
+    }
+    // Nothing is coming, so this client finalizes the row itself. An
+    // `already_finished` carries the real terminal status. A `not_found` does
+    // not: it means the agent has no record of this id, which is not evidence
+    // that anything was cancelled. The pager substitutes `"cancelled"` there
+    // (`app/dispatch/task_result.rs:780`); this client says `"unknown"`
+    // instead, and the README argues why.
+    const status =
+      response?.outcome?.kind === "already_finished"
+        ? ((response.outcome as { status?: string }).status ?? "unknown")
+        : "unknown";
+    current.subagents.finalize(subagentId, status);
+    say(
+      kind === "not_found"
+        ? `the agent has no record of ${subagentId}`
+        : `${subagentId} had already finished: ${status}`,
+    );
   };
 
   /**
@@ -789,6 +904,7 @@ export function createGateway() {
     listDirectory,
     pathExists,
     prompt,
+    cancelSubagent,
     panelAction,
     refreshRoster,
   };
