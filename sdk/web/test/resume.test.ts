@@ -326,3 +326,29 @@ describe("the streams stay apart under a rebuild", () => {
     }
   });
 });
+
+describe("an update the log will not hold", () => {
+  test("does not end the run it arrives in the middle of", () => {
+    // Measured against a live agent before it was fixed. A reply was streaming,
+    // an id-less notification landed between two of its chunks, and the run was
+    // declared over: the cursor settled onto a chunk from the middle of the
+    // reply, the agent could not resolve it, and the whole conversation came
+    // back. An update with no `eventId` is not a line in the log, so it is not a
+    // boundary between lines either.
+    const rig = harness();
+    rig.take("xai", "turn_completed", live("sess-1-294"));
+    rig.take("acp", "user_message_chunk", live("sess-1-295"), 1);
+    rig.take("acp", CHUNK, live("sess-1-297"), 1);
+    rig.take("acp", CHUNK, live("sess-1-298"));
+    rig.take("xai", "pending_interaction", live(undefined));
+    rig.take("acp", CHUNK, live("sess-1-299"));
+    expect(rig.resumption.cursor()).toBe("sess-1-295");
+  });
+
+  test("and cannot be named as one either", () => {
+    const rig = harness();
+    rig.take("acp", ONE, live("sess-1-5"), 1);
+    rig.take("xai", "pending_interaction", live(undefined));
+    expect(rig.resumption.cursor()).toBe("sess-1-5");
+  });
+});

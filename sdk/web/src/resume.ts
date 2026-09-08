@@ -298,10 +298,16 @@ export function createResumption(drawn: () => Mark): Resumption {
       }
       const seen = ceiling[stream];
       if (seq !== null && seen !== null && seq <= seen) return "duplicate";
-      // This update is going to be applied and it is not part of the run that
-      // is open, so that run is finished and the line it was written as can be
-      // named. The mark is taken now, before this update adds anything.
-      if (open !== null && !(RUN_TAGS.has(tag) && tag === open.tag)) {
+      // This update is going to be applied, it will be a line of its own, and
+      // it is not part of the run that is open — so that run is finished and
+      // the line it was written as can be named. The mark is taken now, before
+      // this update adds anything.
+      //
+      // An update with no `eventId` is not in the log at all, so it ends
+      // nothing: measured against a live agent, letting one close a run settled
+      // the cursor onto a chunk from the middle of a reply, which the agent then
+      // could not resolve and answered with the whole conversation.
+      if (meta.eventId !== undefined && open !== null && !(RUN_TAGS.has(tag) && tag === open.tag)) {
         settle(open.id, open.seq, drawn());
         open = null;
       }
@@ -312,6 +318,10 @@ export function createResumption(drawn: () => Mark): Resumption {
 
     drew(tag, meta) {
       const seq = meta.eventId === undefined ? null : eventSeq(meta.eventId);
+      // Nothing the log will not hold may move any of this: see the note in
+      // `verdict`. Such an update is invisible here, not a run boundary with a
+      // missing name.
+      if (meta.eventId === undefined) return;
       if (!RUN_TAGS.has(tag)) {
         settle(meta.eventId, seq, drawn());
         open = null;
