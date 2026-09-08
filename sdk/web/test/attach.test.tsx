@@ -17,7 +17,7 @@
 // `attach` twice by hand — the latter would pass against the bug.
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
-import { render } from "@solidjs/testing-library";
+import { cleanup, render } from "@solidjs/testing-library";
 
 import { App, Home, SessionRoute } from "../src/App.tsx";
 import type { SocketLike } from "../src/client.ts";
@@ -121,6 +121,11 @@ let socket: FakeSocket;
 const RealWebSocket = globalThis.WebSocket;
 
 beforeEach(() => {
+  // Unmount the previous test's page first. `App` reads the remembered
+  // instances at mount and writes them back as it connects, and two of them
+  // alive at once means the one being torn down saves its list over the store
+  // this one has just cleared — a browser has one page, and so does this.
+  cleanup();
   socket = new FakeSocket();
   (globalThis as { WebSocket: unknown }).WebSocket = function () {
     return socket;

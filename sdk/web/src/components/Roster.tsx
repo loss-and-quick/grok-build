@@ -2,6 +2,7 @@ import { A, useNavigate } from "@solidjs/router";
 import { For, Show, type JSX } from "solid-js";
 
 import type { Gateway } from "../gateway.ts";
+import { sessionHref } from "../instances.ts";
 import { ACTIVITY_ROLE, directoryLabel, sessionLabel } from "../roster.ts";
 import { cssVarName } from "../theme.ts";
 import type { RosterEntry } from "../wire.ts";
@@ -11,12 +12,29 @@ import type { RosterEntry } from "../wire.ts";
  *
  * This grouping is the product's whole claim, so it is the first thing on the
  * screen. A session's root is a parameter of `session/new`, never process
- * state; the leader does not rewrite it, and roster entries carry it. "An
- * instance" is therefore a directory with sessions in it, and switching
- * instances is switching sessions — which is why each row is a link, not a
- * button: a session is a place you can bookmark and come back to.
+ * state; the leader does not rewrite it, and roster entries carry it — which is
+ * why each row is a link and not a button: a session is a place you can
+ * bookmark and come back to.
+ *
+ * The whole of this list belongs to one socket. `x.ai/sessions/list` is one
+ * leader's answer and `roster.replace` wipes what came before it, so the
+ * machine it came from is named *above* this column rather than being a level
+ * inside it — see `instances.ts`.
  */
-export function Roster(props: { gateway: Gateway; current: string | undefined }): JSX.Element {
+export function Roster(props: {
+  gateway: Gateway;
+  current: string | undefined;
+  /**
+   * The instance these sessions belong to, written into every link.
+   *
+   * A session id is unique on a leader and not between leaders, so a link
+   * without it is only half an address. Old links stay valid — no `i` means
+   * "whichever instance this tab is on" — and new ones say which machine they
+   * were written on, which is what lets a page opened on the wrong one explain
+   * itself instead of showing an empty screen.
+   */
+  instance: string | null;
+}): JSX.Element {
   const groups = () => props.gateway.roster.groups();
   const navigate = useNavigate();
 
@@ -25,7 +43,7 @@ export function Roster(props: { gateway: Gateway; current: string | undefined })
   // that can be reloaded like any other.
   const createAndOpen = async (cwd: string): Promise<void> => {
     const sessionId = await props.gateway.createSession(cwd);
-    if (sessionId) navigate(`/s/${sessionId}`);
+    if (sessionId) navigate(sessionHref(sessionId, props.instance));
   };
 
   return (
@@ -56,7 +74,9 @@ export function Roster(props: { gateway: Gateway; current: string | undefined })
                 + session here
               </button>
               <For each={group.sessions}>
-                {(entry) => <Row entry={entry} current={props.current} />}
+                {(entry) => (
+                  <Row entry={entry} current={props.current} instance={props.instance} />
+                )}
               </For>
             </section>
           )}
@@ -66,7 +86,11 @@ export function Roster(props: { gateway: Gateway; current: string | undefined })
   );
 }
 
-function Row(props: { entry: RosterEntry; current: string | undefined }): JSX.Element {
+function Row(props: {
+  entry: RosterEntry;
+  current: string | undefined;
+  instance: string | null;
+}): JSX.Element {
   const meta = () =>
     [
       props.entry.isWorktree ? "worktree" : "",
@@ -80,7 +104,7 @@ function Row(props: { entry: RosterEntry; current: string | undefined }): JSX.El
     <A
       class="roster-row"
       classList={{ current: props.current === props.entry.sessionId }}
-      href={`/s/${props.entry.sessionId}`}
+      href={sessionHref(props.entry.sessionId, props.instance)}
     >
       <span
         class="roster-dot"

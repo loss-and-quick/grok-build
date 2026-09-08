@@ -190,6 +190,101 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+/* -- the instance menu ---------------------------------------------------- */
+
+/* In the flow under the line that opens it, not floating over the column. A
+ * floating menu would need positioning, a collision strategy and a scroll
+ * container to escape; this one pushes the roster down while it is open, which
+ * is honest about the fact that it is a switch of everything below it. */
+.instances {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+  padding: 0.5rem;
+  background: var(--grok-bg-light, canvas);
+  border: 1px solid var(--grok-prompt-border, canvastext);
+  border-radius: 6px;
+}
+
+.instance {
+  display: grid;
+  grid-template-columns: 0.6rem minmax(0, 1fr);
+  gap: 0.2rem 0.5rem;
+  align-items: baseline;
+}
+
+.instance.current {
+  border-left: 2px solid var(--grok-prompt-border-active, canvastext);
+  margin-left: -0.5rem;
+  padding-left: calc(0.5rem - 2px);
+}
+
+.instance-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+}
+
+.instance-name {
+  justify-self: start;
+  padding: 0 0.2rem;
+  background: none;
+  border-color: transparent;
+  color: var(--grok-text-primary, canvastext);
+}
+
+.instance-rename {
+  grid-column: 2;
+  padding: 0.1rem 0.2rem;
+}
+
+.instance-hosts,
+.instance-detail {
+  grid-column: 2;
+  font-size: 0.75rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+  overflow-wrap: anywhere;
+}
+
+.instance-actions {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.instance-actions button {
+  padding: 0.1rem 0.4rem;
+  font-size: 0.75rem;
+}
+
+.instance-default {
+  font-size: 0.75rem;
+  color: var(--grok-accent-skill, canvastext);
+}
+
+.instance-footer {
+  display: flex;
+  gap: 0.4rem;
+  border-top: 1px solid var(--grok-prompt-border, canvastext);
+  padding-top: 0.5rem;
+}
+
+/* A `/s/<id>` that names a session this instance does not have. It says which
+ * machine was searched, because "no such session" and "no such session *here*"
+ * are different facts and only the second one is true. */
+.missing-session {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.missing-session p {
+  margin: 0;
+}
+
 .roster-group {
   margin-bottom: 1rem;
 }
@@ -2352,6 +2447,11 @@ button.picker-row:focus-visible {
     width: min(22rem, 88vw);
     transform: translateX(-100%);
     transition: transform 120ms ease;
+    /* The drawer slides out from behind the button that opened it, and that
+     * button stays put because it is also the way back out. So the column
+     * starts below it — the same reserve `.main` makes — rather than opening
+     * with its first line under it. */
+    padding-top: 2.6rem;
   }
 
   .drawer-open .sidebar {

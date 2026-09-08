@@ -41,7 +41,19 @@ import { ToolResult } from "./ToolResult.tsx";
  * `agent_message_chunk` updates a single text node. That is the whole reason
  * this client is fine-grained rather than virtual-DOM.
  */
-export function Session(props: { gateway: Gateway; rail: boolean }): JSX.Element {
+export function Session(props: {
+  gateway: Gateway;
+  rail: boolean;
+  /**
+   * What to draw with nothing attached.
+   *
+   * Passed in because the reason there is nothing on screen is the route's to
+   * know, not this component's: "pick one from the left" and "that session is
+   * on another machine" are the same absence here and completely different
+   * things to be told.
+   */
+  fallback?: JSX.Element;
+}): JSX.Element {
   let composer: HTMLTextAreaElement | undefined;
   const tick = createTick();
   const menu = createCommandMenu(() => props.gateway.commands());
@@ -99,7 +111,7 @@ export function Session(props: { gateway: Gateway; rail: boolean }): JSX.Element
   return (
     <Show
       when={props.gateway.attached()}
-      fallback={<p class="empty">Pick a session on the left.</p>}
+      fallback={props.fallback ?? <p class="empty">Pick a session on the left.</p>}
     >
       {(current) => (
         // Three areas, one grid, and the composer is a child of it rather than
