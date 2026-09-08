@@ -1,63 +1,61 @@
 import { For, Match, Switch, type JSX } from "solid-js";
+import { Dynamic } from "solid-js/web";
 
-import { parseMarkdown, type MarkdownSpan } from "../markdown.ts";
+import { parseMarkdown, type MarkdownNode } from "../markdown.ts";
 
-function Spans(props: { spans: MarkdownSpan[] }): JSX.Element {
+/**
+ * One node, and its children.
+ *
+ * `Dynamic` takes the tag from the node, and the node's tag can only be one of
+ * `MARKDOWN_TAGS` — the parser drops the wrapper for anything else — so the
+ * element names this component can build are a list somebody reviewed, not
+ * whatever a plugin's text happened to name.
+ */
+function Node(props: { node: MarkdownNode }): JSX.Element {
   return (
-    <For each={props.spans}>
-      {(span) => (
-        <Switch>
-          <Match when={span.kind === "text" ? span : null}>{(s) => s().text}</Match>
-          <Match when={span.kind === "code" ? span : null}>
-            {(s) => <code class="grok-md-inline-code">{s().text}</code>}
-          </Match>
-          <Match when={span.kind === "strong" ? span : null}>
-            {(s) => <strong>{s().text}</strong>}
-          </Match>
-          <Match when={span.kind === "link" ? span : null}>
-            {(s) => (
-              // A link whose scheme was refused keeps its text and loses its
-              // href; `parseInline` already made that decision.
-              <a
-                class="grok-md-link"
-                href={s().href ?? undefined}
-                target={s().href ? "_blank" : undefined}
-                rel={s().href ? "noreferrer noopener" : undefined}
-              >
-                {s().text}
-              </a>
-            )}
-          </Match>
-        </Switch>
-      )}
-    </For>
+    <Switch>
+      <Match when={props.node.kind === "text" ? props.node : null}>{(n) => n().text}</Match>
+      <Match when={props.node.kind === "break"}>
+        <br />
+      </Match>
+      <Match when={props.node.kind === "inline_code" ? props.node : null}>
+        {(n) => <code class="grok-md-inline-code">{n().text}</code>}
+      </Match>
+      <Match when={props.node.kind === "code" ? props.node : null}>
+        {(n) => (
+          // The language is carried on the element rather than used to
+          // highlight: the terminal highlights with syntect against its own
+          // theme, and a second highlighter here would be a second opinion
+          // about the same code.
+          <pre class="grok-md-code" data-language={n().language ?? undefined}>
+            {n().text}
+          </pre>
+        )}
+      </Match>
+      <Match when={props.node.kind === "element" ? props.node : null}>
+        {(n) => (
+          <Dynamic
+            component={n().tag}
+            class={`grok-md-${n().tag}`}
+            // A link whose scheme was refused keeps its text and loses its
+            // href; `safeHref` already made that decision.
+            href={n().tag === "a" ? (n().href ?? undefined) : undefined}
+            target={n().tag === "a" && n().href ? "_blank" : undefined}
+            rel={n().tag === "a" && n().href ? "noreferrer noopener" : undefined}
+            start={n().start ?? undefined}
+          >
+            <Nodes nodes={n().children} />
+          </Dynamic>
+        )}
+      </Match>
+    </Switch>
   );
 }
 
+function Nodes(props: { nodes: MarkdownNode[] }): JSX.Element {
+  return <For each={props.nodes}>{(node) => <Node node={node} />}</For>;
+}
+
 export function Markdown(props: { text: string }): JSX.Element {
-  return (
-    <For each={parseMarkdown(props.text)}>
-      {(block) => (
-        <Switch>
-          <Match when={block.kind === "code" ? block : null}>
-            {(b) => <pre class="grok-md-code">{b().text}</pre>}
-          </Match>
-          <Match when={block.kind === "heading" ? block : null}>
-            {(b) => (
-              <div class={`grok-md-h grok-md-h${b().level}`}>
-                <Spans spans={b().spans} />
-              </div>
-            )}
-          </Match>
-          <Match when={block.kind === "paragraph" ? block : null}>
-            {(b) => (
-              <p class="grok-md-p">
-                <Spans spans={b().spans} />
-              </p>
-            )}
-          </Match>
-        </Switch>
-      )}
-    </For>
-  );
+  return <Nodes nodes={parseMarkdown(props.text)} />;
 }

@@ -5,7 +5,7 @@ import type { PanelTone } from "@grok-build/plugin/generated/PanelTone.ts";
 import type { PanelViewModel } from "@grok-build/plugin/generated/PanelViewModel.ts";
 
 import { Panel } from "../src/components/Panel.tsx";
-import { parseInline, parseMarkdown } from "../src/markdown.ts";
+import { MARKDOWN_TAGS, parseMarkdown, safeHref } from "../src/markdown.ts";
 import { PANEL_BLOCK_KINDS, TONE_ROLE, toneColor, type PanelAction } from "../src/panel.ts";
 import { BACKGROUND_ROLES, cssVarName } from "../src/theme.ts";
 
@@ -103,17 +103,17 @@ describe("plugin panels", () => {
 });
 
 describe("panel markdown", () => {
-  test("only http(s) links keep an href", () => {
+  test("only http(s) keeps an href", () => {
     // Panel text is plugin-authored and reaches the page as markup input;
     // `javascript:` in an href is script execution in this page's origin.
-    const spans = parseInline("[click](javascript:alert(1)) and [ok](https://example.com)");
-    const links = spans.filter((s) => s.kind === "link");
-    expect(links).toHaveLength(2);
-    expect(links[0]).toMatchObject({ text: "click", href: null });
-    expect(links[1]).toMatchObject({ text: "ok", href: "https://example.com" });
+    expect(safeHref("https://example.com")).toBe("https://example.com");
+    expect(safeHref("http://example.com")).toBe("http://example.com");
+    expect(safeHref("javascript:alert(1)")).toBeNull();
+    expect(safeHref("mailto:a@b.com")).toBeNull();
+    expect(safeHref(null)).toBeNull();
   });
 
-  test("a refused link renders as text with no href attribute", () => {
+  test("a refused scheme never reaches the DOM as a link", () => {
     const vm: PanelViewModel = {
       id: "p",
       title: "t",
@@ -122,8 +122,28 @@ describe("panel markdown", () => {
     const { container } = render(() =>
       Panel({ plugin: "p", viewModel: vm, onAction: () => {} }),
     );
-    const link = container.querySelector("a.grok-md-link") as HTMLAnchorElement;
-    expect(link.textContent).toBe("click");
+    // Two independent gates, and the parser's fires first: markdown-it's own
+    // `validateLink` refuses the scheme, so there is no anchor at all and the
+    // text survives as the plugin wrote it.
+    expect(container.querySelectorAll("a")).toHaveLength(0);
+    expect(container.textContent).toContain("javascript:alert(1)");
+  });
+
+  test("the second gate holds for a scheme the parser allows", () => {
+    // `mailto:` passes markdown-it and is refused here, so this is the case
+    // that proves `safeHref` is load-bearing rather than decorative. The
+    // terminal is laxer — `SchemeFilter::Standard` passes `mailto:` — because
+    // an unfiltered scheme there is inert text and here it is a navigation.
+    const vm: PanelViewModel = {
+      id: "p",
+      title: "t",
+      blocks: [{ kind: "markdown", text: "[write](mailto:a@b.com)" }],
+    };
+    const { container } = render(() =>
+      Panel({ plugin: "p", viewModel: vm, onAction: () => {} }),
+    );
+    const link = container.querySelector("a.grok-md-a") as HTMLAnchorElement;
+    expect(link.textContent).toBe("write");
     expect(link.getAttribute("href")).toBeNull();
   });
 
@@ -140,12 +160,86 @@ describe("panel markdown", () => {
     expect(container.textContent).toContain("<img");
   });
 
+  test("no element is built for a tag outside the reviewed list", () => {
+    // The renderer hands `Dynamic` a tag straight off a node, so the set of
+    // element names a plugin can reach has to be closed by the parser.
+    for (const node of parseMarkdown("# h\n\n- a\n\n> q\n\n| a |\n| - |\n| 1 |\n\n---\n")) {
+      if (node.kind === "element") expect(MARKDOWN_TAGS).toContain(node.tag);
+    }
+  });
+
   test("headings, fenced code and inline spans parse", () => {
-    const blocks = parseMarkdown("## Head\n\ntext `c` and **b**\n\n```\nfenced\n```");
-    expect(blocks.map((b) => b.kind)).toEqual(["heading", "paragraph", "code"]);
-    expect(blocks[0]).toMatchObject({ level: 2 });
-    expect(blocks[2]).toMatchObject({ text: "fenced" });
-    const spans = blocks[1]!.kind === "paragraph" ? blocks[1]!.spans : [];
-    expect(spans.map((s) => s.kind)).toEqual(["text", "code", "text", "strong"]);
+    const nodes = parseMarkdown("## Head\n\ntext `c` and **b**\n\n```rust\nfenced\n```");
+    expect(nodes.map((n) => (n.kind === "element" ? n.tag : n.kind))).toEqual([
+      "h2",
+      "p",
+      "code",
+    ]);
+    const fence = nodes[2];
+    expect(fence).toMatchObject({ kind: "code", text: "fenced\n", language: "rust" });
+  });
+
+  test("a single tilde is literal, as the terminal's parser makes it", () => {
+    // `markdown-core`'s `offset_events` demotes `~text~` to a literal tilde so
+    // model output like `~**10%**` is not struck through. The browser has to
+    // agree, and this is the case that separates markdown-it from `marked`,
+    // which strikes it.
+    const { container } = render(() =>
+      Panel({
+        plugin: "p",
+        viewModel: { id: "p", title: "t", blocks: [{ kind: "markdown", text: "a ~10%~ b" }] },
+        onAction: () => {},
+      }),
+    );
+    expect(container.querySelector("s")).toBeNull();
+    expect(container.textContent).toContain("~10%~");
+    expect(parseMarkdown("a ~~gone~~ b").length).toBeGreaterThan(0);
+  });
+
+  test("the constructs the panel protocol promises all render", () => {
+    // `PanelBlock::Markdown`'s own doc comment says a panel gets "headings,
+    // lists, tables, code — the same one used for model output". Every one of
+    // these was raw text before the parser was a real one.
+    const text =
+      "- one\n- two\n\n1. first\n\n> quoted\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n" +
+      "*it* **b** ~~s~~ and https://example.com\n\n---\n";
+    const { container } = render(() =>
+      Panel({
+        plugin: "p",
+        viewModel: { id: "p", title: "t", blocks: [{ kind: "markdown", text }] },
+        onAction: () => {},
+      }),
+    );
+    expect(container.querySelectorAll(".grok-md-ul .grok-md-li")).toHaveLength(2);
+    expect(container.querySelector(".grok-md-ol")).not.toBeNull();
+    expect(container.querySelector(".grok-md-blockquote")?.textContent).toContain("quoted");
+    expect(container.querySelectorAll(".grok-md-table .grok-md-th")).toHaveLength(2);
+    expect(container.querySelectorAll(".grok-md-table .grok-md-td")).toHaveLength(2);
+    expect(container.querySelector("em")?.textContent).toBe("it");
+    expect(container.querySelector("strong")?.textContent).toBe("b");
+    expect(container.querySelector("s")?.textContent).toBe("s");
+    expect(container.querySelector(".grok-md-hr")).not.toBeNull();
+    // A bare URL is a link in the terminal too: GFM autolinks it and the pager
+    // linkifies prose a second time.
+    const auto = container.querySelector("a.grok-md-a") as HTMLAnchorElement;
+    expect(auto.getAttribute("href")).toBe("https://example.com");
+  });
+
+  test("an image is text, not a fetch", () => {
+    // The pager's pretty mode renders `![alt](src)` as `alt (src)`, and no
+    // client here should reach out to a host a plugin named.
+    const { container } = render(() =>
+      Panel({
+        plugin: "p",
+        viewModel: {
+          id: "p",
+          title: "t",
+          blocks: [{ kind: "markdown", text: "![alt](https://e.example/i.png)" }],
+        },
+        onAction: () => {},
+      }),
+    );
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).toContain("alt (https://e.example/i.png)");
   });
 });

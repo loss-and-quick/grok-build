@@ -145,14 +145,14 @@ button:disabled {
 
 /* -- main ---------------------------------------------------------------- */
 
-/* Six rows, and only the transcript grows: folder-trust cards, then the
- * session's header, its permission modals, its panels, its transcript and its
- * composer. Counting matters here — an extra child with no row of its own gets
- * an implicit `auto` at the end, which slides the `1fr` onto the panels and
- * squeezes the transcript to nothing. */
+/* Seven rows, and only the transcript grows: folder-trust cards, then the
+ * session's header, its permission modals, its panels, its subagents, its
+ * transcript and its composer. Counting matters here — an extra child with no
+ * row of its own gets an implicit `auto` at the end, which slides the `1fr`
+ * onto the panels and squeezes the transcript to nothing. */
 .main {
   display: grid;
-  grid-template-rows: auto auto auto auto 1fr auto;
+  grid-template-rows: auto auto auto auto auto 1fr auto;
   min-height: 0;
   padding: 0.75rem;
   gap: 0.75rem;
@@ -384,14 +384,31 @@ button:disabled {
   gap: 0.4rem;
 }
 
-/* -- markdown inside a panel --------------------------------------------- */
+/* -- markdown inside a panel ---------------------------------------------
+ *
+ * Every colour below is an `md_*` or `link_fg` role, and the role each element
+ * takes is the one the pager gives it in `pager-render/src/theme/md_style.rs`:
+ * headings by level, `md_text` for body and emphasis, `md_code` on
+ * `md_code_bg` for code, `md_muted` for the list marker, the rule and the
+ * blockquote bar, `md_heading_h2` for a table's frame, `link_fg` underlined
+ * for a link. So a palette change moves both clients together, and nothing
+ * here picks a colour of its own.
+ */
 
 .grok-md-p {
   margin: 0 0 0.4rem;
+  color: var(--grok-md-text, canvastext);
 }
 
-.grok-md-h {
+.grok-md-h1,
+.grok-md-h2,
+.grok-md-h3,
+.grok-md-h4,
+.grok-md-h5,
+.grok-md-h6 {
   font-weight: bold;
+  font-size: 1rem;
+  margin: 0.4rem 0 0.2rem;
 }
 
 .grok-md-h1 {
@@ -430,8 +447,62 @@ button:disabled {
   overflow-x: auto;
 }
 
-.grok-md-link {
+.grok-md-a {
   color: var(--grok-link-fg, canvastext);
+  text-decoration: underline;
+}
+
+.grok-md-strong,
+.grok-md-em,
+.grok-md-s {
+  color: var(--grok-md-text, canvastext);
+}
+
+.grok-md-ul,
+.grok-md-ol {
+  margin: 0 0 0.4rem;
+  padding-left: 1.2rem;
+  color: var(--grok-md-text, canvastext);
+}
+
+.grok-md-li::marker {
+  color: var(--grok-md-muted, canvastext);
+}
+
+/* The pager draws a quoted block behind a bar in `md_muted`
+   (`blockquote_outer`); a left border is the same mark on a page. */
+.grok-md-blockquote {
+  margin: 0 0 0.4rem;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--grok-md-muted, canvastext);
+  color: var(--grok-md-text, canvastext);
+}
+
+.grok-md-hr {
+  border: none;
+  border-top: 1px solid var(--grok-md-muted, canvastext);
+  margin: 0.4rem 0;
+}
+
+/* `display: block` so a table wider than the panel scrolls inside it instead
+   of stretching the panel — the pager fits columns to its own width. */
+.grok-md-table {
+  border-collapse: collapse;
+  margin: 0 0 0.4rem;
+  color: var(--grok-md-text, canvastext);
+  display: block;
+  overflow-x: auto;
+}
+
+.grok-md-th,
+.grok-md-td {
+  border: 1px solid var(--grok-md-heading-h2, canvastext);
+  padding: 0.1rem 0.4rem;
+  text-align: left;
+}
+
+.grok-md-th {
+  font-weight: bold;
 }
 
 ::selection {
@@ -1074,4 +1145,212 @@ button.picker-row:focus-visible {
   background: var(--grok-bg-dark, canvas);
   border-radius: 4px;
   color: var(--grok-gray-bright, canvastext);
+}
+
+/* -- subagents ------------------------------------------------------------ */
+
+/* Its own dock above the transcript, capped the way the panel dock is: a wide
+ * fan-out must not starve the `1fr` transcript row to nothing. */
+.subagents {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 0.5rem;
+  border: 1px solid var(--grok-selection-border, canvastext);
+  border-radius: 6px;
+  background: var(--grok-bg-dark, canvas);
+}
+
+.subagents-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.subagents-title {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--grok-accent-system, canvastext);
+}
+
+.subagents-toggle {
+  padding: 0.1rem 0.4rem;
+  font-size: 0.8rem;
+  color: var(--grok-text-secondary, canvastext);
+  background: none;
+  border: 1px solid var(--grok-prompt-border, canvastext);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.subagent-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Rail, mark, body, stop. A grandchild is indented by its depth, so a nested
+ * fan-out reads as the tree it is rather than a flat list of strangers. */
+.subagent {
+  display: grid;
+  grid-template-columns: 0.75rem 1.25rem 1fr auto;
+  align-items: start;
+  column-gap: 0.25rem;
+  margin-left: calc(var(--depth, 0) * 1.25rem);
+}
+
+.subagent-rail {
+  color: var(--grok-accent-tool, canvastext);
+  line-height: 1.2;
+}
+
+.subagent-completed .subagent-rail,
+.subagent-completed .subagent-mark {
+  color: var(--grok-accent-success, canvastext);
+}
+
+.subagent-failed .subagent-rail,
+.subagent-failed .subagent-mark {
+  color: var(--grok-accent-error, canvastext);
+}
+
+.subagent-cancelled .subagent-rail,
+.subagent-cancelled .subagent-mark,
+.subagent-unknown .subagent-rail,
+.subagent-unknown .subagent-mark {
+  color: var(--grok-gray, canvastext);
+}
+
+.subagent-mark {
+  color: var(--grok-accent-running, canvastext);
+}
+
+.subagent-body {
+  min-width: 0;
+}
+
+.subagent-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem;
+}
+
+.subagent-name {
+  padding: 0;
+  font: inherit;
+  color: var(--grok-accent-assistant, canvastext);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.subagent-disclosure {
+  margin-right: 0.2rem;
+  color: var(--grok-gray-bright, canvastext);
+}
+
+.subagent-meta {
+  color: var(--grok-gray, canvastext);
+}
+
+.subagent-badge {
+  padding: 0 0.3rem;
+  font-size: 0.75rem;
+  color: var(--grok-accent-model, canvastext);
+  border: 1px solid var(--grok-selection-border, canvastext);
+  border-radius: 3px;
+}
+
+.subagent-status {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: var(--grok-text-secondary, canvastext);
+}
+
+.subagent-desc {
+  color: var(--grok-text-secondary, canvastext);
+  overflow-wrap: anywhere;
+}
+
+/* The live "what is it doing" line, in the running accent so the eye finds the
+ * moving part of the row first. */
+.subagent-activity {
+  color: var(--grok-running, canvastext);
+}
+
+.subagent-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  font-size: 0.8rem;
+  color: var(--grok-gray, canvastext);
+}
+
+.subagent-chip-name {
+  margin-right: 0.25rem;
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.subagent-chip-value {
+  color: var(--grok-text-secondary, canvastext);
+}
+
+.subagent-detail {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0 0.5rem;
+  margin: 0.3rem 0 0;
+  font-size: 0.8rem;
+  color: var(--grok-gray, canvastext);
+}
+
+.subagent-detail dd {
+  margin: 0;
+  color: var(--grok-text-secondary, canvastext);
+  overflow-wrap: anywhere;
+}
+
+.subagent-output,
+.subagent-error {
+  margin: 0.3rem 0 0;
+  padding: 0.4rem;
+  max-height: 12rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: var(--grok-bg-terminal, canvas);
+  color: var(--grok-text-secondary, canvastext);
+}
+
+.subagent-error {
+  color: var(--grok-accent-error, canvastext);
+}
+
+/* Armed is a different button, not a darker one: the first click changes what
+ * the second click will do, and the label has to say so. */
+.subagent-stop {
+  padding: 0.1rem 0.4rem;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--grok-text-secondary, canvastext);
+  background: none;
+  border: 1px solid var(--grok-prompt-border, canvastext);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.subagent-stop.armed {
+  color: var(--grok-accent-error, canvastext);
+  border-color: var(--grok-accent-error, canvastext);
+}
+
+.subagent-stop:disabled {
+  cursor: default;
+  opacity: var(--grok-muted-opacity, 1);
 }
