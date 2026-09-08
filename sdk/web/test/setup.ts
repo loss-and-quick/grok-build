@@ -14,25 +14,51 @@ import { plugin } from "bun";
 
 GlobalRegistrator.register();
 
-const SOLID_WEB_BROWSER = new URL("../node_modules/solid-js/web/dist/web.js", import.meta.url)
-  .pathname;
+/**
+ * Solid's browser builds, by specifier.
+ *
+ * **All three, not just `/web`.** Bun resolves with the `node` condition, and
+ * every one of these packages points that condition at a *server* build.
+ * Redirecting only the renderer left the reactive core on the server one, where
+ * `createEffect` and `onMount` are literally `function (fn) {}` — so components
+ * rendered once, statically, and nothing that depended on an effect or a
+ * lifecycle could be tested at all. It failed silently, which is the worst way
+ * for a test environment to be wrong.
+ *
+ * `web/dist/web.js` imports the core by bare specifier itself, which is why the
+ * rewrite has to reach inside `node_modules/solid-js` too: otherwise the
+ * renderer and the components would each hold a different copy of the runtime.
+ */
+const BROWSER_BUILD: Record<string, string> = {
+  "solid-js": new URL("../node_modules/solid-js/dist/solid.js", import.meta.url).pathname,
+  "solid-js/store": new URL("../node_modules/solid-js/store/dist/store.js", import.meta.url)
+    .pathname,
+  "solid-js/web": new URL("../node_modules/solid-js/web/dist/web.js", import.meta.url).pathname,
+};
 
 plugin({
   name: "solid",
   setup(build) {
-    // Bun resolves with the `node` condition, and Solid's `node` export is its
-    // *server* renderer, which throws "Client-only API called on the server
-    // side" the moment a component mounts. `onResolve` does not fire for bare
-    // specifiers in a runtime plugin, so the specifier is rewritten on load
-    // instead — in our own modules and in the two `@solidjs` packages that
-    // import it.
+    // `onResolve` does not fire for bare specifiers in a runtime plugin, so the
+    // specifier is rewritten on load instead. The optional group is greedy, so
+    // `solid-js/web` matches whole rather than as `solid-js` plus a suffix.
     const toBrowserBuild = (code: string): string =>
-      code.replaceAll(/(["`'])solid-js\/web\1/g, JSON.stringify(SOLID_WEB_BROWSER));
+      code.replaceAll(
+        /(["`'])(solid-js(?:\/(?:web|store))?)\1/g,
+        (whole, _quote, specifier: string) =>
+          JSON.stringify(BROWSER_BUILD[specifier] ?? whole),
+      );
 
-    build.onLoad({ filter: /node_modules\/@solidjs\/.*\.jsx?$/ }, async (args) => ({
+    const rewritten = (loader: "js" | "ts") => async (args: { path: string }) => ({
       contents: toBrowserBuild(await Bun.file(args.path).text()),
-      loader: "js",
-    }));
+      loader,
+    });
+
+    build.onLoad({ filter: /node_modules\/@solidjs\/.*\.jsx?$/ }, rewritten("js"));
+    build.onLoad({ filter: /node_modules\/solid-js\/.*\.js$/ }, rewritten("js"));
+    // Our own non-component modules import the store and the core directly, so
+    // they need the same redirect; they have no JSX, so they skip babel.
+    build.onLoad({ filter: /\.ts$/ }, rewritten("ts"));
 
     build.onLoad({ filter: /\.tsx$/ }, (args) => {
       const source = Bun.file(args.path).text();

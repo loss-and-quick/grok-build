@@ -406,6 +406,52 @@ fn stop_reason_wire(reason: acp::StopReason) -> String {
     .to_string()
 }
 
+/// The stderr notice for a session cwd whose repo-local config is gated off, or `None` when nothing is gated.
+///
+/// Headless declares `x.ai/folderTrust.interactive = false` (the `ClientMode::Headless` arm in `pager-bin`): it has
+/// no surface to draw the agent's trust card on and nobody to answer it, so an untrusted root resolves fail-closed
+/// and every repo-local MCP server, hook, plugin, LSP server and permission rule silently fails to load.
+/// This is the pager-side mirror of that verdict, the headless analogue of the TUI's `seed_trust_state`.
+///
+/// Interactivity is forced `false` rather than read from the TTYs: headless never prompts even on a terminal, so
+/// `TrustOutcome::Prompt` would report "nothing gated" for a folder that is in fact gated. With it false the
+/// `Untrusted` arm is exactly the silent-loss case (feature on, not store-trusted, recordable key, configs present).
+///
+/// `remote = None` matches the `RuntimeResolutionContext` headless builds its own agent config with, so this mirror
+/// and the in-process gate read the same feature verdict.
+fn untrusted_workspace_notice(cwd: &Path) -> Option<String> {
+    use xai_grok_workspace::folder_trust::{
+        TrustOutcome, decide, decide_inputs_with_interactive, feature_enabled, repo_config_kinds,
+    };
+    let key = xai_grok_workspace::trust::workspace_key(cwd);
+    let inputs = decide_inputs_with_interactive(cwd, &key, false);
+    match decide(feature_enabled(None), &inputs) {
+        TrustOutcome::Untrusted => Some(format_untrusted_notice(&key, &repo_config_kinds(cwd))),
+        TrustOutcome::Trusted | TrustOutcome::Prompt => None,
+    }
+}
+
+/// Render the notice. Split from the verdict so the wording is testable without a release-stamped build.
+///
+/// Stderr, never stdout: `--output-format json` / `streaming-json` put a machine-readable stream on stdout, and a
+/// line inserted there would break every parser reading it. The `warning:` prefix is what headless already writes
+/// for its other notices (`--include-partial-messages`, `--allow`/`--deny`).
+/// Deliberately not an exit code: the turn itself runs and succeeds, so failing it would break callers over a
+/// condition they may well intend.
+fn format_untrusted_notice(workspace: &Path, kinds: &[&str]) -> String {
+    let kinds = if kinds.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", kinds.join(", "))
+    };
+    format!(
+        "warning: folder not trusted: {}{kinds}\nwarning:   its project MCP servers, hooks, \
+         plugins, LSP and permission rules stay off; run grok with --trust from that folder to \
+         enable them",
+        workspace.display()
+    )
+}
+
 /// Configured MCP servers for the `init` line; all report `"connected"` (status is not resolved here).
 fn mcp_server_names(cwd: &Path) -> Vec<McpServer> {
     let servers =
@@ -1017,6 +1063,13 @@ pub async fn run_single_turn(
         session_id = %session_id.0,
         "headless: open_session complete"
     );
+
+    // Before the turn streams, so the notice precedes whatever output it explains.
+    // Keyed on `session_cwd` rather than the launch cwd: a `--worktree` or resumed session is rooted elsewhere,
+    // and that root is the one actually gated.
+    if let Some(notice) = untrusted_workspace_notice(&session_cwd) {
+        eprintln!("{notice}");
+    }
 
     let track_active = std::env::var("GROK_TRACK_HEADLESS").is_ok();
     if track_active {

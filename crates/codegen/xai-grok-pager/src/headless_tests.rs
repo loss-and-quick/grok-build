@@ -534,3 +534,30 @@ fn handler_answers_ext_method_instead_of_dropping() {
         serde_json::from_str(resp.0.get()).expect("typed wire reply");
     assert!(matches!(parsed, AskUserQuestionExtResponse::Cancelled));
 }
+
+/// The notice must name the gated root and the kinds that gated it: those are the whole point of breaking the
+/// silence, since headless cannot draw the trust card that would otherwise say so.
+#[test]
+fn untrusted_notice_names_the_workspace_and_the_gated_kinds() {
+    let notice = super::format_untrusted_notice(
+        std::path::Path::new("/w/repo"),
+        &["mcp", "hooks", "plugins"],
+    );
+    assert!(notice.contains("/w/repo"), "{notice}");
+    assert!(notice.contains("(mcp, hooks, plugins)"), "{notice}");
+    assert!(notice.contains("--trust"), "{notice}");
+}
+
+/// Every line carries the `warning:` prefix headless already uses, and none of it can reach stdout's
+/// machine-readable stream: a bare continuation line would still be a stderr line, but the prefix keeps a merged
+/// `2>&1` capture greppable the same way as the other headless warnings.
+#[test]
+fn untrusted_notice_prefixes_every_line() {
+    let notice = super::format_untrusted_notice(std::path::Path::new("/w/repo"), &[]);
+    assert!(
+        notice.lines().all(|l| l.starts_with("warning:")),
+        "{notice}"
+    );
+    // No kinds resolved: the parenthetical is dropped rather than rendered empty.
+    assert!(!notice.contains("()"), "{notice}");
+}
