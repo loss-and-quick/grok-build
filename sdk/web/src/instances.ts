@@ -228,11 +228,44 @@ export function rememberConnection(
 }
 
 /**
+ * Whether two `initialize` answers are one machine running two processes.
+ *
+ * `agentId` is the machine, persisted at `$GROK_HOME/agent_id`;
+ * `agentInstanceId` is minted fresh on every launch. So the same `agentId` with
+ * a different `agentInstanceId` is exactly one thing — the leader restarted
+ * under this page — and it is the only way to tell that apart from a socket
+ * that went away for ninety seconds and came back to the process it left.
+ *
+ * The difference is not cosmetic. Across a restart nothing that lived in the
+ * old process survives: a turn that was running is not resumed, prompts that
+ * were queued behind it may be gone, and the session ids on the roster have to
+ * be read again rather than assumed. What *does* survive is what was written to
+ * disk, which is why a reconnect cursor stays usable across one of these — see
+ * `resume.ts`.
+ *
+ * Both halves are required. Switching to a second machine also changes
+ * `agentInstanceId`, and calling that a restart would say the wrong thing about
+ * a session that is alive and simply elsewhere.
+ */
+export function relaunched(before: AgentIdentity, after: AgentIdentity): boolean {
+  return (
+    before.agentId !== undefined &&
+    before.agentId === after.agentId &&
+    before.agentInstanceId !== undefined &&
+    after.agentInstanceId !== undefined &&
+    before.agentInstanceId !== after.agentInstanceId
+  );
+}
+
+/**
  * Whether the leader behind an instance has restarted since it was last seen.
  *
- * `agentInstanceId` is new on every launch, so a mismatch means the sessions
- * remembered from the previous run may not exist any more. Not an error — a
- * reason not to trust `lastSessionId`.
+ * The remembered-record half of {@link relaunched}, and the machine check is
+ * the caller's rather than this function's: a record is *found* by `agentId`,
+ * so by the time one is in hand the two ids already agree. Comparing two
+ * `initialize` answers on one page has no such precondition — switching to
+ * another machine changes `agentInstanceId` too — which is why that one checks
+ * and this one does not.
  */
 export function restarted(instance: Instance, identity: AgentIdentity): boolean {
   return (

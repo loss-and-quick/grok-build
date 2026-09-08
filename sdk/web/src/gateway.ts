@@ -37,7 +37,14 @@ import {
   setModelRequest,
   type SessionModelState,
 } from "./models.ts";
-import { readIdentity, type AgentIdentity } from "./instances.ts";
+import { readIdentity, relaunched, type AgentIdentity } from "./instances.ts";
+import {
+  createResumption,
+  readUpdateMeta,
+  streamOf,
+  type Arrival,
+  type Resumption,
+} from "./resume.ts";
 import { createRoster, type Roster } from "./roster.ts";
 import { createSubagents, type Subagents } from "./subagents.ts";
 import { createTranscript, type Transcript } from "./transcript.ts";
@@ -69,6 +76,7 @@ import {
   type RosterListResponse,
   type SessionInfoResponse,
   type SessionNotification,
+  type SessionUpdate,
   type SettingRow,
   type SettingsListResponse,
   type SettingsUpdate,
@@ -160,6 +168,66 @@ export interface Attached {
    * itself on every attach rather than being carried between sessions.
    */
   subagents: Subagents;
+  /**
+   * How much of this session's event log this client has drawn.
+   *
+   * Per attach like the two above, and — unlike them — it is the one piece that
+   * a reconnect deliberately carries *over*: it is the whole reason the next
+   * `session/load` can ask for a tail instead of a transcript.
+   */
+  resumption: Resumption;
+}
+
+/**
+ * What a socket that has just died was showing.
+ *
+ * Held across exactly one `connect`, and consumed by the first {@link Attached}
+ * that follows it. It exists because `connect` has to drop the attached session
+ * — a transcript built from one leader's replay must never sit under another
+ * leader's roster — while a *reconnect* wants the opposite: the same transcript
+ * back, with only what was missed appended to it. The identity is what keeps
+ * those two apart, since a session id is unique on a leader and not between
+ * leaders.
+ */
+interface Carried {
+  sessionId: string;
+  attached: Attached;
+  /** The machine the transcript was built from. */
+  agentId: string;
+}
+
+/**
+ * The two things a reconnect can have to say, in the conversation itself.
+ *
+ * The status line is not where these go. It is overwritten by the next thing
+ * that happens, and both of these are statements about a *point in time* in the
+ * session — which is what the transcript is for, and it is also the one place a
+ * person scrolling back a minute later will still find them.
+ *
+ * Nothing is said about an ordinary reconnect. A drop that lost nothing is not
+ * an event in the conversation, and a banner on every one of them would train
+ * the reader to skip the two that matter.
+ */
+const RESTARTED_NOTICE =
+  "The agent restarted while this page was disconnected. Anything it was running at the time did not survive, and prompts that were waiting to run may not have either.";
+const REBUILT_NOTICE =
+  "This conversation was reloaded from the agent, because it could no longer say what had changed since this page last saw it. What is above is the agent's own copy.";
+
+/**
+ * The status line for a finished attach.
+ *
+ * The count is not decoration. "Only what was missed" is the claim this whole
+ * mechanism makes, and a number beside it is the one thing that makes the claim
+ * checkable by the person it was made to — a resume of a long conversation that
+ * reports six updates is doing what it says, and one that reports six hundred
+ * has fallen back and says so on the next line as well.
+ */
+function describeArrival(sessionId: string, resumed: boolean, arrived: Arrival): string {
+  if (!resumed) return `attached to ${sessionId}`;
+  if (arrived.rebuilt) return `resumed ${sessionId}; the conversation was reloaded`;
+  if (arrived.frames === 0) return `resumed ${sessionId}; nothing was missed`;
+  const plural = arrived.frames === 1 ? "" : "s";
+  return `resumed ${sessionId}; caught up on ${arrived.frames} update${plural}`;
 }
 
 const STORE_KEYS = {
@@ -200,6 +268,12 @@ export function createGateway() {
   // keys were read and the rest dropped, which is why this client could name
   // the address it was talking to and not the machine.
   const [identity, setIdentity] = createSignal<AgentIdentity>({});
+  // Whether the socket that has just come up reaches a *different process* on
+  // the machine the last one reached. False on a first connect and on a switch
+  // to another machine: neither of those is a leader that restarted under a
+  // page that was watching it. Recomputed on every `connect`, so it describes
+  // the current socket and not the history of the tab.
+  const [relaunch, setRelaunch] = createSignal(false);
   // Whether the agent says this account draws the dock. `null` until the wire
   // says something: the notification arrives when remote settings are refreshed,
   // which may not happen at all while this page is up, and "not told" is not
@@ -272,6 +346,30 @@ export function createGateway() {
    * client, so the pair goes stale on its own without being reset anywhere.
    */
   let attachedOn: { client: GatewayClient; sessionId: string } | null = null;
+  /** See {@link Carried}. Written by `connect`, read once by `attach`. */
+  let carried: Carried | null = null;
+
+  /**
+   * Take the carry-over, if it is this session on this machine.
+   *
+   * Consumed either way, and that is deliberate: it describes what the socket
+   * that just closed was showing, and one attach later it describes nothing.
+   * Leaving it would let a switch to another session and back reuse a
+   * transcript whose cursor has been overtaken by everything that happened in
+   * between.
+   *
+   * The machine check is `agentId`, not `agentInstanceId`: a leader that has
+   * restarted is still the same machine with the same session files, so a
+   * cursor written against them still resolves. What a restart invalidates is
+   * the running state, not the log — which is why it changes what the person is
+   * told (see {@link RESTARTED_NOTICE}) and not whether the cursor is sent.
+   */
+  const takeCarried = (sessionId: string): Attached | null => {
+    const held = carried;
+    carried = null;
+    if (!held || held.sessionId !== sessionId) return null;
+    return held.agentId === identity().agentId ? held.attached : null;
+  };
 
   const say = (text: string): void => {
     setStatus(text);
@@ -413,27 +511,61 @@ export function createGateway() {
         current.subagents.applyChild(notification.sessionId, update);
         return;
       }
-      if (update.sessionUpdate === "available_commands_update") {
-        const advertised = (update as Record<string, unknown>)["availableCommands"];
-        setCommands(Array.isArray(advertised) ? (advertised as AvailableCommand[]) : []);
-        return;
-      }
-      if (update.sessionUpdate === "model_changed") {
-        // Broadcast to every subscriber, so a terminal on the same leader — or
-        // a second tab — moves this picker too.
-        const state = models();
-        if (state) setModels(applyModelChanged(state, update as Record<string, unknown>));
-        return;
-      }
-      if (update.sessionUpdate === "interaction_resolved") {
-        const id = String((update as Record<string, unknown>)["tool_call_id"] ?? "");
-        const pending = permissions.find((p) => p.toolCallId === id);
-        pending?.answer({ outcome: { outcome: "cancelled" } });
-        return;
-      }
-      current.subagents.apply(notification.sessionId, update);
-      current.transcript.apply(update);
+      // Every frame for the attached session goes through the gate, not only
+      // the ones the transcript draws. The cursor names a position in one file
+      // that all of them are written to, so skipping a tag here would leave the
+      // cursor behind the log — and the agent refuses a cursor whose tail
+      // contains a line it cannot send as live, which turns "behind" into a
+      // full replay (`session/storage/replay.rs:508-518`).
+      const tag = update.sessionUpdate;
+      const meta = readUpdateMeta(notification._meta);
+      const verdict = current.resumption.verdict(streamOf(method), tag, meta);
+      // Already drawn. The leader drops most of these itself — it holds live
+      // notifications back while a load is in flight and discards the ones the
+      // replay had already covered (`leader/server.rs:2062-2078`) — and this is
+      // the half that does not depend on which leader answered.
+      if (verdict === "duplicate") return;
+      // The cursor did not resolve and the whole transcript is arriving behind
+      // this frame. Everything on screen is about to be re-sent, so it goes
+      // now, before the first line of the new copy is folded in.
+      if (verdict === "rebuild") current.transcript.reset();
+      fold(current, notification.sessionId, update);
+      // After the fold, never instead of it: what the cursor is allowed to name
+      // depends on how many entries the transcript holds at that moment.
+      current.resumption.drew(tag, meta);
     }
+  };
+
+  /**
+   * Put one update where it belongs.
+   *
+   * Split out of the dispatch above only so that every path through it is
+   * followed by the same bookkeeping. Three tags are not transcript at all —
+   * the slash catalog, the model, and a question another client answered — and
+   * each used to return early, which would now mean returning past the line
+   * that records what was drawn.
+   */
+  const fold = (current: Attached, sessionId: string, update: SessionUpdate): void => {
+    if (update.sessionUpdate === "available_commands_update") {
+      const advertised = (update as Record<string, unknown>)["availableCommands"];
+      setCommands(Array.isArray(advertised) ? (advertised as AvailableCommand[]) : []);
+      return;
+    }
+    if (update.sessionUpdate === "model_changed") {
+      // Broadcast to every subscriber, so a terminal on the same leader — or a
+      // second tab — moves this picker too.
+      const state = models();
+      if (state) setModels(applyModelChanged(state, update as Record<string, unknown>));
+      return;
+    }
+    if (update.sessionUpdate === "interaction_resolved") {
+      const id = String((update as Record<string, unknown>)["tool_call_id"] ?? "");
+      const pending = permissions.find((p) => p.toolCallId === id);
+      pending?.answer({ outcome: { outcome: "cancelled" } });
+      return;
+    }
+    current.subagents.apply(sessionId, update);
+    current.transcript.apply(update);
   };
 
   const connect = async (base: string, secret: string): Promise<void> => {
@@ -450,6 +582,19 @@ export function createGateway() {
     // Re-attaching after a *reconnect* is not lost by this: the caller that
     // wants it reads the session id before it calls here (`Link.resume`), which
     // is also what lets it tell "the link came back" from "we moved".
+    //
+    // What *is* kept is put aside rather than left in place, which is the whole
+    // of the difference. The transcript on screen belongs to the dead socket, so
+    // it may not be drawn under the next one's roster — but if the next socket
+    // turns out to reach the same machine and the same session, it is also the
+    // only copy of the conversation that exists outside the leader, and
+    // throwing it away is what made every reconnect a full replay.
+    const leaving = attached();
+    const left = identity();
+    carried =
+      leaving && left.agentId
+        ? { sessionId: leaving.entry.sessionId, attached: leaving, agentId: left.agentId }
+        : null;
     setAttached(null);
     attachedOn = null;
     setModels(null);
@@ -494,7 +639,15 @@ export function createGateway() {
       })) as InitializeResponse;
       const cwd = initialized._meta?.currentWorkingDirectory;
       if (typeof cwd === "string" && cwd) setAgentCwd(cwd);
-      setIdentity(readIdentity(initialized._meta));
+      const answered = readIdentity(initialized._meta);
+      // Read before the identity is replaced, because it is a comparison
+      // between two answers and the old one is about to be gone. This is the
+      // only thing on the wire that separates "the socket was away for a
+      // moment" from "the process this page was talking to is not running any
+      // more" — a distinction the retry ladder cannot make, because both look
+      // exactly like a socket that closed and opened again.
+      setRelaunch(relaunched(left, answered));
+      setIdentity(answered);
       const seed = initialized._meta?.availableCommands;
       setSeedCommands(Array.isArray(seed) ? seed : []);
       setCommands(seedCommands());
@@ -846,6 +999,20 @@ export function createGateway() {
     return response.exists === true;
   };
 
+  /** A session nothing is known about yet. */
+  const freshAttachment = (entry: RosterEntry): Attached => {
+    const transcript = createTranscript();
+    return {
+      entry,
+      transcript,
+      subagents: createSubagents(entry.sessionId),
+      // The transcript's own position, not a second count kept beside it: the
+      // mark has to be what the transcript will be rewound to, and two numbers
+      // that are supposed to be equal are a thing that can stop being equal.
+      resumption: createResumption(() => transcript.mark()),
+    };
+  };
+
   const attach = async (entry: RosterEntry): Promise<void> => {
     if (!client) return;
     // Already on this session, on this socket: asking again would replay the
@@ -859,8 +1026,32 @@ export function createGateway() {
     // agent now, while there is still a socket to say so on. Nothing else will
     // ever tell it: the workspace has no hook on a client going away.
     fileSearch.release();
-    const subagents = createSubagents(entry.sessionId);
-    setAttached({ entry, transcript: createTranscript(), subagents });
+    // The same session on the same machine, on the socket that replaced the one
+    // it was on: keep the conversation and ask only for what happened while it
+    // was gone. Anything else — another session, another machine, a first
+    // attach — starts empty, which is what every attach used to do.
+    const held = takeCarried(entry.sessionId);
+    // A carry-over with nothing addressable in it is not a resume. It happens
+    // for a session whose only event so far is half of one message: the agent
+    // cannot be asked to continue from a chunk it never wrote as a line, so
+    // there is nothing to keep and starting empty is the honest form of it.
+    const resumed = held && held.resumption.cursor() !== null ? held : null;
+    // The roster row is taken fresh even when everything else is kept: a title,
+    // an activity and even a cwd can have moved while the link was down, and
+    // the row is the leader's current answer about all three.
+    const current: Attached = resumed ? { ...resumed, entry } : freshAttachment(entry);
+    const subagents = current.subagents;
+    // Sent only on a resume. On a first attach there is nothing to be after,
+    // and the agent reads an absent cursor and a stale one the same way — a
+    // full replay — so this is about honesty rather than about the outcome.
+    const cursor = resumed ? current.resumption.cursor() : null;
+    // The cursor is behind the screen by whatever was still streaming when the
+    // link died, and the tail will send that back whole. Bringing the screen
+    // down to the cursor is what keeps the two from being drawn on top of each
+    // other; it can only remove what is about to be replaced.
+    if (resumed) current.transcript.rewind(current.resumption.mark());
+    current.resumption.loading(cursor);
+    setAttached(current);
     // Back to the pre-session builtins until this session advertises its own.
     // `session/load` triggers that advertisement, so the gap is one round-trip
     // wide — and during it the menu offers only what every session has.
@@ -872,7 +1063,7 @@ export function createGateway() {
     // reads as this session's own.
     setModels(null);
     setSessionInfo(null);
-    say(`loading ${entry.sessionId}…`);
+    say(cursor === null ? `loading ${entry.sessionId}…` : `resuming ${entry.sessionId}…`);
     try {
       // `cwd` comes straight off the roster row. That it is there at all is the
       // reason a second client can attach to a session it did not create.
@@ -880,16 +1071,30 @@ export function createGateway() {
         sessionId: entry.sessionId,
         cwd: entry.cwd,
         mcpServers: [],
+        // Omitted rather than sent as null on a first attach. The agent reads
+        // the key's absence and an unresolvable value identically, but the two
+        // are different statements and one of them is a lie.
+        ...(cursor === null ? {} : { _meta: { cursor } }),
       });
       // This reply used to be discarded whole, which is the only reason the
       // model picker looked like it needed a wire change: `models` is on it.
       setModels(readModelState(loaded));
-      say(`attached to ${entry.sessionId}`);
+      // Everything the load was going to send has been sent: the agent drains
+      // its replay before it answers (`agent/mvp_agent/replay.rs:243-249`), so
+      // by here the count is final and so is which of the two answers it was.
+      const arrived = current.resumption.loaded();
+      if (resumed && relaunch()) current.transcript.notice(RESTARTED_NOTICE);
+      if (arrived.rebuilt) current.transcript.notice(REBUILT_NOTICE);
+      say(describeArrival(entry.sessionId, cursor !== null, arrived));
     } catch (e) {
       // Nothing was replayed, so nothing is on this socket to be replayed
       // twice: release the claim rather than leaving the session unattachable
       // until the link is rebuilt.
       if (attachedOn?.client === asking) attachedOn = null;
+      // Close the window the request opened. A load that failed still leaves
+      // this expecting the replay it asked for, and an expectation left open is
+      // a licence for a stray replayed frame to wipe the transcript.
+      current.resumption.loaded();
       say(`load failed: ${String(e)}`);
       return;
     }
@@ -1019,9 +1224,10 @@ export function createGateway() {
   const prompt = async (text: string): Promise<void> => {
     const current = attached();
     if (!text || !client || !current) return;
+    const driving = client;
     say("running…");
     try {
-      const response = (await client.request("session/prompt", {
+      const response = (await driving.request("session/prompt", {
         sessionId: current.entry.sessionId,
         prompt: [{ type: "text", text }],
         // The agent echoes `promptId` on every notification it emits for this
@@ -1036,6 +1242,17 @@ export function createGateway() {
       // either way, and the composer must not wait on a number.
       void refreshSessionInfo();
     } catch (e) {
+      // A socket that closed is not a turn that failed. `session/prompt` is
+      // rejected along with every other request in flight when the link goes
+      // (`failAllPending`, `client.ts`), but the agent is not listening to that
+      // socket to decide whether to keep working — it goes on running the turn,
+      // writes every delta to the session's log, and hands them over on the
+      // next attach. Calling that a failure is the one lie this page can tell
+      // that a person cannot check.
+      if (driving.linkState() === "closed") {
+        say("connection lost; the agent is still running this turn");
+        return;
+      }
       say(`prompt failed: ${String(e)}`);
     }
   };
