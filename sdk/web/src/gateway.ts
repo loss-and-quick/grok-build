@@ -214,6 +214,25 @@ export function createGateway() {
   const roster: Roster = createRoster();
 
   let client: GatewayClient | null = null;
+  /**
+   * The socket and session the last {@link attach} was made on.
+   *
+   * `session/load` is not idempotent from the client's side: it makes the agent
+   * replay the whole transcript **to the asking client** (`replay_session_updates`,
+   * `xai-grok-shell/src/agent/mvp_agent/replay.rs:190`, routed to one client by
+   * `_meta["x.ai/leaderClientId"]` at `leader/server.rs:2135-2176`). So a second
+   * load on one socket lands a second copy of every frame, and because the
+   * replays interleave with the *later* attach's fresh transcript, the result is
+   * every turn twice — the user's included.
+   *
+   * It is compared by socket identity, not by session id alone, because
+   * re-attaching after a reconnect is *required*: ACP v1 replays nothing to a
+   * client that was not there, so the new socket has to ask again. The pair says
+   * exactly what the leader's own books say — a subscription is `(client,
+   * session)` (`leader/server.rs:2000-2012`) — and a `connect` builds a new
+   * client, so the pair goes stale on its own without being reset anywhere.
+   */
+  let attachedOn: { client: GatewayClient; sessionId: string } | null = null;
 
   const say = (text: string): void => {
     setStatus(text);
@@ -688,6 +707,13 @@ export function createGateway() {
 
   const attach = async (entry: RosterEntry): Promise<void> => {
     if (!client) return;
+    // Already on this session, on this socket: asking again would replay the
+    // transcript a second time into the transcript the first ask is still
+    // filling. See {@link attachedOn}. Set before the first `await`, so two
+    // callers in one turn cannot both get past it.
+    if (attachedOn?.client === client && attachedOn.sessionId === entry.sessionId) return;
+    const asking = client;
+    attachedOn = { client: asking, sessionId: entry.sessionId };
     const subagents = createSubagents(entry.sessionId);
     setAttached({ entry, transcript: createTranscript(), subagents });
     // Back to the pre-session builtins until this session advertises its own.
@@ -705,6 +731,10 @@ export function createGateway() {
       });
       say(`attached to ${entry.sessionId}`);
     } catch (e) {
+      // Nothing was replayed, so nothing is on this socket to be replayed
+      // twice: release the claim rather than leaving the session unattachable
+      // until the link is rebuilt.
+      if (attachedOn?.client === asking) attachedOn = null;
       say(`load failed: ${String(e)}`);
       return;
     }

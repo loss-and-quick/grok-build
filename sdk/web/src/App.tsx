@@ -100,6 +100,12 @@ export function createLink(
    * second copy appended. What a person loses is their scroll position; what
    * they would lose by not re-attaching is every message the session produced
    * while the link was down, with nothing on screen to say they were missing.
+   *
+   * It runs after *every* successful connect, including the first, so on a page
+   * opened at `/s/<id>` it asks for a session {@link SessionRoute} has already
+   * asked for. That is a no-op because `attach` refuses a session it is already
+   * on *on this socket*; a plain "is it attached" test would refuse the
+   * reconnect this exists for.
    */
   const resume = async (): Promise<void> => {
     const id = target.attached()?.entry.sessionId;
@@ -496,14 +502,25 @@ export function Home(): JSX.Element {
  * The attach is driven by the route, not by the click, so arriving by
  * bookmark, reload or back-button behaves exactly like arriving by click. It
  * waits for the roster because `session/load` needs the row's `cwd`, which
- * only the roster carries.
+ * only the roster carries — and it re-runs on every roster upsert for this
+ * session, because the row is a store entry and the effect tracks it.
+ *
+ * **Whether that ask is a no-op is not decided here.** This route and
+ * {@link Link.resume} are two independent reasons to attach, and they overlap
+ * exactly once — a page opened straight at `/s/<id>`, where the roster arrives
+ * inside `connect` and fires this effect before `resume` runs. Both then asked,
+ * and two `session/load`s on one socket are two replays of the same transcript
+ * into one view: every turn on screen twice. Guarding it here as well would put
+ * the same rule in two places and let them disagree, which is how it went wrong
+ * the first time — a guard reading `attached()` cannot tell "already on this
+ * session" from "was on this session, on a socket that has since died". The
+ * gateway owns it, keyed on the socket as well as the session.
  */
 export function SessionRoute(): JSX.Element {
   const params = useParams<{ sessionId: string }>();
   createEffect(
     on([() => params.sessionId, () => gateway.roster.get(params.sessionId)], ([id, entry]) => {
       if (!id || !entry) return;
-      if (gateway.attached()?.entry.sessionId === id) return;
       void gateway.attach(entry);
     }),
   );
