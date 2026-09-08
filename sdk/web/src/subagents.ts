@@ -508,9 +508,12 @@ export function dockSubagents(rows: readonly Subagent[]): Subagent[] {
  * yet has no elapsed time on the wire at all, and a spawn without a model said
  * nothing about one.
  */
-export function subagentRailRow(row: Subagent, nowMs: number): RailRow {
+export function subagentRailRow(row: Subagent, sinceFrameMs: number): RailRow {
   const named = subagentLabel(row);
-  const ms = elapsedMs(row, nowMs);
+  // `performance.now()`, not a wall clock: `elapsedMs` adds the wait since the
+  // last progress frame to the agent's own measurement, and that wait was
+  // timed on the monotonic clock.
+  const ms = elapsedMs(row, sinceFrameMs);
   const meta = [row.model, ms === undefined ? undefined : fmtElapsed(ms / 1000)]
     .filter((part): part is string => part !== undefined)
     .join(" ");

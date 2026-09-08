@@ -331,6 +331,34 @@ describe("the dock's own sections in the rail", () => {
     expect(row).toContain("grok-4.5");
   });
 
+  test("a child's elapsed time is read on the clock it was measured on", () => {
+    // This row once read `grok-4.5 29815187m13s`. The fan-out measures the wait
+    // since the last progress frame with `performance.now()` and adds it to the
+    // agent's own `duration_ms`; the rail was handing it a wall clock instead,
+    // and the two differ by the epoch. Any such mix lands in the tens of
+    // millions of minutes, so the guard is an upper bound rather than a value.
+    const { container } = mount([], ({ subagents }) => {
+      subagents.apply(ENTRY.sessionId, spawn("sa-1", { model: "grok-4.5" }));
+      subagents.apply(ENTRY.sessionId, {
+        sessionUpdate: "subagent_progress",
+        subagent_id: "sa-1",
+        parent_session_id: ENTRY.sessionId,
+        child_session_id: "child-sa-1",
+        duration_ms: 134_000,
+        turn_count: 1,
+        tool_call_count: 1,
+        tokens_used: 1,
+        context_window_tokens: 2,
+        context_usage_pct: 1,
+        tools_used: [],
+        error_count: 0,
+      } as unknown as SessionUpdate);
+    });
+    const meta = container.querySelector(".rail-row-meta")!.textContent!;
+    expect(meta).toMatch(/^grok-4\.5 \d+m\d\ds$/);
+    expect(Number(/(\d+)m/.exec(meta)![1])).toBeLessThan(10);
+  });
+
   test("the count on the header is the number of rows, not the number shown", () => {
     const { container } = mount([], ({ tasks }) => {
       for (const id of ["a", "b", "c", "d"]) tasks.apply(bg(id), false);

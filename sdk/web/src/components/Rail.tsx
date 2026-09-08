@@ -124,7 +124,22 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
    * the reason the pager animates everything off a single frame counter.
    */
   const tick = createTick();
-  const now = (): number => {
+
+  /**
+   * Two clocks, because the two things being timed were measured on two.
+   *
+   * A child's elapsed time is the agent's own `duration_ms` plus the wait since
+   * that frame arrived, and that wait is measured with `performance.now()`
+   * (`subagents.ts`). A background task's is the difference between now and a
+   * start time the agent stated as an epoch. Reading either against the other's
+   * clock produces a number in the tens of millions of minutes, which is what
+   * it did.
+   */
+  const sinceFrame = (): number => {
+    void tick();
+    return performance.now();
+  };
+  const wallNow = (): number => {
     void tick();
     return Date.now();
   };
@@ -161,7 +176,7 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
 
   /** Running children, as the dock lists them. */
   const subagentRows = (): RailRow[] => {
-    const at = now();
+    const at = sinceFrame();
     const current = props.gateway.attached();
     if (!current) return [];
     return dockSubagents(current.subagents.rows).map((row) => subagentRailRow(row, at));
@@ -169,14 +184,14 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
 
   /** Running background commands that are not monitors. */
   const taskRows = (): RailRow[] => {
-    const at = now();
+    const at = wallNow();
     const held = work();
     return held ? taskRailRows(held.tasks.tasks, at) : [];
   };
 
   /** Running monitors, then scheduled loops. */
   const watcherRows = (): RailRow[] => {
-    const at = now();
+    const at = wallNow();
     const held = work();
     return held ? watcherRailRows(held.tasks.tasks, held.tasks.loops, at) : [];
   };
