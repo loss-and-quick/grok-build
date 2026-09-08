@@ -7,6 +7,7 @@
 //! At startup, [`Theme::current()`] quantizes every color to the terminal's detected capability level via [`Theme::quantized`].
 //! Runtime-generated colors (syntax highlighting, blending) are also quantized via [`color_support::quantize`].
 
+pub mod animation;
 pub mod cache;
 pub mod color_support;
 pub mod env_appearance;
@@ -21,8 +22,11 @@ mod terminal_default;
 pub mod tokens;
 pub mod tokyonight;
 
+pub use animation::{
+    ANIMATION, AnimationConstants, pulse_brightness, waiting_brightness, wave_brightness,
+};
 pub use color_support::quantize;
-pub use tokyonight::{Theme, pulse_brightness, wave_brightness};
+pub use tokyonight::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThemeKind {

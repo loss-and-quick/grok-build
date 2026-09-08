@@ -271,30 +271,3 @@ impl Theme {
         Style::new().add_modifier(Modifier::BOLD)
     }
 }
-
-/// Compute animated brightness for a wave traveling along the accent line.
-///
-/// Each row has a fixed phase offset (`wave_rows` rows per full cycle), so the wave moves smoothly regardless of block height.
-/// `tick` is the frame counter, `speed` is radians per tick (e.g. 0.15); returns brightness in [0.0, 1.0].
-pub fn wave_brightness(tick: u64, row: u16, wave_rows: u16, speed: f32) -> f32 {
-    use std::f32::consts::PI;
-
-    let rows_per_wave = wave_rows.max(1) as f32;
-    let phase = (row as f32 / rows_per_wave) * 2.0 * PI;
-
-    let t = tick as f32 * speed;
-
-    // sin²(t + phase) gives smooth 0-1 oscillation
-    let sin_val = (t + phase).sin();
-    sin_val * sin_val
-}
-
-/// Compute a pulsing brightness in [0.0, 1.0] for a single element (icon, indicator); everything sharing the same tick pulses in unison.
-///
-/// `tick` is the frame counter, `speed` is radians per tick, and `sin²` has period π, so one full pulse takes `π / (speed * fps)` seconds.
-/// At 30fps, `speed = 0.08` gives about a 1.3s cycle; for a 2.5s cycle pass about `0.042`.
-pub fn pulse_brightness(tick: u64, speed: f32) -> f32 {
-    let t = tick as f32 * speed;
-    let sin_val = t.sin();
-    sin_val * sin_val
-}

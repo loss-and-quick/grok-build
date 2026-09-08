@@ -14,11 +14,7 @@ use crate::scrollback::block::{BlockContent, RenderBlock};
 use crate::scrollback::entry::ScrollbackEntry;
 use crate::scrollback::layout::HorizontalLayout;
 use crate::scrollback::types::{AccentStyle, BlockBackground, DisplayMode, Selectable};
-use crate::theme::{self, Theme};
-
-/// Animation speed for running blocks (radians per tick).
-/// ~0.15 gives a smooth wave that travels the block in ~40 ticks.
-const WAVE_SPEED: f32 = 0.15;
+use crate::theme::{self, ANIMATION, Theme};
 
 pub struct EntryRenderer<'a> {
     entry: &'a ScrollbackEntry,
@@ -244,7 +240,7 @@ impl<'a> EntryRenderer<'a> {
                     self.tick,
                     self.skip_rows,
                     self.appearance().animation.wave_rows,
-                    WAVE_SPEED,
+                    ANIMATION.wave_speed,
                 );
                 blend_color(bg, self.theme.accent_tool, brightness)
                     .unwrap_or(self.theme.accent_tool)
@@ -732,8 +728,12 @@ impl Renderable for EntryRenderer<'_> {
 
                 for row in 0..accent_area.height {
                     let y = accent_area.y + row;
-                    let brightness =
-                        theme::wave_brightness(self.tick, skip_rows + row, wave_rows, WAVE_SPEED);
+                    let brightness = theme::wave_brightness(
+                        self.tick,
+                        skip_rows + row,
+                        wave_rows,
+                        ANIMATION.wave_speed,
+                    );
                     let animated_color = blend_color(bg, color, brightness).unwrap_or(color);
                     let style = self.accent_paint_style(animated_color);
                     buf.set_string_safe(accent_area.x, y, crate::glyphs::accent_bar(), style);
@@ -876,7 +876,8 @@ impl Renderable for EntryRenderer<'_> {
                     // Animated bullet: wave effect synced with accent
                     let bg = bg_color.unwrap_or(self.fallback_bg());
                     let wave_rows = self.appearance().animation.wave_rows;
-                    let brightness = theme::wave_brightness(self.tick, 0, wave_rows, WAVE_SPEED);
+                    let brightness =
+                        theme::wave_brightness(self.tick, 0, wave_rows, ANIMATION.wave_speed);
                     let animated_color =
                         blend_color(bg, style.color, brightness).unwrap_or(style.color);
                     if let Some(cell) = buf.cell_mut((content_area.x, bullet_y)) {
@@ -1784,11 +1785,11 @@ mod tests {
 
     /// What a running block's rail actually looks like, frame by frame.
     ///
-    /// `WAVE_SPEED` and the default `wave_rows` are the whole animation: one is
-    /// how fast the wave advances per tick, the other is how far its phase
-    /// travels per row. Sampling the curve at both pins the rendered result, so
-    /// a change to either shows up as a failing table rather than as an
-    /// animation that quietly runs at a different speed.
+    /// `ANIMATION.wave_speed` and the default `wave_rows` are the whole
+    /// animation: one is how fast the wave advances per tick, the other is how
+    /// far its phase travels per row. Sampling the curve at both pins the
+    /// rendered result, so a change to either shows up as a failing table
+    /// rather than as an animation that quietly runs at a different speed.
     #[test]
     fn the_running_rail_wave_is_pinned() {
         let wave_rows = crate::appearance::AnimationConfig::default().wave_rows;
@@ -1803,10 +1804,11 @@ mod tests {
         ]
         .into_iter()
         .map(|(tick, row)| {
-            (theme::wave_brightness(tick, row, wave_rows, WAVE_SPEED) * 10_000.0).round() as u32
+            (theme::wave_brightness(tick, row, wave_rows, ANIMATION.wave_speed) * 10_000.0).round()
+                as u32
         })
         .collect();
-        assert_eq!(WAVE_SPEED, 0.15);
+        assert_eq!(ANIMATION.wave_speed, 0.15);
         assert_eq!(wave_rows, 32);
         assert_eq!(samples, vec![0, 10_000, 0, 223, 9_953, 1_099, 1_762]);
     }

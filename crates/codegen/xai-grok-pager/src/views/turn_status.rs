@@ -36,24 +36,18 @@ pub(crate) const SPINNER_DIVISOR: u64 = 4;
 /// Its `○ ◎ ◉ ◎` cycle therefore runs at roughly half the speed (~1.07s per loop).
 pub(crate) const MONITOR_PULSE_DIVISOR: u64 = 8;
 
-/// Pulse speed for every "waiting on you" diamond.
-/// The drain-blocked, pending-user-input, and plan-approval statuses all share this cadence.
-/// `pulse_brightness` returns `sin²(tick*speed)`, which has period π, so at ~30fps this is ~1.3s per cycle (`π / (0.08 * 30) ≈ 1.31`).
-///
-/// Always route diamond rendering through [`pending_diamond_color`] so the three call sites can never silently drift apart.
-pub(crate) const USER_WAITING_PULSE_SPEED: f32 = 0.08;
-
 /// Compute the pulsing diamond color for any "waiting on you" cue.
 ///
-/// Blends `accent` toward `theme.bg_base` using a `sin²` pulse driven by [`USER_WAITING_PULSE_SPEED`].
-/// Brightness ranges from 0.3 (dim) to 1.0 (full accent) so the diamond stays visible at the trough.
+/// Blends `accent` toward `theme.bg_base` on [`crate::theme::waiting_brightness`], the shared
+/// "waiting on you" curve: a `sin²` pulse lifted onto a floor so the diamond stays visible at the trough.
+/// The drain-blocked, pending-user-input, and plan-approval statuses all read it through this function,
+/// so the three call sites can never silently drift apart.
 ///
 /// Pass `theme.accent_user` for user-input waits (permission prompts, `ask_user_question`, the drain-blocked idle status).
 /// Pass `theme.accent_plan` for plan-approval waits.
 pub(crate) fn pending_diamond_color(theme: &Theme, accent: Color, tick: u64) -> Color {
-    let brightness = crate::theme::pulse_brightness(tick, USER_WAITING_PULSE_SPEED);
-    crate::render::color::blend_color(theme.bg_base, accent, 0.3 + brightness * 0.7)
-        .unwrap_or(accent)
+    let brightness = crate::theme::waiting_brightness(tick);
+    crate::render::color::blend_color(theme.bg_base, accent, brightness).unwrap_or(accent)
 }
 
 // ---------------------------------------------------------------------------
@@ -1672,7 +1666,7 @@ mod tests {
     fn user_waiting_pulse_speed_is_stable() {
         // The drain-blocked, pending-user-input, and plan-approval cues all read this one constant via `pending_diamond_color`
         // The assertion guards against an accidental tweak that would silently change the cadence of every "your turn" cue
-        assert_eq!(USER_WAITING_PULSE_SPEED, 0.08);
+        assert_eq!(crate::theme::ANIMATION.waiting_pulse_speed, 0.08);
     }
 
     /// The colour the "waiting on you" diamond actually takes, tick by tick.
