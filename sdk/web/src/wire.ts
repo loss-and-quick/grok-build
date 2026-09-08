@@ -1118,3 +1118,166 @@ export interface SessionInfoResponse {
   turns?: number;
   contextFacts?: ContextFacts | null;
 }
+
+// ---------------------------------------------------------------------------
+// Background work — the dock's Tasks and Watchers
+//
+// Nothing here is new on the wire, and that is the whole point of the section.
+// The pager's dock builds its Tasks rows from running non-monitor background
+// commands and its Watchers rows from running monitors plus scheduled `/loop`
+// tasks (`app/agent_view/panes.rs:338-412`), and every one of those reaches a
+// client already:
+//
+//   - `task_backgrounded` announces a bash command that went to the background,
+//     and `monitor_description` is what marks it a monitor rather than a run
+//     (`extensions/notification.rs:769-787`);
+//   - `task_completed` carries the finished task's whole snapshot (`:641`);
+//   - `scheduled_task_created` / `_fired` / `_deleted` are the loop's life
+//     (`:789-810`);
+//   - all of them are persisted and replayed by `session/load`, which is how
+//     the pager's own handler comes to test `_meta.isReplay` on them
+//     (`acp_handler/background.rs:92`, `:403-420`).
+//
+// So this client folds the same stream the terminal folds, and the two methods
+// below are the ones the terminal already calls to act on a row.
+// ---------------------------------------------------------------------------
+
+/**
+ * `TaskKind` (`xai-grok-tools/src/computer/types.rs:146`).
+ *
+ * The only thing that separates a Tasks row from a Watchers row on the snapshot
+ * path. On the notification path the same distinction arrives as the presence
+ * of `monitor_description`.
+ */
+export type TaskKind = "bash" | "monitor" | (string & {});
+
+/**
+ * `std::time::SystemTime` as serde writes it.
+ *
+ * Not a number, and worth declaring rather than probing: `TaskSnapshot` derives
+ * plain `Serialize` with no `rename_all` and no timestamp helper, so its
+ * `start_time` reaches a client as this two-field struct.
+ */
+export interface WireSystemTime {
+  secs_since_epoch: number;
+  nanos_since_epoch: number;
+}
+
+/** Epoch milliseconds for a serialized `SystemTime`. */
+export function epochMs(time: WireSystemTime | null | undefined): number | undefined {
+  if (!time || typeof time.secs_since_epoch !== "number") return undefined;
+  return time.secs_since_epoch * 1000 + (time.nanos_since_epoch ?? 0) / 1e6;
+}
+
+/**
+ * One task as `x.ai/task/list` reports it (`extensions/task.rs:394`).
+ *
+ * snake_case, unlike the camelCase DTOs beside it in that file: `TaskSnapshot`
+ * lives in `xai-grok-tools` and carries no `rename_all` at all
+ * (`computer/types.rs:190-248`). Only the fields a dock row is built from are
+ * described, per the rule at the top of this file.
+ *
+ * `start_time` is why the call is worth making. `task_backgrounded` carries no
+ * timestamp, so the pager dates a task from the moment its own process saw the
+ * notification (`acp_handler/background.rs:157`) — which on a replay is the
+ * moment of attaching. This is the agent's clock.
+ */
+export interface TaskSnapshot {
+  task_id: string;
+  command: string;
+  display_command?: string | null;
+  cwd?: string;
+  start_time?: WireSystemTime;
+  end_time?: WireSystemTime | null;
+  completed?: boolean;
+  kind?: TaskKind;
+  description?: string | null;
+  is_backgrounded?: boolean;
+  /** The session that owns the task; scoped kills and scoped views read it. */
+  owner_session_id?: string | null;
+}
+
+/** `x.ai/task/list`'s reply. */
+export interface ListTasksResponse {
+  tasks?: TaskSnapshot[];
+}
+
+/**
+ * What killing a background task actually did (`computer/types.rs:292`).
+ *
+ * The same three-way shape `x.ai/subagent/cancel` has, and it matters for the
+ * same reason: only `killed` is followed by a `task_completed`. `already_exited`
+ * means the row is about to be finished by an event that has already been sent,
+ * and `not_found` means the agent has no such task — a stale row from a replay,
+ * which the pager drops outright (`app/dispatch/turn.rs:799-807`).
+ */
+export type KillOutcome = "killed" | "already_exited" | "not_found" | (string & {});
+
+/** `x.ai/task/kill`'s reply (`extensions/task.rs:50`). */
+export interface KillTaskResponse {
+  taskId?: string;
+  outcome?: KillOutcome;
+}
+
+/**
+ * Who asked for the kill (`extensions/task.rs:33`).
+ *
+ * A browser is a client UI, which is the default the field takes when it is
+ * omitted; it is sent anyway because the other value means bulk teardown and
+ * the difference decides whether the model is told its command was killed
+ * (`computer/types.rs:309-315`).
+ */
+export type TaskKillSource = "clientUi" | "teardown";
+
+/** `x.ai/scheduler/delete`'s reply (`extensions/task.rs:416`). */
+export interface DeleteScheduledTaskResponse {
+  taskId?: string;
+  deleted?: boolean;
+}
+
+/** `task_backgrounded` (`extensions/notification.rs:769`). */
+export interface SessionUpdateTaskBackgrounded {
+  sessionUpdate: "task_backgrounded";
+  tool_call_id: string;
+  task_id: string;
+  command: string;
+  cwd: string;
+  output_file: string;
+  /** Present only for a monitor; its absence is what makes the row a Task. */
+  monitor_description?: string | null;
+  /** The model's own label for the command, preferred over the command itself. */
+  description?: string | null;
+}
+
+/** `task_completed` (`extensions/notification.rs:641`). */
+export interface SessionUpdateTaskCompleted {
+  sessionUpdate: "task_completed";
+  task_snapshot: TaskSnapshot;
+  will_wake?: boolean;
+}
+
+/** `scheduled_task_created` (`extensions/notification.rs:789`). */
+export interface SessionUpdateScheduledTaskCreated {
+  sessionUpdate: "scheduled_task_created";
+  task_id: string;
+  prompt: string;
+  human_schedule: string;
+  next_fire_at?: string | null;
+}
+
+/** `scheduled_task_fired` (`extensions/notification.rs:795`). */
+export interface SessionUpdateScheduledTaskFired {
+  sessionUpdate: "scheduled_task_fired";
+  task_id: string;
+  prompt: string;
+  human_schedule: string;
+  next_fire_at?: string | null;
+  subagent_id?: string | null;
+}
+
+/** `scheduled_task_deleted` (`extensions/notification.rs:804`). */
+export interface SessionUpdateScheduledTaskDeleted {
+  sessionUpdate: "scheduled_task_deleted";
+  task_id: string;
+  reason?: string;
+}
