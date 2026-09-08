@@ -1405,7 +1405,7 @@ fn render_agents_tab(
                 let status = if entry.enabled {
                     format!("{} ", crate::glyphs::filled_dot())
                 } else {
-                    "\u{25cb} ".to_string()
+                    format!("{} ", crate::glyphs::hollow_dot())
                 };
                 let status_fg = if entry.enabled {
                     theme.accent_success

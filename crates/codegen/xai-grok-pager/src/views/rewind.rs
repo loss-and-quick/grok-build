@@ -585,7 +585,7 @@ fn render_radio_row(
     let marker = if is_cursor {
         crate::glyphs::filled_dot()
     } else {
-        "\u{25CB}"
+        crate::glyphs::hollow_dot()
     };
     let key_display = key_label(key);
 

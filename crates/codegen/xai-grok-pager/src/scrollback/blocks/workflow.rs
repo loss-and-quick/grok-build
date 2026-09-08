@@ -64,9 +64,9 @@ impl WorkflowBlock {
                 .iter()
                 .map(|p| {
                     let mark = match p.state.as_str() {
-                        "done" => "✓",
-                        "active" => "●",
-                        _ => "○",
+                        "done" => crate::glyphs::check_mark(),
+                        "active" => crate::glyphs::filled_dot(),
+                        _ => crate::glyphs::hollow_dot(),
                     };
                     format!("{} {mark}", p.title)
                 })
@@ -202,9 +202,9 @@ impl BlockContent for WorkflowBlock {
         ];
         for p in &self.phases {
             let mark = match p.state.as_str() {
-                "done" => "✓",
-                "active" => "●",
-                _ => "○",
+                "done" => crate::glyphs::check_mark(),
+                "active" => crate::glyphs::filled_dot(),
+                _ => crate::glyphs::hollow_dot(),
             };
             lines.push(Line::from(Span::styled(
                 format!("  {mark} {}", p.title),

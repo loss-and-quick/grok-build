@@ -1633,7 +1633,7 @@ fn build_single_option_lines(
             )
         } else {
             (
-                "(\u{25cb})".to_string(), // (○)
+                format!("({})", crate::glyphs::hollow_dot()), // (○)
                 Style::default().fg(fg(theme.gray)).bg(row_bg),
             )
         };
@@ -1732,7 +1732,7 @@ fn build_freeform_line(
     } else if is_selected {
         format!("({})", crate::glyphs::filled_dot())
     } else {
-        "(\u{25cb})".to_string()
+        format!("({})", crate::glyphs::hollow_dot())
     };
     let _marker_display_w: usize = 3;
     let marker_style = if is_selected {

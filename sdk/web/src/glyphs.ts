@@ -1,67 +1,74 @@
 // The pager's glyphs, so the two clients read as one product.
 //
-// Copied from `xai-grok-pager-render/src/glyphs.rs`. Like the animation
-// constants these are not generated — `glyphs.rs` is a Rust module of `const
-// char`s with no artifact — and the same fix applies: emit them alongside the
-// palette. They change far less often than colours, but "less often" is not
-// "never", so `test/glyphs.test.ts` reads `glyphs.rs` and compares.
+// Nothing here is a codepoint. Every character comes from `GLYPHS` in
+// `@grok-build/theme`, serialized from `xai-grok-pager-render/src/glyphs/` by
+// calling the very functions the pager calls, and guarded by
+// `glyphs::tokens::tests::generated_glyph_tokens_match_the_pager_glyphs`, which
+// compares the artifact rather than rewriting it.
 //
-// Two below are pinned by nothing, because `glyphs.rs` does not own them: the
-// chip separator lives in the context bar, and the hollow dot is a literal at
-// the pager's own permission and question views. Naming that here is cheaper
-// than a test that would have to know where every literal in the pager is.
+// This module is the naming layer: the artifact's keys are the pager's function
+// names, which say what the terminal draws with a glyph, and the names below say
+// what *this* client draws with it. Where the two uses differ that difference is
+// the comment, and it is the only thing here worth reading.
 //
-// The ASCII fallbacks in `glyphs.rs` exist for legacy Windows consoles that
-// cannot render the codepoint. A browser has no such limit, so only the real
-// glyphs are here.
-
-/** `❯ ` — the prompt prefix. `glyphs::prompt_arrow()`. */
-export const PROMPT_ARROW = "❯";
-
-/** `◆` — the bullet on a tool call and a collapsed thinking block. `diamond_filled()`. */
-export const BULLET = "◆";
-
-/** `◈` — the verb-group header diamond. `diamond_dotted()`. */
-export const GROUP_DIAMOND = "◈";
-
-/** `┃` — the left accent rail down a block. `accent_bar()`. */
-export const ACCENT_BAR = "┃";
-
-/** `│` — the separator between status chips. `context_bar::SEPARATOR`. */
-export const CHIP_SEPARATOR = "│";
+// `test/glyphs.test.ts` fails if a literal glyph or a bare number reappears
+// below, which is how the old hand-copied version of this file started.
+import { GLYPHS } from "@grok-build/theme";
 
 /**
- * `›` — the separator the pager already uses for **settings breadcrumbs**, and
- * so the one a path's breadcrumbs use here. `chevron()`.
+ * `❯` — the prompt prefix, and the marker on a selected row.
+ *
+ * The artifact carries the pager's own `"❯ "`: two terminal columns, the glyph
+ * plus its pad. A terminal pays for spacing in cells and this client pays for it
+ * in CSS, so the pad is dropped here rather than turned into a space nobody can
+ * style.
  */
-export const CHEVRON = "›";
+export const PROMPT_ARROW = GLYPHS.prompt_arrow.trimEnd();
 
-/** `‹` — `chevron()`'s mirror: the pager's "previous", and here the way up. `chevron_left()`. */
-export const CHEVRON_LEFT = "‹";
+/** `◆` — the bullet on a tool call and on a collapsed thinking block. */
+export const BULLET = GLYPHS.diamond_filled;
 
-/** `▾` — the expanded-section marker; here, a subagent row showing its detail. `disclosure_open()`. */
-export const DISCLOSURE_OPEN = "▾";
+/** `◈` — the verb-group header diamond. */
+export const GROUP_DIAMOND = GLYPHS.diamond_dotted;
 
-/** `▸` — the collapsed-section marker; here, a directory you can descend into. `disclosure_closed()`. */
-export const DISCLOSURE_CLOSED = "▸";
+/** `┃` — the left accent rail down a block. */
+export const ACCENT_BAR = GLYPHS.accent_bar;
 
-/** `●` — the selected option marker. `filled_dot()`. */
-export const DOT_FILLED = "●";
+/** `│` — the separator between status chips. */
+export const CHIP_SEPARATOR = GLYPHS.chip_separator;
 
-/** `○` — its unselected partner, a literal at `permission_view.rs` and `question_view.rs`. */
-export const DOT_HOLLOW = "○";
+/**
+ * `›` — the pager's settings-breadcrumb separator, and so the separator a path's
+ * breadcrumbs use here.
+ */
+export const CHEVRON = GLYPHS.chevron;
 
-/** `✓` — the done marker. `check_mark()`. */
-export const CHECK_MARK = "✓";
+/** `‹` — its mirror: the pager's "previous", and here the way up a path. */
+export const CHEVRON_LEFT = GLYPHS.chevron_left;
 
-/** `✗` — its failure sibling, and the pager's own stop button. `ballot_x()`. */
-export const BALLOT_X = "✗";
+/** `▾` — the expanded-section marker; here, a subagent row showing its detail. */
+export const DISCLOSURE_OPEN = GLYPHS.disclosure_open;
 
-/** Braille spinner frames, cycled every 4 ticks. `braille_spinner_frames()`. */
-export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"] as const;
+/** `▸` — the collapsed-section marker; here, a directory you can descend into. */
+export const DISCLOSURE_CLOSED = GLYPHS.disclosure_closed;
 
-/** Ticks per spinner frame — `SPINNER_DIVISOR` in `turn_status.rs`, ~7.5fps. */
-export const SPINNER_DIVISOR = 4;
+/** `●` — the selected option marker. */
+export const DOT_FILLED = GLYPHS.filled_dot;
+
+/** `○` — its unselected partner. */
+export const DOT_HOLLOW = GLYPHS.hollow_dot;
+
+/** `✓` — the done marker. */
+export const CHECK_MARK = GLYPHS.check_mark;
+
+/** `✗` — its failure sibling, and the pager's own stop button. */
+export const BALLOT_X = GLYPHS.ballot_x;
+
+/** Braille spinner frames, in the pager's order. */
+export const SPINNER_FRAMES = GLYPHS.braille_spinner_frames;
+
+/** Ticks a spinner frame is held for. */
+export const SPINNER_DIVISOR = GLYPHS.spinner_divisor;
 
 export function spinnerFrame(tick: number): string {
   const at = Math.floor(tick / SPINNER_DIVISOR) % SPINNER_FRAMES.length;

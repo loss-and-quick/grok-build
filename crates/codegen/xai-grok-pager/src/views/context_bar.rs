@@ -143,8 +143,8 @@ fn color_to_rgb(c: Color) -> (u8, u8, u8) {
 // Status bar separator
 // ---------------------------------------------------------------------------
 
-/// The separator character between status bar items.
-pub const SEPARATOR: &str = "│";
+/// The separator character between status bar items, taken from the glyph module so a second client draws the same one.
+pub const SEPARATOR: &str = crate::glyphs::chip_separator();
 
 // ---------------------------------------------------------------------------
 // Context bar line builder

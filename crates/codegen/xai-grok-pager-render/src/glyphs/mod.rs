@@ -6,6 +6,8 @@
 //! Windows Terminal, VS Code, and modern emulators bundle fonts (or fall back to one) that cover the glyphs we use as chrome.
 //! The substitution therefore only fires for legacy `cmd.exe` / `powershell.exe`.
 
+pub mod tokens;
+
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
@@ -183,6 +185,18 @@ pub fn braille_spinner_frames() -> &'static [&'static str] {
     }
 }
 
+/// Show each [`braille_spinner_frames`] frame for this many animation ticks.
+/// At the shipped ~30fps cadence that is ~133ms a frame, about 7.5 spinner fps.
+///
+/// It lives beside the frames rather than beside the caller because a frame list and its dwell are one animation:
+/// a client that takes the frames from here and the dwell from its own source spins at a different speed than the terminal does.
+pub const SPINNER_DIVISOR: u64 = 4;
+
+/// Show each [`monitor_icon_frames`] frame for this many animation ticks, twice the [`SPINNER_DIVISOR`] dwell (~3.75 fps).
+/// The idle still-running cue should breathe calmly rather than read like the active turn spinner.
+/// Its `○ ◎ ◉ ◎` cycle therefore runs at roughly half the speed (~1.07s per loop).
+pub const MONITOR_PULSE_DIVISOR: u64 = 8;
+
 /// Pulsing dot progress-spinner frames (`⋅ : ⸬ ⁙`) normally; a quiet 1-column dot cycle (`.`, `:`, `·`) on legacy ConHost.
 ///
 /// U+22C5 / U+2E2C / U+2059 are absent from CP437, so every caller falls back to a dot cycle the raster font does render.
@@ -197,6 +211,14 @@ pub fn dot_spinner_frames() -> &'static [&'static str] {
     } else {
         FANCY
     }
+}
+
+/// `"│"` (U+2502 LIGHT VERTICAL, CP437 `0xB3`). Always 1 column wide and present on every target.
+///
+/// The separator drawn between status-bar chips, which the pager names `context_bar::SEPARATOR`.
+/// A `const fn` so that constant can be defined as this one rather than as a second copy of the codepoint.
+pub const fn chip_separator() -> &'static str {
+    "\u{2502}"
 }
 
 /// `"┃"` (U+2503 HEAVY VERTICAL) normally, `"│"` (U+2502 LIGHT VERTICAL, CP437 `0xB3`) on legacy ConHost. Always 1 column wide.
@@ -265,6 +287,14 @@ pub fn timeline_tick_active() -> &'static str {
 /// Idle ticks reuse a single light cell; this is the wide bright hover form.
 pub fn timeline_tick_hover() -> &'static str {
     "\u{2500}\u{2500}"
+}
+
+/// `"○"` (U+25CB WHITE CIRCLE, CP437 `0x09`). Always 1 column wide and present on every target.
+///
+/// The unselected partner of [`filled_dot`]: the radio marker the permission, question, settings and rewind views draw beside an option that is not chosen.
+/// Already a CP437 glyph, so it needs no legacy stand-in; a `const fn` so a `const` elsewhere can name it instead of restating the codepoint.
+pub const fn hollow_dot() -> &'static str {
+    "\u{25CB}"
 }
 
 /// `"●"` (U+25CF BLACK CIRCLE) normally, `"•"` (U+2022 BULLET, CP437 `0x07`) on legacy ConHost. Always 1 column wide.
@@ -470,6 +500,22 @@ fn decide_legacy_windows_console(host: HostOs, brand: TerminalName) -> bool {
 mod tests {
     use super::*;
     use unicode_width::UnicodeWidthStr;
+
+    // The glyphs this module owns that need no legacy stand-in still have to be one column:
+    // they came in as literals at call sites that had no width test of their own.
+    #[test]
+    fn glyphs_without_a_fallback_are_one_column() {
+        assert_eq!(chip_separator().width(), 1);
+        assert_eq!(hollow_dot().width(), 1);
+        assert_eq!(light_horizontal().width(), 1);
+    }
+
+    // `MONITOR_PULSE_DIVISOR`'s doc says "twice the spinner's dwell", and a doc that says
+    // twice while the numbers say something else is worse than no doc.
+    #[test]
+    fn the_monitor_pulse_dwells_twice_as_long_as_the_spinner() {
+        assert_eq!(MONITOR_PULSE_DIVISOR, SPINNER_DIVISOR * 2);
+    }
 
     // Both variants must match `PROMPT_ARROW_WIDTH` so callers using the constant for layout math don't drift between platforms
     #[test]

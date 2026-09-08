@@ -2900,7 +2900,7 @@ impl AgentView {
                     (format!("({}) ", crate::glyphs::filled_dot()), marker_style)
                 } else {
                     (
-                        "(\u{25cb}) ".to_string(),
+                        format!("({}) ", crate::glyphs::hollow_dot()),
                         Style::default().fg(theme.gray).bg(row_bg),
                     )
                 };

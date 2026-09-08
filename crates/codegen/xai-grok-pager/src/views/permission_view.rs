@@ -1348,7 +1348,7 @@ fn build_permission_option_line<'a>(
     let marker = if is_cursor {
         format!("({})", crate::glyphs::filled_dot())
     } else {
-        "(\u{25cb})".to_string()
+        format!("({})", crate::glyphs::hollow_dot())
     };
     let marker_style = if is_cursor {
         Style::default()
@@ -1413,7 +1413,7 @@ fn build_reject_once_line<'a>(
         )
     } else {
         (
-            "(\u{25cb})".to_string(),
+            format!("({})", crate::glyphs::hollow_dot()),
             Style::default().fg(theme.gray).bg(row_bg),
         )
     };

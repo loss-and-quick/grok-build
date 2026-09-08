@@ -935,7 +935,7 @@ pub fn render_cancel_turn_panel(
         let marker = if is_cursor {
             crate::glyphs::filled_dot()
         } else {
-            "\u{25CB}"
+            crate::glyphs::hollow_dot()
         };
         let num = (i + 1).to_string();
         let num_style = Style::default().fg(theme.accent_user).bg(row_bg);
