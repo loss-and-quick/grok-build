@@ -4088,3 +4088,90 @@ async fn goal_yield_runs_queued_row_next_then_resumes_goal() {
         })
         .await;
 }
+
+/// The attach-time snapshot and the broadcast are the same queue.
+///
+/// `x.ai/queue/changed` fires only on a change, so a client that attaches to a
+/// session already holding prompts has to be told where the stream starts. If
+/// that answer were built separately it would drift, and the drift would show
+/// as a client whose queue is wrong until the next edit — the failure mode this
+/// pins shut.
+#[tokio::test]
+async fn queue_snapshot_matches_the_broadcast_it_starts_from() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, mut gateway_rx) = build_actor().await;
+
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("p1", "A"));
+                state.pending_inputs.push_back(user_item("p2", "B"));
+                actor.broadcast_queue_changed(&state);
+            }
+
+            let mut broadcast: Option<crate::session::prompt_queue::QueueChanged> = None;
+            while let Ok(msg) = gateway_rx.try_recv() {
+                if let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg
+                    && args.request.method.as_ref()
+                        == crate::session::prompt_queue::QUEUE_CHANGED_METHOD
+                {
+                    broadcast = serde_json::from_str(args.request.params.get()).ok();
+                }
+            }
+            let broadcast = broadcast.expect("at least one queue/changed broadcast");
+
+            assert_eq!(
+                actor.queue_snapshot().await,
+                broadcast,
+                "a client that asks must be told exactly what a client that listened heard"
+            );
+            assert_eq!(ids(&broadcast.entries), vec!["p1", "p2"]);
+
+            // A drained queue answers present-and-empty, never with silence.
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.clear();
+            }
+            assert!(actor.queue_snapshot().await.entries.is_empty());
+        })
+        .await;
+}
+
+/// A row carries the same mutability the handlers enforce.
+///
+/// The wire used to say only what kind a row was, so a client worked out for
+/// itself which rows it could touch — and it happened to be right only because
+/// the one protected origin is named after its kind. This is the answer coming
+/// from the side that actually refuses the mutation.
+#[tokio::test]
+async fn queue_rows_carry_whether_the_session_will_take_a_mutation() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("user-1", "A"));
+                state.pending_inputs.push_back(protected_item("parent"));
+            }
+            {
+                let state = actor.state.lock().await;
+                let wire = actor.build_queue_wire(&state);
+                let editable: Vec<(&str, Option<bool>)> = wire
+                    .iter()
+                    .map(|entry| (entry.id.as_str(), entry.editable))
+                    .collect();
+                assert_eq!(
+                    editable,
+                    vec![("user-1", Some(true)), ("parent", Some(false))]
+                );
+            }
+
+            // And the bit is not decoration: the row it marks is the row the
+            // handler refuses.
+            assert!(!actor.handle_remove_queued_prompt("parent", 0, None).await);
+            assert!(actor.handle_remove_queued_prompt("user-1", 0, None).await);
+        })
+        .await;
+}

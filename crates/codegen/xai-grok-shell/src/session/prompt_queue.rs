@@ -20,6 +20,7 @@ mod tests {
         let payload = QueueChanged {
             session_id: "sess-1".to_string(),
             entries: vec![QueueEntryWire {
+                editable: None,
                 id: "p1".to_string(),
                 version: 0,
                 owner: Some("grok-tui".to_string()),
@@ -65,6 +66,7 @@ mod tests {
     #[test]
     fn queue_entry_wire_round_trips_last_editor() {
         let entry = QueueEntryWire {
+            editable: None,
             id: "p1".to_string(),
             version: 3,
             owner: Some("grok-tui".to_string()),

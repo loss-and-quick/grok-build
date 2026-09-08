@@ -403,6 +403,15 @@ pub enum SessionCommand {
     GetSessionInfo {
         responds_to: oneshot::Sender<SessionInfoData>,
     },
+    /// The queued prompts as `x.ai/queue/changed` would broadcast them now.
+    ///
+    /// The broadcast is edge-triggered and never persisted, so a client that
+    /// attaches part-way through a session has nothing to start its mirror
+    /// from. Answered through the actor because `pending_inputs` is the queue,
+    /// and only the actor holds it.
+    GetQueueSnapshot {
+        responds_to: oneshot::Sender<crate::session::prompt_queue::QueueChanged>,
+    },
     /// The saved plan for `/view-plan`, read through the actor because it owns
     /// the `PlanModeTracker` that knows where the file is and whether an
     /// approval is parked on it.

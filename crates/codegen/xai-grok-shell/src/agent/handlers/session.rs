@@ -158,10 +158,21 @@ async fn handle_session_info(
         .get(session.model_id.0.as_ref())
         .and_then(|entry| entry.info.name.clone());
 
+    // Asked on the same call the client already makes when it attaches, so the
+    // queue arrives with the rest of the session rather than needing a round
+    // trip of its own. A session that cannot answer leaves `None`, which says
+    // "unknown" where an empty list would claim "nothing queued".
+    let (queue_tx, queue_rx) = tokio::sync::oneshot::channel();
+    let _ = session.cmd_tx.send(SessionCommand::GetQueueSnapshot {
+        responds_to: queue_tx,
+    });
+    let queue = queue_rx.await.ok();
+
     let response = SessionInfoResponse {
         session_id,
         cwd: session.info.cwd.clone(),
         syncs_to_backend: session_syncs_to_backend(&session, agent.is_writeback_storage()).await,
+        queue,
         data,
     };
 

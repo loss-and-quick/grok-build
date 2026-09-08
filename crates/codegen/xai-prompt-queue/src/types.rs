@@ -48,6 +48,22 @@ pub struct QueueEntryWire {
     /// 0-based position among queued, not-yet-running prompts.
     #[serde(default)]
     pub position: usize,
+    /// Whether the session will accept an edit, reorder, remove or send-now for
+    /// this row.
+    ///
+    /// The session decides it (a row's origin carries a queue policy, and one of
+    /// those policies is visible-but-protected), then refuses any mutation that
+    /// disagrees. Without it on the wire a client has nothing to go on but the
+    /// `kind` string, so it offers controls the session will silently no-op —
+    /// the guess happens to be right today only because exactly one origin is
+    /// protected and its kind is named after it.
+    ///
+    /// `None` from an agent too old to say. A client that gets `None` should
+    /// fall back to whatever it did before rather than assume either answer:
+    /// guessing `true` offers a control that does nothing, guessing `false`
+    /// takes away every control on the queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editable: Option<bool>,
 }
 
 /// Broadcast payload for the `x.ai/queue/changed` notification.
@@ -85,6 +101,7 @@ mod tests {
             session_id: "sess-42".into(),
             entries: vec![
                 QueueEntryWire {
+                    editable: None,
                     id: "p1".into(),
                     version: 3,
                     owner: Some("alice".into()),
@@ -95,6 +112,7 @@ mod tests {
                     combined_texts: None,
                 },
                 QueueEntryWire {
+                    editable: None,
                     id: "p2".into(),
                     version: 0,
                     owner: None,
@@ -127,6 +145,7 @@ mod tests {
         let payload = QueueChanged {
             session_id: "s1".into(),
             entries: vec![QueueEntryWire {
+                editable: None,
                 id: "p1".into(),
                 version: 2,
                 owner: Some("alice".into()),
@@ -206,5 +225,47 @@ mod tests {
         assert_eq!(json["runningCombinedTexts"], serde_json::json!(["a", "b"]));
         let round: QueueChanged = serde_json::from_value(json).unwrap();
         assert_eq!(round, original);
+    }
+
+    /// A row says whether the session will let a client touch it.
+    ///
+    /// Absent is "the agent did not say", which is not "no": a client that read
+    /// a missing key as `false` would grey out every control on a queue served
+    /// by an older agent.
+    #[test]
+    fn editable_survives_the_wire_and_absence_is_not_a_refusal() {
+        let unsaid: QueueEntryWire =
+            serde_json::from_value(serde_json::json!({ "id": "p1" })).unwrap();
+        assert_eq!(unsaid.editable, None);
+        assert!(
+            serde_json::to_value(&unsaid)
+                .unwrap()
+                .get("editable")
+                .is_none(),
+            "an unset capability must not appear as one"
+        );
+
+        let protected = QueueEntryWire {
+            editable: Some(false),
+            // Deliberately the ordinary kind: the point of the field is that a
+            // row can be protected without the kind label giving it away.
+            kind: "prompt".into(),
+            ..unsaid.clone()
+        };
+        let json = serde_json::to_value(&protected).unwrap();
+        assert_eq!(json["editable"], serde_json::json!(false));
+        assert_eq!(
+            serde_json::from_value::<QueueEntryWire>(json).unwrap(),
+            protected
+        );
+
+        let open = QueueEntryWire {
+            editable: Some(true),
+            ..unsaid
+        };
+        assert_eq!(
+            serde_json::to_value(&open).unwrap()["editable"],
+            serde_json::json!(true)
+        );
     }
 }

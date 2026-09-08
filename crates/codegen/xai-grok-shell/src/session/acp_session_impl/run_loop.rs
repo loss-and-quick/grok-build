@@ -849,6 +849,10 @@ pub(super) async fn run_session(
                             let info = session.build_session_info().await;
                             let _ = responds_to.send(info);
                         }
+                        SessionCommand::GetQueueSnapshot { responds_to } => {
+                            let queue = session.queue_snapshot().await;
+                            let _ = responds_to.send(queue);
+                        }
                         SessionCommand::GetPlanSnapshot { responds_to } => {
                             // The lock is released before the read: nothing else
                             // in the tracker is needed once the path is copied,

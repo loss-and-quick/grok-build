@@ -448,6 +448,10 @@ impl SessionActor {
                 text: meta.text.clone(),
                 combined_texts: meta.combined_texts.clone(),
                 position: out.len(),
+                // The same bit the mutation handlers gate on, so a client
+                // renders the controls this session will actually honour
+                // instead of inferring them from the kind label.
+                editable: Some(item.is_queue_editable()),
             });
         }
         out
@@ -457,14 +461,34 @@ impl SessionActor {
     /// The notification goes fire-and-forget through the gateway and carries `sessionId` so session routing fans it to every attached client.
     /// It is never persisted.
     pub(super) fn broadcast_queue_changed(&self, state: &State) {
-        let running = state.running_prompt_id().and_then(|pid| {
+        let running = Self::running_display(state);
+        self.broadcast_queue_changed_inner(state, running);
+    }
+
+    /// The running turn's display fields, read off the item the actor is draining.
+    fn running_display(state: &State) -> Option<RunningPromptDisplay> {
+        state.running_prompt_id().and_then(|pid| {
             state
                 .pending_inputs
                 .iter()
                 .find(|i| i.prompt_id == pid)
                 .map(Self::running_display_from_item)
-        });
-        self.broadcast_queue_changed_inner(state, running);
+        })
+    }
+
+    /// The queue exactly as [`Self::broadcast_queue_changed`] would put it on the
+    /// wire this instant.
+    ///
+    /// `x.ai/queue/changed` fires only when the queue changes and is never
+    /// persisted, so the stream has no starting value: a client that attaches to
+    /// a session already holding queued prompts would draw an empty queue until
+    /// somebody happened to edit one. This is that starting value. It is asked
+    /// for once on attach rather than polled — a queue moves too often for
+    /// polling to ever be more than a stale guess between broadcasts.
+    pub(crate) async fn queue_snapshot(&self) -> crate::session::prompt_queue::QueueChanged {
+        let state = self.state.lock().await;
+        let running = Self::running_display(&state);
+        self.queue_changed_payload(&state, running)
     }
 
     /// Broadcast with an explicit running-turn display.
@@ -493,7 +517,16 @@ impl SessionActor {
         }
     }
 
-    fn broadcast_queue_changed_inner(&self, state: &State, running: Option<RunningPromptDisplay>) {
+    /// Build the `x.ai/queue/changed` payload for the queue as it stands.
+    ///
+    /// Sole constructor: the broadcast and the attach-time snapshot both come
+    /// through here, so no client can be shown one shape on arrival and another
+    /// live.
+    fn queue_changed_payload(
+        &self,
+        state: &State,
+        running: Option<RunningPromptDisplay>,
+    ) -> crate::session::prompt_queue::QueueChanged {
         let running_id = running.as_ref().map(|r| r.id.clone());
         // Exclude the running/promoting row from `entries` (same as when `running_task` is set)
         let mut entries = self.build_queue_wire(state);
@@ -507,14 +540,18 @@ impl SessionActor {
             Some(r) => (Some(r.text), Some(r.kind), r.combined_texts),
             None => (None, None, None),
         };
-        let payload = crate::session::prompt_queue::QueueChanged {
+        crate::session::prompt_queue::QueueChanged {
             session_id: self.session_info.id.0.to_string(),
             entries,
             running_prompt_id: running_id,
             running_text,
             running_kind,
             running_combined_texts,
-        };
+        }
+    }
+
+    fn broadcast_queue_changed_inner(&self, state: &State, running: Option<RunningPromptDisplay>) {
+        let payload = self.queue_changed_payload(state, running);
         tracing::debug!(
             target: "qtrace",
             pid = std::process::id(),

@@ -602,6 +602,18 @@ pub struct SessionInfoResponse {
     /// Defaults to `false` so an older shell that omits it reads as `Local`.
     #[serde(default)]
     pub syncs_to_backend: bool,
+    /// The prompts queued behind the running turn, in the shape
+    /// `x.ai/queue/changed` broadcasts them.
+    ///
+    /// The same type on purpose: a client parses one thing and reconciles the
+    /// broadcast into whatever this gave it. Carried here because the broadcast
+    /// only fires on a change and is never written to the session log, so a
+    /// client attaching to a session that is already three prompts deep has no
+    /// other way to learn that. `None` from an agent too old to answer, which
+    /// is not the same as a queue that is empty — an empty queue answers with
+    /// an empty `entries` list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<xai_prompt_queue::QueueChanged>,
     #[serde(flatten)]
     pub data: SessionInfoData,
 }
@@ -1036,5 +1048,67 @@ mod tests {
         let back: SessionInfoResponse = serde_json::from_str(&json).unwrap();
         assert!(back.syncs_to_backend);
         assert_eq!(back.cwd, "/w");
+    }
+
+    /// The attach-time queue snapshot rides this response in the same shape the
+    /// `x.ai/queue/changed` broadcast uses, so one parser serves both.
+    ///
+    /// An agent too old to answer omits the key, and that must read as "unknown"
+    /// rather than as an empty queue: a client that mistook the two would paint
+    /// away prompts the session is still holding.
+    #[test]
+    fn session_info_response_carries_the_queue_snapshot() {
+        let from_old_shell: SessionInfoResponse = serde_json::from_str(
+            r#"{"sessionId":"s1","cwd":"/w","model":"m","resolvedModelId":null,
+                "modelFingerprint":null,"turns":0,"context":{}}"#,
+        )
+        .expect("an older shell omits the field");
+        assert!(
+            from_old_shell.queue.is_none(),
+            "a missing key is an agent that cannot answer, not an empty queue"
+        );
+        assert!(
+            !serde_json::to_string(&from_old_shell)
+                .unwrap()
+                .contains("queue"),
+            "nothing to say means nothing on the wire"
+        );
+
+        let mut with_queue = from_old_shell.clone();
+        with_queue.queue = Some(xai_prompt_queue::QueueChanged {
+            session_id: "s1".to_string(),
+            entries: vec![xai_prompt_queue::QueueEntryWire {
+                editable: None,
+                id: "p1".to_string(),
+                version: 2,
+                owner: Some("grok-web".to_string()),
+                last_editor: None,
+                kind: "prompt".to_string(),
+                text: "and then rename it".to_string(),
+                position: 0,
+                combined_texts: None,
+            }],
+            running_prompt_id: Some("p0".to_string()),
+            running_text: Some("rewrite the parser".to_string()),
+            running_kind: Some("prompt".to_string()),
+            running_combined_texts: None,
+        });
+        let json = serde_json::to_string(&with_queue).unwrap();
+        assert!(json.contains(r#""queue":{"#), "{json}");
+        let back: SessionInfoResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.queue, with_queue.queue);
+
+        // An empty queue is a statement, and a different one.
+        let mut drained = from_old_shell.clone();
+        drained.queue = Some(xai_prompt_queue::QueueChanged {
+            session_id: "s1".to_string(),
+            ..Default::default()
+        });
+        let back: SessionInfoResponse =
+            serde_json::from_str(&serde_json::to_string(&drained).unwrap()).unwrap();
+        assert!(
+            back.queue.is_some_and(|q| q.entries.is_empty()),
+            "an empty queue must survive as present-and-empty"
+        );
     }
 }
