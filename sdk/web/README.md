@@ -72,6 +72,100 @@ directory's most recent session.
 The theme picker offers the six palettes from `sdk/theme`. Nothing in this
 client names a colour; see "Colour" below.
 
+## Signing in
+
+Until this existed, a browser could not authenticate at all. With no credential
+on disk the agent installs no auth method, and every `session/new` and
+`session/load` is refused with `no auth method id provided`
+(`agent_ops.rs:4494`) — so the page worked only if a terminal had already logged
+in to the same leader. That made it a companion to a terminal rather than a
+client.
+
+Now the page signs the agent in itself, through exactly the calls the terminal
+uses. `initialize` carries `authMethods` and `defaultAuthMethodId`; this client
+authenticates on the agent's own choice, or shows a card when the agent says it
+has nothing. A login is `authenticate` plus a concurrent poll of
+`x.ai/auth/get_url` — concurrent because `authenticate` does not return until
+the whole login is over, so the URL a person needs to finish it can only be
+collected alongside. `x.ai/auth/submit_code` hands back a pasted code and
+`x.ai/auth/cancel` abandons the attempt, both scoped by the same `request_seq`
+the pager sends.
+
+**No credential passes through the browser.** The agent runs the flow, mints the
+token and writes it to `~/.grok/auth.json` itself — the same
+`run_auth_flow_steps` a `grok login` runs. Two methods on this wire would change
+that and neither is called anywhere in this package: `x.ai/auth/getBearerToken`
+hands a client the live bearer, and `x.ai/setApiKey` lets a client install one,
+writing `auth.json` and the agent's process environment for every client on the
+leader. A test walks `src/` and fails if either name appears. The only
+secret-shaped thing that ever crosses is an authorization *code* on the paste
+path, and it is single-use and PKCE-bound: the verifier is generated inside the
+agent and never leaves it.
+
+### Which flows work here, and which do not
+
+Every method the agent ships can be completed in a browser, and that is
+structural rather than lucky — the agent does the authenticating, so a client's
+whole part is a link, sometimes a code, sometimes a pasted one back, and a
+cancel button. None of those four is a terminal capability.
+
+| the agent reports | the card shows |
+| --- | --- |
+| `loopback` | the sign-in address, and a paste box |
+| `device` | the user code, the address, and no paste box |
+| `command` | a waiting status while the provider's own browser runs |
+
+The paste box is drawn for `loopback` and nowhere else. Only that flow races a
+pasted code against the callback listener (`oidc/login.rs`,
+`race_callback_and_client_ui`); `device` polls the token endpoint and `command`
+waits on a subprocess, and neither reads `code_rx` at all — a box there would
+swallow whatever was typed into it.
+
+It is worth knowing where the callback lands: on the *agent's* loopback address,
+not the browser's. When the page and the agent share a machine — the default,
+since the gateway binds loopback — it completes itself. Reached through a tunnel
+it cannot, and the dead page's own address is the answer; that is what the paste
+box is for, and it is the same limit a terminal has over SSH.
+
+**Two things are deliberately refused, each with the place it can be done
+instead.**
+
+*A method this build does not recognise.* An unknown id may want a device code,
+a paste box, a second round trip or none of those, and nothing on the wire says
+which — so the card offers no button and names `grok login` in a terminal on the
+agent's machine. The advertised list is the contract in both directions: the
+agent's `authenticate` rejects an id that is not on it, and this client refuses
+to drive one it cannot finish.
+
+*Typing an API key into the browser.* `x.ai/setApiKey` exists and would work,
+and it is not offered. The advertised list is the reason: `xai.api_key` is
+advertised only when a key already exists (`auth_method.rs`,
+`should_advertise_xai_api_key`), so offering a box to create one is offering a
+method the agent did not advertise. The terminal has no such box either — keys
+come from the environment or `config.toml`, which is also the one place they
+carry provenance. So when the agent advertises nothing at all — a
+`[auth] preferred_method = "api_key"` pin with no key, which builds an empty
+list and a `None` default — the card says no client can sign in from here and
+names `XAI_API_KEY` and `config.toml` on the agent's machine.
+
+### Is the shared auth method the folder-trust bug again?
+
+No, and the difference is worth stating because the shapes look alike.
+`auth_method_id` is one `ArcSwapOption` for the whole agent, and every client's
+`initialize` rewrites it — which is exactly what `interactive_trust` did before
+`54cc4c3d`. But that flag named a *client* property, whether this client can
+draw a trust card, and two clients honestly differ on it; the fix was to carry
+each client's own answer in its session request. `auth_method_id` names which
+credential the one `AuthManager`, over the one `~/.grok/auth.json`, is currently
+serving. There is no per-client answer to carry: every session's turns are
+signed with the same bearer. A browser login is the same act as a terminal
+login, for the same user, on the same store.
+
+What is true is that a login is machine-wide. Signing in here signs in the
+terminal sharing this leader, and the agent's single flight means starting one
+login cancels another in flight — from either side, exactly as two terminals
+already do to each other.
+
 ## Slash commands
 
 Press `/` in the composer and the shell's own catalog opens: its builtins, the
@@ -216,6 +310,7 @@ transform, which the reactivity depends on.
 | file | what it holds |
 | --- | --- |
 | `src/wire.ts` | the slice of the protocol this client speaks, and nothing else |
+| `src/auth.ts` | which sign-in a client may drive, and which it must refuse |
 | `src/client.ts` | JSON-RPC 2.0 over the gateway's WebSocket |
 | `src/gateway.ts` | the live connection, as reactive state |
 | `src/roster.ts` | the roster, grouped by `cwd` |
@@ -226,7 +321,7 @@ transform, which the reactivity depends on.
 | `src/panel.ts` | tone-to-role, and the block-kind exhaustiveness guard |
 | `src/theme.ts` | generated palette to CSS custom properties |
 | `src/App.tsx` | the screen and its routes |
-| `src/components/` | Roster, Session, Panel, Markdown, Settings, PermissionCard, FolderTrustCard, DirectoryPicker, CommandMenu |
+| `src/components/` | AuthCard, Roster, Session, Panel, Markdown, Settings, PermissionCard, FolderTrustCard, DirectoryPicker, CommandMenu |
 
 `src/wire.ts` is hand-written on purpose and the reasoning is at the top of the
 file: the panel types and the palette *are* generated and are imported, never
