@@ -6,6 +6,7 @@ import {
   METHOD_NOT_FOUND,
   unprefix,
   unwrapExt,
+  watchLink,
   type SocketLike,
 } from "../src/client.ts";
 
@@ -168,5 +169,45 @@ describe("request and response plumbing", () => {
     expect(() => client.receive("not json")).not.toThrow();
     expect(() => client.receive("null")).not.toThrow();
     expect(() => client.receive('{"jsonrpc":"2.0"}')).not.toThrow();
+  });
+});
+
+describe("what the socket says about itself", () => {
+  test("a link that closes reports closed, so nothing above it can keep claiming connected", async () => {
+    // The bug this stands against: the reactive layer's `connection()` stayed
+    // `"connected"` after the socket died, because nothing told it otherwise.
+    const seen: string[] = [];
+    const stop = watchLink((_, state) => seen.push(state));
+    const { socket, client } = await connected();
+    expect(client.linkState()).toBe("open");
+    socket.fire("close");
+    expect(client.linkState()).toBe("closed");
+    expect(seen).toEqual(["opening", "open", "closed"]);
+    stop();
+  });
+
+  test("each state is announced once, however many times the socket repeats itself", async () => {
+    const seen: string[] = [];
+    const stop = watchLink((_, state) => seen.push(state));
+    const { socket } = await connected();
+    socket.fire("open");
+    socket.fire("close");
+    socket.fire("close");
+    expect(seen).toEqual(["opening", "open", "closed"]);
+    stop();
+  });
+
+  test("the client is named, because a replaced socket's close arrives after its replacement", async () => {
+    // A reconnect hangs up the old socket before opening the new one, and the
+    // old `close` lands afterwards. A watcher that could not tell them apart
+    // would read the new link as dead the instant it came up.
+    const events: [GatewayClient, string][] = [];
+    const stop = watchLink((client, state) => events.push([client, state]));
+    const old = await connected();
+    const fresh = await connected();
+    old.socket.fire("close");
+    expect(events.at(-1)![0]).toBe(old.client);
+    expect(events.at(-1)![0]).not.toBe(fresh.client);
+    stop();
   });
 });

@@ -94,6 +94,62 @@ button:disabled {
   color: var(--grok-text-secondary, canvastext);
 }
 
+/* -- the link ------------------------------------------------------------- */
+
+.link {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* The dot carries the state and the words repeat it, because a colour alone
+ * cannot separate "retrying" from "gave up" — and that is the difference a
+ * person can act on. */
+.link-dot {
+  flex: none;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--grok-gray, canvastext);
+}
+
+.link[data-phase="live"] .link-dot {
+  background: var(--grok-accent-success, canvastext);
+}
+
+.link[data-phase="connecting"] .link-dot {
+  background: var(--grok-accent-running, canvastext);
+}
+
+.link[data-phase="waiting"] .link-dot {
+  background: var(--grok-warning, canvastext);
+}
+
+.link[data-phase="lost"] .link-dot {
+  background: var(--grok-accent-error, canvastext);
+}
+
+.link-state {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--grok-text-secondary, canvastext);
+}
+
+.link-retry {
+  flex: none;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+.link-note {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+  overflow-wrap: anywhere;
+}
+
 .roster-group {
   margin-bottom: 1rem;
 }

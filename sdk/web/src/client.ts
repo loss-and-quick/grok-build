@@ -100,6 +100,71 @@ interface Pending {
   reject: (reason: Error) => void;
 }
 
+/**
+ * Whether there is a socket, as the module that owns the socket sees it.
+ *
+ * `"open"` is not the same as "usable": the handshake that follows can still
+ * fail. It is the floor under every other claim — nothing above this may call
+ * itself connected while this says `"closed"`.
+ */
+export type LinkState = "opening" | "open" | "closed";
+
+export type LinkWatcher = (client: GatewayClient, state: LinkState) => void;
+
+const linkWatchers = new Set<LinkWatcher>();
+
+/**
+ * Watch every gateway socket this page opens, from outside the object that
+ * owns it.
+ *
+ * A supervisor has to know that the socket died, and it does not hold the
+ * client: the reactive layer builds one privately per connect, so by the time
+ * anything above notices, the object that could have been asked is already
+ * being replaced. Announcing here instead makes the socket's own module the one
+ * place that reports liveness, and it reports for every client — the watcher is
+ * handed the one the event belongs to precisely because a superseded socket's
+ * `close` still arrives, and arrives *after* its replacement has opened.
+ */
+export function watchLink(watcher: LinkWatcher): () => void {
+  linkWatchers.add(watcher);
+  return () => {
+    linkWatchers.delete(watcher);
+  };
+}
+
+/**
+ * How long to wait before the next attempt to reopen a dropped link.
+ *
+ * The first attempt is immediate, because the commonest drop is momentary and a
+ * person watching the page should not be told to wait for one; from there each
+ * attempt doubles up to a ceiling, so a leader that is down stays asked once
+ * every half minute rather than continuously. The ladder is bounded on purpose
+ * — see {@link RETRY_LIMIT}.
+ *
+ * Deterministic, with no jitter. Jitter answers many clients synchronising on
+ * one server; this is one browser tab against a gateway on its own loopback,
+ * and a fixed ladder is one whose remaining attempts the screen can state
+ * truthfully.
+ */
+export const RETRY_BASE_MS = 500;
+export const RETRY_CEILING_MS = 30_000;
+
+/**
+ * How many attempts before the page stops trying on its own.
+ *
+ * Nine attempts span about a minute and a half, which covers a leader being
+ * restarted and a laptop waking up. Past that the page stops rather than
+ * knocking on a stopped gateway until the tab is closed — and says that it has
+ * stopped, because "reconnecting…" that will never resolve is the same lie as
+ * "connected" on a dead socket.
+ */
+export const RETRY_LIMIT = 9;
+
+export function retryDelayMs(attempt: number): number {
+  if (attempt <= 1) return 0;
+  return Math.min(RETRY_CEILING_MS, RETRY_BASE_MS * 2 ** (attempt - 2));
+}
+
 /** The socket surface this client needs; narrowed so tests can supply a fake. */
 export interface SocketLike {
   send(data: string): void;
@@ -110,6 +175,7 @@ export interface SocketLike {
 
 export class GatewayClient {
   private socket: SocketLike | null = null;
+  private link: LinkState = "closed";
   private nextId = 1;
   private readonly pending = new Map<number | string, Pending>();
   private readonly notificationHandlers: NotificationHandler[] = [];
@@ -133,20 +199,41 @@ export class GatewayClient {
     this.requestHandler = handler;
   }
 
+  /** Is there a socket, and is it open? */
+  linkState(): LinkState {
+    return this.link;
+  }
+
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       const socket = this.openSocket();
       this.socket = socket;
+      this.announce("opening");
       socket.addEventListener("message", (event) => this.receive(String(event.data)));
-      socket.addEventListener("open", () => resolve());
+      socket.addEventListener("open", () => {
+        this.announce("open");
+        resolve();
+      });
       socket.addEventListener("error", () => reject(new Error("gateway socket error")));
       socket.addEventListener("close", () => {
         this.failAllPending(new Error("gateway socket closed"));
         this.socket = null;
+        this.announce("closed");
       });
     });
   }
 
+  /**
+   * Close deliberately.
+   *
+   * The socket is dropped here but `"closed"` is not announced here: the
+   * announcement waits for the socket's own `close` event, so that every
+   * report of a dead link comes from the same place whether the link was
+   * hung up or lost. Announcing early would also be wrong in the one case
+   * that matters — a reconnect hangs up the old socket *before* opening the
+   * new one, and a supervisor told "closed" at that instant would start
+   * chasing a link that is already being replaced.
+   */
   close(): void {
     this.socket?.close();
     this.socket = null;
@@ -233,6 +320,12 @@ export class GatewayClient {
         error: { code: INTERNAL_ERROR, message: String(e) },
       });
     }
+  }
+
+  private announce(state: LinkState): void {
+    if (this.link === state) return;
+    this.link = state;
+    for (const watcher of linkWatchers) watcher(this, state);
   }
 
   private failAllPending(reason: Error): void {
