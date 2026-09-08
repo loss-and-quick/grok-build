@@ -47,6 +47,7 @@ import {
 } from "./resume.ts";
 import { createRoster, type Roster } from "./roster.ts";
 import { createSubagents, type Subagents } from "./subagents.ts";
+import { createTasks, type Tasks } from "./tasks.ts";
 import { createTranscript, type Transcript } from "./transcript.ts";
 import { LIST_PARAMS, ROOT } from "./directory.ts";
 import {
@@ -65,7 +66,10 @@ import {
   type FsExistsResponse,
   type FsListResponse,
   type InitializeResponse,
+  type DeleteScheduledTaskResponse,
+  type KillTaskResponse,
   type ListRunningSubagentsResponse,
+  type ListTasksResponse,
   type NewSessionResponse,
   type PanelActionResponse,
   type PromptResponse,
@@ -168,6 +172,15 @@ export interface Attached {
    * itself on every attach rather than being carried between sessions.
    */
   subagents: Subagents;
+  /**
+   * This session's background work: the dock's Tasks and Watchers.
+   *
+   * Per attach, like the transcript and the fan-out, and rebuilt the same way:
+   * `session/load` replays this session's own `task_backgrounded`,
+   * `task_completed` and `scheduled_task_*` rows, so the two sections come back
+   * from the log rather than being carried between sessions.
+   */
+  tasks: Tasks;
   /**
    * How much of this session's event log this client has drawn.
    *
@@ -529,6 +542,11 @@ export function createGateway() {
       // this frame. Everything on screen is about to be re-sent, so it goes
       // now, before the first line of the new copy is folded in.
       if (verdict === "rebuild") current.transcript.reset();
+      // Ahead of the transcript fold rather than inside it, because this is the
+      // one fold that needs to know *how* the frame arrived: a live
+      // `task_backgrounded` means the command started as it was announced, and
+      // a replayed one says nothing at all about when.
+      current.tasks.apply(update, meta.isReplay);
       fold(current, notification.sessionId, update);
       // After the fold, never instead of it: what the cursor is allowed to name
       // depends on how many entries the transcript holds at that moment.
@@ -1021,6 +1039,7 @@ export function createGateway() {
       entry,
       transcript,
       subagents: createSubagents(entry.sessionId),
+      tasks: createTasks(),
       // The transcript's own position, not a second count kept beside it: the
       // mark has to be what the transcript will be rewound to, and two numbers
       // that are supposed to be equal are a thing that can stop being equal.
@@ -1114,6 +1133,12 @@ export function createGateway() {
       return;
     }
     await seedRunningSubagents(entry.sessionId, subagents);
+    // Not awaited, unlike the seed above it. That one fills counters that would
+    // otherwise read "unknown" on rows already on screen; this one only
+    // *corrects* an elapsed time the replay could not date, and a leader too
+    // old to know `x.ai/task/list` would never answer at all — which awaiting
+    // would turn into a session that never finishes attaching.
+    void seedTasks(entry.sessionId, current.tasks);
     // Not awaited, and this is the same argument as the seed above it: the
     // transcript is what attaching is, and a window that has not arrived yet is
     // a widget that is not on screen yet. Waiting on it would let a leader slow
@@ -1206,6 +1231,125 @@ export function createGateway() {
         ? `the agent has no record of ${subagentId}`
         : `${subagentId} had already finished: ${status}`,
     );
+  };
+
+  /**
+   * Ask what background work is running right now.
+   *
+   * The same shape as {@link seedRunningSubagents} and for the same reason.
+   * `session/load` replays every `task_backgrounded` this session ever wrote,
+   * so *which* commands exist is known by the time this runs; what the replay
+   * cannot carry is when any of them started, because the notification has no
+   * timestamp on it. The pager lives with that — it stamps its own clock on a
+   * replayed task (`acp_handler/background.rs:157`), which on a resume dates
+   * every one of them to the moment of resuming — and `x.ai/task/list` is the
+   * agent's own answer (`extensions/task.rs:394`).
+   *
+   * A failure is not reported. The rows are already on screen from the replay;
+   * only the elapsed column stays an em dash, which is the true statement.
+   */
+  const seedTasks = async (sessionId: string, tasks: Tasks): Promise<void> => {
+    if (!client) return;
+    try {
+      const response = (await client.ext("x.ai/task/list", { sessionId })) as ListTasksResponse;
+      tasks.seed(sessionId, response?.tasks ?? []);
+    } catch {
+      // See above: the stream said which, and only the when is missing.
+    }
+  };
+
+  /**
+   * Kill a background command or a monitor.
+   *
+   * Destructive: the process is signalled where it stands, and whatever it had
+   * not finished is not finished. The rail arms the button before it sends.
+   *
+   * The three outcomes differ the way `x.ai/subagent/cancel`'s do, and the
+   * pager branches on them in the same three ways (`app/dispatch/turn.rs:786-817`).
+   * Only `killed` is followed by a `task_completed`, so only it leaves the row
+   * marked. `already_exited` means the completion has already been sent.
+   * `not_found` means the agent has no such task at all — a row replayed out of
+   * a session whose process died with it — and the row goes, because a stop
+   * button over nothing is worse than no row.
+   */
+  const killTask = async (taskId: string): Promise<void> => {
+    const current = attached();
+    if (!client || !current) return;
+    current.tasks.markKillSent(taskId, performance.now());
+    say(`stopping ${taskId}…`);
+    let response: KillTaskResponse | undefined;
+    try {
+      response = (await client.ext("x.ai/task/kill", {
+        sessionId: current.entry.sessionId,
+        taskId,
+        // A browser is a client UI, which is also the field's default. Sent
+        // anyway because the other value means bulk teardown, and the two
+        // differ in whether the model is told its command was killed
+        // (`computer/types.rs:309-315`).
+        source: "clientUi",
+      })) as KillTaskResponse;
+    } catch (e) {
+      // The RPC failed, so the process may well still be running. Clear the
+      // mark and leave the row rather than reporting a kill that never
+      // happened — the pager's `BgTaskKillFailed` rule (`turn.rs:809-816`).
+      current.tasks.clearKill(taskId);
+      say(`could not stop ${taskId}: ${String(e)}`);
+      return;
+    }
+    const outcome = response?.outcome;
+    if (outcome === "killed") {
+      say(`stopping ${taskId}; waiting for it to exit`);
+      return;
+    }
+    if (outcome === "not_found") {
+      current.tasks.forget(taskId);
+      say(`the agent has no record of ${taskId}`);
+      return;
+    }
+    // `already_exited`, and also an outcome this client does not know: clear
+    // the mark and keep the row, which is what the pager does with an
+    // unparseable answer for the same reason — it is not evidence of anything.
+    current.tasks.clearKill(taskId);
+    say(outcome === "already_exited" ? `${taskId} had already exited` : `stopped ${taskId}`);
+  };
+
+  /**
+   * Delete a scheduled `/loop`.
+   *
+   * Removed from the list before the agent answers, which is the pager's own
+   * optimism (`app/dispatch/turn.rs:684-696`): a schedule is a record rather
+   * than a process, deleting one cannot half-succeed, and the
+   * `scheduled_task_deleted` broadcast that follows lands on a row already
+   * gone. A failure puts it back, because a schedule still on the agent's books
+   * that this browser has stopped showing is the one outcome worth a word.
+   */
+  const cancelScheduledLoop = async (taskId: string): Promise<void> => {
+    const current = attached();
+    if (!client || !current) return;
+    const removed = current.tasks.loops.find((loop) => loop.taskId === taskId);
+    current.tasks.removeLoop(taskId);
+    say(`removing ${taskId}…`);
+    try {
+      const response = (await client.ext("x.ai/scheduler/delete", {
+        sessionId: current.entry.sessionId,
+        taskId,
+      })) as DeleteScheduledTaskResponse;
+      say(response?.deleted === false ? `the agent had no schedule ${taskId}` : `removed ${taskId}`);
+    } catch (e) {
+      if (removed) {
+        current.tasks.apply(
+          {
+            sessionUpdate: "scheduled_task_created",
+            task_id: removed.taskId,
+            prompt: removed.prompt,
+            human_schedule: removed.humanSchedule,
+            next_fire_at: removed.nextFireAt ?? null,
+          } as unknown as SessionUpdate,
+          false,
+        );
+      }
+      say(`could not remove ${taskId}: ${String(e)}`);
+    }
   };
 
   /**
@@ -1412,6 +1556,8 @@ export function createGateway() {
     pathExists,
     prompt,
     cancelSubagent,
+    killTask,
+    cancelScheduledLoop,
     panelAction,
     setModel,
     refreshRoster,
