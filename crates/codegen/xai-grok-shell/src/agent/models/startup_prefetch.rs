@@ -14,6 +14,12 @@ use crate::agent::config::Config;
 use crate::auth::{GrokAuth, GrokComConfig};
 use crate::util::config::RemoteSettings;
 
+/// The registered fetch. Written from tests only by `startup_prefetch_tests`,
+/// every case of which holds `#[serial(remote_sig_disarm)]` — the same group
+/// as `init_tests`, the other consumer of the process-wide fetch. Anything new
+/// that calls [`begin_before_policy_gate`], [`accept`] or [`clear_for_tests`]
+/// joins that group: the mutex here orders the writes but not the read-modify
+/// -write a case spans between `clear_for_tests` and its assertion.
 static INFLIGHT: Mutex<Option<Arc<Inflight>>> = Mutex::new(None);
 
 /// Mirrors the worker's own HTTP budget, with margin for backoff sleeps.
