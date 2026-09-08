@@ -203,6 +203,12 @@ pub enum CommandProvenance {
     Skill {
         source: String,
     },
+    /// ACP command a plugin declared in its manifest and handles in its own code.
+    /// Not a skill: nothing is expanded locally, the typed line passes through to the shell like any other ACP command.
+    /// `source` is the plugin install name, absent only if the agent advertised the command without naming its plugin.
+    Plugin {
+        source: Option<String>,
+    },
 }
 
 impl CommandProvenance {
@@ -212,6 +218,10 @@ impl CommandProvenance {
         match self {
             Self::Builtin | Self::Shell => std::borrow::Cow::Borrowed("built-in"),
             Self::Skill { source } => std::borrow::Cow::Owned(format!("skill · {source}")),
+            Self::Plugin { source: None } => std::borrow::Cow::Borrowed("plugin"),
+            Self::Plugin { source: Some(name) } => {
+                std::borrow::Cow::Owned(format!("plugin · {name}"))
+            }
         }
     }
 }

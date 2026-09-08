@@ -26,12 +26,16 @@ impl SkillIdentity {
     }
 }
 
-/// Parsed ACP `_meta` skill fields.
+/// Parsed ACP `_meta`: what the agent said this command is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillMeta {
     /// No skill keys.
     Absent,
     Skill(SkillIdentity),
+    /// A plugin's manifest-declared command, handled by the plugin's own code (`_meta.pluginCommand`).
+    /// Routed exactly like [`SkillMeta::Absent`]; it exists only so the menu can badge it.
+    /// The name is the plugin install name, `None` when the agent advertised none.
+    PluginCommand(Option<String>),
     /// Unknown `scope` string (e.g. `"workflow"`). Pass through, don't error.
     Foreign,
     /// Skill-like keys present but invalid. Invocation errors rather than silently degrading.
@@ -46,6 +50,13 @@ impl SkillMeta {
         let path_val = m.get("path");
         let scope_val = m.get("scope");
         if path_val.is_none() && scope_val.is_none() {
+            // Read only where the skill classification already yielded `Absent`, so a plugin command is
+            // recognized without any key the routing above reads. The agent omits `path`/`scope` for these
+            // deliberately (nothing to expand, no file to point at); adding them to earn a badge would
+            // reclassify them as markdown skills and break the dispatch.
+            if m.get("pluginCommand").and_then(|v| v.as_bool()) == Some(true) {
+                return SkillMeta::PluginCommand(trimmed_string_field(m, "pluginName"));
+            }
             return SkillMeta::Absent;
         }
         let path = path_val.and_then(|v| v.as_str());
@@ -97,6 +108,9 @@ impl SlashCommand for AcpSlashCommand {
             SkillMeta::Skill(identity) => CommandProvenance::Skill {
                 source: identity.source().to_string(),
             },
+            SkillMeta::PluginCommand(plugin) => CommandProvenance::Plugin {
+                source: plugin.clone(),
+            },
             _ => CommandProvenance::Shell,
         }
     }
@@ -133,7 +147,10 @@ impl SlashCommand for AcpSlashCommand {
             SkillMeta::Malformed => {
                 CommandResult::Error(format!("Malformed skill metadata for /{}", self.name))
             }
-            SkillMeta::Absent | SkillMeta::Foreign => CommandResult::PassThrough(text),
+            // A plugin command routes with `Absent`: the pass-through IS its dispatch, and the badge must not move it.
+            SkillMeta::Absent | SkillMeta::Foreign | SkillMeta::PluginCommand(_) => {
+                CommandResult::PassThrough(text)
+            }
             SkillMeta::Skill(_) => CommandResult::InjectSkill {
                 display_text: text.clone(),
                 prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
@@ -221,6 +238,84 @@ mod tests {
                 plugin_name: Some("acme".to_string()),
             })
         );
+    }
+
+    /// The badge must ride the keys the agent actually sends for a manifest command, which carry no `path`/`scope`.
+    #[test]
+    fn plugin_command_meta_is_recognized_and_badged() {
+        let cmd = AcpSlashCommand::from(&make_cmd(
+            "deploy",
+            Some(serde_json::json!({
+                "pluginCommand": true,
+                "pluginName": "acme",
+                "bareName": "deploy",
+                "qualifiedName": "acme:deploy",
+            })),
+        ));
+        assert!(
+            !cmd.is_skill(),
+            "a manifest command expands nothing locally"
+        );
+        assert_eq!(
+            cmd.provenance(),
+            CommandProvenance::Plugin {
+                source: Some("acme".to_string())
+            }
+        );
+        assert_eq!(cmd.provenance().badge(), "plugin · acme");
+    }
+
+    /// The pass-through is the dispatch path, so the badge must leave `run` on it.
+    #[test]
+    fn plugin_command_still_passes_through() {
+        let cmd = AcpSlashCommand::from(&make_cmd(
+            "deploy",
+            Some(serde_json::json!({"pluginCommand": true, "pluginName": "acme"})),
+        ));
+        let mut ctx = make_exec_ctx();
+        match cmd.run(&mut ctx, "staging") {
+            CommandResult::PassThrough(text) => assert_eq!(text, "/deploy staging"),
+            other => panic!("expected PassThrough, got {other:?}"),
+        }
+    }
+
+    /// A skill keeps its own classification even if a plugin flag rides along: `path`/`scope` decide routing first.
+    #[test]
+    fn plugin_flag_never_reclassifies_a_skill() {
+        assert_eq!(
+            parse(serde_json::json!({
+                "pluginCommand": true,
+                "scope": "plugin",
+                "path": "/plugins/acme/skills/login/SKILL.md",
+                "pluginName": "acme",
+            })),
+            SkillMeta::Skill(SkillIdentity {
+                path: "/plugins/acme/skills/login/SKILL.md".to_string(),
+                scope: SkillScope::Plugin,
+                plugin_name: Some("acme".to_string()),
+            })
+        );
+    }
+
+    /// A false or non-boolean flag is not a plugin command; it stays the shell command it was before.
+    #[test]
+    fn non_true_plugin_flag_stays_absent() {
+        for meta in [
+            serde_json::json!({"pluginCommand": false}),
+            serde_json::json!({"pluginCommand": "yes"}),
+        ] {
+            assert_eq!(parse(meta.clone()), SkillMeta::Absent, "{meta}");
+        }
+    }
+
+    /// An unnamed plugin still gets a badge rather than passing for a builtin.
+    #[test]
+    fn plugin_command_without_a_name_badges_bare() {
+        assert_eq!(
+            parse(serde_json::json!({"pluginCommand": true, "pluginName": " "})),
+            SkillMeta::PluginCommand(None)
+        );
+        assert_eq!(CommandProvenance::Plugin { source: None }.badge(), "plugin");
     }
 
     #[test]

@@ -60,7 +60,11 @@ impl MenuGroup {
                 Self::BundledSkill
             }
             CommandProvenance::Skill { .. } => Self::OtherSkill,
-            CommandProvenance::Builtin | CommandProvenance::Shell => Self::Command,
+            // A plugin's manifest command runs code rather than expanding a file, so it ranks with the commands
+            // and not with the skills its plugin may also ship.
+            CommandProvenance::Builtin
+            | CommandProvenance::Shell
+            | CommandProvenance::Plugin { .. } => Self::Command,
         }
     }
 }
@@ -968,8 +972,10 @@ impl SlashController {
             })
             .collect();
         let triggers = self.registry.triggers();
-        // Badge only collisions where a visible skill and a visible non-skill share the same bare name
-        let mut skill_bares: HashSet<String> = HashSet::new();
+        // Badge only collisions where a visible contributed command and a visible builtin share the same bare name
+        // A plugin's manifest command counts as contributed, not builtin: it is the side the badge has to name, and
+        // without it a `/acme:deploy` beside a builtin `/deploy` would have gone unbadged and read as built-in
+        let mut contributed_bares: HashSet<String> = HashSet::new();
         let mut other_bares: HashSet<String> = HashSet::new();
         for (_, trigger) in triggers
             .iter()
@@ -977,13 +983,16 @@ impl SlashController {
             .filter(|(i, _)| visible_indices.contains(i))
         {
             let bare = trigger_bare_name(trigger).to_lowercase();
-            if matches!(trigger.provenance, CommandProvenance::Skill { .. }) {
-                skill_bares.insert(bare);
+            if matches!(
+                trigger.provenance,
+                CommandProvenance::Skill { .. } | CommandProvenance::Plugin { .. }
+            ) {
+                contributed_bares.insert(bare);
             } else {
                 other_bares.insert(bare);
             }
         }
-        let colliding_bares: HashSet<&str> = skill_bares
+        let colliding_bares: HashSet<&str> = contributed_bares
             .intersection(&other_bares)
             .map(String::as_str)
             .collect();
@@ -1851,6 +1860,62 @@ mod tests {
         assert!(
             snapshot.matches.iter().any(|row| row.display == "/model"),
             "expected /model in matches"
+        );
+    }
+
+    /// End to end through the registry: a manifest command that had to qualify itself around a builtin says which
+    /// plugin it came from, where before it claimed to be built-in like the command it lost the bare name to.
+    #[test]
+    fn plugin_manifest_command_reaches_the_menu_badged() {
+        let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
+        let meta = serde_json::json!({
+            "pluginCommand": true,
+            "pluginName": "acme",
+            "bareName": "login",
+            "qualifiedName": "acme:login",
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        ctrl.registry_mut()
+            .set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+                "acme:login".to_string(),
+                "Acme account login".to_string(),
+            )
+            .meta(meta)]);
+
+        let state = SlashState::default();
+        let models = ModelState::default();
+        ctrl.refresh(&state, "/", 1, &models);
+        let matches = state.snapshot().matches;
+        let row = matches
+            .iter()
+            .find(|row| row.display == "/acme:login")
+            .expect("plugin command in the menu");
+        assert_eq!(
+            row.provenance,
+            Some(CommandProvenance::Plugin {
+                source: Some("acme".to_string())
+            })
+        );
+        assert_eq!(
+            row.provenance.as_ref().map(CommandProvenance::badge),
+            Some(std::borrow::Cow::Owned("plugin · acme".to_string()))
+        );
+        assert_eq!(
+            MenuGroup::of(row.provenance.as_ref().unwrap()),
+            MenuGroup::Command,
+            "a manifest command runs code, so it ranks with the commands and not the skills"
+        );
+        let builtin = matches
+            .iter()
+            .find(|row| row.display == "/login")
+            .expect("builtin it collided with");
+        assert_eq!(builtin.provenance, Some(CommandProvenance::Builtin));
+        assert!(
+            ctrl.registry()
+                .get("acme:login")
+                .is_some_and(|c| !c.is_skill())
         );
     }
 
