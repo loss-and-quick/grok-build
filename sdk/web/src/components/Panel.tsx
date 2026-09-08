@@ -41,7 +41,7 @@ function asKind<K extends PanelBlock["kind"]>(kind: K, block: PanelBlock): Block
  * that way: a re-publish that inserts a block above a field must not count as a
  * different field.
  */
-interface Fields {
+export interface Fields {
   /** Adopt a mounted element for `id`, restoring what was typed into it. */
   adopt(id: string, field: HTMLInputElement, published: string | null): void;
   /** Remember an edit, so it survives an element this component has to rebuild. */
@@ -52,7 +52,7 @@ interface Fields {
   collect(): Record<string, string>;
 }
 
-function createFields(): Fields {
+export function createFields(): Fields {
   const mounted = new Map<string, HTMLInputElement>();
   const typed = new Map<string, string>();
   return {
@@ -98,8 +98,22 @@ export function Panel(props: {
   plugin: string;
   viewModel: PanelViewModel;
   onAction: (action: PanelAction) => void;
+  /**
+   * Where the live text of this panel's fields is kept.
+   *
+   * Passed in when one panel has two surfaces — the rail's widget and the
+   * dialog its **Open** button raises — so that both are the same editor rather
+   * than two, which is the pager's model: one `LineEditor` per input id,
+   * whichever surface is drawing it. Left out, the panel owns its own, which is
+   * what a panel drawn in only one place needs.
+   */
+  fields?: Fields;
 }): JSX.Element {
-  const fields = createFields();
+  // Resolved once, at creation, rather than read through props wherever it is
+  // used. A field unregisters itself as it unmounts, and by then the surface
+  // that supplied this map may already be gone — reading a prop during teardown
+  // is reading something that has been torn down.
+  const fields = props.fields ?? createFields();
 
   return (
     <section class="grok-panel">

@@ -16,6 +16,7 @@ import {
   type GatewayClient,
 } from "./client.ts";
 import { createGateway, remember, remembered, type Gateway } from "./gateway.ts";
+import { railEnabled } from "./rail.ts";
 import { applyTheme, themeByName } from "./theme.ts";
 
 const gateway: Gateway = createGateway();
@@ -233,6 +234,27 @@ export function createLink(
 const link: Link = createLink(gateway);
 
 /**
+ * This browser's own answer about the widget rail, or `null` for "not asked".
+ *
+ * The gate itself belongs to the agent: `dock_enabled` rides
+ * `x.ai/settings/update` to every attached client, and until now this page threw
+ * that notification away, so a cohort the dock was turned on for saw nothing of
+ * it here. This is the layer beneath it, and the pager has the same one — it
+ * resolves the feature through pin, environment, config file, then the cohort
+ * flag (`pager/src/app/mod.rs:199-209`), and a `[features] dock` in a file on
+ * that machine outranks the rollout. A browser has no such file; storage is what
+ * it has instead, and it sits in the same place in the order.
+ */
+const [railLocal, setRailLocal] = createSignal<boolean | null>(storedRail());
+
+function storedRail(): boolean | null {
+  const stored = remembered("rail");
+  return stored === "" ? null : stored === "on";
+}
+
+const railShown = (): boolean => railEnabled(railLocal(), gateway.dockEnabled());
+
+/**
  * The screen.
  *
  * The route is the attached session, which is what makes this a web client
@@ -254,8 +276,7 @@ export function App(props: { children?: JSX.Element }): JSX.Element {
     // bookmarked session opens attached instead of at a login form.
     const url = remembered("url");
     const secret = remembered("secret");
-    if (url && secret) void link.open(url, secret);
-  });
+    if (url && secret) void link.open(url, secret);  });
 
   return (
     <div class="layout">
@@ -277,6 +298,7 @@ export function App(props: { children?: JSX.Element }): JSX.Element {
         </select>
         <NewSessionButton />
         <RosterPane />
+        <RailToggle />
         <Settings gateway={gateway} />
       </aside>
       <main class="main">
@@ -496,6 +518,38 @@ function ConnectForm(props: { onDone: () => void }): JSX.Element {
   );
 }
 
+/**
+ * This browser's say in whether the rail is drawn.
+ *
+ * Not a settings row: `x.ai/settings/list` does not carry one, and a control
+ * that pretended to write a setting the agent has no key for would be a lie
+ * about where the state lives. What it is instead is the browser's copy of
+ * `[features] dock` in a `config.toml` — a local answer that outranks the
+ * cohort flag, exactly as the pager's own ladder has it. The label says which
+ * way the agent has voted, because a switch whose default comes from elsewhere
+ * is unreadable without that.
+ */
+function RailToggle(): JSX.Element {
+  const remote = (): boolean | null => gateway.dockEnabled();
+  const said = (): string =>
+    remote() === null ? "the agent has not said" : remote() ? "the agent says on" : "the agent says off";
+
+  return (
+    <label class="rail-toggle">
+      <input
+        type="checkbox"
+        checked={railShown()}
+        onChange={(event) => {
+          const on = event.currentTarget.checked;
+          remember("rail", on ? "on" : "off");
+          setRailLocal(on);
+        }}
+      />
+      Widget rail <span class="rail-toggle-note">({said()})</span>
+    </label>
+  );
+}
+
 function RosterPane(): JSX.Element {
   const params = useParams<{ sessionId?: string }>();
   return <Roster gateway={gateway} current={params.sessionId} />;
@@ -503,7 +557,7 @@ function RosterPane(): JSX.Element {
 
 /** `/` — connected but not attached. */
 export function Home(): JSX.Element {
-  return <Session gateway={gateway} />;
+  return <Session gateway={gateway} rail={railShown()} />;
 }
 
 /**
@@ -534,7 +588,7 @@ export function SessionRoute(): JSX.Element {
       void gateway.attach(entry);
     }),
   );
-  return <Session gateway={gateway} />;
+  return <Session gateway={gateway} rail={railShown()} />;
 }
 
 /** `/d/:cwd` — a directory. Attaches to its most recently changed session. */
@@ -550,5 +604,5 @@ export function DirectoryRoute(): JSX.Element {
       },
     ),
   );
-  return <Session gateway={gateway} />;
+  return <Session gateway={gateway} rail={railShown()} />;
 }

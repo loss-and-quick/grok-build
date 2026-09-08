@@ -261,6 +261,59 @@ button:disabled {
   gap: 0.75rem;
 }
 
+/* The attached session's three areas: the flow (header, permissions, fan-out,
+ * transcript), the widget rail, and the composer.
+ *
+ * Named areas rather than a track list, and for the reason above: an area that
+ * has no element in it takes no space, so the rail appearing and disappearing
+ * cannot shift what the other two are. The composer is a child of this grid
+ * rather than of the flow above it, which is what lets the rail be a column
+ * beside the session on a wide window and a strip directly above the prompt on
+ * a narrow one — the pager's own dock geometry — without the DOM changing.
+ *
+ * The narrow layout is the base case, not the exception, and the number below
+ * is measured rather than chosen. A plugin publishing a four-column table of
+ * realistic content wants about 350px of usable width before it starts hiding a
+ * navigator takes 22rem, so a third column stops being worth having under about
+ * 1200px of window — at 1100px it is 300px wide and cuts the last column off
+ * with nothing on screen to say so. Below that the rail is what the terminal
+ * has: a strip directly above the prompt, the full width of the session, where
+ * the same table has 400px or more and fits outright. */
+.session-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "flow"
+    "rail"
+    "composer";
+}
+
+.session-flow {
+  grid-area: flow;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 0;
+}
+
+.session-body > .composer {
+  grid-area: composer;
+}
+
+@media (min-width: 1200px) {
+  .session-body.railed {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "flow rail"
+      "composer rail";
+  }
+}
+
 .session-title {
   margin: 0;
   font-size: 1.1rem;
@@ -1901,4 +1954,198 @@ button.picker-row:focus-visible {
   margin: 0;
   color: var(--grok-gray, canvastext);
   opacity: var(--grok-muted-opacity, 1);
+}
+
+/* -- the widget rail ------------------------------------------------------ */
+
+/* The pager's dock in a browser's geometry. Narrow is the base case: a strip
+ * above the prompt, capped so it can never eat the transcript — the same
+ * `40vh` ceiling `.panels` has, and for the same reason. */
+.rail {
+  grid-area: rail;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-height: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 0.5rem;
+  background: var(--grok-bg-dark, canvas);
+  border: 1px solid var(--grok-prompt-border, canvastext);
+  border-radius: 6px;
+}
+
+/* Wide enough for a third column: it becomes one, full height, with the
+ * navigator's own background. The floor is what a four-column table measured at
+ * — narrower than this and the rail starts clipping content whose only
+ * affordance is a scrollbar the platform may not draw. A table wider still is
+ * what the **Open** dialog is for, which is the terminal's arrangement too: the
+ * pager writes each table row as one clipped line and F6 is where it is read. */
+@media (min-width: 1200px) {
+  .railed > .rail {
+    width: clamp(360px, 26vw, 24rem);
+    max-height: none;
+    padding: 0 0 0 0.6rem;
+    border: 0;
+    border-left: 1px solid var(--grok-prompt-border, canvastext);
+    border-radius: 0;
+  }
+}
+
+/* `▾ Subagents 5 ─────…` — `dock.rs`'s `section_header`, cell for cell: the
+ * chevron, the label, the count, then a rule spending whatever is left of the
+ * line. The rule is what makes a stack of these read as one dock rather than as
+ * unrelated headings, which is why the terminal pays for it in columns. */
+.rail-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.rail-disclosure {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.15rem 0;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rail-chevron {
+  color: var(--grok-gray, canvastext);
+}
+
+.rail-label {
+  font-weight: bold;
+  color: var(--grok-gray-bright, canvastext);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-count,
+.rail-source {
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+  white-space: nowrap;
+}
+
+.rail-rule {
+  flex: 1 1 auto;
+  min-width: 1rem;
+  border-top: 1px solid var(--grok-gray-dim, canvastext);
+}
+
+.rail-open {
+  flex: 0 0 auto;
+}
+
+.rail-disclosure:hover .rail-label,
+.rail-disclosure:focus-visible .rail-label {
+  color: var(--grok-accent-skill, canvastext);
+}
+
+.rail-body {
+  min-width: 0;
+  /* The pager clamps its panel overlay to 30 rows and this is that number in a
+   * browser's units: past it the widget scrolls rather than pushing the next
+   * section off the rail. Taking the count the product already named is the
+   * same rule `TYPED_LINE_LIMIT` follows. */
+  max-height: calc(30 * 1.5em);
+  overflow-y: auto;
+}
+
+.rail-broken {
+  margin: 0;
+  color: var(--grok-accent-error, canvastext);
+}
+
+/* A panel in a column is narrower than a panel over a transcript, so it loses
+ * the card border it had there — two nested frames in 300px is a frame around
+ * nothing. */
+.rail-body .grok-panel {
+  border: 0;
+  background: none;
+}
+
+.rail-body .grok-panel-header {
+  display: none;
+}
+
+.rail-body .grok-panel-body {
+  padding: 0.2rem 0 0.5rem;
+}
+
+/* This is the honest half of the width finding: a table wider than the column
+ * scrolls rather than being cut, and the scrollbar is left visible because it
+ * is the only thing that says there is more. Reading such a table is what the
+ * widget's **Open** button is for — the terminal reads its own wide tables the
+ * same way, on F6, since the pager writes each row as one clipped line. */
+.rail-body .grok-panel-table-wrap {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.rail-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  color: var(--grok-text-secondary, canvastext);
+}
+
+.rail-toggle-note {
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+/* -- a widget, opened whole ----------------------------------------------- */
+
+/* The same scrim and the same trap as the directory picker; see `focus.ts` for
+ * why the `aria-modal` claim and the trap are one decision rather than two. */
+.overlay-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  place-items: center;
+  padding: 1rem;
+  background: color-mix(in srgb, var(--grok-bg-dark, canvas) 82%, transparent);
+}
+
+.overlay {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.6rem;
+  width: min(60rem, 100%);
+  height: min(40rem, 100%);
+  padding: 0.75rem;
+  background: var(--grok-bg-light, canvas);
+  border: 1px solid var(--grok-selection-border, canvastext);
+  border-radius: 6px;
+}
+
+.overlay-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.overlay-title {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--grok-accent-skill, canvastext);
+}
+
+.overlay-body {
+  min-height: 0;
+  overflow: auto;
 }

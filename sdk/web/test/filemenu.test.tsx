@@ -75,7 +75,7 @@ function mount() {
     panelAction: async () => {},
   } as unknown as Gateway;
 
-  const { container } = render(() => Session({ gateway }));
+  const { container } = render(() => Session({ gateway, rail: false }));
   const input = container.querySelector<HTMLTextAreaElement>(".prompt-input")!;
 
   // Async because a keystroke reaches the agent: `sync` asks the search, which

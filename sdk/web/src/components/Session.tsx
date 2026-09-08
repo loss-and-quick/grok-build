@@ -28,6 +28,7 @@ import { FileMenu, createFileMenu } from "./FileMenu.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { Panel } from "./Panel.tsx";
+import { Rail } from "./Rail.tsx";
 import { PermissionCard } from "./PermissionCard.tsx";
 import { Subagents } from "./Subagents.tsx";
 import { ToolResult } from "./ToolResult.tsx";
@@ -40,7 +41,7 @@ import { ToolResult } from "./ToolResult.tsx";
  * `agent_message_chunk` updates a single text node. That is the whole reason
  * this client is fine-grained rather than virtual-DOM.
  */
-export function Session(props: { gateway: Gateway }): JSX.Element {
+export function Session(props: { gateway: Gateway; rail: boolean }): JSX.Element {
   let composer: HTMLTextAreaElement | undefined;
   const tick = createTick();
   const menu = createCommandMenu(() => props.gateway.commands());
@@ -101,7 +102,15 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
       fallback={<p class="empty">Pick a session on the left.</p>}
     >
       {(current) => (
-        <>
+        // Three areas, one grid, and the composer is a child of it rather than
+        // of the column above it. That is what lets the rail be a column beside
+        // the session when there is room and a dock directly above the prompt
+        // when there is not — the pager's own geometry, which is where the rail
+        // came from — without moving anything in the DOM as the window changes
+        // size. A move would rebuild whatever a plugin panel was holding, which
+        // is the thing `Panel.tsx` exists to prevent.
+        <div class="session-body" classList={{ railed: props.rail }}>
+          <div class="session-flow">
           <header class="session-header">
             {/* The transcript is where the pager's third fallback reads from
                 too: `entry_title` takes the first user prompt out of the
@@ -122,17 +131,25 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
             </For>
           </div>
 
-          <div class="panels">
-            <For each={Object.values(current().transcript.panels)}>
-              {(panel) => (
-                <Panel
-                  plugin={panel.plugin}
-                  viewModel={panel.viewModel}
-                  onAction={(action) => void props.gateway.panelAction(panel.plugin, action)}
-                />
-              )}
-            </For>
-          </div>
+          {/* Where a panel goes when the rail is off: a stack over the
+              transcript, which is where every panel went before the rail
+              existed. The agent decides — `dock_enabled` rides
+              `x.ai/settings/update` to every client — so this is not a second
+              design kept alive beside the first, it is the off position of the
+              agent's own switch. */}
+          <Show when={!props.rail}>
+            <div class="panels">
+              <For each={Object.values(current().transcript.panels)}>
+                {(panel) => (
+                  <Panel
+                    plugin={panel.plugin}
+                    viewModel={panel.viewModel}
+                    onAction={(action) => void props.gateway.panelAction(panel.plugin, action)}
+                  />
+                )}
+              </For>
+            </div>
+          </Show>
 
           {/* Between the panels and the transcript: a fan-out is state the
               transcript would scroll away, and the composer must stay put. */}
@@ -143,6 +160,11 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
               {(entry) => <Entry entry={entry} cwd={current().entry.cwd} tick={tick} />}
             </For>
           </div>
+          </div>
+
+          <Show when={props.rail}>
+            <Rail gateway={props.gateway} />
+          </Show>
 
           <form
             class="composer"
@@ -266,7 +288,7 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
               Send
             </button>
           </form>
-        </>
+        </div>
       )}
     </Show>
   );

@@ -70,7 +70,7 @@ function stub(over: Partial<Gateway> = {}): { gateway: Gateway; sent: string[] }
 }
 
 function mount(gateway: Gateway) {
-  const { container } = render(() => Session({ gateway }));
+  const { container } = render(() => Session({ gateway, rail: false }));
   const input = container.querySelector<HTMLTextAreaElement>(".prompt-input")!;
   const type = (text: string, caret = text.length): void => {
     input.value = text;
