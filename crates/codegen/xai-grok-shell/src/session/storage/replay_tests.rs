@@ -1310,3 +1310,132 @@ fn child_lookup_sees_session_created_after_prior_miss() {
         resolve_replay_updates_path("late-child", home.path(), ReplayPathHint::default()).unwrap();
     assert_eq!(path.as_deref(), Some(dir.join(UPDATES_FILE).as_path()));
 }
+
+// ── compaction history read back from the log ──────────────────────────
+
+fn compaction_line(before: Option<u64>, after: u64, elapsed_ms: Option<i64>) -> String {
+    persist_xai_update(
+        crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
+            tokens_before: before,
+            tokens_after: after,
+            elapsed_ms,
+            summary_preview: None,
+        },
+    )
+}
+
+/// `x.ai/session/info` answers the compaction history out of the session's own
+/// log, so a client that attached after a compaction is told the same thing as
+/// one that watched it happen. This is the read that makes that true.
+#[test]
+fn compaction_records_come_back_from_the_log_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(UPDATES_FILE);
+    let msg = acp_envelope(
+        r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}"#,
+    );
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n{msg}\n{}\n",
+            compaction_line(Some(858_000), 43_000, Some(500)),
+            compaction_line(Some(900_000), 60_000, None),
+        ),
+    )
+    .unwrap();
+
+    let records = super::replay::read_compaction_records(&path);
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.iter().map(|r| r.ordinal).collect::<Vec<_>>(),
+        vec![1, 2],
+        "ordinals number the compactions in the order they ran"
+    );
+    assert_eq!(records[0].tokens_before, Some(858_000));
+    assert_eq!(records[0].tokens_after, 43_000);
+    assert_eq!(records[0].elapsed_ms, Some(500));
+    assert_eq!(records[0].recovered(), Some(815_000));
+    assert_eq!(
+        records[1].elapsed_ms, None,
+        "an untimed compaction stays untimed"
+    );
+}
+
+/// A rewind that removed the turns around a compaction removed the compaction
+/// too. Reporting it would describe a window the session no longer has.
+#[test]
+fn a_rewound_compaction_is_not_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(UPDATES_FILE);
+    let prompt = acp_envelope(
+        r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p1"}}"#,
+    );
+    let rewind = xai_envelope(
+        r#"{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2024-01-01"}"#,
+    );
+    std::fs::write(
+        &path,
+        format!(
+            "{prompt}\n{}\n{rewind}\n{}\n",
+            compaction_line(Some(800_000), 40_000, None),
+            compaction_line(Some(900_000), 50_000, None),
+        ),
+    )
+    .unwrap();
+
+    let records = super::replay::read_compaction_records(&path);
+    assert_eq!(
+        records.len(),
+        1,
+        "only the compaction after the rewind survives"
+    );
+    assert_eq!(records[0].tokens_after, 50_000);
+    assert_eq!(
+        records[0].ordinal, 1,
+        "the survivor is renumbered rather than left with a gap"
+    );
+}
+
+/// A session that never compacted, and one whose log is gone, both answer with
+/// no records rather than failing the whole `session/info` reply.
+#[test]
+fn a_log_with_no_compactions_or_no_log_at_all_reads_as_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(UPDATES_FILE);
+    assert!(super::replay::read_compaction_records(&path).is_empty());
+
+    let msg = acp_envelope(
+        r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}"#,
+    );
+    std::fs::write(&path, format!("{msg}\n")).unwrap();
+    assert!(super::replay::read_compaction_records(&path).is_empty());
+}
+
+/// The facts the wire carries are resolved over exactly these records, and the
+/// count the agent reports is the authority on how many ran: a record the log
+/// no longer holds is reported missing, not quietly dropped from the total.
+#[test]
+fn resolved_facts_report_a_record_the_log_no_longer_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(UPDATES_FILE);
+    std::fs::write(
+        &path,
+        format!("{}\n", compaction_line(Some(800_000), 40_000, None)),
+    )
+    .unwrap();
+
+    let snapshot = crate::session::ContextInfo {
+        used: 40_000,
+        total: 1_000_000,
+        compaction_count: 3,
+        ..Default::default()
+    };
+    let facts = crate::session::ContextFacts::resolve(
+        &snapshot,
+        &super::replay::read_compaction_records(&path),
+    );
+    assert_eq!(facts.compaction.reported_count, 3);
+    assert_eq!(facts.compaction.records.len(), 1);
+    assert_eq!(facts.compaction.undetailed(), 2);
+    assert_eq!(facts.compaction.recovered_tokens, 760_000);
+}

@@ -695,6 +695,26 @@ impl SessionActor {
         let api_backend = config.as_ref().map(|c| format!("{:?}", c.api_backend));
         let agent_name = self.agent.borrow().definition().name.clone();
         let conversation_id = None;
+        let context = ContextInfo {
+            used: total_tokens,
+            total: context_window,
+            system_prompt_tokens,
+            tool_definitions_count: tool_definitions_count as u64,
+            tool_definitions_tokens,
+            compaction_count: compaction_count as u64,
+            turn_count: turn_count as u64,
+            tool_call_count: tool_call_count as u64,
+            message_count: message_count as u64,
+            message_tokens,
+            free_tokens,
+            usage_pct,
+            auto_compact_threshold_percent: self.compaction.threshold_percent.get(),
+            usage_categories,
+        };
+        let history = self.compaction_history(context.compaction_count).await;
+        let context_facts = Some(crate::session::context_facts::ContextFacts::resolve(
+            &context, &history,
+        ));
         SessionInfoData {
             model,
             model_display_name: None,
@@ -706,23 +726,44 @@ impl SessionActor {
             agent_name: Some(agent_name),
             turns: turns as u64,
             turn_index,
-            context: ContextInfo {
-                used: total_tokens,
-                total: context_window,
-                system_prompt_tokens,
-                tool_definitions_count: tool_definitions_count as u64,
-                tool_definitions_tokens,
-                compaction_count: compaction_count as u64,
-                turn_count: turn_count as u64,
-                tool_call_count: tool_call_count as u64,
-                message_count: message_count as u64,
-                message_tokens,
-                free_tokens,
-                usage_pct,
-                auto_compact_threshold_percent: self.compaction.threshold_percent.get(),
-                usage_categories,
-            },
+            context,
+            context_facts,
         }
+    }
+    /// Every compaction this session has completed, oldest first, read back
+    /// from its own `updates.jsonl`.
+    ///
+    /// The log is where these records live: each one was written there by the
+    /// same notification that told attached clients about the compaction. So
+    /// this answers identically for a client that watched it happen, one that
+    /// attached afterwards, and one attached to a session this process never
+    /// compacted — none of which is true of a count kept in a client's memory.
+    ///
+    /// The buffer is flushed first, because a compaction that finished moments
+    /// ago is exactly the one a user opens `/context` to look at. The read is
+    /// on the request path rather than cached because `x.ai/session/info` is
+    /// asked for by hand, a handful of times in a session — and `reported_count`
+    /// skips both the flush and the read for the sessions that never compacted,
+    /// which is most of them.
+    async fn compaction_history(
+        &self,
+        reported_count: u64,
+    ) -> Vec<crate::session::context_facts::CompactionRecord> {
+        if reported_count == 0 {
+            return Vec::new();
+        }
+        let (respond_to, flushed) = tokio::sync::oneshot::channel();
+        if self
+            .notifications
+            .persistence_tx
+            .send(PersistenceMsg::FlushAndAck { respond_to })
+            .is_ok()
+        {
+            // A failed flush is not fatal: the log still holds every
+            // compaction but the newest, which is better than none.
+            let _ = flushed.await;
+        }
+        crate::session::storage::read_compaction_records(&self.transcript_path())
     }
     /// Build the `/context` rows for everything this session injects into the
     /// prompt that is not the conversation (see [`TokenUsageCategory`]).

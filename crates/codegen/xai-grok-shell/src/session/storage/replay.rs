@@ -553,3 +553,68 @@ pub(crate) fn filter_delta_replay_lines(contents: &str) -> Vec<&str> {
         .collect();
     filter_rewind_lines(live)
 }
+
+/// The tag `AutoCompactCompleted` is persisted under, and the substring that
+/// keeps every other line off the JSON path.
+const AUTO_COMPACT_COMPLETED_TAG: &str = "auto_compact_completed";
+
+/// Every completed compaction this session's log still holds, oldest first.
+///
+/// The log is the only place these records exist: the values are produced once,
+/// at compaction, and written to `updates.jsonl` in the same notification that
+/// tells attached clients about it. Reading them back here is what lets one
+/// answer serve a client that watched the compaction happen, a client that
+/// attached afterwards, and a client attaching to a session this process did
+/// not compact — all from the same source, so none of them can disagree.
+///
+/// Rewind-filtered by the same driver replay uses, so a compaction whose turns
+/// were rewound away does not keep being reported.
+pub(crate) fn read_compaction_records(
+    updates_path: &Path,
+) -> Vec<crate::session::context_facts::CompactionRecord> {
+    let Ok(contents) = std::fs::read_to_string(updates_path) else {
+        return Vec::new();
+    };
+    if !contents.contains(AUTO_COMPACT_COMPLETED_TAG) {
+        return Vec::new();
+    }
+    let filtered = filter_rewind_lines(contents.lines().filter(|l| !l.trim().is_empty()).collect());
+    collect_compaction_records(&filtered)
+}
+
+/// The scan itself, over already rewind-filtered lines.
+pub(crate) fn collect_compaction_records(
+    filtered: &[&str],
+) -> Vec<crate::session::context_facts::CompactionRecord> {
+    let mut records = Vec::new();
+    for line in filtered {
+        if !line.contains(AUTO_COMPACT_COMPLETED_TAG) {
+            continue;
+        }
+        let raw = serde_json::from_str::<RawLinePeek<'_>>(line)
+            .ok()
+            .and_then(|e| e.params.map(|p| p.get()))
+            .unwrap_or(line);
+        let Ok(notification) = serde_json::from_str::<SessionNotification>(raw) else {
+            continue;
+        };
+        if let XaiUpdate::AutoCompactCompleted {
+            tokens_before,
+            tokens_after,
+            elapsed_ms,
+            summary_preview,
+        } = notification.update
+        {
+            records.push(crate::session::context_facts::CompactionRecord {
+                // Position in the surviving log, so a rewind that removed an
+                // earlier compaction renumbers rather than leaving a gap.
+                ordinal: records.len() + 1,
+                tokens_before,
+                tokens_after,
+                elapsed_ms,
+                summary_preview,
+            });
+        }
+    }
+    records
+}

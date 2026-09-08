@@ -333,3 +333,105 @@ async fn the_memory_search_block_is_read_back_out_of_the_system_message() {
         })
         .await;
 }
+
+/// `x.ai/session/info` carries the window already resolved into the rows,
+/// bands and thresholds `/context` draws, so the terminal and any other client
+/// render the same numbers instead of each deriving their own.
+#[tokio::test(flavor = "current_thread")]
+async fn session_info_carries_the_resolved_context_facts() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+
+            let facts = actor
+                .build_session_info()
+                .await
+                .context_facts
+                .expect("session/info resolves the facts");
+            assert_eq!(facts.total, 256_000);
+            assert_eq!(facts.auto_compact.threshold_percent, 85);
+            assert_eq!(
+                facts.auto_compact.threshold_tokens,
+                256_000 * 85 / 100,
+                "the trigger the agent will actually fire on, in tokens"
+            );
+            assert_eq!(
+                facts.bar.used() + facts.bar.free,
+                crate::session::BarPartition::UNITS,
+                "the partition a client draws must be exact"
+            );
+            let labels: Vec<&str> = facts
+                .contributors
+                .iter()
+                .map(|c| c.label.as_str())
+                .collect();
+            assert!(labels.contains(&"System prompt"), "{labels:?}");
+            assert!(labels.contains(&"Free"), "{labels:?}");
+        })
+        .await;
+}
+
+/// The compaction history comes off the session's own log, not out of a
+/// client's memory: an agent that never saw these compactions run still
+/// reports them, which is what lets a browser or a freshly attached pager
+/// show the same section the terminal has always shown.
+#[tokio::test(flavor = "current_thread")]
+async fn session_info_reports_compactions_read_back_from_the_session_log() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+
+            // Two compactions this actor never ran, exactly as the notification
+            // that announced them was persisted.
+            let path = actor.transcript_path();
+            std::fs::create_dir_all(path.parent().expect("session dir")).expect("mkdir");
+            let line = |before: u64, after: u64| {
+                let notif = crate::extensions::notification::SessionNotification {
+                    session_id: actor.session_info.id.clone(),
+                    update: crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
+                        tokens_before: Some(before),
+                        tokens_after: after,
+                        elapsed_ms: Some(400),
+                        summary_preview: None,
+                    },
+                    meta: None,
+                };
+                serde_json::to_string(
+                    &crate::session::storage::SessionUpdateEnvelope::from_update(
+                        &crate::session::storage::SessionUpdate::Xai(Box::new(notif)),
+                    )
+                    .expect("envelope"),
+                )
+                .expect("json")
+            };
+            std::fs::write(
+                &path,
+                format!("{}\n{}\n", line(200_000, 20_000), line(180_000, 15_000)),
+            )
+            .expect("write log");
+            actor.signals_handle().record_compaction(200_000);
+            actor.signals_handle().record_compaction(180_000);
+
+            let facts = actor
+                .build_session_info()
+                .await
+                .context_facts
+                .expect("session/info resolves the facts");
+            assert_eq!(facts.compaction.reported_count, 2);
+            assert_eq!(facts.compaction.records.len(), 2);
+            assert_eq!(facts.compaction.undetailed(), 0);
+            assert_eq!(facts.compaction.recovered_tokens, 180_000 + 165_000);
+            assert_eq!(facts.compaction.elapsed_ms, 800);
+            assert_eq!(facts.compaction.records[0].tokens_after, 20_000);
+            assert_eq!(facts.compaction.records[1].ordinal, 2);
+        })
+        .await;
+}

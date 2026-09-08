@@ -146,6 +146,9 @@ async fn handle_session_info(
                 crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
             ..ContextInfo::default()
         },
+        // A session that did not answer resolved nothing; `None` says so,
+        // where a default `ContextFacts` would render as a zero window.
+        context_facts: None,
     });
 
     data.model_display_name = agent

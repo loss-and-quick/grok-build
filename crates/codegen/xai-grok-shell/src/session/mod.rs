@@ -2,6 +2,7 @@ pub mod acp_types;
 pub mod announcement_state;
 pub mod commands;
 pub(crate) mod compaction_config;
+pub mod context_facts;
 pub(crate) mod doom_loop_telemetry;
 pub mod handle;
 pub(crate) mod memory_state;
@@ -15,6 +16,10 @@ pub mod visibility;
 pub use self::acp_session::*;
 pub use self::acp_types::*;
 pub use self::commands::*;
+pub use self::context_facts::{
+    AutoCompact, BarPartition, CompactionFacts, CompactionRecord, ContextFacts, Contributor,
+    ContributorKind,
+};
 pub use self::fork::{ForkSessionRequest, ForkSessionResponse, fork_session};
 pub use self::handle::*;
 pub use self::persistence::{

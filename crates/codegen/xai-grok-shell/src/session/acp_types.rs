@@ -474,7 +474,7 @@ pub fn count_detail(count: u64, noun: &str) -> String {
 }
 
 /// Context usage breakdown for session info.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ContextInfo {
     pub used: u64,
@@ -524,8 +524,8 @@ fn default_auto_compact_threshold() -> u8 {
 
 /// Unified session info data returned by GetSessionInfo.
 /// One query, all the fields needed for /session-info and /context.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct SessionInfoData {
     /// Agent definition name for this session (e.g. `grok-build`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -550,6 +550,17 @@ pub struct SessionInfoData {
     #[serde(default)]
     pub turn_index: u64,
     pub context: ContextInfo,
+    /// The same window, resolved into the rows, bands and thresholds
+    /// `/context` draws — see [`crate::session::context_facts`].
+    ///
+    /// Carried rather than left for each client to derive, because the
+    /// derivation holds decisions (what the unlabelled remainder means, where
+    /// the advisory band before auto-compaction starts, how a partition that
+    /// overruns `used` is squeezed) that have no other expression on the wire.
+    /// `None` from an agent too old to resolve them, which is a Rust client's
+    /// cue to run [`context_facts::ContextFacts::resolve`] over `context`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_facts: Option<super::context_facts::ContextFacts>,
 }
 
 pub fn model_display_name(

@@ -368,6 +368,7 @@ mod tests {
                 auto_compact_threshold_percent: 85,
                 usage_categories: vec![],
             },
+            context_facts: None,
         }
     }
 

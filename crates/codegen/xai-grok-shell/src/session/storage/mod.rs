@@ -1461,7 +1461,7 @@ pub use replay::{
     load_updates_for_replay, prepare_replay_lines, replay_would_emit, stream_replay_updates_at,
     stream_replay_updates_at_hinted,
 };
-pub(crate) use replay::{ReplayToolCollapser, filter_delta_replay_lines};
+pub(crate) use replay::{ReplayToolCollapser, filter_delta_replay_lines, read_compaction_records};
 
 /// Extracts `method` and raw `params` from an updates.jsonl envelope without parsing the notification payload.
 #[derive(serde::Deserialize)]
