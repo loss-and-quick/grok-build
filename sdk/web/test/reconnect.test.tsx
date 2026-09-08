@@ -545,4 +545,39 @@ describe("what the gate must not swallow", () => {
 
     expect(gateway.permissions.map((pending) => pending.toolCallId)).toEqual(["call-1"]);
   });
+
+  test("and the copy the dead socket was showing is not left beside it", async () => {
+    // Measured against a live agent before it was fixed: the card from the old
+    // socket stayed, the leader re-sent the same request, and the same question
+    // stood on screen twice. Pressing the older one writes the answer into a
+    // socket with nowhere to send it, so the agent stays parked on a question
+    // the person believes they have answered.
+    const gateway = createGateway();
+    await connect(gateway);
+    leader().answers = [FIRST_LOAD];
+    await attach(gateway);
+    const asking = (id: number): string =>
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "session/request_permission",
+        params: {
+          sessionId: SESSION,
+          toolCall: { toolCallId: "call-1", title: "Run a command" },
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+        },
+      });
+    leader().receive(asking(900));
+    await settle();
+    expect(gateway.permissions.length).toBe(1);
+
+    drop();
+    await connect(gateway);
+    leader().answers = [{ frames: [] }];
+    await attach(gateway);
+    leader().receive(asking(901));
+    await settle();
+
+    expect(gateway.permissions.map((pending) => pending.toolCallId)).toEqual(["call-1"]);
+  });
 });

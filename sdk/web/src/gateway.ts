@@ -597,6 +597,21 @@ export function createGateway() {
         : null;
     setAttached(null);
     attachedOn = null;
+    // Every card on screen was addressed to the socket that just closed, and
+    // answering one would write the reply into a socket with nowhere to send
+    // it — the agent would stay parked on a question the person believes they
+    // have answered. Measured against a live agent: without this, a reconnect
+    // stacked a second copy of the same permission beside the dead one.
+    //
+    // Nothing is lost by dropping them. The leader caches an open interaction
+    // and re-sends it to a client that has just attached
+    // (`leader/server.rs:2095-2114`), so a permission comes back by itself on
+    // the next `session/load`. Folder trust is not cached, and is not kept for
+    // that reason either: it was equally unanswerable, and the agent releases
+    // its dedup key when the round-trip ends so the next session in that
+    // workspace is asked afresh.
+    setPermissions([]);
+    setFolderTrusts([]);
     setModels(null);
     setSessionInfo(null);
     setDockEnabled(null);
