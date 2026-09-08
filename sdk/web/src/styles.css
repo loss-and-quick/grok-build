@@ -2513,6 +2513,12 @@ button.picker-row:focus-visible {
   gap: 0.1rem;
 }
 
+/* The text column is the one that gives way, and the meta is never cut.
+ * `dock.rs` drops the meta *whole* when the line cannot hold both (`paint_row`,
+ * and the test that pins it) rather than painting half of it, because half an
+ * elapsed time is a wrong number where a shortened label is a marked one. CSS
+ * cannot drop a column conditionally, so this takes the same side of the same
+ * trade: the label ellipsizes and says so, and the whole of it is behind Open. */
 .rail-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;

@@ -29,6 +29,13 @@ import { shownRows, type RailRow } from "../rail.ts";
  * the text in place, which is also what the terminal does: `dock.rs` addresses
  * a row as `Row(section, i)`.
  */
+/** A row's left-hand side as one string, for the `title` a clipped row carries. */
+function fullText(row: RailRow): string {
+  return [row.kind, row.label, row.activity && `— ${row.activity}`]
+    .filter((part): part is string => Boolean(part))
+    .join(" ");
+}
+
 export function RailList(props: {
   /** The section key; a row's identity in the walk is built from it. */
   section: string;
@@ -52,7 +59,10 @@ export function RailList(props: {
             <span class="rail-row-mark" aria-hidden="true">
               {BULLET}
             </span>
-            <span class="rail-row-text">
+            {/* The whole line, for the reader whose column cut it short. Not a
+                substitute for Open — a title is not reachable from a keyboard —
+                but the cheapest way to make an ellipsis recoverable in place. */}
+            <span class="rail-row-text" title={fullText(row())}>
               <Show when={row().kind}>{(kind) => <span class="rail-row-kind">{kind()}</span>}</Show>
               <span class="rail-row-label">{row().label}</span>
               <Show when={row().activity}>
