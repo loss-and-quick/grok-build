@@ -402,6 +402,30 @@ impl AgentRebuildSpec {
         Ok((agent, agent_build_elapsed))
     }
 }
+/// A resources-state file no other bridge in this process, and no earlier run, writes to.
+///
+/// The toolset saves `Resources` to `<parent>/resources_state.json` after tool
+/// calls and loads that file back when the next bridge is built. A path shared
+/// by the whole binary therefore carried a `State<T>` one test touched into
+/// every bridge built after it, and — since the file outlives the process —
+/// into every later run on the machine. That is what left an empty
+/// `State<ReportedTaskCompletions>` sitting in a freshly created actor's
+/// resources, where `auto_wake_suppression_tests` reads its absence as proof
+/// that no completion has been reported yet.
+///
+/// The path is real rather than empty on purpose: an empty one selects the
+/// no-op handle, which spawns no writer task, and the paused-clock turn tests
+/// in `rate_limit_backoff_tests` / `transient_retry_loop_tests` stall without it.
+#[cfg(test)]
+pub(crate) fn isolated_test_state_path() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir()
+        .join(format!("grok-shell-test-state-{}", std::process::id()))
+        .join(NEXT.fetch_add(1, Ordering::Relaxed).to_string());
+    std::fs::create_dir_all(&dir).expect("test resources-state directory");
+    dir.join("tool_state.json")
+}
 /// Every field is set to a minimal default suitable for test `SessionActor` literals and focused `build_agent` tests.
 #[cfg(test)]
 pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
@@ -415,7 +439,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         ),
         fs_backend: Arc::new(xai_grok_tools::computer::local::LocalFs),
         tools_notification_handle: ToolNotificationHandle::noop(),
-        bridge_state_path: std::env::temp_dir().join("test_tool_state.json"),
+        bridge_state_path: isolated_test_state_path(),
         session_env: Arc::new(HashMap::new()),
         models_manager: crate::agent::models::ModelsManager::default(),
         compaction_policy: CompactionPolicy::default(),

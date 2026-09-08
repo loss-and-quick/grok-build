@@ -156,7 +156,7 @@ async fn test_agent_from_config(
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: std::path::PathBuf::from("/tmp/tool_state.json"),
+        state_path: crate::session::agent_rebuild::isolated_test_state_path(),
         memory_backend: None,
         web_search_config: Default::default(),
         web_fetch_config: Default::default(),
