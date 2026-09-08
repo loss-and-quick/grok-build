@@ -900,3 +900,180 @@ export interface CancelSubagentResponse {
   cancelled: boolean;
   outcome?: SubagentCancelOutcome | null;
 }
+
+// ---------------------------------------------------------------------------
+// The context window — crates/codegen/xai-grok-shell/src/session/context_facts.rs
+//
+// `/context` used to be a pure function compiled into the pager: which rows
+// exist, what they are called, what the unlabelled remainder means, how the
+// window divides into a drawable partition, and where the advisory band before
+// auto-compaction starts. None of that was reachable by a client that is not
+// the pager, so a second client could only reimplement it — and a
+// reimplementation of a rounding rule or of an advisory threshold is a
+// divergence waiting to happen, not a port.
+//
+// So the agent resolves it once, on `x.ai/session/info`, and every client
+// renders the result. The module says what a client is still left to choose:
+// "a client picks glyphs or colors or CSS for these structures and draws
+// them". That is the whole of this client's part, and nothing below is
+// recomputed here.
+//
+// Every field is `#[serde(default)]` on the agent, and `contextFacts` is itself
+// optional: an agent too old to resolve them omits it. A Rust client answers
+// that by calling `ContextFacts::resolve` itself; this one cannot — the
+// resolver is the thing that was not reachable — so it says the agent did not
+// send them rather than inventing a second derivation.
+// ---------------------------------------------------------------------------
+
+/**
+ * Which part of the window a row accounts for.
+ *
+ * A client maps this to a glyph and a colour; the resolver never names one, so
+ * the facts stay independent of what draws them. `unknown` is what a kind this
+ * build has no name for degrades to — and the wire type says the safe direction
+ * is *itemized*, since itemized rows are informational and never enter the
+ * partition, so a row that cannot be classified is shown rather than counted
+ * twice.
+ */
+export type ContributorKind =
+  | "systemPrompt"
+  | "messages"
+  | "toolSchemas"
+  | "unattributed"
+  | "free"
+  | "itemized"
+  | "unknown";
+
+/** One row of the breakdown. */
+export interface Contributor {
+  kind: ContributorKind;
+  label: string;
+  tokens: number;
+  /** Count-then-noun detail, e.g. `"12 tools"`. */
+  detail?: string | null;
+  /** For an injected block, the text `tokens` was measured over. */
+  text?: string | null;
+}
+
+/**
+ * The window split into one hundred units, in draw order.
+ *
+ * **A hundred, so that one unit reads as one percent**: the wire type says a
+ * terminal spends them as cells and a browser as percent, and that both agree
+ * with a legend printing percentages of the same window. So this is the one
+ * structure here a browser can use verbatim — the bands are already the
+ * widths.
+ *
+ * They are also already clamped. The per-category figures are independent
+ * estimates over the same request and routinely sum to more than `used`; the
+ * resolver clamps in legend order so the measured bands keep their true width
+ * and the unattributed remainder is what gets squeezed, "since the remainder is
+ * the one band that has no measurement of its own to defend". Re-normalising
+ * these on this side would be a second opinion about that.
+ */
+export interface BarPartition {
+  system: number;
+  messages: number;
+  tools: number;
+  unattributed: number;
+  free: number;
+}
+
+/**
+ * Where the window stands relative to the auto-compact trigger.
+ *
+ * `thresholdPercent` is the trigger the agent resolved for the active model —
+ * remote settings, then the user's TOML, then the environment — and not a
+ * client-side default. `approaching` is the advisory band below it, a policy
+ * number "with no other expression on the wire, which is why it is resolved
+ * here instead of being left for each client to hardcode and then disagree
+ * about". Both flags are read, never recomputed from `usagePct`.
+ */
+export interface AutoCompact {
+  thresholdPercent: number;
+  thresholdTokens: number;
+  remainingTokens: number;
+  /** The threshold is reached: compaction runs on the next turn. */
+  imminent: boolean;
+  /** Close enough to plan around. Never true at the same time as `imminent`. */
+  approaching: boolean;
+}
+
+/**
+ * One completed compaction, read back from the session's own log.
+ *
+ * `ordinal` is a position rather than a wall clock, because the records come
+ * out of a log where "now" says nothing about when they ran. A field the agent
+ * did not report is absent, never guessed — including the number of
+ * conversation items collapsed, which is not measured at all.
+ */
+export interface CompactionRecord {
+  ordinal: number;
+  tokensBefore?: number | null;
+  tokensAfter: number;
+  elapsedMs?: number | null;
+  summaryPreview?: string | null;
+}
+
+/**
+ * What compaction has done to this session.
+ *
+ * `reportedCount` and `records.length` are two different things and the wire
+ * keeps them apart on purpose: a session resumed without a full replay counts
+ * compactions it has no record of, and letting the row count stand in for the
+ * total would under-report what compaction did to the conversation.
+ */
+export interface CompactionFacts {
+  reportedCount: number;
+  records?: CompactionRecord[];
+  recoveredTokens: number;
+  /** Records with no before count, so their recovery is missing from the total. */
+  recordsWithoutRecovery: number;
+  elapsedMs: number;
+}
+
+/** The resolved context and compaction picture for one session. */
+export interface ContextFacts {
+  used: number;
+  total: number;
+  /**
+   * Share of the window in use, at full precision — not the snapshot's own
+   * pre-rounded `u8`, which the resolver keeps for the threshold comparison
+   * alone so the two can never be mistaken for each other.
+   */
+  usagePct: number;
+  /** The rows that partition the window: the contributors, then the remainder. */
+  contributors: Contributor[];
+  /**
+   * Rows itemizing tokens already counted inside `contributors`. Adding these
+   * to the contributors would double-count, which is why they are a second
+   * list and not more rows in the first.
+   */
+  itemized?: Contributor[];
+  bar: BarPartition;
+  autoCompact: AutoCompact;
+  turnCount: number;
+  toolCallCount: number;
+  compaction: CompactionFacts;
+}
+
+/**
+ * `x.ai/session/info`'s reply (`agent/handlers/session.rs`, `SessionInfoResponse`
+ * flattened over `SessionInfoData`).
+ *
+ * Only what this client draws is described, per the rule at the top of this
+ * file. The handler answers `{}` for a session id it has no resident handle
+ * for, so every field here has to be optional in practice.
+ *
+ * **There is no notification carrier for any of it.** This is request/response
+ * only — the pager debounces its own asking — so a client refreshes on attach,
+ * at the end of a turn and when a person asks, and never on a timer.
+ */
+export interface SessionInfoResponse {
+  sessionId?: string;
+  cwd?: string;
+  model?: string | null;
+  modelDisplayName?: string | null;
+  turns?: number;
+  contextFacts?: ContextFacts | null;
+}

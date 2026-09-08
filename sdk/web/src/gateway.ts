@@ -66,6 +66,7 @@ import {
   type RosterChanged,
   type RosterEntry,
   type RosterListResponse,
+  type SessionInfoResponse,
   type SessionNotification,
   type SettingRow,
   type SettingsListResponse,
@@ -198,6 +199,12 @@ export function createGateway() {
   // "told no". Reset on every connect, because it is the agent's answer and the
   // next agent may give a different one.
   const [dockEnabled, setDockEnabled] = createSignal<boolean | null>(null);
+  // The attached session's `x.ai/session/info`, which is where the resolved
+  // context window arrives. `null` means nobody has asked yet — not that the
+  // window is empty — and it is dropped on every attach, because the facts
+  // belong to one session and a stale breakdown under a new title is a wrong
+  // answer where "not yet" is the true one.
+  const [sessionInfo, setSessionInfo] = createSignal<SessionInfoResponse | null>(null);
   // The slash catalog for the attached session.
   //
   // Two sources, and the seam between them is the point. `initialize` carries
@@ -439,6 +446,7 @@ export function createGateway() {
     setAttached(null);
     attachedOn = null;
     setModels(null);
+    setSessionInfo(null);
     setDockEnabled(null);
     // A new socket is a new client on the leader's books, so the search id from
     // the old one is unusable: its status stream is addressed to a client that
@@ -765,6 +773,38 @@ export function createGateway() {
   };
 
   /**
+   * Read the attached session's info, and with it the resolved context window.
+   *
+   * **Asked, never streamed.** `contextFacts` rides `x.ai/session/info`, a
+   * request/response method with no notification carrier of its own — the pager
+   * debounces its own asking (`app/agent_view/mod.rs:456-459`) rather than
+   * subscribing to anything. So this runs on attach, at the end of a turn and
+   * when a person presses the button, and never on a timer: a poll would be
+   * this client inventing a cadence the product has not got, and the number it
+   * would be polling for only changes when a turn does.
+   *
+   * The answer is dropped if the session moved while it was in flight. The
+   * handler replies `{}` for a session it has no resident handle for, which is
+   * a real answer and is stored as one: it is how "the leader no longer holds
+   * this session" reaches the widget.
+   */
+  const refreshSessionInfo = async (): Promise<void> => {
+    const current = attached();
+    if (!client || !current) return;
+    const asked = current.entry.sessionId;
+    try {
+      const response = (await client.ext("x.ai/session/info", {
+        sessionId: asked,
+      })) as SessionInfoResponse;
+      if (attached()?.entry.sessionId !== asked) return;
+      setSessionInfo(response ?? {});
+    } catch (e) {
+      if (attached()?.entry.sessionId !== asked) return;
+      say(`could not read the context window: ${String(e)}`);
+    }
+  };
+
+  /**
    * List one directory for the picker.
    *
    * No `sessionId` is sent, on purpose: the agent consults it only to resolve a
@@ -816,8 +856,11 @@ export function createGateway() {
     setCommands(seedCommands());
     // The catalog belongs to the session being left, so it goes with it. Showing
     // the previous session's current model over a session still loading would be
-    // a wrong answer where "not yet" is the true one.
+    // a wrong answer where "not yet" is the true one. The context window is the
+    // same case and worse: a breakdown is nothing but numbers, so a stale one
+    // reads as this session's own.
     setModels(null);
+    setSessionInfo(null);
     say(`loading ${entry.sessionId}…`);
     try {
       // `cwd` comes straight off the roster row. That it is there at all is the
@@ -840,6 +883,12 @@ export function createGateway() {
       return;
     }
     await seedRunningSubagents(entry.sessionId, subagents);
+    // Not awaited, and this is the same argument as the seed above it: the
+    // transcript is what attaching is, and a window that has not arrived yet is
+    // a widget that is not on screen yet. Waiting on it would let a leader slow
+    // to answer one extension method hold up the session that is already
+    // loaded.
+    void refreshSessionInfo();
   };
 
   /**
@@ -971,6 +1020,10 @@ export function createGateway() {
         _meta: { promptId: crypto.randomUUID() },
       })) as PromptResponse;
       say(`turn ended: ${response.stopReason}`);
+      // The window moves when a turn does, which is why the end of one is the
+      // cadence and there is no timer beside it. Not awaited: the turn is over
+      // either way, and the composer must not wait on a number.
+      void refreshSessionInfo();
     } catch (e) {
       say(`prompt failed: ${String(e)}`);
     }
@@ -1100,6 +1153,7 @@ export function createGateway() {
     roster,
     fileSearch,
     settings,
+    sessionInfo,
     auth,
     permissions,
     folderTrusts,
@@ -1117,6 +1171,7 @@ export function createGateway() {
     panelAction,
     setModel,
     refreshRoster,
+    refreshSessionInfo,
   };
 }
 
