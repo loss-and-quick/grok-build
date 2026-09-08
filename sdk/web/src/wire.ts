@@ -316,6 +316,16 @@ export type SessionUpdate =
 export interface SessionNotification {
   sessionId: string;
   update: SessionUpdate;
+  /**
+   * Everything about the *delivery* rather than the event.
+   *
+   * Two keys are read, and both decide whether an update is folded in at all
+   * rather than what it draws: `eventId` names the line this notification was
+   * (or will be) persisted as, which is what a reconnect can ask to resume
+   * after, and `isReplay` says the agent is re-sending history rather than
+   * living it. See `resume.ts`.
+   */
+  _meta?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
