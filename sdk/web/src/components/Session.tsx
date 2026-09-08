@@ -8,6 +8,7 @@ import type { Gateway } from "../gateway.ts";
 import { sessionLabel } from "../roster.ts";
 import type { TranscriptEntry } from "../transcript.ts";
 import { CommandMenu, createCommandMenu } from "./CommandMenu.tsx";
+import { Markdown } from "./Markdown.tsx";
 import { Panel } from "./Panel.tsx";
 import { PermissionCard } from "./PermissionCard.tsx";
 import { Subagents } from "./Subagents.tsx";
@@ -172,7 +173,20 @@ function Entry(props: { entry: TranscriptEntry; tick: () => number }): JSX.Eleme
                 {PROMPT_ARROW}
               </span>
             </Show>
-            <div class="message-text">{message().text}</div>
+            {/* An agent message and a thought both go through the pager's
+                markdown pipeline — `AgentMessageBlock` and `ThinkingBlock` are
+                two users of one `MarkdownContent`. A user turn does not: the
+                pager renders what was typed as plain text with its own token
+                spans, so marking it up here would show the author something
+                other than what they wrote. */}
+            <Show
+              when={message().role !== "user"}
+              fallback={<div class="message-text">{message().text}</div>}
+            >
+              <div class="message-text message-markdown">
+                <Markdown text={message().text} />
+              </div>
+            </Show>
           </article>
         )}
       </Match>

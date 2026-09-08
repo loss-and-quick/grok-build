@@ -1,4 +1,4 @@
-// Panel markdown, parsed by a real parser and handed on as data.
+// Markdown, parsed by a real parser and handed on as data.
 //
 // The terminal runs `pulldown-cmark 0.13` with `ENABLE_GFM | STRIKETHROUGH |
 // MATH | TASKLISTS | TABLES` (`xai-grok-markdown-core/src/lib.rs`,
@@ -39,6 +39,33 @@
 // (`pager-render/src/terminal/hyperlinks.rs`) — and it can afford to be: an
 // unfiltered scheme in a terminal is inert text, while in a browser an href is
 // something a click executes.
+//
+// ## Streaming, and why blocks exist here at all
+//
+// An assistant turn arrives as many `agent_message_chunk`s, so the same
+// document is parsed once per delta over a buffer that only grows. Measured
+// with `markdown-it` over a 24 KB reply arriving in 20-character chunks: 1.2 ms
+// per parse by the end of the turn and 1.5 s of parsing across it — and, far
+// worse than the parsing, a whole-document node tree rebuilt on every chunk,
+// which tears down and recreates the message's DOM hundreds of times and takes
+// the reader's text selection with it.
+//
+// The pager already answered this, and this module takes its answer instead of
+// inventing one. `StreamingMarkdownRenderer` freezes rendered output at
+// *checkpoints* and re-renders only the tail, and a checkpoint is only ever a
+// **top-level block boundary**: "Blocks nested inside lists, blockquotes, or
+// tables cannot be checkpoints because the outer container might continue"
+// (`xai-grok-markdown/src/checkpoint.rs`). {@link createMarkdownStream} freezes
+// on that same boundary, expressed the one way a token stream allows it: a
+// top-level block that has a *successor* has ended, so every block but the last
+// is frozen and only the last is re-parsed and re-rendered.
+//
+// Two consequences are the pager's as well, and are named here rather than
+// hidden. An open fence never freezes, so it renders as a code block that grows
+// — the pager keeps `open_code_highlighter` for exactly that tail. And a link
+// reference definition arriving *after* its use cannot reach back into frozen
+// output; the parser `env` is shared across pushes so a definition already seen
+// still resolves, which is as far as a frozen prefix can go in either client.
 import MarkdownIt from "markdown-it";
 import type { Token } from "markdown-it";
 
@@ -217,7 +244,150 @@ function build(tokens: readonly Token[]): MarkdownNode[] {
   return nodes;
 }
 
-/** Parse panel markdown into renderable nodes. */
+/**
+ * One top-level block, and the source it was parsed from.
+ *
+ * `source` is the block's own byte range, **line terminators included**. That
+ * is not fussiness: a fence whose last line has not yet ended renders its body
+ * without the trailing newline and gains it the moment the newline arrives, so
+ * a `source` trimmed to whole lines would call those two states equal and the
+ * stream would keep the earlier render.
+ */
+export interface MarkdownBlock {
+  readonly source: string;
+  readonly nodes: MarkdownNode[];
+}
+
+/** A block plus where it ends, which only the stream needs. */
+interface SplitBlock {
+  readonly block: MarkdownBlock;
+  /**
+   * Byte offset just past the block's last line, or `null` when the parser gave
+   * no line map — in which case nothing from here on may be frozen, because
+   * there is no boundary to freeze at.
+   */
+  readonly endsAt: number | null;
+}
+
+/** Byte offset of the start of each line, plus one entry for the end of the text. */
+function lineOffsets(text: string): number[] {
+  const offsets = [0];
+  for (let at = 0; at < text.length; at += 1) {
+    if (text.charCodeAt(at) === 10) offsets.push(at + 1);
+  }
+  // A block's line map ends *exclusive*, and the last block's end is the end of
+  // the text, which is one past the last line start.
+  offsets.push(text.length);
+  return offsets;
+}
+
+/**
+ * Cut the token stream at depth zero.
+ *
+ * The walk is the same generic nesting walk {@link build} does; all it adds is
+ * that a group which opens and closes at depth zero is one top-level block, and
+ * every top-level token carries the `map` that names its lines.
+ */
+function splitBlocks(text: string, env: Record<string, unknown>): SplitBlock[] {
+  const tokens = PARSER.parse(text, env);
+  const offsets = lineOffsets(text);
+  const blocks: SplitBlock[] = [];
+  let depth = 0;
+  let from = 0;
+  for (let at = 0; at < tokens.length; at += 1) {
+    const token = tokens[at];
+    if (!token) continue;
+    if (depth === 0) from = at;
+    depth += token.nesting;
+    if (depth !== 0) continue;
+    const group = tokens.slice(from, at + 1);
+    const map = group[0]?.map ?? null;
+    const from_ = map ? (offsets[map[0]] ?? null) : null;
+    const to = map ? (offsets[map[1]] ?? null) : null;
+    blocks.push({
+      block: {
+        source: from_ !== null && to !== null ? text.slice(from_, to) : "",
+        nodes: build(group),
+      },
+      endsAt: to,
+    });
+  }
+  return blocks;
+}
+
+/** Parse a whole markdown document into its top-level blocks. */
+export function parseMarkdownBlocks(text: string): MarkdownBlock[] {
+  return splitBlocks(text, {}).map((split) => split.block);
+}
+
+/** Parse markdown into renderable nodes. */
 export function parseMarkdown(text: string): MarkdownNode[] {
-  return build(PARSER.parse(text, {}));
+  return parseMarkdownBlocks(text).flatMap((block) => block.nodes);
+}
+
+/**
+ * A document that is still arriving.
+ *
+ * {@link MarkdownStream.push} takes the whole buffer so far and answers with
+ * every block in it, **keeping the object identity of blocks that have not
+ * changed**. That identity is the point: `<For>` reuses the DOM of an item it
+ * has seen before, so a delta rebuilds the one block still being written and
+ * leaves every earlier paragraph, list and fence — and any selection inside
+ * them — untouched.
+ */
+export interface MarkdownStream {
+  push(text: string): MarkdownBlock[];
+}
+
+export function createMarkdownStream(): MarkdownStream {
+  /** Blocks that can no longer change, in order, with the identity handed out. */
+  let frozen: MarkdownBlock[] = [];
+  /** The exact prefix `frozen` was parsed from; the tail is everything after it. */
+  let frozenText = "";
+  /** The previous answer, so a block that just froze keeps the DOM it already had. */
+  let previous: MarkdownBlock[] = [];
+  /**
+   * Shared across pushes so a link reference definition seen in a frozen block
+   * still resolves in the tail. `markdown-it` accumulates `references` here.
+   */
+  let env: Record<string, unknown> = {};
+
+  return {
+    push(text) {
+      // Not an extension of what was frozen — a panel republished, or a
+      // different document entirely — so nothing frozen applies.
+      if (!text.startsWith(frozenText)) {
+        frozen = [];
+        frozenText = "";
+        previous = [];
+        env = {};
+      }
+
+      const split = splitBlocks(text.slice(frozenText.length), env);
+      // Every block but the last has a successor, so it has ended: nothing
+      // appended after it can reopen a block at depth zero. The last one is
+      // still open by definition and is re-parsed on the next delta.
+      let boundary: number | null = null;
+      const freezing: MarkdownBlock[] = [];
+      for (const candidate of split.slice(0, -1)) {
+        if (candidate.endsAt === null) break;
+        freezing.push(candidate.block);
+        boundary = candidate.endsAt;
+      }
+      if (boundary !== null) {
+        frozenText = text.slice(0, frozenText.length + boundary);
+        frozen.push(...freezing);
+      }
+
+      const all = frozen.concat(split.slice(freezing.length).map((rest) => rest.block));
+      // A block frozen on this push was the open tail on the last one, with the
+      // same source; handing back the object already rendered keeps its DOM.
+      const answer = all.map((block, at) =>
+        previous[at]?.source === block.source ? previous[at]! : block,
+      );
+      for (let at = 0; at < frozen.length; at += 1) frozen[at] = answer[at]!;
+      previous = answer;
+      return answer;
+    },
+  };
 }

@@ -1,7 +1,7 @@
-import { For, Match, Switch, type JSX } from "solid-js";
+import { For, Match, Switch, createMemo, type JSX } from "solid-js";
 import { Dynamic } from "solid-js/web";
 
-import { parseMarkdown, type MarkdownNode } from "../markdown.ts";
+import { createMarkdownStream, type MarkdownNode } from "../markdown.ts";
 
 /**
  * One node, and its children.
@@ -56,6 +56,17 @@ function Nodes(props: { nodes: MarkdownNode[] }): JSX.Element {
   return <For each={props.nodes}>{(node) => <Node node={node} />}</For>;
 }
 
+/**
+ * A markdown document, whether finished or still arriving.
+ *
+ * One component for both, because the two must not diverge in what they draw:
+ * the stream's frozen prefix is the same parse a finished document gets, so a
+ * turn looks the same mid-flight as it does when it lands. `<For>` over the
+ * blocks is what makes the reuse visible to the renderer — an unchanged block
+ * is the same object, so its DOM is not rebuilt.
+ */
 export function Markdown(props: { text: string }): JSX.Element {
-  return <Nodes nodes={parseMarkdown(props.text)} />;
+  const stream = createMarkdownStream();
+  const blocks = createMemo(() => stream.push(props.text));
+  return <For each={blocks()}>{(block) => <Nodes nodes={block.nodes} />}</For>;
 }

@@ -300,10 +300,22 @@ button:disabled {
   color: var(--grok-text-primary, canvastext);
 }
 
+/* Markdown brings its own block spacing and its own `md_*` colours, so the
+ * pre-wrap and the primary text colour that a typed user turn needs would both
+ * fight it: every newline in the source would become a second line break on top
+ * of the paragraph the parser already made. */
+.message-markdown {
+  white-space: normal;
+  color: inherit;
+}
+
 /* Reasoning is blended toward the background in the pager rather than dimmed
- * outright (`bg_blend`, 0.7), so it reads as muted without going flat grey. */
+ * outright (`bg_blend`, 0.7), so it reads as muted without going flat grey.
+ * Opacity rather than a colour, because the pager blends every *span* of the
+ * rendered line (`blend_line_with_default`), and markdown gives those spans
+ * their own colours — over an opaque page, 0.7 opacity is that same blend. */
 .message-thought .message-text {
-  color: color-mix(in srgb, var(--grok-text-primary, canvastext) 70%, var(--grok-bg-base, canvas));
+  opacity: 0.7;
 }
 
 /* A tool call: accent rail in its own column, then the bullet and title —
