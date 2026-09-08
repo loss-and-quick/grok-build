@@ -174,6 +174,98 @@ export interface SessionUpdatePanelClosed {
   id: string;
 }
 
+// ---------------------------------------------------------------------------
+// Subagent lifecycle, on the parent session's own update stream
+//
+// The three variants below (`crates/codegen/xai-grok-shell/src/extensions/
+// notification.rs:654`, `:697`, `:724`) are emitted on the PARENT session id,
+// so a client subscribed to the parent sees the whole fan-out without asking
+// for anything. `emit_subagent_notification` sends them over
+// `x.ai/session_notification` (`agent/subagent/spawn.rs:510`), the carrier this
+// client already listens on.
+//
+// Two of the three are persisted, and therefore replayed on `session/load`
+// (`session/acp_session_impl/updates.rs:659`, `:741`). `subagent_progress` is
+// never written to JSONL — `updates.rs:638` and `agent/subagent/mod.rs:2049`
+// both say so in as many words — so it is live-only. A client attaching
+// mid-fan-out therefore learns *which* children exist immediately, and *how
+// each one is doing* on that child's next tick.
+// ---------------------------------------------------------------------------
+
+/**
+ * A child was spawned. Emitted before the child's first prompt is dispatched,
+ * so the mapping exists before any of the child's own events arrive.
+ *
+ * Nested fan-out rides the same variant: a grandchild's spawn is emitted on
+ * *its* parent's session id, which a client already subscribed to the child
+ * receives — the leader clones the parent's subscriber set onto every child
+ * (`leader/server.rs:2315`).
+ */
+export interface SessionUpdateSubagentSpawned {
+  sessionUpdate: "subagent_spawned";
+  subagent_id: string;
+  parent_session_id: string;
+  parent_prompt_id?: string | null;
+  child_session_id: string;
+  /** `"general-purpose"`, `"explore"`, `"plan"`, or a name found on disk. */
+  subagent_type: string;
+  /** The model's own one-line summary of the task. Not the task prompt. */
+  description: string;
+  /** `"new"` or `"resumed"` after bootstrap. */
+  effective_context_source?: string | null;
+  context_normalized?: boolean;
+  capability_mode?: string | null;
+  persona?: string | null;
+  role?: string | null;
+  model?: string | null;
+  resumed_from?: string | null;
+  workflow_run_id?: string | null;
+}
+
+/**
+ * A live tick while the child runs.
+ *
+ * The publisher samples every two seconds and emits only when a counter
+ * actually moved, with an eight-second heartbeat so a quiet child still says
+ * it is alive (`agent/subagent/mod.rs:2014`, `:2066`). So the gap between two
+ * ticks is a fact about the child, not a stall in the client.
+ *
+ * `duration_ms` is the authoritative elapsed time: the agent measures it from
+ * the child's real start, not from when a client happened to see the spawn.
+ */
+export interface SessionUpdateSubagentProgress {
+  sessionUpdate: "subagent_progress";
+  subagent_id: string;
+  parent_session_id: string;
+  child_session_id: string;
+  duration_ms: number;
+  turn_count: number;
+  tool_call_count: number;
+  tokens_used: number;
+  context_window_tokens: number;
+  /** 0–100. */
+  context_usage_pct: number;
+  tools_used: string[];
+  error_count: number;
+}
+
+/** The child reached a terminal state. One per child; the pager treats a second as a duplicate. */
+export interface SessionUpdateSubagentFinished {
+  sessionUpdate: "subagent_finished";
+  subagent_id: string;
+  child_session_id: string;
+  /** `"completed"`, `"failed"` or `"cancelled"`. */
+  status: string;
+  error?: string | null;
+  tool_calls: number;
+  turns: number;
+  duration_ms: number;
+  tokens_used?: number;
+  /** The child's final answer, when it completed. */
+  output?: string | null;
+  will_wake?: boolean;
+}
+
 /** Anything else on the same carrier; kept so an unknown tag is data, not a crash. */
 export interface SessionUpdateOther {
   sessionUpdate: string;
@@ -188,6 +280,9 @@ export type SessionUpdate =
   | SessionUpdateToolCallUpdate
   | SessionUpdatePluginPanel
   | SessionUpdatePanelClosed
+  | SessionUpdateSubagentSpawned
+  | SessionUpdateSubagentProgress
+  | SessionUpdateSubagentFinished
   | SessionUpdateAvailableCommands
   | SessionUpdateOther;
 
@@ -678,4 +773,84 @@ export interface AuthUrlResponse {
   auth_url?: string | null;
   external_provider?: boolean;
   mode?: AuthUrlMode | null;
+}
+
+// ---------------------------------------------------------------------------
+// Subagents — the extension methods
+//
+// `crates/codegen/xai-grok-shell/src/extensions/task.rs:435` dispatches all
+// three. They are ordinary ext methods on the same socket, so a browser reaches
+// them exactly as the pager does; nothing about them is terminal-shaped.
+//
+// The pager calls only `cancel` (`app/effects/mod.rs:1778`). `list_running` and
+// `get` exist for clients that were not present when the fan-out started —
+// `agent/subagent/mod.rs:2050` names the reconnect case in as many words — and
+// a browser tab is that client every time it attaches.
+// ---------------------------------------------------------------------------
+
+/**
+ * One running child, as `x.ai/subagent/list_running` reports it.
+ *
+ * camelCase, unlike the snake_case session updates above: the DTOs in
+ * `task.rs` carry `rename_all = "camelCase"` while the session-update enum's
+ * `rename_all` applies to its tag alone.
+ *
+ * `startedAtEpochMs` is the field that makes this call worth making. Nothing on
+ * the update stream carries a start time — `subagent_spawned` has none — so a
+ * client that attached mid-fan-out can only date a child from the moment it
+ * saw it. This is the agent's own clock, for children that started before the
+ * client existed.
+ */
+export interface SubagentLiveSnapshot {
+  subagentId: string;
+  parentSessionId: string;
+  childSessionId: string;
+  subagentType: string;
+  description: string;
+  startedAtEpochMs: number;
+  durationMs: number;
+  turnCount: number;
+  toolCallCount: number;
+  tokensUsed: number;
+  contextWindowTokens: number;
+  contextUsagePct: number;
+  toolsUsed: string[];
+  errorCount: number;
+}
+
+/**
+ * `x.ai/subagent/list_running`'s reply.
+ *
+ * Only direct children of the session named in the request, and only live ones:
+ * the handler's `From` impl asserts the running status is the only one it can
+ * receive (`task.rs:178`). A grandchild is reached by asking its own parent.
+ */
+export interface ListRunningSubagentsResponse {
+  subagents: SubagentLiveSnapshot[];
+}
+
+/**
+ * What cancelling actually did.
+ *
+ * Three real answers, and the difference matters to a client: only
+ * `cancelled` is followed by a `subagent_finished`. For the other two no
+ * further event is coming, so a client that waits for one waits forever —
+ * which is why the shell added this tag alongside the older `cancelled` bool
+ * (`task.rs:79`).
+ *
+ * `#[serde(other)]` catches a future `kind`, so an unknown value is not a
+ * parse failure; it is the case where this client must fall back to the bool.
+ */
+export type SubagentCancelOutcome =
+  | { kind: "cancelled" }
+  | { kind: "already_finished"; status: string }
+  | { kind: "not_found" }
+  | { kind: string };
+
+/** `x.ai/subagent/cancel`'s reply. `outcome` is absent only from an older shell. */
+export interface CancelSubagentResponse {
+  subagentId: string;
+  /** Legacy flag for older pagers: true only when a live child was stopped. */
+  cancelled: boolean;
+  outcome?: SubagentCancelOutcome | null;
 }
