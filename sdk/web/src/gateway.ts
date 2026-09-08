@@ -37,6 +37,7 @@ import {
   setModelRequest,
   type SessionModelState,
 } from "./models.ts";
+import { readIdentity, type AgentIdentity } from "./instances.ts";
 import { createRoster, type Roster } from "./roster.ts";
 import { createSubagents, type Subagents } from "./subagents.ts";
 import { createTranscript, type Transcript } from "./transcript.ts";
@@ -193,6 +194,12 @@ export function createGateway() {
   // the one path that always exists, and it is never a *limit* — `session/new`
   // takes any absolute `cwd`, so the picker may leave in either direction.
   const [agentCwd, setAgentCwd] = createSignal(ROOT);
+  // Who answered. `initialize._meta` has carried this since long before there
+  // was anything here to read it: the machine's persistent id, the leader
+  // process's own id, the hostname and the agent's version. Two of the five
+  // keys were read and the rest dropped, which is why this client could name
+  // the address it was talking to and not the machine.
+  const [identity, setIdentity] = createSignal<AgentIdentity>({});
   // Whether the agent says this account draws the dock. `null` until the wire
   // says something: the notification arrives when remote settings are refreshed,
   // which may not happen at all while this page is up, and "not told" is not
@@ -448,6 +455,9 @@ export function createGateway() {
     setModels(null);
     setSessionInfo(null);
     setDockEnabled(null);
+    // The identity belongs to the socket being replaced. Keeping it would let
+    // the line above the roster name the machine we have just left.
+    setIdentity({});
     // A new socket is a new client on the leader's books, so the search id from
     // the old one is unusable: its status stream is addressed to a client that
     // no longer exists, and a `close` has nowhere to go. Forget it rather than
@@ -484,6 +494,7 @@ export function createGateway() {
       })) as InitializeResponse;
       const cwd = initialized._meta?.currentWorkingDirectory;
       if (typeof cwd === "string" && cwd) setAgentCwd(cwd);
+      setIdentity(readIdentity(initialized._meta));
       const seed = initialized._meta?.availableCommands;
       setSeedCommands(Array.isArray(seed) ? seed : []);
       setCommands(seedCommands());
@@ -1147,6 +1158,7 @@ export function createGateway() {
     status,
     attached,
     agentCwd,
+    identity,
     dockEnabled,
     commands,
     models,

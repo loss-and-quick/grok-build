@@ -382,6 +382,37 @@ export interface InitializeResponse {
      * `available_commands_update`.
      */
     availableCommands?: AvailableCommand[];
+    /**
+     * The machine's own id: a UUID the agent persists at `$GROK_HOME/agent_id`
+     * (`xai-grok-telemetry/src/id.rs`).
+     *
+     * What makes an instance a machine rather than an address. It survives a
+     * leader restart, a change of port and the difference between the loopback
+     * address and the one the same machine answers on over the network, so two
+     * URLs carrying one `agentId` are one instance and a client that treats
+     * them as two shows the same roster twice.
+     */
+    agentId?: string;
+    /**
+     * The id of this leader *process*, minted fresh on every launch
+     * (`id.rs`).
+     *
+     * A generation, not an identity. A value that differs from the one seen
+     * last time means the leader restarted, so session ids remembered from
+     * before it may no longer exist — which is the difference between "we
+     * reconnected" and "we reconnected to a leader that has forgotten
+     * everything".
+     */
+    agentInstanceId?: string;
+    /** The machine's name, and so the default label for an instance. */
+    hostname?: string;
+    /**
+     * The agent binary's version.
+     *
+     * Worth showing because it can be the reason something is refused: a leader
+     * accepts a second `grok` only at a matching version.
+     */
+    agentVersion?: string;
     [key: string]: unknown;
   };
 }
