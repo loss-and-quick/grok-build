@@ -133,6 +133,75 @@ refuses to save the list says so on screen: a theme that fails to save is
 retyped in a second, and a machine that fails to save is one somebody added and
 will not find again.
 
+## Coming back
+
+A dropped socket is chased on a bounded ladder — immediate, then half a second
+doubling to a thirty-second ceiling, nine attempts, then the page says it has
+stopped and offers the button. It wakes on its own when the tab is looked at
+again or the machine's network returns. None of that is new; what is new is
+what happens to the *conversation* across the gap.
+
+**The reconnect asks for the rest, not for the whole thing.** Every notification
+the agent persists carries `_meta.eventId`, and `session/load` takes the last
+one a client applied as `_meta.cursor`: the agent then sends only what follows
+it, and sends it **without** `isReplay`, because to a client that never saw
+those events they are not history. This client kept none of that and re-read
+every conversation from the top on every drop.
+
+**A cursor is a line, not a frame.** A streaming reply arrives as many
+`agent_message_chunk` notifications and is persisted as **one** line under the
+last chunk's id — measured, not assumed: twelve live chunks, ids 4 through 15,
+one line, `eventId …-15`. So the ids from the middle of a reply exist on the
+wire and nowhere on disk, and a client that names one of them gets the whole
+conversation back. What is sent instead is the last event before the run that is
+still open, and the half-written reply on screen is taken back to meet it — the
+tail then delivers that reply whole, once.
+
+**A stale cursor cannot lose anything.** The agent resolves a cursor by exact
+match against the rewind-filtered log. A cursor that was rewound away, one whose
+log was rotated, and one naming a line the agent cannot send as live all land on
+a single branch: `isReplay` on every frame and the entire transcript. That is
+the signal, and the client acts on it rather than trying to judge its own cursor
+first — the screen is thrown away on the first replayed frame and rebuilt from
+what follows. A rewind is therefore correct by construction: either the cursor
+line survived the truncation, and so did everything before it, or it did not and
+the whole thing comes back. There is no third outcome where the page keeps a
+turn the leader has dropped.
+
+**A restarted leader is not a dropped socket.** `agentId` is the machine and
+`agentInstanceId` is the process, so the same one with a different other is a
+leader that restarted under a page that was watching it. The cursor survives it,
+because the log did; what does not survive is the running state, and the page
+says so. Switching to another machine changes `agentInstanceId` too, which is
+why both halves are checked.
+
+**What the reader is told, and when.** Nothing, for a reconnect that lost
+nothing — a banner on every dropped packet trains people to skip the two that
+matter. Those two go in the transcript, at the point they happened, because the
+status line is overwritten by the next thing that occurs:
+
+- the agent restarted, so whatever it was running is gone and prompts that were
+  queued may be gone with it;
+- the conversation was reloaded, so anything the page held that the leader does
+  not is no longer there.
+
+The status line carries the measurement — "nothing was missed", "caught up on 3
+updates", "the conversation was reloaded" — which is what makes "only what was
+missed" a claim the reader can check rather than one they have to take.
+
+**A permission that was waiting is still waiting.** An unanswered
+`session/request_permission` is a reverse-request, not a line in the log: the
+leader caches it and re-sends it to a client that has just attached, after the
+load's response and regardless of the cursor. A card that vanished across an
+outage would leave the agent parked with nothing on screen, so this is the one
+part of a reconnect that depends on none of the above.
+
+**A socket that closed is not a turn that failed.** Every request in flight is
+rejected when the link goes, `session/prompt` included — but the agent is not
+listening to that socket to decide whether to keep working. It finishes the
+turn, writes every delta to the log, and hands them over on the next attach. The
+page says that, rather than reporting a failure the person cannot check.
+
 ## Signing in
 
 Until this existed, a browser could not authenticate at all. With no credential
