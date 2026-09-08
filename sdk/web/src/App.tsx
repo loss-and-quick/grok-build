@@ -8,7 +8,13 @@ import { FolderTrustCard } from "./components/FolderTrustCard.tsx";
 import { Roster } from "./components/Roster.tsx";
 import { Session } from "./components/Session.tsx";
 import { Settings } from "./components/Settings.tsx";
-import { RETRY_LIMIT, retryDelayMs, watchLink, type GatewayClient } from "./client.ts";
+import {
+  RETRY_LIMIT,
+  gatewayHost,
+  retryDelayMs,
+  watchLink,
+  type GatewayClient,
+} from "./client.ts";
 import { createGateway, remember, remembered, type Gateway } from "./gateway.ts";
 import { applyTheme, themeByName } from "./theme.ts";
 
@@ -238,8 +244,7 @@ export function App(props: { children?: JSX.Element }): JSX.Element {
   return (
     <div class="layout">
       <aside class="sidebar">
-        <ConnectForm />
-        <LinkLine />
+        <Connection />
         <div class="status">{gateway.status()}</div>
         <select
           class="theme-picker"
@@ -339,25 +344,55 @@ function linkLine(): string {
 }
 
 /**
- * Where the link stands, on screen.
+ * The connection, as a line rather than a form.
  *
- * The screen has to be able to say "this is not working" and to say what it is
- * doing about it. A dot alone cannot: "reconnecting" and "gave up" look the
- * same in every colour, and the difference between them is the only thing a
+ * The form was on screen permanently — address, secret and a button above the
+ * status line, the theme picker and the new-session button — which pushed the
+ * roster, the thing this page is for, a third of the way down the window on a
+ * client that had no further use for any of it. Connected, this is one line: a
+ * dot, where the connection goes, and the way out of it. The form comes back
+ * when it is wanted, so changing endpoint stays a deliberate act rather than
+ * two fields that are always one keystroke from being wrong.
+ *
+ * The state is written as well as coloured. "Retrying" and "gave up" look the
+ * same in every palette, and the difference between them is the only thing a
  * person can act on.
  */
-function LinkLine(): JSX.Element {
+function Connection(): JSX.Element {
+  const [editing, setEditing] = createSignal(false);
+  const collapsed = (): boolean => !editing() && link.phase() !== "offline";
   const retrying = (): boolean => link.phase() === "waiting" || link.phase() === "lost";
+
   return (
-    <>
+    <Show when={collapsed()} fallback={<ConnectForm onDone={() => setEditing(false)} />}>
       <div class="link" data-phase={link.phase()}>
         <span class="link-dot" aria-hidden="true" />
-        <span class="link-state">{linkLine()}</span>
+        <button
+          class="link-where"
+          type="button"
+          title={`${link.endpoint()} — press to change`}
+          onClick={() => setEditing(true)}
+        >
+          {gatewayHost(link.endpoint())}
+        </button>
+        <Show when={link.phase() !== "live"}>
+          <span class="link-state">{linkLine()}</span>
+        </Show>
         <Show when={retrying()}>
           <button class="link-retry" type="button" onClick={() => link.retryNow()}>
             Retry now
           </button>
         </Show>
+        <button
+          class="link-hangup"
+          type="button"
+          onClick={() => {
+            setEditing(false);
+            link.hangUp();
+          }}
+        >
+          {link.phase() === "live" ? "Disconnect" : "Stop"}
+        </button>
       </div>
       <Show when={link.note() || retrying()}>
         <p class="link-note">
@@ -367,41 +402,80 @@ function LinkLine(): JSX.Element {
           </Show>
         </p>
       </Show>
-    </>
+    </Show>
   );
 }
 
-function ConnectForm(): JSX.Element {
-  const [url, setUrl] = createSignal(remembered("url", DEFAULT_GATEWAY));
-  const [secret, setSecret] = createSignal(remembered("secret"));
+/**
+ * The gateway address and its secret.
+ *
+ * The secret is remembered and never rendered back. Remembering it is what
+ * makes `/s/<id>` a real URL — a bookmark opened in a second tab has to reach
+ * the gateway before it can attach to anything — and `localStorage` is the only
+ * store that survives that, `sessionStorage` being per tab. But a filled
+ * password field on every reload puts a credential for the whole machine's
+ * agent into the DOM of every page load, and buys nothing: the value is already
+ * known, and typing is only needed when it changes. So the field starts empty
+ * and says that a secret is remembered, and forgetting one is its own button.
+ */
+function ConnectForm(props: { onDone: () => void }): JSX.Element {
+  const [saved, setSaved] = createSignal(remembered("secret") !== "");
+  let urlField!: HTMLInputElement;
+  let secretField!: HTMLInputElement;
 
   return (
     <form
       class="connect"
       onSubmit={(event) => {
         event.preventDefault();
-        remember("url", url());
-        remember("secret", secret());
-        void link.open(url(), secret());
+        const url = urlField.value.trim();
+        const secret = secretField.value || remembered("secret");
+        remember("url", url);
+        remember("secret", secret);
+        setSaved(secret !== "");
+        props.onDone();
+        void link.open(url, secret);
       }}
     >
       <input
         class="connect-url"
         type="text"
+        ref={urlField}
         placeholder={DEFAULT_GATEWAY}
-        value={url()}
-        onInput={(event) => setUrl(event.currentTarget.value)}
+        value={remembered("url", DEFAULT_GATEWAY)}
       />
       <input
         class="connect-secret"
         type="password"
-        placeholder="gateway secret"
-        value={secret()}
-        onInput={(event) => setSecret(event.currentTarget.value)}
+        ref={secretField}
+        autocomplete="off"
+        placeholder={saved() ? "using the remembered secret" : "gateway secret"}
       />
-      <button class="connect-button" type="submit">
-        Connect
-      </button>
+      <div class="connect-buttons">
+        <button class="connect-button" type="submit">
+          Connect
+        </button>
+        <Show when={saved()}>
+          <button
+            class="connect-forget"
+            type="button"
+            onClick={() => {
+              remember("secret", "");
+              setSaved(false);
+              secretField.focus();
+            }}
+          >
+            Forget secret
+          </button>
+        </Show>
+        {/* Opening the form must not commit anyone to reconnecting: on a live
+            link, pressing Connect would hang the socket up and build another. */}
+        <Show when={link.phase() !== "offline"}>
+          <button class="connect-cancel" type="button" onClick={() => props.onDone()}>
+            Cancel
+          </button>
+        </Show>
+      </div>
     </form>
   );
 }

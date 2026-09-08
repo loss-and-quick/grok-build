@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   GatewayClient,
+  gatewayHost,
   gatewayUrl,
   METHOD_NOT_FOUND,
   unprefix,
@@ -209,5 +210,16 @@ describe("what the socket says about itself", () => {
     expect(events.at(-1)![0]).toBe(old.client);
     expect(events.at(-1)![0]).not.toBe(fresh.client);
     stop();
+  });
+});
+
+describe("naming the endpoint", () => {
+  test("a gateway is identified by host and port, never by its secret", () => {
+    expect(gatewayHost("ws://127.0.0.1:2420/ws")).toBe("127.0.0.1:2420");
+    expect(gatewayHost("ws://127.0.0.1:2420/ws?server-key=s3cret")).toBe("127.0.0.1:2420");
+  });
+
+  test("something that is not a URL is shown as typed, not swallowed", () => {
+    expect(gatewayHost("not a url")).toBe("not a url");
   });
 });

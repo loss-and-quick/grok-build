@@ -50,6 +50,21 @@ body {
   gap: 0.4rem;
 }
 
+.connect-buttons {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.connect-button {
+  flex: 1;
+}
+
+.connect-forget,
+.connect-cancel {
+  flex: none;
+  font-size: 0.8rem;
+}
+
 input,
 textarea,
 select {
@@ -129,11 +144,36 @@ button:disabled {
   background: var(--grok-accent-error, canvastext);
 }
 
+/* The address is the way back to the form, so it is a button — but it reads as
+ * the label it is, because pressing it is a rarity and the roster below is
+ * what this column is for. */
+.link-where {
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 0.15rem 0.3rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border-color: transparent;
+}
+
+.link-where:hover:enabled {
+  border-color: var(--grok-hover-border, canvastext);
+}
+
 .link-state {
   flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--grok-text-secondary, canvastext);
+}
+
+.link-hangup {
+  flex: none;
+  margin-left: auto;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
 }
 
 .link-retry {

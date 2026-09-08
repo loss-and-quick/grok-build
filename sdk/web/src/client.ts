@@ -64,6 +64,21 @@ export function gatewayUrl(base: string, secret: string): string {
   return url.toString();
 }
 
+/**
+ * The endpoint, as something short enough to keep on screen.
+ *
+ * What identifies a gateway to a person is the host and port it answers on —
+ * the scheme and the `/ws` path are the same for every one of them, and the
+ * secret must not be shown at all.
+ */
+export function gatewayHost(base: string): string {
+  try {
+    return new URL(base).host;
+  } catch {
+    return base;
+  }
+}
+
 /** Strip the ACP extension prefix so callers dispatch on the real method name. */
 export function unprefix(method: string): string {
   return method.startsWith(EXT_PREFIX) ? method.slice(EXT_PREFIX.length) : method;
