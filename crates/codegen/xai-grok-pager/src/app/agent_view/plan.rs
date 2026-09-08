@@ -4,7 +4,7 @@ use super::AgentView;
 use super::{ActivePane, InputMode, test_fixtures};
 #[cfg(test)]
 use crate::actions::ActionRegistry;
-use crate::app::actions::Action;
+use crate::app::actions::{Action, Effect};
 use crate::app::app_view::InputOutcome;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::list_pane::ListItem;
@@ -24,18 +24,25 @@ fn log_plan_submit(action: &str) {
     });
 }
 impl AgentView {
-    /// Resolve the absolute path to the plan file for this session.
-    fn plan_file_path(&self) -> Option<std::path::PathBuf> {
-        let session_id = self.session.session_id.as_ref()?;
-        let cwd_str = self.session.cwd.to_string_lossy().into_owned();
-        let encoded_cwd = urlencoding::encode(&cwd_str);
-        Some(
-            xai_grok_shell::util::grok_home::grok_home()
-                .join("sessions")
-                .join(encoded_cwd.as_ref())
-                .join(session_id.0.as_ref())
-                .join("plan.md"),
-        )
+    /// Ask the agent for this session's saved plan.
+    ///
+    /// `open` is the difference between the user asking to see the plan and a
+    /// background refresh that only keeps the chip honest. `None` when there is
+    /// no session, which is the one case with no agent to ask.
+    pub(crate) fn fetch_plan_effect(&self, open: bool) -> Option<Effect> {
+        Some(Effect::FetchSessionPlan {
+            agent_id: self.session.id,
+            session_id: self.session.session_id.clone()?,
+            open,
+        })
+    }
+    /// Adopt the plan the agent reported over `x.ai/session/plan`.
+    ///
+    /// A blank body is stored as `None`: the agent already collapses an empty
+    /// plan file into "no plan", and keeping that shape here means every reader
+    /// tests one thing.
+    pub(crate) fn set_plan_file_body(&mut self, body: Option<String>) {
+        self.plan_file_body = body.filter(|s| !s.trim().is_empty());
     }
     /// Whether the current line viewer is showing a plan preview.
     pub(super) fn is_plan_viewer(&self) -> bool {
@@ -79,8 +86,8 @@ impl AgentView {
     }
     /// Resolve the plan body for the line-viewer preview.
     ///
-    /// Prefers content carried on the approval request (inline plan-creation or the shell-read file body), then falls back to the on-disk plan file.
-    /// Request body first keeps file-backed previews working when the path resolution fails or the file disappears between intercept and open.
+    /// Prefers content carried on the approval request (inline plan-creation or the shell-read file body), then falls back to the plan the agent last reported.
+    /// Request body first keeps file-backed previews working when the agent has not been asked yet, or answered after the plan changed under it.
     pub(super) fn plan_body_for_preview(&self) -> Option<String> {
         if let Some(content) = self
             .plan_approval_view
@@ -97,9 +104,7 @@ impl AgentView {
         {
             return Some(content.to_owned());
         }
-        self.plan_file_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .filter(|s| !s.trim().is_empty())
+        self.plan_file_body.clone()
     }
     /// Open the plan preview when content exists, or when plan approval is parked with an empty body (so the decision surface always pops).
     pub(crate) fn show_plan_preview_if_available(&mut self) {
@@ -125,8 +130,6 @@ impl AgentView {
                 crate::views::plan_approval_view::EMPTY_PLAN_PLACEHOLDER.to_owned(),
                 None,
             )
-        } else if let Some(plan_path) = self.plan_file_path() {
-            LineViewerState::open_markdown(&plan_path, None)
         } else {
             None
         }) else {
@@ -721,10 +724,10 @@ impl AgentView {
             self.show_toast("No comments to send.");
             return InputOutcome::Changed;
         }
-        let plan_content = self.inline_plan_content().map(str::to_owned).or_else(|| {
-            let path = self.plan_file_path()?;
-            std::fs::read_to_string(path).ok()
-        });
+        let plan_content = self
+            .inline_plan_content()
+            .map(str::to_owned)
+            .or_else(|| self.plan_file_body.clone());
         let body = crate::views::plan_approval_view::format_plan_comments(
             &self.plan_comments,
             plan_content.as_deref(),
@@ -819,6 +822,33 @@ mod plan_chip_tests {
         agent.plan_mode_active = true;
         let appearance = AppearanceConfig::default();
         assert!(!agent.should_show_plan_chip(&appearance));
+    }
+    /// The chip is drawn from the plan the agent reported, not from a file this
+    /// process went and read. Without a reported plan there is nothing to show.
+    #[test]
+    fn plan_chip_follows_the_plan_the_agent_reported() {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        let appearance = AppearanceConfig::default();
+        assert!(!agent.should_show_plan_chip(&appearance));
+
+        agent.set_plan_file_body(Some("# Plan\n".to_string()));
+        assert!(agent.should_show_plan_chip(&appearance));
+    }
+    /// An empty plan file is "no plan", so a blank body must not raise the chip.
+    #[test]
+    fn a_blank_reported_plan_is_no_plan() {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.set_plan_file_body(Some("  \n\t\n".to_string()));
+        assert!(!agent.should_show_plan_chip(&AppearanceConfig::default()));
+    }
+    /// With no session there is no agent to ask, which is the only case the
+    /// pager still has to answer for itself.
+    #[test]
+    fn a_sessionless_view_has_nothing_to_ask() {
+        let agent = make_agent();
+        assert!(agent.fetch_plan_effect(true).is_none());
     }
     #[test]
     fn plan_chip_visible_when_config_overrides() {

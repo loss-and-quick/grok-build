@@ -2451,8 +2451,8 @@ impl acp::Agent for MvpAgent {
             "x.ai/getApiKey" | "x.ai/setApiKey" => {
                 crate::extensions::auth::handle(self, &args).await
             }
-            "x.ai/session/info" | "x.ai/session/close" | "x.ai/session/list"
-            | "x.ai/sessions/list" => {
+            "x.ai/session/info" | "x.ai/session/plan" | "x.ai/session/close"
+            | "x.ai/session/list" | "x.ai/sessions/list" => {
                 crate::agent::handlers::session::handle(self, &args).await
             }
             "x.ai/workspaces/list" => {

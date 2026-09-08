@@ -83,6 +83,12 @@ impl AgentView {
                 if self.hit_plan_button.contains(mouse.column, mouse.row) {
                     if self.plan_approval_view.is_some() {
                         self.reopen_plan_approval();
+                        return InputOutcome::Changed;
+                    }
+                    // The plan lives on the agent, so the click asks for it
+                    // rather than opening whatever the last answer left behind.
+                    if let Some(effect) = self.fetch_plan_effect(true) {
+                        self.pending_effects.push(effect);
                     } else {
                         self.show_plan_preview();
                     }
@@ -94,6 +100,12 @@ impl AgentView {
                 {
                     if self.plan_approval_view.is_some() {
                         self.reopen_plan_approval();
+                        return InputOutcome::Changed;
+                    }
+                    // The plan lives on the agent, so the click asks for it
+                    // rather than opening whatever the last answer left behind.
+                    if let Some(effect) = self.fetch_plan_effect(true) {
+                        self.pending_effects.push(effect);
                     } else {
                         self.show_plan_preview();
                     }

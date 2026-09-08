@@ -10,6 +10,7 @@ pub mod merge;
 pub(crate) mod message_delivery;
 pub mod notifications;
 pub mod pending_interaction;
+pub mod plan_snapshot;
 pub mod prompt_queue;
 pub mod two_pass;
 pub mod visibility;
@@ -26,6 +27,7 @@ pub use self::persistence::{
     LocalFeedbackEntry, UserFeedbackEntry, find_local_child_for_remote, resolve_local_session,
     resolve_local_session_any_cwd, session_exists_for_cwd,
 };
+pub use self::plan_snapshot::{PlanSnapshot, SessionPlanResponse};
 pub use self::result::{Empty, ExtMethodResult};
 pub use self::share::{ShareSessionRequest, ShareSessionResponse};
 pub use prod_mc_cli_chat_proxy_types::feedback_types::{

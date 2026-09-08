@@ -1294,6 +1294,14 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             agent_id,
             session_id: hydrate_sid.clone(),
         });
+        // A resumed session may already have a plan, written before this client
+        // existed. Asking here is what stops attaching late from meaning
+        // "no plan"; nothing else would tell this client about one.
+        effects.push(Effect::FetchSessionPlan {
+            agent_id,
+            session_id: hydrate_sid.clone(),
+            open: false,
+        });
         if app.plugin_cta_enabled {
             effects.push(Effect::FetchPluginCtaCatalog {
                 agent_id,

@@ -1524,6 +1524,18 @@ pub struct AgentView {
     /// the prompt area shows the plan approval overlay and input is modal.
     pub(crate) plan_approval_view: Option<PlanApprovalViewState>,
     pub(crate) latest_inline_plan_content: Option<String>,
+    /// The saved plan as the agent last reported it over `x.ai/session/plan`.
+    ///
+    /// The pager used to read `plan.md` off its own disk on every frame that
+    /// drew the plan chip, which is the one thing a browser cannot copy. This
+    /// is the same body, arrived over the wire, so both clients now show a plan
+    /// the agent resolved rather than one each client found for itself.
+    ///
+    /// Refreshed when the user asks for the plan, when a plan-mode turn ends
+    /// (the model's chance to have written it), and when a session is resumed.
+    /// Between those it is the plan as of the last ask, which is what the chip
+    /// claims.
+    pub(crate) plan_file_body: Option<String>,
     pub(crate) plan_comments: Vec<PlanComment>,
     /// Monotonic counter for casual plan comment IDs.
     pub(crate) plan_next_comment_id: u64,

@@ -1358,6 +1358,24 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast(&format!("Couldn't delete session: {error}"));
             vec![]
         }
+        TaskResult::SessionPlanComplete {
+            agent_id,
+            session_id,
+            plan,
+            open,
+        } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            if agent.session.session_id.as_ref() != Some(&session_id) {
+                return vec![];
+            }
+            agent.set_plan_file_body(plan.content);
+            if open {
+                agent.show_plan_preview();
+            }
+            vec![]
+        }
         TaskResult::ContextInfoComplete {
             agent_id,
             session_id,

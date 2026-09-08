@@ -634,6 +634,15 @@ pub(super) fn apply_terminal_outcome(
             {
                 agent.discard_pending_adoption_updates(&p.prompt_id);
             }
+            // A plan-mode turn is the model's chance to have written the plan,
+            // and the pager no longer reads the file to find out. Asking at the
+            // turn boundary keeps the plan chip honest without polling.
+            if let Some(agent) = app.agents.get(&agent_id)
+                && agent.plan_mode_active
+                && let Some(effect) = agent.fetch_plan_effect(false)
+            {
+                app.pending_effects.push(effect);
+            }
             is_active
         }
     }

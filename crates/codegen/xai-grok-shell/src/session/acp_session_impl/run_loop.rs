@@ -849,6 +849,21 @@ pub(super) async fn run_session(
                             let info = session.build_session_info().await;
                             let _ = responds_to.send(info);
                         }
+                        SessionCommand::GetPlanSnapshot { responds_to } => {
+                            // The lock is released before the read: nothing else
+                            // in the tracker is needed once the path is copied,
+                            // and holding it across an await would park every
+                            // other plan-mode caller behind a file read.
+                            let (path, awaiting) = {
+                                let tracker = session.plan_mode.lock();
+                                (
+                                    tracker.plan_file_path().to_path_buf(),
+                                    tracker.is_awaiting_plan_approval(),
+                                )
+                            };
+                            let snapshot = crate::session::plan_snapshot::PlanSnapshot::read(&path, awaiting).await;
+                            let _ = responds_to.send(snapshot);
+                        }
                         SessionCommand::BackgroundForegroundCommand { tool_call_id, respond_to } => {
                             let result = session.agent.borrow().tool_bridge()
                                 .background_foreground_command(&tool_call_id)

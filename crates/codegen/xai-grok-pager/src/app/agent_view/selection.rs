@@ -1198,7 +1198,14 @@ impl AgentView {
         // Double-click on bg-task / subagent blocks (matched above) opens a viewer instead of folding
         match click_count {
             1 if is_plan_tool => {
-                self.show_plan_preview();
+                // The plan lives on the agent, so the click asks for it rather
+                // than opening whatever the last answer left behind. The viewer
+                // opens when the answer arrives.
+                if let Some(effect) = self.fetch_plan_effect(true) {
+                    self.pending_effects.push(effect);
+                } else {
+                    self.show_plan_preview();
+                }
             }
             2 if is_bg_task => {
                 // Double-click bg task: open block viewer (same as Enter).

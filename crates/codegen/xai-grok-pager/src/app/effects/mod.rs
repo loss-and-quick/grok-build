@@ -3672,6 +3672,27 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::FetchSessionPlan { agent_id, session_id, open } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    // An agent that does not know the method, or one that fails
+                    // the read, reports the same thing a plan-less session
+                    // does: nothing to show.
+                    let plan = fetch_session_plan(&session_id, &tx)
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::debug!("session plan fetch failed: {e}");
+                            Default::default()
+                        });
+                    TaskResult::SessionPlanComplete {
+                        agent_id,
+                        session_id,
+                        plan,
+                        open,
+                    }
+                });
+        }
         Effect::ShowContextInfo { agent_id, session_id, nonce } => {
             let tx = acp_tx.clone();
             tasks
@@ -4775,6 +4796,39 @@ async fn fetch_session_info(
     }
     envelope.result.ok_or_else(|| "session info response missing result".to_string())
 }
+/// Fetch this session's saved plan via `x.ai/session/plan`.
+///
+/// The pager reads the plan the same way any other client does now: it asks the
+/// agent that owns the file rather than resolving `~/.grok/sessions/…/plan.md`
+/// itself. That keeps the two clients from drifting over where a plan lives.
+async fn fetch_session_plan(
+    session_id: &acp::SessionId,
+    tx: &AcpAgentTx,
+) -> Result<xai_grok_shell::session::PlanSnapshot, String> {
+    let request = acp::ExtRequest::new(
+        "x.ai/session/plan",
+        serde_json::value::to_raw_value(
+                &serde_json::json!({
+            "sessionId": session_id.0.to_string()
+        }),
+            )
+            .expect("serialize session/plan params")
+            .into(),
+    );
+    let resp = acp_send(request, tx).await.map_err(|e| e.to_string())?;
+    let envelope: ExtMethodResult<xai_grok_shell::session::SessionPlanResponse> =
+        serde_json::from_str(resp.0.get())
+            .map_err(|e| format!("invalid session plan response: {e}"))?;
+    if let Some(err) = envelope.error {
+        let msg = err.as_str().map(String::from).unwrap_or_else(|| err.to_string());
+        return Err(msg);
+    }
+    envelope
+        .result
+        .map(|response| response.plan)
+        .ok_or_else(|| "session plan response missing result".to_string())
+}
+
 /// Fetch [`PromptUsage`] via `x.ai/session/usage` (bare response, no envelope).
 async fn fetch_session_usage(
     session_id: &acp::SessionId,

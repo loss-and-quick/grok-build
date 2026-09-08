@@ -1889,6 +1889,17 @@ pub enum Effect {
         /// Usage-modal fetch generation; echoed back on the task result.
         nonce: u64,
     },
+    /// Ask the agent for this session's saved plan via `x.ai/session/plan`.
+    ///
+    /// `open` distinguishes the user asking to see the plan (`/view-plan`, the
+    /// chip, a plan-tool block) from a background refresh that only keeps the
+    /// chip honest. A background reply must not pop a viewer over whatever the
+    /// user is doing.
+    FetchSessionPlan {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        open: bool,
+    },
     /// Fetch and display detailed context usage via x.ai/session/info.
     ShowContextInfo {
         agent_id: AgentId,
@@ -2746,6 +2757,17 @@ pub enum TaskResult {
         source: String,
         session_id: String,
         error: String,
+    },
+    /// The session's saved plan came back. Drop if `session_id` no longer matches.
+    ///
+    /// A failed fetch has no variant: the plan is chrome, and an agent too old
+    /// to know the method answers `method not found`, which is "no plan to
+    /// show", not something to report.
+    SessionPlanComplete {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        plan: xai_grok_shell::session::PlanSnapshot,
+        open: bool,
     },
     /// Context info fetched successfully. Drop if `session_id` no longer matches.
     ContextInfoComplete {

@@ -8,19 +8,36 @@ use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
 
-/// Show the current plan: if a plan file exists, open it in the preview overlay popover.
+/// Show the current plan: if the agent has one saved, open it in the preview overlay popover.
 /// If no plan has been written yet, show a toast.
 ///
-/// Delegates to `AgentView::show_plan_preview()`, which reads the session's `plan.md` from its session artifacts directory.
+/// Asks the agent for the plan (`x.ai/session/plan`) and opens the preview when
+/// the answer arrives, rather than reading `plan.md` off this machine. The read
+/// belongs to the agent that owns the file, so a browser can serve `/view-plan`
+/// from the same source the terminal does.
+///
+/// A parked approval already carries the plan body in memory, so that path opens
+/// without a round trip.
 pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
-    with_active_agent(app, |agent| {
-        if agent.plan_approval_view.is_some() {
-            agent.reopen_plan_approval();
-        } else {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    if agent.plan_approval_view.is_some() {
+        agent.reopen_plan_approval();
+        return vec![];
+    }
+    match agent.fetch_plan_effect(true) {
+        Some(effect) => vec![effect],
+        // No session means no agent to ask. Whatever a live approval left
+        // behind is all there is, and the toast says so when there is none.
+        None => {
             agent.show_plan_preview();
+            vec![]
         }
-    });
-    vec![]
+    }
 }
 
 /// Enter plan mode via `/plan`.

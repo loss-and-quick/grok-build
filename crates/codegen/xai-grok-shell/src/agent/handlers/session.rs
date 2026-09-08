@@ -29,6 +29,7 @@ pub(crate) async fn handle(
 ) -> Result<acp::ExtResponse, acp::Error> {
     match args.method.as_ref() {
         "x.ai/session/info" => handle_session_info(agent, args).await,
+        "x.ai/session/plan" => handle_session_plan(agent, args).await,
         "x.ai/session/close" => handle_session_close(agent, args).await,
         "x.ai/session/list" => handle_session_list(agent, args).await,
         "x.ai/sessions/list" => handle_roster_list(agent, args).await,
@@ -165,6 +166,47 @@ async fn handle_session_info(
     };
 
     ExtMethodResult::success(serde_json::to_value(&response).unwrap_or_default())
+        .to_ext_response()
+        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+}
+
+/// `x.ai/session/plan`: the plan this session has saved, for `/view-plan`.
+///
+/// Session-scoped rather than path-scoped on purpose. The plan file lives under
+/// the agent's `grok_home`, and taking a path from the caller would let any
+/// client name one. The session id names the plan instead, and the actor that
+/// owns the file resolves it.
+///
+/// A session id that names nothing resolves to an empty snapshot rather than an
+/// error: "no plan" is what a client would draw either way, and a dormant
+/// session having no plan to show is not a failure.
+async fn handle_session_plan(
+    agent: &MvpAgent,
+    args: &acp::ExtRequest,
+) -> Result<acp::ExtResponse, acp::Error> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PlanRequest {
+        session_id: String,
+    }
+
+    let req: PlanRequest = serde_json::from_str(args.params.get())
+        .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
+
+    let session_id = req.session_id;
+    let sid = acp::SessionId::new(session_id.clone());
+    let plan = match agent.resident_handle(&sid) {
+        Some(session) => {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = session
+                .cmd_tx
+                .send(SessionCommand::GetPlanSnapshot { responds_to: tx });
+            rx.await.unwrap_or_default()
+        }
+        None => crate::session::PlanSnapshot::default(),
+    };
+
+    ExtMethodResult::success(crate::session::SessionPlanResponse { session_id, plan })
         .to_ext_response()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }

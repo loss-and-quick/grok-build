@@ -344,6 +344,7 @@ impl AgentView {
             permission_pattern_edit: None,
             plan_approval_view: None,
             latest_inline_plan_content: None,
+            plan_file_body: None,
             plan_comments: Vec::new(),
             plan_next_comment_id: 0,
             casual_commenting_range: None,

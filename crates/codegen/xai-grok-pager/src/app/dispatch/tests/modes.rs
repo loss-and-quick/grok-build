@@ -2198,3 +2198,109 @@ fn show_export_copy_tip_shows_and_counts_when_flag_on() {
     assert!(app.agents[&id].ephemeral_tip.is_active());
     assert_eq!(app.tip_seen_counts.get(EXPORT_COPY_TIP_SEEN_KEY), Some(&1));
 }
+
+/// `/view-plan` asks the agent for the plan instead of reading `plan.md` off
+/// this machine. Nothing opens yet: the viewer waits for the answer, so a
+/// browser running the same command sees the same document the terminal does.
+#[test]
+fn view_plan_asks_the_agent_for_the_plan() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().plan_file_body = Some("stale body".into());
+
+    let effects = dispatch(Action::ShowPlan, &mut app);
+
+    match effects.as_slice() {
+        [
+            Effect::FetchSessionPlan {
+                agent_id,
+                session_id,
+                open,
+            },
+        ] => {
+            assert_eq!(*agent_id, id);
+            assert_eq!(session_id.0.as_ref(), "test-session");
+            assert!(*open, "the user asked to see it");
+        }
+        other => panic!("expected a plan fetch, got {other:?}"),
+    }
+    assert!(
+        app.agents[&id].line_viewer.is_none(),
+        "the stale body must not open ahead of the answer"
+    );
+}
+
+/// The answer is what the preview draws, and it replaces whatever the pager
+/// held before.
+#[test]
+fn the_agents_answer_becomes_the_preview() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().plan_file_body = Some("stale body".into());
+
+    let _ = dispatch_task_result(
+        crate::app::actions::TaskResult::SessionPlanComplete {
+            agent_id: id,
+            session_id: "test-session".to_string().into(),
+            plan: xai_grok_shell::session::PlanSnapshot {
+                content: Some("# Fresh plan\n".into()),
+                ..Default::default()
+            },
+            open: true,
+        },
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert_eq!(agent.plan_file_body.as_deref(), Some("# Fresh plan\n"));
+    assert!(agent.line_viewer.is_some(), "the preview opened");
+}
+
+/// A background refresh keeps the chip honest without popping a viewer over
+/// whatever the user is doing.
+#[test]
+fn a_background_refresh_updates_the_chip_without_opening_anything() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    let _ = dispatch_task_result(
+        crate::app::actions::TaskResult::SessionPlanComplete {
+            agent_id: id,
+            session_id: "test-session".to_string().into(),
+            plan: xai_grok_shell::session::PlanSnapshot {
+                content: Some("# Fresh plan\n".into()),
+                ..Default::default()
+            },
+            open: false,
+        },
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert_eq!(agent.plan_file_body.as_deref(), Some("# Fresh plan\n"));
+    assert!(agent.line_viewer.is_none());
+}
+
+/// A reply that outlived the session it asked about touches nothing.
+#[test]
+fn a_reply_for_another_session_is_dropped() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    let _ = dispatch_task_result(
+        crate::app::actions::TaskResult::SessionPlanComplete {
+            agent_id: id,
+            session_id: "some-older-session".to_string().into(),
+            plan: xai_grok_shell::session::PlanSnapshot {
+                content: Some("# Someone else's plan\n".into()),
+                ..Default::default()
+            },
+            open: true,
+        },
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert!(agent.plan_file_body.is_none());
+    assert!(agent.line_viewer.is_none());
+}

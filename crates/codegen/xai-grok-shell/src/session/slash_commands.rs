@@ -560,7 +560,7 @@ pub const PAGER_COMMAND_KEYS: &[(&str, CommandSurface)] = &[
     ("onboarding", CommandSurface::WireMissing), // alias of `tutorial`
     ("personas", CommandSurface::WireMissing), // same `.grok/personas/*.toml` reads and writes as `config-agents`
     ("plan", CommandSurface::Any),
-    ("plan-view", CommandSurface::WireMissing), // alias of `view-plan`
+    ("plan-view", CommandSurface::Any), // alias of `view-plan`
     ("plugin", CommandSurface::Any),
     ("plugins", CommandSurface::Any),
     ("preferences", CommandSurface::Any),
@@ -581,7 +581,7 @@ pub const PAGER_COMMAND_KEYS: &[(&str, CommandSurface)] = &[
     ("sessions", CommandSurface::Any),
     ("settings", CommandSurface::Any),
     ("share", CommandSurface::Any),
-    ("show-plan", CommandSurface::WireMissing), // alias of `view-plan`
+    ("show-plan", CommandSurface::Any), // alias of `view-plan`
     ("skills", CommandSurface::Any),
     ("summarize", CommandSurface::Any),
     ("tasks", CommandSurface::Any),
@@ -599,7 +599,7 @@ pub const PAGER_COMMAND_KEYS: &[(&str, CommandSurface)] = &[
     ("t", CommandSurface::Any),
     ("undo", CommandSurface::Any),
     ("usage", CommandSurface::Any),
-    ("view-plan", CommandSurface::WireMissing), // reads `~/.grok/sessions/*/plan.md`; only live plan updates cross
+    ("view-plan", CommandSurface::Any), // the saved plan crosses as `x.ai/session/plan`
     ("vim-mode", CommandSurface::Terminal), // scrollback key handling; the settings row is `surface: terminal` too
     ("voice", CommandSurface::WireMissing), // captures the mic in-process and streams it to `wss://api.x.ai/v1/stt`
     ("welcome", CommandSurface::Any),

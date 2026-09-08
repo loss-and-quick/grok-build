@@ -403,6 +403,12 @@ pub enum SessionCommand {
     GetSessionInfo {
         responds_to: oneshot::Sender<SessionInfoData>,
     },
+    /// The saved plan for `/view-plan`, read through the actor because it owns
+    /// the `PlanModeTracker` that knows where the file is and whether an
+    /// approval is parked on it.
+    GetPlanSnapshot {
+        responds_to: oneshot::Sender<super::plan_snapshot::PlanSnapshot>,
+    },
     CompactSession {
         user_context: Option<String>,
         respond_to: oneshot::Sender<acp::Result<()>>,
