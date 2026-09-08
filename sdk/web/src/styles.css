@@ -464,6 +464,67 @@ button.tool-title:focus-visible .tool-bullet-mark {
   opacity: var(--grok-muted-opacity, 1);
 }
 
+/* A read's body, with the file's own line numbers down the left.
+ *
+ * The row shape is the pager's: a right-aligned line number, two spaces, then
+ * the line. The number column is
+ * sized in `ch` from the widest number the block actually shows — the pager's
+ * own `gutter_width`/`gutter_layout` — so the two columns line up without a
+ * table and without measuring anything. */
+.tool-row {
+  display: flex;
+  align-items: baseline;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.tool-gutter {
+  flex: none;
+  padding-right: 2ch;
+  text-align: right;
+  white-space: pre;
+  color: var(--grok-gray-dim, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+  /* A line number is a label on the content, not part of it: excluding it from
+   * selection is what makes a copied read paste back as the file's own text.
+   * The terminal reaches the same place from the other side — its gutter spans
+   * are outside the block's selectable range. */
+  user-select: none;
+}
+
+.tool-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--grok-text-primary, canvastext);
+}
+
+/* `bg_dark` is the panel the pager puts a read body on. */
+.tool-panel {
+  padding: 0.4rem 0;
+  background: var(--grok-bg-dark, canvas);
+}
+
+.tool-read {
+  grid-column: 2;
+  margin-top: 0.25rem;
+  min-width: 0;
+  max-height: 24rem;
+  overflow: auto;
+}
+
+/* Whatever a fold is hiding, said in the muted role the pager uses for its own
+ * `…` separator. */
+.tool-fold-note {
+  padding: 0.1rem 0.4rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
 .composer {
   display: grid;
   grid-template-columns: 1fr auto;

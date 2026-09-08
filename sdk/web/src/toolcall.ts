@@ -194,6 +194,42 @@ function searchTitle(call: ToolCallFacts): ToolTitle {
   return { verb: "Search ", parts, secondary: null };
 }
 
+/**
+ * The lines a read actually covers.
+ *
+ * **`offset` is one-based**, and the tool says so: `resolve_read_start_line`
+ * is documented "Harness-compatible negative offset resolution (1-indexed
+ * start line)" and returns a positive `offset` unchanged as the start line
+ * (`xai-grok-tools/src/implementations/grok_build/read_file/mod.rs`), with
+ * `stored_read_offset` putting that same raw value on `FileContent.offset`.
+ * Read live, `offset: 50, limit: 10` returns the ten lines whose own numbers
+ * are 50 to 59, and the agent's numbered copy of them opens with `50→`.
+ *
+ * The pager computes `start = off + 1` and `end = off + lim`
+ * (`tool_call_to_block`, `acp/tracker.rs`), a line too far at each end: it
+ * labels that read `(51-60)` and numbers its gutter from 51. **This client
+ * does not reproduce it**, which is the one place these two disagree on
+ * purpose. A line number is a claim about where in the file you are looking,
+ * and it is the part of a read a person carries back out to an editor; being
+ * consistently wrong about it is worse than not showing it. Pinned against the
+ * tool's own rule by `test/toolresult.test.ts`.
+ *
+ * Zero is the exception, and the reason the two agreed until now: the tool
+ * folds `offset: 0` to line 1 as well (`if offset_raw == 0 { return 1 }`) while
+ * `stored_read_offset` still puts the literal `0` on the wire, so `off + 1`
+ * happens to be right for exactly that one value.
+ */
+export function readRange(
+  offset: number | null,
+  limit: number | null,
+  total: number,
+): { start: number; end: number } | null {
+  if (offset === null && limit === null) return null;
+  const start = offset === null || offset === 0 ? 1 : offset;
+  const end = limit === null ? total : Math.min(start + limit - 1, total);
+  return { start, end };
+}
+
 /** `Read path (1-50 of 200)`, or `Skill deploy`. */
 function readTitle(call: ToolCallFacts): ToolTitle {
   const path = field(call.rawInput, "file_path", "target_file", "path") ?? call.title;
@@ -206,11 +242,11 @@ function readTitle(call: ToolCallFacts): ToolTitle {
   const offset = typeof content["offset"] === "number" ? content["offset"] : null;
   const limit = typeof content["limit"] === "number" ? content["limit"] : null;
   const total = typeof content["total_lines"] === "number" ? content["total_lines"] : null;
-  if ((offset !== null || limit !== null) && total !== null) {
-    const start = (offset ?? 0) + 1;
-    const end = limit === null ? total : Math.min((offset ?? 0) + limit, total);
+  const range = total === null ? null : readRange(offset, limit, total);
+  if (range && total !== null) {
     // The `of total` half appears only when the range is not the whole file —
     // the pager's own condition, so a short file is not labelled twice.
+    const { start, end } = range;
     parts.push({
       text: total > end - start + 1 ? ` (${start}-${end} of ${total})` : ` (${start}-${end})`,
       role: "detail",
@@ -424,11 +460,12 @@ export function ellipsisFor(kind: string, hidden: number): string {
 //   - **Syntax highlighting.** Read content and Edit diffs are painted by
 //     `syntect` against the terminal's theme, selected from the file extension
 //     and, for a scoped highlight, by reading the file off disk
-//     (`app/edit_highlight_worker.rs`). Nothing on the wire carries it.
-//   - **Typed output re-laid-out.** `rawOutput` is on the wire, so grep hits,
-//     read gutters and edit diffs *could* be drawn from data rather than from
-//     prose. They are not drawn here yet, and that is a gap in this client, not
-//     a gap in the protocol.
+//     (`app/edit_highlight_worker.rs`). Nothing on the wire carries it. A
+//     read's line numbers and its text *are* on the wire, and
+//     `toolresult.ts` draws them.
+//   - **Typed output re-laid-out.** `rawOutput` carries a grep's hits and an
+//     edit's diff as well, and neither is drawn from them yet. That is a gap
+//     in this client, not a gap in the protocol.
 //   - **Path surfaces by terminal width.** The pager shows a basename when
 //     collapsed, a cwd-relative path when expanded and fish-shortens either to
 //     fit the columns it has. A page has no column budget, so it shows the

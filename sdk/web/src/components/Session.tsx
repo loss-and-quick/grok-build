@@ -16,6 +16,7 @@ import {
   type ToolTitle,
   type TruncatedOutput,
 } from "../toolcall.ts";
+import { typedResult, type TypedResult } from "../toolresult.ts";
 
 import type { Gateway } from "../gateway.ts";
 import { sessionLabel } from "../roster.ts";
@@ -25,6 +26,7 @@ import { Markdown } from "./Markdown.tsx";
 import { Panel } from "./Panel.tsx";
 import { PermissionCard } from "./PermissionCard.tsx";
 import { Subagents } from "./Subagents.tsx";
+import { ToolResult } from "./ToolResult.tsx";
 
 /**
  * One attached session: its panels, its transcript, and the composer.
@@ -259,6 +261,11 @@ function ToolCall(props: {
     const text = body();
     return text === "" ? [] : text.replace(/\n+$/, "").split("\n");
   };
+  // A failed call has no typed result to draw: `ToolOutput::ReadFile` carries
+  // `FileNotFound` instead of `FileContent`, and the terminal shows the error
+  // text there too.
+  const typed = (): TypedResult | null => (failed() ? null : typedResult(facts()));
+  const openable = (): boolean => typed() !== null || lines().length > 0;
   const fold = (): TruncatedOutput => truncate(lines(), props.call.toolKind);
   const title = (): ToolTitle => toolTitle(facts());
 
@@ -291,14 +298,12 @@ function ToolCall(props: {
           it. With no output there is nothing to fold, so it stops being a
           button rather than becoming a dead one. */}
       <Dynamic
-        component={lines().length > 0 ? "button" : "div"}
+        component={openable() ? "button" : "div"}
         class="tool-title"
-        type={lines().length > 0 ? "button" : undefined}
-        aria-expanded={lines().length > 0 ? mode() !== "collapsed" : undefined}
+        type={openable() ? "button" : undefined}
+        aria-expanded={openable() ? mode() !== "collapsed" : undefined}
         onClick={
-          lines().length > 0
-            ? () => setMode(nextMode(props.call.toolKind, mode()))
-            : undefined
+          openable() ? () => setMode(nextMode(props.call.toolKind, mode())) : undefined
         }
       >
         {/* Hovering a foldable row swaps the diamond for a chevron in place,
@@ -307,7 +312,7 @@ function ToolCall(props: {
             (`scrollback_pane.rs`), so the affordance costs no column. */}
         <span class="tool-bullet" aria-hidden="true">
           <span class="tool-bullet-mark">{BULLET}</span>
-          <Show when={lines().length > 0}>
+          <Show when={openable()}>
             <span class="tool-bullet-open">{CHEVRON}</span>
           </Show>
         </span>
@@ -337,18 +342,32 @@ function ToolCall(props: {
           </div>
         )}
       </Show>
-      <Show when={mode() !== "collapsed" && lines().length > 0}>
-        <pre class="tool-output" classList={{ "tool-error": failed() }}>
-          <Show when={mode() === "truncated" && fold().hidden > 0} fallback={lines().join("\n")}>
-            {fold().head.join("\n")}
-            <span class="tool-ellipsis">
-              {"\n"}
-              {ellipsisFor(props.call.toolKind, fold().hidden)}
-              {"\n"}
-            </span>
-            {fold().tail.join("\n")}
-          </Show>
-        </pre>
+      {/* The typed result when the wire carried one, and the text body
+          otherwise. `rawOutput` is the whole result, not a
+          summary of it, so drawing prose over it was this client throwing away
+          what it had already been sent. */}
+      <Show when={mode() !== "collapsed" && openable()}>
+        <Show
+          when={typed()}
+          fallback={
+            <pre class="tool-output" classList={{ "tool-error": failed() }}>
+              <Show
+                when={mode() === "truncated" && fold().hidden > 0}
+                fallback={lines().join("\n")}
+              >
+                {fold().head.join("\n")}
+                <span class="tool-ellipsis">
+                  {"\n"}
+                  {ellipsisFor(props.call.toolKind, fold().hidden)}
+                  {"\n"}
+                </span>
+                {fold().tail.join("\n")}
+              </Show>
+            </pre>
+          }
+        >
+          {(result) => <ToolResult result={result()} cwd={props.cwd} mode={mode()} />}
+        </Show>
       </Show>
     </article>
   );
