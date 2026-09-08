@@ -418,13 +418,22 @@ impl AgentRebuildSpec {
 /// in `rate_limit_backoff_tests` / `transient_retry_loop_tests` stall without it.
 #[cfg(test)]
 pub(crate) fn isolated_test_state_path() -> PathBuf {
+    isolated_test_session_dir().join("tool_state.json")
+}
+
+/// A directory no other case can name, for any `SessionContext` path a test hands the bridge.
+///
+/// `session_folder` is the same hazard as `state_path` and shares the fix: a name spelled out in
+/// the source is one name for the whole binary and for every later run on the machine.
+#[cfg(test)]
+pub(crate) fn isolated_test_session_dir() -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir()
         .join(format!("grok-shell-test-state-{}", std::process::id()))
         .join(NEXT.fetch_add(1, Ordering::Relaxed).to_string());
     std::fs::create_dir_all(&dir).expect("test resources-state directory");
-    dir.join("tool_state.json")
+    dir
 }
 /// Every field is set to a minimal default suitable for test `SessionActor` literals and focused `build_agent` tests.
 #[cfg(test)]

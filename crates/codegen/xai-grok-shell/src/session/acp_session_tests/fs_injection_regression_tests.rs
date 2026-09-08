@@ -43,18 +43,19 @@ async fn tool_bridge_routes_writes_through_injected_fs() {
         ],
         behavior_preset: None,
     };
+    let session_dir = crate::session::agent_rebuild::isolated_test_session_dir();
     let ctx = SessionContext {
         backend: terminal,
         fs,
         cwd: cwd.clone(),
-        session_folder: std::env::temp_dir().join("grok-test-fs"),
+        session_folder: session_dir.clone(),
         session_env: std::sync::Arc::new(std::collections::HashMap::new()),
         notification_handle: ToolNotificationHandle::noop(),
         owner_session_id: None,
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: std::env::temp_dir().join("grok-test-fs/tool_state.json"),
+        state_path: session_dir.join("tool_state.json"),
         memory_backend: None,
         web_search_config: Default::default(),
         web_fetch_config: Default::default(),

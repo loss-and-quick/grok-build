@@ -86,18 +86,19 @@ async fn web_search_uses_model_override_from_config_end_to_end() {
     let fs: std::sync::Arc<dyn AsyncFileSystem> = std::sync::Arc::new(LocalFs);
     let terminal: std::sync::Arc<dyn TerminalBackend> =
         std::sync::Arc::new(LocalTerminalBackend::new());
+    let session_dir = crate::session::agent_rebuild::isolated_test_session_dir();
     let ctx = SessionContext {
         backend: terminal,
         fs,
         cwd: std::env::temp_dir(),
-        session_folder: std::env::temp_dir().join("grok-web-search-e2e"),
+        session_folder: session_dir.clone(),
         session_env: std::sync::Arc::new(std::collections::HashMap::new()),
         notification_handle: ToolNotificationHandle::noop(),
         owner_session_id: None,
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: std::env::temp_dir().join("grok-web-search-e2e/state.json"),
+        state_path: session_dir.join("state.json"),
         memory_backend: None,
         web_search_config: xai_grok_tools::implementations::web_search::WebSearchConfig::Enabled {
             api_key: web_search_sampling.api_key.clone().unwrap(),
@@ -167,18 +168,19 @@ async fn web_search_errors_when_configured_model_cannot_be_resolved() {
     let fs: std::sync::Arc<dyn AsyncFileSystem> = std::sync::Arc::new(LocalFs);
     let terminal: std::sync::Arc<dyn TerminalBackend> =
         std::sync::Arc::new(LocalTerminalBackend::new());
+    let session_dir = crate::session::agent_rebuild::isolated_test_session_dir();
     let ctx = SessionContext {
         backend: terminal,
         fs,
         cwd: std::env::temp_dir(),
-        session_folder: std::env::temp_dir().join("grok-web-search-disabled"),
+        session_folder: session_dir.clone(),
         session_env: std::sync::Arc::new(std::collections::HashMap::new()),
         notification_handle: ToolNotificationHandle::noop(),
         owner_session_id: None,
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: std::env::temp_dir().join("grok-web-search-disabled/state.json"),
+        state_path: session_dir.join("state.json"),
         memory_backend: None,
         web_search_config: xai_grok_tools::implementations::web_search::WebSearchConfig::Disabled,
         web_fetch_config: Default::default(),
