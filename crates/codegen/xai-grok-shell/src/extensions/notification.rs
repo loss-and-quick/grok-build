@@ -669,6 +669,13 @@ pub enum SessionUpdate {
         tool_call_id: Option<String>,
         /// The child session's ACP session ID.
         child_session_id: String,
+        /// The child's working directory: its worktree when isolated, else the cwd it was given, else the parent's.
+        ///
+        /// `session/load` derives the child's session directory from this, so without it a client
+        /// that was not attached at spawn time cannot open the child at all. Absent for children
+        /// spawned before this field existed; a client with no value should not guess the parent's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_cwd: Option<String>,
         /// Agent type used for the subagent ("general-purpose", "explore", "plan", or custom).
         subagent_type: String,
         /// Short human-readable description of the task.
@@ -1647,6 +1654,7 @@ mod tests {
             parent_prompt_id: None,
             tool_call_id: None,
             child_session_id: "c".into(),
+            child_cwd: None,
             subagent_type: "explore".into(),
             description: "d".into(),
             effective_context_source: None,

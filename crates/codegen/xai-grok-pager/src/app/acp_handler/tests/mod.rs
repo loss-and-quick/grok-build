@@ -1508,6 +1508,7 @@ pub(super) fn test_subagent_spawned_for_workflow(
         parent_prompt_id: None,
         tool_call_id: None,
         child_session_id: child_sid.into(),
+        child_cwd: None,
         subagent_type: "explore".into(),
         description: "scan src/".into(),
         effective_context_source: None,

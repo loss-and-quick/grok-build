@@ -2062,6 +2062,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         parent_prompt_id: Some("prompt-1".into()),
         tool_call_id: None,
         child_session_id: "child-resumed".into(),
+        child_cwd: None,
         subagent_type: "general-purpose".into(),
         description: "fix review feedback".into(),
         effective_context_source: Some("resumed".into()),
@@ -2084,6 +2085,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         parent_prompt_id: None,
         tool_call_id: None,
         child_session_id: "c".into(),
+        child_cwd: None,
         subagent_type: "explore".into(),
         description: "d".into(),
         effective_context_source: Some("new".into()),
@@ -2112,6 +2114,7 @@ fn notification_subagent_spawned_carries_the_calling_tool_call_id() {
         parent_prompt_id: Some("prompt-1".into()),
         tool_call_id: Some("call-7".into()),
         child_session_id: "child-1".into(),
+        child_cwd: None,
         subagent_type: "general-purpose".into(),
         description: "scan src/".into(),
         effective_context_source: Some("new".into()),
@@ -2136,6 +2139,7 @@ fn notification_subagent_spawned_carries_the_calling_tool_call_id() {
         parent_prompt_id: None,
         tool_call_id: None,
         child_session_id: "child-2".into(),
+        child_cwd: None,
         subagent_type: "explore".into(),
         description: "classify goal".into(),
         effective_context_source: None,
@@ -2166,6 +2170,48 @@ fn notification_subagent_spawned_carries_the_calling_tool_call_id() {
         panic!("expected SubagentSpawned");
     };
     assert!(tool_call_id.is_none());
+}
+/// `session/load` derives a child's session directory from its cwd, so a client that
+/// was not attached at spawn time can only open the child if the spawn said where it runs.
+#[test]
+fn notification_subagent_spawned_carries_the_child_cwd() {
+    let spawned = SessionUpdate::SubagentSpawned {
+        subagent_id: "sa-wt".into(),
+        parent_session_id: "parent".into(),
+        parent_prompt_id: None,
+        tool_call_id: Some("call-7".into()),
+        child_session_id: "child-wt".into(),
+        child_cwd: Some("/tmp/worktrees/child-wt".into()),
+        subagent_type: "general-purpose".into(),
+        description: "scan src/".into(),
+        effective_context_source: Some("new".into()),
+        context_normalized: false,
+        capability_mode: None,
+        persona: None,
+        role: None,
+        model: None,
+        resumed_from: None,
+        workflow_run_id: None,
+    };
+    let json = serde_json::to_value(&spawned).unwrap();
+    assert_eq!(json["child_cwd"], "/tmp/worktrees/child-wt");
+
+    let legacy = serde_json::json!({
+        "sessionUpdate": "subagent_spawned",
+        "subagent_id": "sa-old",
+        "parent_session_id": "parent",
+        "child_session_id": "child-old",
+        "subagent_type": "explore",
+        "description": "old payload",
+    });
+    let decoded: SessionUpdate = serde_json::from_value(legacy).unwrap();
+    let SessionUpdate::SubagentSpawned { child_cwd, .. } = decoded else {
+        panic!("expected SubagentSpawned");
+    };
+    assert!(
+        child_cwd.is_none(),
+        "an older payload must decode with no cwd rather than an invented one"
+    );
 }
 #[test]
 fn upload_ref_includes_resumed_from() {
