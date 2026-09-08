@@ -45,13 +45,21 @@ export interface RailRow {
 /**
  * A section of the rail.
  *
- * Two shapes, because the rail carries two kinds of thing. A `list` is the
+ * Three shapes, because the rail carries three kinds of thing. A `list` is the
  * dock's own section: a count, and rows capped at {@link MAX_SECTION_ROWS}. A
- * `panel` is a plugin's published `PanelViewModel`, which is not a list of rows
- * and is drawn by `Panel.tsx` as its own body.
+ * `panel` is a plugin's published `PanelViewModel`, drawn by `Panel.tsx` as its
+ * own body. A `widget` is a built-in whose body is a picture rather than rows —
+ * the context window is one, and the dock's row cap has nothing to say about a
+ * bar and its legend.
+ *
+ * The third shape is not a hedge against the second. It was the first thing the
+ * rail was asked for that is neither: `dock.rs` has only list sections because
+ * every one of its four *is* a list, and a client that filed the context
+ * breakdown as two capped rows would be inventing a shape neither product has.
  */
 export type RailSection =
   | { kind: "list"; key: string; label: string; rows: readonly RailRow[] }
+  | { kind: "widget"; key: string; label: string; note?: string }
   | { kind: "panel"; key: string; label: string; source: string };
 
 /** One painted line of the rail, in order. */
@@ -70,10 +78,12 @@ export type RailItem = Extract<RailVisual, { kind: "header" | "row" }>;
  * `dock.rs`: a section with a zero count is skipped, and a dock whose sections
  * are all zero renders nothing. A panel section is never empty in that sense —
  * publishing one *is* the plugin asking for the space, which is why it has no
- * count to be zero.
+ * count to be zero — and neither is a built-in widget: whoever supplies one has
+ * already decided it has something to say, and a widget with nothing is simply
+ * not supplied. The emptiness rule is about counts, and only lists have one.
  */
 export function sectionShown(section: RailSection): boolean {
-  return section.kind === "panel" || section.rows.length > 0;
+  return section.kind !== "list" || section.rows.length > 0;
 }
 
 /** How many rows a list section draws before the "N more" line. */
@@ -97,7 +107,7 @@ export function visualRows(
     if (!sectionShown(section)) continue;
     rows.push({ kind: "header", section: section.key });
     if (collapsed.has(section.key)) continue;
-    if (section.kind === "panel") {
+    if (section.kind !== "list") {
       rows.push({ kind: "body", section: section.key });
       continue;
     }
@@ -116,9 +126,9 @@ export function visualRows(
  * Headers and rows interleaved, exactly as `dock.rs` does it — the cursor is
  * one sequence over both, so Down from a section's last row lands on the next
  * section's header rather than skipping to its first row. A "N more" line is
- * not selectable there and is not here. Neither is a panel body: what is inside
- * it is ordinary content with its own focusable elements, and Tab is what
- * reaches those.
+ * not selectable there and is not here. Neither is a section body: what is
+ * inside one is ordinary content with its own focusable elements, and Tab is
+ * what reaches those.
  */
 export function railItems(
   sections: readonly RailSection[],

@@ -28,7 +28,23 @@ export const PROMPT_ARROW = GLYPHS.prompt_arrow.trimEnd();
 /** `◆` — the bullet on a tool call and on a collapsed thinking block. */
 export const BULLET = GLYPHS.diamond_filled;
 
-/** `◈` — the verb-group header diamond. */
+/**
+ * `◇` — its hollow partner: free capacity in the context bar.
+ *
+ * The pair is the whole legend of that bar in the terminal, and it carries the
+ * same meaning here: `◆` is a band of the window that is spent, `◇` is what is
+ * left of it.
+ */
+export const DIAMOND_HOLLOW = GLYPHS.diamond_hollow;
+
+/**
+ * `◈` — the verb-group header diamond, and the context bar's informational row.
+ *
+ * The second use is the load-bearing one: the pager reserves this glyph for
+ * rows that do **not** partition the window, so a reader can tell at a glance
+ * which rows add up to what is used and which are already counted inside one of
+ * them.
+ */
 export const GROUP_DIAMOND = GLYPHS.diamond_dotted;
 
 /** `┃` — the left accent rail down a block. */

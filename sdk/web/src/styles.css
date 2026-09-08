@@ -1985,7 +1985,7 @@ button.picker-row:focus-visible {
   .railed > .rail {
     width: clamp(360px, 26vw, 24rem);
     max-height: none;
-    padding: 0 0 0 0.6rem;
+    padding: 0 0.6rem;
     border: 0;
     border-left: 1px solid var(--grok-prompt-border, canvastext);
     border-radius: 0;
@@ -2033,6 +2033,14 @@ button.picker-row:focus-visible {
 .rail-source {
   color: var(--grok-gray, canvastext);
   opacity: var(--grok-muted-opacity, 1);
+  white-space: nowrap;
+}
+
+/* A folded widget's one-line summary. Brighter than the count beside it,
+ * because on a folded section it is the whole content: `Context 62%` has to
+ * answer the question without being opened. */
+.rail-note {
+  color: var(--grok-text-secondary, canvastext);
   white-space: nowrap;
 }
 
@@ -2090,6 +2098,162 @@ button.picker-row:focus-visible {
 .rail-body .grok-panel-table-wrap {
   overflow-x: auto;
   scrollbar-width: thin;
+}
+
+/* -- the context widget --------------------------------------------------- */
+
+/* `/context` in a column. The terminal spends the partition's hundred units as
+ * cells over a grid it picks by terminal width; a browser spends them as
+ * percent, which the wire type names as the reason the partition is a hundred
+ * of anything. So there is no grid here and no breakpoint: one strip, five
+ * bands, widths straight off the wire. */
+.context {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  /* Measured against itself, not against the window: this widget is one width
+   * in the rail's column, another in the strip above the prompt, and another
+   * again in the dialog, and only the first of those follows from the
+   * viewport. */
+  container-type: inline-size;
+}
+
+.context-headline {
+  margin: 0;
+  color: var(--grok-text-secondary, canvastext);
+}
+
+.context-model {
+  margin: 0;
+  color: var(--grok-gray-bright, canvastext);
+}
+
+.context-bar {
+  display: flex;
+  height: 0.5rem;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+/* No gap and no border between bands: they sum to exactly a hundred units, and
+ * anything spent between them is a bar that no longer sums to the window. */
+.context-band {
+  height: 100%;
+}
+
+/* Glyph, label, tokens, share, detail — the pager's own five columns, aligned
+ * the way it aligns them (it measures its widths over the rows that render;
+ * `subgrid` is what a browser has instead). */
+.context-legend {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr) auto auto auto;
+  column-gap: 0.4rem;
+}
+
+.context-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+}
+
+.context-label {
+  color: var(--grok-text-secondary, canvastext);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-tokens,
+.context-percent,
+.context-detail {
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* The pager has this switch too, and at the same place in the reasoning: under
+ * 50 terminal columns it stops trying to fit a legend row on one line and puts
+ * the figures under the label. A rail column is about 46 columns of this
+ * client's monospace, so the same row is the same problem here — and the part
+ * that gives is the detail, because "· 26 tools" is the one cell whose width
+ * nothing else lines up with. */
+@container (max-width: 26rem) {
+  .context-detail {
+    grid-column: 2 / -1;
+    text-align: left;
+  }
+}
+
+.context-note,
+.context-footer {
+  margin: 0;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.context-auto {
+  margin: 0;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+/* Past the trigger the line is a warning and the tip below it is absent — the
+ * agent never sets both flags, so the two can never contradict each other. */
+.context-auto.imminent,
+.context-tip {
+  color: var(--grok-warning, canvastext);
+  opacity: 1;
+}
+
+.context-tip {
+  margin: 0;
+}
+
+.context-subhead {
+  margin: 0.2rem 0 0;
+  font-size: 0.85rem;
+  color: var(--grok-text-primary, canvastext);
+}
+
+.context-records {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.context-record {
+  display: flex;
+  gap: 0.4rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.context-ordinal {
+  color: var(--grok-text-secondary, canvastext);
+  opacity: 1;
+}
+
+.context-injection-title {
+  margin: 0.4rem 0 0.2rem;
+  font-size: 0.85rem;
+  color: var(--grok-text-secondary, canvastext);
+}
+
+.context-injection-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.context-refresh {
+  align-self: flex-start;
 }
 
 .rail-toggle {

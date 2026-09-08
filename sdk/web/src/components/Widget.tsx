@@ -21,6 +21,16 @@ export function Widget(props: {
   label: string;
   /** A list section's live count. Panels have no count — they have a source. */
   count?: number;
+  /**
+   * A built-in widget's one-line summary, for when the section is folded shut.
+   *
+   * The terminal has the same idea in the same place — its collapsed plugin
+   * panel is a status chip that keeps the title and a count — because the whole
+   * point of folding a section is that it still says whether it is worth
+   * opening. A context widget folded to nothing but the word "Context" would
+   * have to be opened to answer the only question it is ever asked.
+   */
+  note?: string;
   /** The plugin that published this panel. */
   source?: string;
   open: boolean;
@@ -57,6 +67,7 @@ export function Widget(props: {
           <Show when={props.count !== undefined}>
             <span class="rail-count">{props.count}</span>
           </Show>
+          <Show when={props.note}>{(note) => <span class="rail-note">{note()}</span>}</Show>
           <Show when={props.source}>
             {(source) => <span class="rail-source">{source()}</span>}
           </Show>

@@ -135,6 +135,10 @@ function mount(published: [string, PanelViewModel][]) {
   const seen: PanelAction[] = [];
   const gateway = {
     attached: () => ({ entry: ENTRY, transcript, subagents }),
+    // Nobody has asked for the window here, so the rail holds plugin panels
+    // and nothing else — which is what these tests are about. The context
+    // section has its own file.
+    sessionInfo: () => null,
     panelAction: async (_plugin: string, action: PanelAction) => {
       seen.push(action);
     },

@@ -1,12 +1,24 @@
 import { ErrorBoundary, For, Show, createEffect, createSignal, type JSX } from "solid-js";
 
+import { usageChip } from "../context.ts";
 import type { Gateway } from "../gateway.ts";
 import type { PanelAction } from "../panel.ts";
 import { itemKey, moveCursor, railItems, type RailSection } from "../rail.ts";
 import type { PanelEntry } from "../transcript.ts";
+import type { ContextFacts } from "../wire.ts";
+import { ContextWidget } from "./ContextWidget.tsx";
 import { Overlay } from "./Overlay.tsx";
 import { Panel, createFields, type Fields } from "./Panel.tsx";
 import { Widget } from "./Widget.tsx";
+
+/**
+ * The context widget's section key.
+ *
+ * A fixed string rather than a generated one, and it cannot collide with a
+ * plugin's: those are `panel:…`, percent-encoded, and a plugin does not get to
+ * choose the prefix.
+ */
+const CONTEXT_KEY = "context";
 
 /**
  * The widget rail.
@@ -52,13 +64,40 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
   const sectionKey = (panel: PanelEntry): string =>
     `panel:${encodeURIComponent(panel.plugin)}:${encodeURIComponent(panel.viewModel.id)}`;
 
-  const sections = (): RailSection[] =>
-    panels().map((panel) => ({
-      kind: "panel",
-      key: sectionKey(panel),
-      label: panel.viewModel.title,
-      source: panel.plugin,
-    }));
+  /**
+   * The resolved context window, or `null` while nobody has asked yet.
+   *
+   * Nothing is derived from it here. `x.ai/session/info` carries the whole
+   * `/context` picture already resolved, which is the reason this section could
+   * be built at all: the numbers used to be a pure function inside the pager,
+   * and a second client could only have reimplemented them.
+   */
+  const facts = (): ContextFacts | null => props.gateway.sessionInfo()?.contextFacts ?? null;
+
+  /**
+   * Every section, in the order they are drawn.
+   *
+   * **Built-ins above plugins, and the order fixed.** Publishing a panel is a
+   * plugin asking for the space, not taking it, so nothing a plugin does can
+   * push the context window down the column. The render below walks the same
+   * order; this list is what the keyboard walks.
+   */
+  const sections = (): RailSection[] => {
+    const all: RailSection[] = [];
+    const context = facts();
+    if (context) {
+      all.push({ kind: "widget", key: CONTEXT_KEY, label: "Context", note: usageChip(context) });
+    }
+    for (const panel of panels()) {
+      all.push({
+        kind: "panel",
+        key: sectionKey(panel),
+        label: panel.viewModel.title,
+        source: panel.plugin,
+      });
+    }
+    return all;
+  };
 
   const isOpen = (key: string): boolean => !collapsed().has(key);
   const toggle = (key: string): void => {
@@ -129,6 +168,31 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
           at all — `dock.rs`'s rule, and what keeps the third column from being
           a permanent strip of empty. */}
       <aside class="rail" role="region" aria-label="Session widgets" onKeyDown={onKeyDown}>
+        {/* First in the column, and outside the `<For>` below it on purpose.
+            Solid keys a `<For>` by reference, and a panel entry is a stable
+            object that survives a republish — building one array of freshly
+            made section objects for both the walk and the render would remount
+            every widget whenever the context window moved, which is the DOM
+            rebuild `Panel.tsx` exists to prevent. So the walk gets the objects
+            and the render gets the entries, in the same order. */}
+        <Show when={facts()}>
+          {(context) => (
+            <Widget
+              itemKey={`h:${CONTEXT_KEY}`}
+              label="Context"
+              note={usageChip(context())}
+              open={isOpen(CONTEXT_KEY)}
+              onToggle={() => toggle(CONTEXT_KEY)}
+              onOpenFully={() => setOpened(CONTEXT_KEY)}
+            >
+              <ContextWidget
+                facts={context()}
+                model={props.gateway.sessionInfo()?.modelDisplayName ?? props.gateway.sessionInfo()?.model}
+                onRefresh={() => void props.gateway.refreshSessionInfo()}
+              />
+            </Widget>
+          )}
+        </Show>
         <For each={panels()}>
           {(panel) => (
             <Widget
@@ -156,6 +220,23 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
           )}
         </For>
       </aside>
+
+      {/* The same dialog for the built-in: the column has room for the bar and
+          the legend, and not for the text every injected block was measured
+          over. That is the pager's split too — a compact tab, and a separate
+          view for the injected text. */}
+      <Show when={opened() === CONTEXT_KEY && facts()}>
+        {(context) => (
+          <Overlay label="Context" onClose={() => setOpened(null)}>
+            <ContextWidget
+              facts={context()}
+              model={props.gateway.sessionInfo()?.modelDisplayName ?? props.gateway.sessionInfo()?.model}
+              full
+              onRefresh={() => void props.gateway.refreshSessionInfo()}
+            />
+          </Overlay>
+        )}
+      </Show>
 
       {/* The F6 overlay, as a button rather than a key. A four-column table is
           not readable in a 300px column — measured, not assumed — and this is
