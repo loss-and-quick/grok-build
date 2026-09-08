@@ -2809,6 +2809,7 @@ pub(crate) mod test_fixtures {
         session.enqueue_prompt("local one".to_string());
         let mut agent = AgentView::new(session, ScrollbackState::new());
         agent.shared_queue = vec![QueueEntryWire {
+            editable: None,
             id: "p1".into(),
             version: 2,
             owner: None,

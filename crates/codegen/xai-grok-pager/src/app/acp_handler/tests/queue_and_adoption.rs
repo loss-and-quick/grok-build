@@ -1497,6 +1497,7 @@
         let shell = xai_grok_shell::session::prompt_queue::QueueChanged {
             session_id: "sess-1".to_string(),
             entries: vec![xai_grok_shell::session::prompt_queue::QueueEntryWire {
+                editable: None,
                 id: "b1".to_string(),
                 version: 0,
                 owner: None,

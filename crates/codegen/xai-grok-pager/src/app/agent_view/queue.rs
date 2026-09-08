@@ -228,7 +228,7 @@ impl AgentView {
     }
 
     /// Whether bare Enter on the empty composer would actually send the top visible held row, the "Enter to send now" half of the inline hint.
-    /// A server top row sends only when its wire-kind capabilities allow it.
+    /// A server top row sends only when the row says the agent will take it.
     /// A local top row sends only when prompt-like (`force_interject_queue_row` refuses bash and client-expanded rows with a toast).
     pub(crate) fn held_queue_top_sendable(&self) -> bool {
         let running = self.session.current_prompt_id.as_deref();
@@ -242,8 +242,7 @@ impl AgentView {
                 &self.send_now_painted_blocks,
             )
         }) {
-            return crate::views::queue_pane::ServerRowCapabilities::from_wire_kind(&top.kind)
-                .can_send_now();
+            return crate::views::queue_pane::ServerRowCapabilities::from_wire(top).can_send_now();
         }
         self.session.pending_prompts.front().is_some_and(|p| {
             p.kind == crate::app::agent::QueueEntryKind::Prompt && p.wire_matches_display()
@@ -324,9 +323,7 @@ impl AgentView {
         self.shared_queue
             .iter()
             .find(|entry| entry.id == server_id)
-            .map(|entry| {
-                crate::views::queue_pane::ServerRowCapabilities::from_wire_kind(&entry.kind)
-            })
+            .map(crate::views::queue_pane::ServerRowCapabilities::from_wire)
     }
 
     /// `Some(is_prompt_like)` for a resolvable merged-queue row; `None` when it can't be resolved.
@@ -704,8 +701,7 @@ impl AgentView {
                 .iter()
                 .find(|entry| entry.id == id)
                 .is_some_and(|entry| {
-                    crate::views::queue_pane::ServerRowCapabilities::from_wire_kind(&entry.kind)
-                        .can_reorder()
+                    crate::views::queue_pane::ServerRowCapabilities::from_wire(entry).can_reorder()
                 })
         };
         let mut swappable: Vec<String> = all_ids
@@ -809,6 +805,7 @@ mod queue_edit_routing_tests {
 
     fn server_wire(id: &str, position: usize) -> QueueEntryWire {
         QueueEntryWire {
+            editable: None,
             id: id.into(),
             version: 1,
             owner: None,
@@ -824,6 +821,7 @@ mod queue_edit_routing_tests {
         let mut agent = make_running_agent();
         agent.session.pending_prompts.clear();
         agent.shared_queue = vec![QueueEntryWire {
+            editable: None,
             id: "parent-message-msg-1".into(),
             version: 7,
             owner: None,
@@ -1416,6 +1414,7 @@ mod queue_edit_routing_tests {
         // Two server rows so a swap is possible.
         agent.shared_queue = vec![
             QueueEntryWire {
+                editable: None,
                 id: "p1".into(),
                 version: 0,
                 owner: None,
@@ -1426,6 +1425,7 @@ mod queue_edit_routing_tests {
                 combined_texts: None,
             },
             QueueEntryWire {
+                editable: None,
                 id: "p2".into(),
                 version: 0,
                 owner: None,

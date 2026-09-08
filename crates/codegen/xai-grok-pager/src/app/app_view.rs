@@ -2349,6 +2349,7 @@ impl AppView {
         kind: &str,
     ) {
         let entry = crate::app::prompt_queue::QueueEntryWire {
+            editable: None,
             id: prompt_id.to_string(),
             version: 0,
             owner: None,

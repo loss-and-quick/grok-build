@@ -347,6 +347,7 @@
         agent.session.pending_prompts.clear();
 
         agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+            editable: None,
             id: "sq-1".into(),
             version: 0,
             owner: None,

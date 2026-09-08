@@ -42,8 +42,11 @@ pub enum QueueRowOrigin {
     Server,
 }
 
-/// Capabilities projected from a server queue row's wire kind.
-/// Unknown kinds stay editable/sendable for backward compatibility.
+/// What a server queue row will let the user do to it.
+///
+/// The agent decides this and refuses whatever disagrees, so the row says so on
+/// the wire and this reads it. Deriving it here instead is how the terminal ends
+/// up offering a Delete the session then ignores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ServerRowCapabilities {
     can_mutate: bool,
@@ -52,6 +55,17 @@ pub(crate) struct ServerRowCapabilities {
 impl ServerRowCapabilities {
     const EDITABLE: Self = Self { can_mutate: true };
     const PROTECTED: Self = Self { can_mutate: false };
+
+    /// Read the row's own answer, falling back to the kind for an agent too old
+    /// to give one. The fallback is the rule this used to apply unconditionally:
+    /// a parent agent's message is protected, everything else is not.
+    pub(crate) fn from_wire(entry: &QueueEntryWire) -> Self {
+        match entry.editable {
+            Some(true) => Self::EDITABLE,
+            Some(false) => Self::PROTECTED,
+            None => Self::from_wire_kind(&entry.kind),
+        }
+    }
 
     pub(crate) fn from_wire_kind(kind: &str) -> Self {
         if kind == "parent_agent_message" {
@@ -193,7 +207,7 @@ impl QueuedPromptEntry {
             origin: QueueRowOrigin::Server,
             server_id: Some(wire.id.clone()),
             version: wire.version,
-            capabilities: ServerRowCapabilities::from_wire_kind(&wire.kind),
+            capabilities: ServerRowCapabilities::from_wire(wire),
             styled,
         }
     }
@@ -1108,6 +1122,7 @@ mod tests {
 
     fn wire(id: &str, text: &str, pos: usize) -> QueueEntryWire {
         QueueEntryWire {
+            editable: None,
             id: id.into(),
             version: 0,
             owner: None,
@@ -1168,6 +1183,51 @@ mod tests {
             assert_eq!(pane.delete_click(col, area.y), None);
             assert_eq!(pane.send_now_click(col, area.y), None);
         }
+    }
+
+    /// The agent's own answer decides, not the kind label.
+    ///
+    /// A protected row need not be a parent agent message, and a parent
+    /// agent message need not stay protected. The pane used to read the kind
+    /// and be right by luck; now it reads what the row says and the luck
+    /// stops mattering.
+    #[test]
+    fn a_rows_own_editable_bit_beats_the_kind_guess() {
+        let mut protected = wire("p1", "do the thing", 0);
+        protected.editable = Some(false);
+        let mut pane = QueuePane::new();
+        pane.sync_from_merged(
+            &Default::default(),
+            &[protected],
+            None,
+            None,
+            &Default::default(),
+        );
+        let id = pane.entry_ids()[0];
+        let capabilities = pane.row_capabilities(id).expect("the row is present");
+        assert!(!capabilities.can_edit());
+        assert!(!capabilities.can_delete());
+        assert!(!capabilities.can_reorder());
+        assert!(!capabilities.can_send_now());
+
+        let mut freed = wire("p2", "status update", 0);
+        freed.kind = "parent_agent_message".into();
+        freed.editable = Some(true);
+        let mut pane = QueuePane::new();
+        pane.sync_from_merged(
+            &Default::default(),
+            &[freed],
+            None,
+            None,
+            &Default::default(),
+        );
+        let id = pane.entry_ids()[0];
+        assert!(
+            pane.row_capabilities(id)
+                .expect("the row is present")
+                .can_edit(),
+            "the wire says editable, so the kind must not overrule it"
+        );
     }
 
     #[test]
