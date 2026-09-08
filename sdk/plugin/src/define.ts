@@ -23,6 +23,8 @@ import type { HookInvokeResult } from "./generated/HookInvokeResult.ts";
 import type { InitializeResult } from "./generated/InitializeResult.ts";
 import type { ToolDescriptorDto } from "./generated/ToolDescriptorDto.ts";
 import type { ToolInvokeResult } from "./generated/ToolInvokeResult.ts";
+import type { CommandDescriptorDto } from "./generated/CommandDescriptorDto.ts";
+import type { CommandInvokeResult } from "./generated/CommandInvokeResult.ts";
 
 import type { SessionStartPayload } from "./generated/SessionStartPayload.ts";
 import type { SessionEndPayload } from "./generated/SessionEndPayload.ts";
@@ -165,10 +167,55 @@ export interface ToolDefinition {
   handler: ToolHandler;
 }
 
+/**
+ * A slash-command handler. Receives whatever the user typed after the command
+ * name (trimmed, `""` when they typed only the name), the same `PluginContext`
+ * hooks and tools get, and the per-call [`ToolCallContext`]
+ * ({sessionId, cwd, agent}).
+ *
+ * Return `handled(...)` / `prompt(...)` / `declined(...)`, a bare string
+ * (shorthand for `handled(string)`), or nothing (the command did its work
+ * silently — typical when it published a panel). Throwing surfaces to the user
+ * as a refusal carrying the message; it never crashes the sidecar.
+ *
+ * The handler's `signal` aborts nothing today: the host has no way to cancel an
+ * in-flight command, it only stops waiting once its deadline passes. Treat the
+ * deadline as real and keep the handler short — anything long-running belongs
+ * behind a panel the command publishes, or a subagent it spawns.
+ */
+export type CommandHandler = (
+  args: string,
+  ctx: PluginContext,
+  call: ToolCallContext,
+) =>
+  | Promise<CommandInvokeResult | string | void>
+  | CommandInvokeResult
+  | string
+  | void;
+
+/**
+ * One slash command served by this plugin, keyed by bare name in
+ * `PluginDefinition.commands`. `description`/`argumentHint` are informational
+ * here: the *manifest's* `slashCommands` array is what the `/` menu is built
+ * from (before the sidecar starts), and the host warns at handshake when the
+ * manifest and this map drift.
+ */
+export interface CommandDefinition {
+  description?: string;
+  /** Usage hint shown beside the name in the `/` menu. */
+  argumentHint?: string;
+  handler: CommandHandler;
+}
+
 export interface PluginDefinition {
   name?: string;
   hooks?: { [E in EventName]?: HookHandler<E> };
   tools?: Record<string, ToolDefinition>;
+  /** Slash commands this plugin serves, keyed by the bare name declared in
+   * plugin.json's `slashCommands`. Typing `/name args` runs the handler here —
+   * this is the code-backed counterpart of a `commands/*.md` file, whose body
+   * is only ever substituted into the user's message. */
+  commands?: Record<string, CommandDefinition>;
   /** Fires when the user activates a button in a panel this plugin published
    * (via `ctx.ui.publishPanel`). `panelId`/`buttonId` are the panel's and
    * button's ids; `inputs` maps each editable Input field's id to its current
@@ -277,6 +324,33 @@ export function replace(payload?: unknown): HookInvokeResult {
 }
 
 /**
+ * Slash command: the plugin did the work itself. `text` (optional) is shown to
+ * the user; the model is not called. A command that published a panel with
+ * `ctx.ui.publishPanel` usually has nothing left to say and omits it.
+ */
+export function handled(text?: string): CommandInvokeResult {
+  return { kind: "handled", text };
+}
+
+/**
+ * Slash command: ask the model, with `text` as the prompt. This is what a
+ * `commands/*.md` file does — the plugin now composes the prompt in code, so it
+ * can read config, storage or the outside world first.
+ */
+export function prompt(text: string): CommandInvokeResult {
+  return { kind: "prompt", text };
+}
+
+/**
+ * Slash command: refuse this invocation. `reason` is shown to the user and the
+ * turn ends without calling the model — use it for bad arguments, a missing
+ * sign-in, or any precondition only the plugin can check.
+ */
+export function declined(reason: string): CommandInvokeResult {
+  return { kind: "declined", reason };
+}
+
+/**
  * Defines and starts a TS plugin: wires the stdio JSON-RPC endpoint, serves
  * `initialize`/`hook_invoke`/`shutdown`, and starts the read loop
  * immediately. In a real plugin entry point this call *is* the whole
@@ -320,6 +394,16 @@ export function definePlugin(
       tool.inputSchema ?? { type: "object", properties: {} },
   }));
 
+  // Same deal for slash commands: reported at handshake so the host can warn
+  // when plugin.json's `slashCommands` and this map disagree.
+  const commandDescriptors: CommandDescriptorDto[] = Object.entries(
+    def.commands ?? {},
+  ).map(([name, command]) => ({
+    name,
+    description: command.description ?? "",
+    argument_hint: command.argumentHint,
+  }));
+
   registerIncomingHandlers(endpoint, {
     async initialize(params): Promise<InitializeResult> {
       ctx = createPluginContext(host, params);
@@ -334,6 +418,7 @@ export function definePlugin(
         subscriptions,
         plugin_version: undefined,
         tools: toolDescriptors,
+        commands: commandDescriptors,
       };
     },
 
@@ -402,6 +487,40 @@ export function definePlugin(
         return { content: message, is_error: true };
       } finally {
         activeToolCalls.delete(params.invocation_id);
+      }
+    },
+
+    async commandInvoke(params): Promise<CommandInvokeResult> {
+      const command = def.commands?.[params.command];
+      if (!command || !ctx) {
+        return declined(
+          `"${params.command}" is not a command this plugin serves`,
+        );
+      }
+      // No cancel channel exists for commands, so the signal is never aborted
+      // here; it is present so a handler can pass one along to `fetch` and to
+      // keep the call context identical to a tool's.
+      const call: ToolCallContext = {
+        sessionId: params.context.session_id,
+        cwd: params.context.cwd,
+        agent: params.context.agent,
+        signal: new AbortController().signal,
+      };
+      try {
+        const result = await command.handler(params.args, ctx, call);
+        if (result === undefined || result === null) return handled();
+        if (typeof result === "string") return handled(result);
+        return result;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        host.logEmit({
+          level: "error",
+          message: `command "${params.command}" threw`,
+          fields: { error: message },
+        });
+        // An uncaught handler error is a refusal the user reads, never a
+        // sidecar crash and never a silently-started model turn.
+        return declined(message);
       }
     },
 

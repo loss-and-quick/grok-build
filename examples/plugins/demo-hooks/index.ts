@@ -22,6 +22,14 @@
 // note how it reads `call.cwd`, which is the *calling* session's working
 // directory at invoke time, not a session-static path.
 //
+// …plus two slash commands (`greet`, `ask`), declared in plugin.json's
+// `slashCommands` array and served here via `command_invoke`. These are the
+// user's entry point into this code: typing `/greet` runs the handler below,
+// not a markdown file. `greet` answers the user directly; `ask` composes a
+// prompt for the model, which is what a `commands/*.md` file does — except the
+// text is computed here, so it can read config, storage, or anything else
+// first.
+//
 // Import note: a real, installed plugin imports the SDK by its package name:
 //
 //     import { definePlugin, deny, observed } from "@grok-build/plugin";
@@ -30,10 +38,13 @@
 // directly by relative path. The runtime (bun / node >=22 / deno) executes the
 // TypeScript entry file as-is — no build step.
 import {
+  declined,
   definePlugin,
   deny,
+  handled,
   injectContext,
   observed,
+  prompt,
   replace,
   type HookInvokeResult,
   type PluginCredentialDto,
@@ -58,6 +69,9 @@ export const SESSION_START_CONTEXT =
  * provider token — it just shows the Replace credential shape end to end. */
 export const STATIC_TOKEN = "demo-static-bearer-0123456789";
 
+/** What `/greet` answers when given no name (the e2e test asserts on it). */
+export const GREET_DEFAULT = "demo-hooks: hello from the plugin's own code";
+
 definePlugin({
   name: "demo-hooks",
   tools: {
@@ -74,6 +88,43 @@ definePlugin({
         const text = (input as { text?: unknown }).text ?? "";
         ctx.log.info("demo-hooks: echo tool called", { cwd: call.cwd });
         return `demo-echo: ${String(text)} (cwd=${call.cwd}, agent=${call.agent})`;
+      },
+    },
+  },
+  commands: {
+    // Keep these in sync with plugin.json's `slashCommands` entries — the host
+    // warns at handshake when the two drift, exactly as it does for tools.
+    //
+    // `/greet [name]` — the plugin answers the user itself. Nothing reaches the
+    // model, so no turn is spent. `args` is whatever followed the command name,
+    // trimmed; `call` is the same {sessionId, cwd, agent} a tool handler gets.
+    greet: {
+      description: "Greet someone, or say who is being greeted.",
+      argumentHint: "[name]",
+      handler(args, ctx, call) {
+        ctx.log.info("demo-hooks: /greet ran", { cwd: call.cwd });
+        if (args === "nobody") {
+          // Refusing is a first-class reply: the reason is shown to the user
+          // and the model is never called. Use it for bad arguments or a
+          // precondition only the plugin can check (not signed in, no config).
+          return declined("there is nobody to greet");
+        }
+        return handled(args ? `demo-hooks: hello, ${args}` : GREET_DEFAULT);
+      },
+    },
+
+    // `/ask <question>` — the plugin composes a prompt and hands it to the
+    // model. This is what a `commands/*.md` file does, except the text is built
+    // here, so it can consult ctx.config / ctx.storage / the outside world
+    // first. The user's typed line stays what the transcript shows.
+    ask: {
+      description: "Hand the model a prompt this plugin composed.",
+      argumentHint: "<question>",
+      handler(args) {
+        if (!args) return declined("say what you want asked, e.g. /ask why");
+        return prompt(
+          `Answer this concisely, and say that demo-hooks asked it:\n\n${args}`,
+        );
       },
     },
   },

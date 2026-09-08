@@ -13,6 +13,8 @@ import type { ShutdownParams } from "./generated/ShutdownParams.ts";
 import type { ToolInvokeParams } from "./generated/ToolInvokeParams.ts";
 import type { ToolInvokeResult } from "./generated/ToolInvokeResult.ts";
 import type { ToolCancelParams } from "./generated/ToolCancelParams.ts";
+import type { CommandInvokeParams } from "./generated/CommandInvokeParams.ts";
+import type { CommandInvokeResult } from "./generated/CommandInvokeResult.ts";
 import type { LogEmitParams } from "./generated/LogEmitParams.ts";
 import type { ConfigGetResult } from "./generated/ConfigGetResult.ts";
 import type { StorageGetParams } from "./generated/StorageGetParams.ts";
@@ -52,6 +54,7 @@ export const CoreToPluginMethod = {
   HookInvoke: "hook_invoke",
   ToolInvoke: "tool_invoke",
   ToolCancel: "tool_cancel",
+  CommandInvoke: "command_invoke",
   PanelAction: "panel_action",
   Shutdown: "shutdown",
 } as const;
@@ -91,6 +94,12 @@ export interface IncomingHandlers {
   /** Notification: the host abandoned an in-flight `tool_invoke` (parent turn
    * aborted). No reply; the SDK aborts the matching handler's signal. */
   toolCancel(params: ToolCancelParams): void;
+  /** Request: the user ran a slash command this plugin declares in its
+   * manifest. Unlike `panelAction` this must answer — the reply is what the
+   * host renders, prompts with, or reports as a refusal. */
+  commandInvoke(
+    params: CommandInvokeParams,
+  ): Promise<CommandInvokeResult> | CommandInvokeResult;
   /** Notification: the user activated a button in a panel this plugin
    * published. No reply; the SDK dispatches to `onPanelAction`. */
   panelAction(params: PanelActionParams): void;
@@ -113,6 +122,9 @@ export function registerIncomingHandlers(
   );
   endpoint.setNotificationHandler(CoreToPluginMethod.ToolCancel, (params) =>
     handlers.toolCancel(params as ToolCancelParams),
+  );
+  endpoint.setRequestHandler(CoreToPluginMethod.CommandInvoke, (params) =>
+    handlers.commandInvoke(params as CommandInvokeParams),
   );
   endpoint.setNotificationHandler(CoreToPluginMethod.PanelAction, (params) =>
     handlers.panelAction(params as PanelActionParams),

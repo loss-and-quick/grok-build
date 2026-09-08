@@ -2,11 +2,14 @@ import { describe, expect, test } from "bun:test";
 
 import {
   allow,
+  declined,
   definePlugin,
   deny,
   forceStop,
+  handled,
   injectContext,
   observed,
+  prompt,
   replace,
   stopBlock,
 } from "../src/define.ts";
@@ -633,6 +636,144 @@ describe("definePlugin — tools", () => {
     await writer.waitForCount(3);
     const resp = writer.messages[2] as { result: unknown };
     expect(resp.result).toEqual({ content: "value=7", is_error: false });
+  });
+});
+
+describe("definePlugin — slash commands", () => {
+  const COMMAND_INVOKE = (command: string, args: string) => ({
+    jsonrpc: "2.0",
+    id: 77,
+    method: "command_invoke",
+    params: {
+      invocation_id: "cinv-1",
+      command,
+      args,
+      context: { session_id: "sess-42", cwd: "/proj/dir", agent: "main" },
+      timeout_ms: 10_000,
+    },
+  });
+
+  test("handshake reports command descriptors with defaulted description", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      {
+        commands: {
+          deploy: {
+            description: "Deploy it",
+            argumentHint: "<env>",
+            handler: () => "ok",
+          },
+          bare: { handler: () => undefined },
+        },
+      },
+      { reader, writer, exitOnShutdown: false },
+    );
+
+    const response = await initialize(reader, writer);
+    const result = response.result as unknown as {
+      commands: Array<{
+        name: string;
+        description: string;
+        argument_hint?: string;
+      }>;
+    };
+    expect(result.commands.map((c) => c.name).sort()).toEqual([
+      "bare",
+      "deploy",
+    ]);
+    const deploy = result.commands.find((c) => c.name === "deploy")!;
+    expect(deploy.description).toBe("Deploy it");
+    expect(deploy.argument_hint).toBe("<env>");
+    const bare = result.commands.find((c) => c.name === "bare")!;
+    expect(bare.description).toBe("");
+    expect(bare.argument_hint).toBeUndefined();
+  });
+
+  test("command_invoke dispatches with the typed args and per-call context", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      {
+        commands: {
+          deploy: {
+            handler: (args, ctx, call) =>
+              `deploy args=${args} session=${call.sessionId} ` +
+              `cwd=${call.cwd} agent=${call.agent} ws=${ctx.workspaceRoot}`,
+          },
+        },
+      },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    reader.pushLine(COMMAND_INVOKE("deploy", "staging --dry-run"));
+    await writer.waitForCount(2);
+    const resp = writer.messages[1] as {
+      result: { kind: string; text?: string };
+    };
+    // A bare string is shorthand for `handled(string)`.
+    expect(resp.result.kind).toBe("handled");
+    expect(resp.result.text).toContain("args=staging --dry-run");
+    expect(resp.result.text).toContain("session=sess-42");
+    expect(resp.result.text).toContain("cwd=/proj/dir");
+    expect(resp.result.text).toContain("agent=main");
+    expect(resp.result.text).toContain("ws=/workspace");
+  });
+
+  test("every reply shape reaches the wire, and nothing means a silent handled", async () => {
+    const cases: Array<[unknown, Record<string, unknown>]> = [
+      [handled("shown"), { kind: "handled", text: "shown" }],
+      [prompt("ask this"), { kind: "prompt", text: "ask this" }],
+      [declined("nope"), { kind: "declined", reason: "nope" }],
+      [undefined, { kind: "handled" }],
+    ];
+    for (const [reply, expected] of cases) {
+      const { reader, writer } = setUpEndpoint();
+      definePlugin(
+        { commands: { c: { handler: () => reply as never } } },
+        { reader, writer, exitOnShutdown: false },
+      );
+      await initialize(reader, writer);
+      reader.pushLine(COMMAND_INVOKE("c", ""));
+      await writer.waitForCount(2);
+      const resp = writer.messages[1] as { result: Record<string, unknown> };
+      // `handled()` with no text serializes `text: undefined`, which JSON drops.
+      expect(JSON.parse(JSON.stringify(resp.result))).toEqual(expected);
+    }
+  });
+
+  test("a throwing handler and an unknown command both refuse, never crash", async () => {
+    const { reader, writer } = setUpEndpoint();
+    definePlugin(
+      {
+        commands: {
+          boom: {
+            handler: () => {
+              throw new Error("handler exploded");
+            },
+          },
+        },
+      },
+      { reader, writer, exitOnShutdown: false },
+    );
+    await initialize(reader, writer);
+
+    reader.pushLine(COMMAND_INVOKE("boom", ""));
+    // The throw is logged first (log_emit notification), then the refusal.
+    await writer.waitForCount(3);
+    const refusal = writer.messages[2] as {
+      result: { kind: string; reason: string };
+    };
+    expect(refusal.result.kind).toBe("declined");
+    expect(refusal.result.reason).toBe("handler exploded");
+
+    // The endpoint is still serving: an unregistered command is refused too.
+    reader.pushLine({ ...COMMAND_INVOKE("ghost", ""), id: 78 });
+    await writer.waitForCount(4);
+    const ghost = writer.messages[3] as {
+      result: { kind: string; reason: string };
+    };
+    expect(ghost.result.kind).toBe("declined");
+    expect(ghost.result.reason).toContain("not a command this plugin serves");
   });
 });
 

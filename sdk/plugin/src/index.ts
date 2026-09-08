@@ -23,6 +23,9 @@ export type { AgentSpawnResult } from "./generated/AgentSpawnResult.ts";
 export type { AgentStatusDto } from "./generated/AgentStatusDto.ts";
 export type { AgentWaitParams } from "./generated/AgentWaitParams.ts";
 export type { AgentWaitResult } from "./generated/AgentWaitResult.ts";
+export type { CommandDescriptorDto } from "./generated/CommandDescriptorDto.ts";
+export type { CommandInvokeParams } from "./generated/CommandInvokeParams.ts";
+export type { CommandInvokeResult } from "./generated/CommandInvokeResult.ts";
 export type { ConfigGetParams } from "./generated/ConfigGetParams.ts";
 export type { ConfigGetResult } from "./generated/ConfigGetResult.ts";
 export type { DecisionDto } from "./generated/DecisionDto.ts";
@@ -145,6 +148,9 @@ export {
   observed,
   injectContext,
   replace,
+  handled,
+  prompt,
+  declined,
   PROTOCOL_VERSION,
 } from "./define.ts";
 export type {
@@ -158,4 +164,6 @@ export type {
   ToolDefinition,
   ToolHandler,
   ToolResult,
+  CommandDefinition,
+  CommandHandler,
 } from "./define.ts";

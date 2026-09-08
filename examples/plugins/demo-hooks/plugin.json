@@ -14,5 +14,17 @@
         "required": ["text"]
       }
     }
+  ],
+  "slashCommands": [
+    {
+      "name": "greet",
+      "description": "Greet someone, or say who is being greeted.",
+      "argumentHint": "[name]"
+    },
+    {
+      "name": "ask",
+      "description": "Hand the model a prompt this plugin composed.",
+      "argumentHint": "<question>"
+    }
   ]
 }

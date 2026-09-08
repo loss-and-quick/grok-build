@@ -118,6 +118,71 @@ plugin→core calls (`ctx.storage`, `ctx.agents`, …) mid-invoke; the endpoint
 serves both directions concurrently. The host warns at handshake when the
 manifest's `tools` array and the `definePlugin` tools map drift.
 
+## Slash commands (`commands`)
+
+A plugin can add a `/` command that runs its own code. Declare each one in
+**plugin.json** (`slashCommands: [{ name, description, argumentHint?,
+timeoutMs? }]`) — that array is what the `/` menu is built from, before any
+sidecar starts — and provide the handler in `definePlugin`:
+
+```ts
+definePlugin({
+  commands: {
+    deploy: {
+      description: "Deploy the current branch",   // informational; menu uses plugin.json
+      argumentHint: "<env>",
+      handler: async (args, ctx, call) => {
+        if (!args) return declined("name an environment, e.g. /deploy staging");
+        // Full plugin context: ctx.storage / ctx.agents / ctx.ui / ctx.config
+        await ctx.storage.set(`last-deploy:${call.cwd}`, args);
+        await ctx.ui.publishPanel({ id: "deploy", title: "Deploy", blocks: [
+          { kind: "status", items: [{ label: "env", value: args, tone: "success" }] },
+        ]});
+        return handled();                          // panel is up; nothing to print
+      },
+    },
+    review: {
+      description: "Ask the model to review the diff",
+      handler: (args) => prompt(`Review the working tree.\n\nFocus: ${args}`),
+    },
+  },
+});
+```
+
+The handler receives `args` (everything the user typed after the name, trimmed
+— `""` when they typed only the name), the same `PluginContext` hooks and tools
+get, and the per-call `call = { sessionId, cwd, agent }`. Arguments are free
+text: `argumentHint` is a display string, nothing parses it for you.
+
+Return one of three things, and no more — a command may render, it may hand the
+model a prompt, or it may refuse. It cannot steer a turn already in flight,
+change session settings, or stand in for a builtin:
+
+| reply | what happens |
+| --- | --- |
+| `handled(text?)` (or a bare string, or nothing) | `text` is shown to the user; the model is **not** called |
+| `prompt(text)` | the model is asked, with `text` as the prompt; the user's own line stays what the transcript shows |
+| `declined(reason)` | `reason` is shown and the turn ends |
+
+A thrown error becomes `declined(message)`, never a sidecar crash and never a
+silently-started model turn.
+
+The host enforces a hard deadline (default 10 s — much shorter than a tool's,
+because the user's prompt is blocked on it; `timeoutMs` in the manifest
+overrides it per command). Every way the dispatch can fail — no sidecar, a
+plugin the user has not trusted, a deadline, a crash mid-call — is reported to
+the user as a refused command. Nothing here can leave a `/` command hanging,
+and nothing cancels a handler that overruns: the host just stops waiting. Keep
+handlers short and put long work behind a panel the command publishes, or a
+subagent it spawns.
+
+Both kinds of plugin command can coexist. A `commands/*.md` file still works
+and still has its body substituted into the user's message; if a markdown file
+and a `slashCommands` entry share a name, the markdown one keeps the bare `/name`
+and the handler-backed one is advertised as `/<plugin>:<name>`. A command from a
+plugin the user has not trusted, or has disabled, is never advertised and never
+dispatched.
+
 ## Subagent orchestration (`ctx.agents`)
 
 Every hook and `setup()` receives `ctx.agents`, a typed wrapper over the
@@ -393,16 +458,18 @@ anyone who disagrees.
   outgoing call (e.g. `ctx.storage.get`) must not block the loop that would
   deliver its response.
 - `src/rpc.ts` — typed wrappers over the wire methods: `initialize` /
-  `hook_invoke` / `tool_invoke` / `tool_cancel` / `panel_action` / `shutdown`
+  `hook_invoke` / `tool_invoke` / `tool_cancel` / `command_invoke` /
+  `panel_action` / `shutdown`
   handlers, and `HostClient` for
   `log_emit`/`storage_*`/`config_get`/`agent_*`/`ui_publish_panel`/`ui_close_panel`/
   `auth_publish_url`/`auth_await_code`.
 - `src/context.ts` — `PluginContext` (`log`, `storage`, `agents`, `ui`, `auth`,
   `config()`, `workspaceRoot`, `sessionId`) and the per-call
   `ToolCallContext`.
-- `src/define.ts` — `definePlugin()` (hooks + tools) and the gate-aware
-  result helpers (`allow`, `deny`, `stopBlock`, `forceStop`, `observed`,
-  `injectContext`, `replace`).
+- `src/define.ts` — `definePlugin()` (hooks + tools + slash commands) and the
+  reply helpers: gate-aware (`allow`, `deny`, `stopBlock`, `forceStop`,
+  `observed`, `injectContext`, `replace`) and command (`handled`, `prompt`,
+  `declined`).
 - `src/generated/*.ts` — **read-only**, generated from the Rust side via
   `ts-rs`. Do not edit; do not redefine these shapes elsewhere. `src/index.ts`
   re-exports them.

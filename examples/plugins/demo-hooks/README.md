@@ -23,6 +23,19 @@ the session tool catalog (and therefore the model) sees, and
 `definePlugin({ tools })` provides the handler that runs in this sidecar. The
 host warns at handshake if the two drift.
 
+And two **slash commands**, which is how a *person* reaches this code:
+
+| Command  | Behavior                                                                    |
+| -------- | --------------------------------------------------------------------------- |
+| `/greet` | Answers the user directly from the handler; `/greet nobody` refuses instead. |
+| `/ask`   | Composes a prompt in code and hands it to the model.                         |
+
+Same two-sided declaration as tools: `plugin.json`'s `slashCommands` array is
+what the `/` menu shows, `definePlugin({ commands })` provides the handler, and
+the host warns on drift. Unlike a `commands/*.md` file — whose body is only ever
+substituted into the user's message — these run the plugin's own code and decide
+for themselves whether the model is called at all.
+
 The deny reason and stop context are exported as constants from `index.ts`; the
 Rust e2e test (`plugin_sidecar_e2e_tests.rs` in `xai-grok-shell`) asserts an
 equivalent command hook produces byte-identical values.
@@ -32,7 +45,7 @@ equivalent command hook produces byte-identical values.
 ```
 demo-hooks/
   plugin.json   # manifest: "exec" names the program that speaks the protocol
-  index.ts      # definePlugin({ tools: { ... }, hooks: { ... } })
+  index.ts      # definePlugin({ tools, commands, hooks })
   _sdk/         # the SDK, including the `run` launcher `exec` points at
   README.md
 ```
@@ -50,6 +63,9 @@ demo-hooks/
   enforces it on Windows; see the README for what happens there.
 - `"tools": [{ "name": "echo", ... }]` — the model-visible tool catalog entry
   (name, description, JSON input schema; optional `timeoutMs` per tool).
+- `"slashCommands": [{ "name": "greet", ... }]` — the `/` menu entries (name,
+  description, optional `argumentHint` and `timeoutMs`). Arguments are free
+  text; the hint is only what the menu displays.
 
 ## Importing the SDK
 
@@ -76,6 +92,7 @@ hook code is otherwise identical.
 Point a session at this directory as a plugin dir (or install it), then trigger
 a tool call whose input contains `DEMO_DENY_MARKER` to see the deny, or let a
 turn end to see the injected stop context. Ask the model to call
-`demo-hooks__echo` to see the tool round trip. Sidecars start lazily on the
-first matching hook or tool call — a plugin that never fires an event it
-subscribed to never costs a process.
+`demo-hooks__echo` to see the tool round trip. Type `/greet` (or `/greet Ada`,
+or `/ask why is the sky blue`) to see a slash command run this plugin's code.
+Sidecars start lazily on the first matching hook, tool, or command call — a
+plugin that never fires an event it subscribed to never costs a process.
