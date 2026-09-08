@@ -164,8 +164,14 @@ export function Session(props: {
           </Show>
 
           {/* Between the panels and the transcript: a fan-out is state the
-              transcript would scroll away, and the composer must stay put. */}
-          <Subagents gateway={props.gateway} />
+              transcript would scroll away, and the composer must stay put.
+              Only when the rail is off, and for the same reason the panels
+              above it are: with the rail on, the fan-out is a section of the
+              dock like the terminal's own, and drawing it in both places would
+              put two live copies of the same state on one screen. */}
+          <Show when={!props.rail}>
+            <Subagents gateway={props.gateway} />
+          </Show>
 
           <div class="transcript">
             <For each={current().transcript.entries}>

@@ -1917,9 +1917,10 @@ button.picker-row:focus-visible {
   color: var(--grok-accent-error, canvastext);
 }
 
-/* Armed is a different button, not a darker one: the first click changes what
- * the second click will do, and the label has to say so. */
-.subagent-stop {
+/* The stop on a subagent, a background command, a monitor and a schedule — one
+ * button because one discipline. Armed is a different button, not a darker one:
+ * the first click changes what the second click will do, and the label says so. */
+.stop-button {
   padding: 0.1rem 0.4rem;
   font: inherit;
   font-size: 0.8rem;
@@ -1930,12 +1931,12 @@ button.picker-row:focus-visible {
   cursor: pointer;
 }
 
-.subagent-stop.armed {
+.stop-button.armed {
   color: var(--grok-accent-error, canvastext);
   border-color: var(--grok-accent-error, canvastext);
 }
 
-.subagent-stop:disabled {
+.stop-button:disabled {
   cursor: default;
   opacity: var(--grok-muted-opacity, 1);
 }
@@ -2495,4 +2496,91 @@ button.picker-row:focus-visible {
   padding-left: 0.75rem;
   border-left: 2px solid var(--grok-accent-system, canvastext);
   color: var(--grok-accent-system, canvastext);
+}
+
+/* -- the dock's list sections in the rail --------------------------------- */
+
+/* `dock.rs` spends four columns indenting a row past its header chevron so the
+ * diamond is the first glyph on the line (`ROW_INDENT`). This is that indent,
+ * and the grid is the rest of the row: the mark, the text that may be clipped,
+ * the meta column that may not, and the action. */
+.rail-rows {
+  margin: 0;
+  padding: 0 0 0 0.6rem;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.rail-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0.1rem 0.2rem;
+  border-radius: 4px;
+}
+
+/* The dock highlights the row its cursor sits on with a background rather than
+ * a marker in the text, so a focused row here does the same — and it is a real
+ * focus ring as well, because unlike a terminal cursor this one can be arrived
+ * at by a screen reader. */
+.rail-row:focus-visible {
+  outline: 1px solid var(--grok-accent-skill, canvastext);
+  background: var(--grok-bg-highlight, canvas);
+}
+
+.rail-row-mark {
+  color: var(--grok-gray-dim, canvastext);
+}
+
+.rail-row.running .rail-row-mark,
+.rail-row.running .rail-row-kind {
+  color: var(--grok-accent-running, canvastext);
+}
+
+/* The three text spans share one line and one ellipsis: the row is a line in a
+ * column 360px wide, and `dock.rs` clips it at the terminal's edge the same
+ * way. What was clipped is in the dialog behind **Open**. */
+.rail-row-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-row-kind {
+  color: var(--grok-accent-running, canvastext);
+}
+
+.rail-row-label {
+  margin-left: 0.35rem;
+  color: var(--grok-text-primary, canvastext);
+}
+
+/* `— activity`, and the dash is drawn here rather than written into the string
+ * so the label and the activity stay two values that a reader can tell apart. */
+.rail-row-activity {
+  margin-left: 0.35rem;
+  color: var(--grok-gray, canvastext);
+}
+
+.rail-row-activity::before {
+  content: "— ";
+}
+
+/* Right-aligned and never clipped: the meta column is the one thing on the row
+ * that is a measurement, and half an elapsed time is worse than none. */
+.rail-row-meta {
+  color: var(--grok-gray, canvastext);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* `▾ N more` — the pager's own overflow line, and not a control there or here. */
+.rail-more {
+  padding-left: 1rem;
+  color: var(--grok-gray, canvastext);
+  font-size: 0.85rem;
 }

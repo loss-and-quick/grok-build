@@ -24,6 +24,7 @@
 //   - hiding finished rows behind a toggle (`tasks_pane.rs:900`, `show_done`).
 import { createStore, produce } from "solid-js/store";
 
+import { fmtElapsed, type RailRow } from "./rail.ts";
 import type {
   SessionUpdate,
   SessionUpdateSubagentFinished,
@@ -474,3 +475,52 @@ export function sortRows(rows: readonly Subagent[]): Subagent[] {
   });
 }
 
+
+// ---------------------------------------------------------------------------
+// The dock's Subagents section
+// ---------------------------------------------------------------------------
+
+/**
+ * The children the dock's Subagents section lists (`panes.rs:306-337`).
+ *
+ * Running only, and workflow children excluded — a workflow run is its own
+ * thing in the terminal and its steps are not loose subagents. Oldest first,
+ * which the pager reads off `started_at`; the stream carries no spawn time, so
+ * arrival order is the same measurement from the same event.
+ *
+ * Deliberately not `sortRows`: that is the *tasks pane*'s order (running first,
+ * then type, then newest) and the pane still uses it. The dock has its own, and
+ * a client that used one order in both places would be choosing where the
+ * terminal did not.
+ */
+export function dockSubagents(rows: readonly Subagent[]): Subagent[] {
+  return rows
+    .filter((row) => row.status === "running" && row.workflowRunId === undefined)
+    .sort((a, b) => a.seq - b.seq);
+}
+
+/**
+ * One child as a dock row.
+ *
+ * `dock_subagent_rows` builds the meta as the model then the elapsed time, in
+ * `fmt_elapsed`'s coarse form rather than the pane's `format_duration`. Either
+ * half can be missing here and neither is invented: a child that has not ticked
+ * yet has no elapsed time on the wire at all, and a spawn without a model said
+ * nothing about one.
+ */
+export function subagentRailRow(row: Subagent, nowMs: number): RailRow {
+  const named = subagentLabel(row);
+  const ms = elapsedMs(row, nowMs);
+  const meta = [row.model, ms === undefined ? undefined : fmtElapsed(ms / 1000)]
+    .filter((part): part is string => part !== undefined)
+    .join(" ");
+  return {
+    key: row.subagentId,
+    kind: named.label,
+    label: named.description,
+    activity: row.activity,
+    meta: meta === "" ? undefined : meta,
+    running: true,
+    killable: !row.pendingKill,
+  };
+}

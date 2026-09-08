@@ -56,7 +56,7 @@ function mount(gateway: Gateway) {
     chips,
     title: () => container.querySelector(".subagents-title")?.textContent ?? "",
     names: () => [...container.querySelectorAll(".subagent-name")].map((n) => n.textContent ?? ""),
-    stop: () => container.querySelector<HTMLButtonElement>(".subagent-stop"),
+    stop: () => container.querySelector<HTMLButtonElement>(".stop-button"),
   };
 }
 

@@ -1,14 +1,35 @@
-import { ErrorBoundary, For, Show, createEffect, createSignal, type JSX } from "solid-js";
+import {
+  ErrorBoundary,
+  For,
+  Show,
+  createEffect,
+  createSignal,
+  untrack,
+  type Accessor,
+  type JSX,
+} from "solid-js";
 
+import { createTick } from "../animation.ts";
 import { usageChip } from "../context.ts";
 import type { Gateway } from "../gateway.ts";
 import type { PanelAction } from "../panel.ts";
-import { itemKey, moveCursor, railItems, type RailSection } from "../rail.ts";
+import {
+  itemKey,
+  moveCursor,
+  railItems,
+  visualRows,
+  type RailRow,
+  type RailSection,
+} from "../rail.ts";
+import { dockSubagents, subagentRailRow } from "../subagents.ts";
 import type { PanelEntry } from "../transcript.ts";
 import type { ContextFacts } from "../wire.ts";
 import { ContextWidget } from "./ContextWidget.tsx";
 import { Overlay } from "./Overlay.tsx";
 import { Panel, createFields, type Fields } from "./Panel.tsx";
+import { RailList } from "./RailList.tsx";
+import { StopButton } from "./StopButton.tsx";
+import { Subagents } from "./Subagents.tsx";
 import { Widget } from "./Widget.tsx";
 
 /**
@@ -21,6 +42,16 @@ import { Widget } from "./Widget.tsx";
 const CONTEXT_KEY = "context";
 
 /**
+ * The dock's own three, in the dock's own order.
+ *
+ * `dock.rs:60-67` lists Subagents, Tasks, Watchers, Queued and paints them in
+ * that order; Queued belongs to the prompt queue and arrives with it. The keys
+ * are fixed strings for the same reason `CONTEXT_KEY` is, and a plugin cannot
+ * collide with them.
+ */
+const SUBAGENTS_KEY = "subagents";
+
+/**
  * The widget rail.
  *
  * The plugin protocol has promised this since it was written: a published
@@ -31,10 +62,12 @@ const CONTEXT_KEY = "context";
  * product designed and did not have, and its shape is taken from the place the
  * product did work it out: `views/dock.rs`, the Figma "Exploration" layout.
  *
- * What the rail holds today is plugin panels. The dock's other sections —
- * Subagents, Tasks, Watchers, Queued — are data this client mostly already has,
- * and they belong here next; `rail.ts` already models a list section with the
- * dock's row cap, so arriving is a matter of supplying rows.
+ * Three of the dock's four sections are here — Subagents, Tasks, Watchers —
+ * and none of them needed anything added to the wire. Tasks and Watchers are
+ * not stored things the agent could be asked for; they are two filters over
+ * background commands and scheduled loops (`panes.rs:338-412`), and every frame
+ * either filter reads has been on the session's own stream all along. Queued is
+ * the fourth and arrives with the prompt queue.
  *
  * **Order is fixed and not configurable.** The pager keeps its panels in an
  * `IndexMap` and removes with `shift_remove`, so publication order survives a
@@ -75,12 +108,59 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
   const facts = (): ContextFacts | null => props.gateway.sessionInfo()?.contextFacts ?? null;
 
   /**
+   * The wall clock every elapsed time on the rail is read against.
+   *
+   * One signal for the whole column, so three sections of rows count in step
+   * rather than each drifting by however long its own timer has been alive —
+   * the reason the pager animates everything off a single frame counter.
+   */
+  const tick = createTick();
+  const now = (): number => {
+    void tick();
+    return Date.now();
+  };
+
+  /**
+   * Stops that were sent and never answered, released on the shared tick.
+   *
+   * The terminal does exactly this and in the same place — its render pass
+   * clears `pending_kill` once `PENDING_KILL_TIMEOUT_SECS` has passed, for
+   * background tasks and subagents alike (`agent_view/render.rs:1267-1285`) —
+   * because a stop whose reply was lost otherwise leaves a row marked
+   * "stopping…" with no way back. `untrack` keeps the sweep from being its own
+   * trigger: it writes to the same stores it reads.
+   */
+  createEffect(() => {
+    void tick();
+    const current = props.gateway.attached();
+    if (!current) return;
+    untrack(() => {
+      const at = performance.now();
+      current.subagents.expireKills(at);
+    });
+  });
+
+  /** Running children, as the dock lists them. */
+  const subagentRows = (): RailRow[] => {
+    const at = now();
+    const current = props.gateway.attached();
+    if (!current) return [];
+    return dockSubagents(current.subagents.rows).map((row) => subagentRailRow(row, at));
+  };
+
+  /**
    * Every section, in the order they are drawn.
    *
    * **Built-ins above plugins, and the order fixed.** Publishing a panel is a
    * plugin asking for the space, not taking it, so nothing a plugin does can
    * push the context window down the column. The render below walks the same
    * order; this list is what the keyboard walks.
+   *
+   * The dock's three sit between the context window and the plugins, in the
+   * dock's own order. The context window is above them because it is the one
+   * section that is always there: the other three obey `dock.rs`'s emptiness
+   * rule and are absent whenever nothing is running, so putting them first
+   * would move the permanent thing every time a subagent spawned.
    */
   const sections = (): RailSection[] => {
     const all: RailSection[] = [];
@@ -88,6 +168,7 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
     if (context) {
       all.push({ kind: "widget", key: CONTEXT_KEY, label: "Context", note: usageChip(context) });
     }
+    all.push({ kind: "list", key: SUBAGENTS_KEY, label: "Subagents", rows: subagentRows() });
     for (const panel of panels()) {
       all.push({
         kind: "panel",
@@ -111,6 +192,33 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
 
   const act = (panel: PanelEntry) => (action: PanelAction) =>
     void props.gateway.panelAction(panel.plugin, action);
+
+  /**
+   * One list section, drawn from the same row array the walk was given.
+   *
+   * `dock.rs`'s emptiness rule is the `Show`: a section with a zero count is
+   * not drawn, and `sectionShown` already tells the walk the same thing, so the
+   * cursor never has an item the screen does not.
+   */
+  const listSection = (
+    key: string,
+    label: string,
+    rows: () => RailRow[],
+    action: (row: Accessor<RailRow>) => JSX.Element,
+  ): JSX.Element => (
+    <Show when={rows().length > 0}>
+      <Widget
+        itemKey={`h:${key}`}
+        label={label}
+        count={rows().length}
+        open={isOpen(key)}
+        onToggle={() => toggle(key)}
+        onOpenFully={() => setOpened(key)}
+      >
+        <RailList section={key} rows={rows()} action={action} />
+      </Widget>
+    </Show>
+  );
 
   /**
    * One editor per panel, not one per surface.
@@ -162,7 +270,7 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
   };
 
   return (
-    <Show when={sections().length > 0}>
+    <Show when={visualRows(sections(), collapsed()).length > 0}>
       {/* A region, not a dialog: the rail is beside the session, not over it,
           and nothing about it is modal. A rail with no sections renders nothing
           at all — `dock.rs`'s rule, and what keeps the third column from being
@@ -193,6 +301,19 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
             </Widget>
           )}
         </Show>
+        {/* The dock's own three, in the dock's order. Each is a plain call
+            rather than a component so the rows the walk was handed and the rows
+            drawn here are the same array, which is `dock.rs`'s one-walk rule
+            expressed the only way a browser can express it. */}
+        {listSection(SUBAGENTS_KEY, "Subagents", subagentRows, (row) => (
+          <StopButton
+            tick={tick}
+            subject={row().key}
+            pending={row().killable === false}
+            title="Stop this subagent. Its turn is cancelled where it stands and nothing is handed back."
+            onConfirm={() => void props.gateway.cancelSubagent(row().key)}
+          />
+        ))}
         <For each={panels()}>
           {(panel) => (
             <Widget
@@ -236,6 +357,18 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
             />
           </Overlay>
         )}
+      </Show>
+
+      {/* The fan-out, whole. The rail row is `dock.rs`'s line — a kind, a
+          description, what it is doing and how long it has been — and this is
+          the pane that line stands for, with the counters, the child's answer
+          and the finished rows the column has no room for. The terminal makes
+          the same split: Enter on a dock subagent row opens the child
+          fullscreen (`panes.rs:464-472`). */}
+      <Show when={opened() === SUBAGENTS_KEY}>
+        <Overlay label="Subagents" onClose={() => setOpened(null)}>
+          <Subagents gateway={props.gateway} />
+        </Overlay>
       </Show>
 
       {/* The F6 overlay, as a button rather than a key. A four-column table is

@@ -126,12 +126,14 @@ function panel(id: string, title: string): PanelViewModel {
   };
 }
 
-function mount(published: [string, PanelViewModel][]) {
+function mount(published: [string, PanelViewModel][] = [], seed?: (into: Fixture) => void) {
   const transcript = createTranscript();
   const subagents = createSubagents(ENTRY.sessionId);
   for (const [plugin, viewModel] of published) {
     transcript.apply({ sessionUpdate: "plugin_panel", plugin, view_model: viewModel } as SessionUpdate);
   }
+  const stopped: string[] = [];
+  seed?.({ subagents });
   const seen: PanelAction[] = [];
   const gateway = {
     attached: () => ({ entry: ENTRY, transcript, subagents }),
@@ -142,9 +144,28 @@ function mount(published: [string, PanelViewModel][]) {
     panelAction: async (_plugin: string, action: PanelAction) => {
       seen.push(action);
     },
+    cancelSubagent: async (id: string) => {
+      stopped.push(id);
+    },
   } as unknown as Gateway;
   const { container } = render(() => Rail({ gateway }));
-  return { container, seen, transcript };
+  return { container, seen, transcript, stopped };
+}
+
+interface Fixture {
+  subagents: ReturnType<typeof createSubagents>;
+}
+
+/** The section headers on screen, in the order they are drawn. */
+function labels(container: HTMLElement): string[] {
+  return [...container.querySelectorAll(".rail-label")].map((node) => node.textContent ?? "");
+}
+
+/** One section's row text, meta included. */
+function rowsOf(container: HTMLElement, section: string): string[] {
+  return [...container.querySelectorAll(`[data-rail-item^="r:${section}:"]`)].map((node) =>
+    (node.textContent ?? "").replace(/\s+/g, " ").trim(),
+  );
 }
 
 describe("the rail on screen", () => {
@@ -237,5 +258,84 @@ describe("the rail on screen", () => {
     field.value = "typed";
     container.querySelector<HTMLButtonElement>(".grok-panel-button")!.click();
     expect(seen).toEqual([{ panelId: "oauth", buttonId: "go", inputs: { code: "typed" } }]);
+  });
+});
+
+describe("the fan-out as a dock section", () => {
+  const spawn = (id: string, over: Record<string, unknown> = {}): SessionUpdate =>
+    ({
+      sessionUpdate: "subagent_spawned",
+      subagent_id: id,
+      parent_session_id: ENTRY.sessionId,
+      child_session_id: `child-${id}`,
+      subagent_type: "explore",
+      description: "find the render path",
+      ...over,
+    }) as unknown as SessionUpdate;
+
+  test("a section with nothing in it is not drawn at all", () => {
+    // `dock.rs`: "Sections with a zero count are hidden; an all-zero dock
+    // renders nothing." An empty Subagents heading must not hold a third column
+    // open over a session that has spawned nothing.
+    const { container } = mount();
+    expect(container.querySelector(".rail")).toBeNull();
+  });
+
+  test("it stands above the plugins, as a built-in does", () => {
+    const { container } = mount([["acme", panel("oauth", "acme: OAuth")]], ({ subagents }) => {
+      subagents.apply(ENTRY.sessionId, spawn("sa-1"));
+    });
+    expect(labels(container)).toEqual(["Subagents", "acme: OAuth"]);
+  });
+
+  test("a row is the dock's line: kind, label, activity, then the meta column", () => {
+    const { container } = mount([], ({ subagents }) => {
+      subagents.apply(ENTRY.sessionId, spawn("sa-1", { model: "grok-4.5" }));
+      // The child's own frames arrive on the child's session id and feed its
+      // activity label, which is the one thing on a dock row that comes from a
+      // session other than the attached one.
+      subagents.applyChild("child-sa-1", {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "…" },
+      } as unknown as SessionUpdate);
+    });
+    const [row] = rowsOf(container, "subagents");
+    expect(row).toContain("Explore");
+    expect(row).toContain("find the render path");
+    expect(row).toContain("Thinking");
+    expect(row).toContain("grok-4.5");
+  });
+
+  test("the count on the header is the number of rows, not the number shown", () => {
+    const { container } = mount([], ({ subagents }) => {
+      for (const id of ["a", "b", "c", "d"]) subagents.apply(ENTRY.sessionId, spawn(id));
+    });
+    expect(container.querySelector(".rail-count")?.textContent).toBe("4");
+    expect(rowsOf(container, "subagents")).toHaveLength(MAX_SECTION_ROWS);
+    expect(container.querySelector(".rail-more")?.textContent).toContain(
+      `${4 - MAX_SECTION_ROWS} more`,
+    );
+  });
+
+  test("arrows walk from the header into its rows, past the overflow line", () => {
+    const { container } = mount([], ({ subagents }) => {
+      for (const id of ["a", "b", "c"]) subagents.apply(ENTRY.sessionId, spawn(id));
+    });
+    const walk = [...container.querySelectorAll("[data-rail-item]")].map((node) =>
+      node.getAttribute("data-rail-item"),
+    );
+    expect(walk).toEqual(["h:subagents", "r:subagents:0", "r:subagents:1"]);
+  });
+
+  test("the first press of a stop does not send it", () => {
+    const { container, stopped } = mount([], ({ subagents }) => {
+      subagents.apply(ENTRY.sessionId, spawn("sa-1"));
+    });
+    const button = container.querySelector<HTMLButtonElement>(".stop-button")!;
+    button.click();
+    expect(stopped).toEqual([]);
+    expect(button.textContent).toContain("confirm");
+    button.click();
+    expect(stopped).toEqual(["sa-1"]);
   });
 });

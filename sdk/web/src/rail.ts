@@ -31,15 +31,55 @@
  */
 export const MAX_SECTION_ROWS = 2;
 
-/** One line inside a list section. */
+/**
+ * One line inside a list section.
+ *
+ * The fields are `DockRow`'s (`dock.rs:42-49`), which is what makes the three
+ * dock sections one row shape rather than three: `◆ kind label — activity` on
+ * the left and `meta` right-aligned, with the accent carried by `kind` because
+ * that is the word saying what sort of work the row is.
+ */
 export interface RailRow {
   /** Stable within its section; what an activated row is reported as. */
   key: string;
+  /** The accent word: `Explore`, `Run`, `Monitor`, `Loop`. */
+  kind?: string;
   label: string;
-  /** Right-hand column: an elapsed time, a model, a status. */
+  /**
+   * What the row is doing right now, when anything says.
+   *
+   * Only subagent rows ever carry one, and only because a child's own update
+   * stream is on the wire; a background command's output is not an activity and
+   * `dock.rs` leaves the field `None` for it.
+   */
+  activity?: string;
+  /** Right-hand column: an elapsed time, a model, a schedule. */
   meta?: string;
   /** Marks the row as live, which is what earns it the running accent. */
   running?: boolean;
+  /**
+   * Whether a stop can still be offered.
+   *
+   * `DockRow::killable`, which the terminal computes as `!pending_kill`: a stop
+   * already sent and not yet answered takes the `[stop]` action off the row
+   * rather than letting it be sent twice (`panes.rs:330`, `dock.rs:390-395`).
+   */
+  killable?: boolean;
+}
+
+/**
+ * `dock.rs`'s `fmt_elapsed` (`:381`): `42s`, then `2m14s`.
+ *
+ * Not `subagents.ts`'s `formatDuration`, which is `pager-render`'s own
+ * `format_duration` and starts at tenths of a second. The two live side by side
+ * in the terminal and say different things — the dock's is a coarse "how long
+ * has this been going", the fan-out pane's is a measurement — so porting one
+ * over the other would be this client deciding something the terminal did not.
+ */
+export function fmtElapsed(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds));
+  if (whole < 60) return `${whole}s`;
+  return `${Math.floor(whole / 60)}m${String(whole % 60).padStart(2, "0")}s`;
 }
 
 /**

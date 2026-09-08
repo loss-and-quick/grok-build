@@ -1,4 +1,4 @@
-import { For, Show, createSignal, type JSX } from "solid-js";
+import { For, Show, createEffect, createSignal, untrack, type JSX } from "solid-js";
 
 import { blendToward, createTick, waveBrightness } from "../animation.ts";
 import type { Gateway } from "../gateway.ts";
@@ -11,7 +11,6 @@ import {
   spinnerFrame,
 } from "../glyphs.ts";
 import {
-  PENDING_KILL_TIMEOUT_MS,
   contextBadge,
   elapsedMs,
   formatDuration,
@@ -20,9 +19,10 @@ import {
   subagentLabel,
   type Subagent,
 } from "../subagents.ts";
+import { StopButton } from "./StopButton.tsx";
 
 /**
- * The fan-out, above the transcript.
+ * The fan-out, whole.
  *
  * Its own region rather than rows inside the transcript, because a fan-out is
  * *current state*, not an event: three children each rewrite their own line
@@ -30,6 +30,13 @@ import {
  * scroll the thing you are watching off the screen. The pager reached the same
  * place from the other direction — it writes one scrollback line per child and
  * then keeps the live view in a docked pane (`views/tasks_pane.rs`).
+ *
+ * **Two places draw this, and never at once.** With the rail on it is what the
+ * Subagents section's **Open** raises, which is the terminal's own split: the
+ * dock carries a one-line row per child and Enter on it opens the child
+ * (`panes.rs:464-472`). With the rail off there is no column to carry that row,
+ * so this goes back above the transcript, where every panel goes when the rail
+ * is off.
  *
  * Everything drawn here is something the wire said. A counter the wire has not
  * carried yet renders as an em dash, never as a zero: "no tool calls" and "the
@@ -39,6 +46,17 @@ import {
 export function Subagents(props: { gateway: Gateway }): JSX.Element {
   const tick = createTick();
   const [showDone, setShowDone] = createSignal(false);
+
+  // A stop the agent never answered stops marking the row, so it can be offered
+  // again — the sweep the pager runs in its own render pass
+  // (`agent_view/render.rs:1279-1285`). The rail runs the same one; either
+  // surface being on screen is enough, and running both is harmless.
+  createEffect(() => {
+    void tick();
+    const current = props.gateway.attached();
+    if (!current) return;
+    untrack(() => current.subagents.expireKills(performance.now()));
+  });
 
   const all = (): readonly Subagent[] => props.gateway.attached()?.subagents.rows ?? [];
   const running = (): number => all().filter((row) => row.status === "running").length;
@@ -75,39 +93,8 @@ export function Subagents(props: { gateway: Gateway }): JSX.Element {
 
 function Row(props: { row: Subagent; tick: () => number; gateway: Gateway }): JSX.Element {
   const [open, setOpen] = createSignal(false);
-  // The stop button arms itself before it fires; see `armed` below.
-  const [armedAt, setArmedAt] = createSignal(0);
   const label = () => subagentLabel(props.row);
   const running = () => props.row.status === "running";
-
-  /**
-   * Whether the stop button is asking for a second click.
-   *
-   * The terminal stops a child with one `x` on the row its cursor already sits
-   * on — two gestures, because the cursor had to get there. A button in a list
-   * is one click, and stopping a child is not undoable: its turn is cancelled
-   * where it stands and its work is not handed back. So the button asks twice,
-   * and the arming expires on its own after the pager's own
-   * `PENDING_KILL_TIMEOUT_SECS`, so a click forgotten about does not sit
-   * waiting to become a stop.
-   */
-  const armed = (): boolean => {
-    const at = armedAt();
-    if (at === 0) return false;
-    // Read the shared tick so the arming expires on its own rather than on the
-    // next click; `tick()` is the same wall-clock signal the spinner rides.
-    void props.tick();
-    return performance.now() - at < PENDING_KILL_TIMEOUT_MS;
-  };
-
-  const stop = (): void => {
-    if (!armed()) {
-      setArmedAt(performance.now());
-      return;
-    }
-    setArmedAt(0);
-    void props.gateway.cancelSubagent(props.row.subagentId);
-  };
 
   return (
     <li class={`subagent subagent-${props.row.status}`} style={{ "--depth": props.row.depth }}>
@@ -205,17 +192,16 @@ function Row(props: { row: Subagent; tick: () => number; gateway: Gateway }): JS
         </Show>
       </div>
 
+      {/* The same button the rail row carries, so the two surfaces cannot come
+          to disagree about what a stop costs or how many presses it takes. */}
       <Show when={running()}>
-        <button
-          class="subagent-stop"
-          classList={{ armed: armed() }}
-          type="button"
-          disabled={props.row.pendingKill}
+        <StopButton
+          tick={props.tick}
+          subject={props.row.subagentId}
+          pending={props.row.pendingKill}
           title="Stop this subagent. Its turn is cancelled where it stands and nothing is handed back."
-          onClick={stop}
-        >
-          {props.row.pendingKill ? "stopping…" : armed() ? "confirm stop" : `${BALLOT_X} stop`}
-        </button>
+          onConfirm={() => void props.gateway.cancelSubagent(props.row.subagentId)}
+        />
       </Show>
     </li>
   );
