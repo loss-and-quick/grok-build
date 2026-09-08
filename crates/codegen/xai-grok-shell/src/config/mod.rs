@@ -16,10 +16,12 @@ pub use xai_grok_config_types::{
 /// Parsed from the `[subagents]` section of `~/.grok/config.toml` or
 /// `.grok/config.toml`.
 /// Enabled by default; can be disabled via the `GROK_SUBAGENTS=0` env var or `[subagents] enabled = false` in config.toml.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+/// Writing the section to tune something else (`max_depth`, `[subagents.models]`, …) leaves subagents on.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SubagentsConfig {
     /// Whether subagent support is enabled.
+    /// `Default` carries the documented `true`, so a `[subagents]` table that omits the key deserialises to enabled.
     pub enabled: bool,
     /// Raw `[subagents] max_depth` (i64 so out-of-range parses; clamped to at least 1 at resolve).
     #[serde(default)]
@@ -85,6 +87,22 @@ pub struct SubagentsConfig {
     pub personas: std::collections::HashMap<String, SubagentPersona>,
 }
 use xai_grok_subagent_resolution::config::{SubagentPersona, SubagentRole};
+impl Default for SubagentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_depth: None,
+            max_concurrent: None,
+            sampling_limit: None,
+            limit_behavior: None,
+            workflow_max_concurrent: None,
+            models: std::collections::HashMap::new(),
+            toggle: std::collections::HashMap::new(),
+            roles: std::collections::HashMap::new(),
+            personas: std::collections::HashMap::new(),
+        }
+    }
+}
 impl SubagentsConfig {
     fn discover_personas_in_dir(&mut self, dir: &std::path::Path) {
         if !dir.is_dir() {
@@ -365,7 +383,7 @@ impl SubagentsConfig {
     /// Resolve the final subagents config from all sources (in priority order):
     /// 1. CLI flag `--subagents` (absolute highest, always enables)
     /// 2. `GROK_SUBAGENTS` env var: `1`/`true` enables, `0`/`false` force-disables
-    /// 3. Config file `[subagents]` section
+    /// 3. Config file `[subagents] enabled` (the key itself, not the presence of the section)
     /// 4. Default (enabled)
     ///
     /// `enabled` is deliberately not remotely gated.
@@ -391,11 +409,17 @@ impl SubagentsConfig {
             .get("subagents")
             .and_then(|v| v.clone().try_into().ok())
             .unwrap_or_default();
+        // Only the `enabled` key counts as local intent; a `[subagents]` table written to tune
+        // max_depth or models is not a request to turn the feature off.
+        let has_local_enabled = config
+            .get("subagents")
+            .and_then(|v| v.as_table())
+            .is_some_and(|t| t.contains_key("enabled"));
         let resolved = crate::agent::config::resolve_enabled(
             if cli_flag { Some(true) } else { None },
             "GROK_SUBAGENTS",
             result.enabled,
-            config.get("subagents").is_some(),
+            has_local_enabled,
             None,
             true,
         );

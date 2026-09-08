@@ -1381,12 +1381,54 @@ fn subagents_config_models_without_enabled() {
             .unwrap();
         let sa = SubagentsConfig::resolve(false, &config);
         assert!(
-                !sa.enabled,
-                "explicit [subagents] section without enabled should be false"
+                sa.enabled,
+                "a [subagents] section without enabled must keep the documented default"
             );
         assert_eq!(sa.models.len(), 1);
         assert_eq!(sa.models.get("explore").unwrap(), "grok-3-fast");
     });
+}
+/// The config line that bit us: `[subagents]` written to raise max_depth, no `enabled` key.
+/// Tuning a knob is not a request to turn the feature off.
+#[test]
+fn subagents_config_tuning_key_alone_stays_enabled() {
+    without_grok_subagents(|| {
+        let config: toml::Value = toml::from_str("[subagents]\nmax_depth = 3").unwrap();
+        let sa = SubagentsConfig::resolve(false, &config);
+        assert!(
+                sa.enabled,
+                "[subagents] max_depth alone must leave subagents enabled"
+            );
+        assert_eq!(sa.max_depth, Some(3));
+    });
+}
+/// The same section still yields to an explicit `enabled = false` next to the tuning key.
+#[test]
+fn subagents_config_tuning_key_with_explicit_disable() {
+    without_grok_subagents(|| {
+        let config: toml::Value = toml::from_str("[subagents]\nmax_depth = 3\nenabled = false")
+            .unwrap();
+        let sa = SubagentsConfig::resolve(false, &config);
+        assert!(!sa.enabled, "explicit enabled = false must still disable");
+    });
+}
+/// A tuning-only section leaves the env var and the CLI flag as the deciding sources.
+#[test]
+fn subagents_config_tuning_key_yields_to_env_and_cli() {
+    with_grok_subagents(
+        "0",
+        || {
+            let config: toml::Value = toml::from_str("[subagents]\nmax_depth = 3").unwrap();
+            assert!(
+                    !SubagentsConfig::resolve(false, &config).enabled,
+                    "GROK_SUBAGENTS=0 must still win over the default"
+                );
+            assert!(
+                    SubagentsConfig::resolve(true, &config).enabled,
+                    "--subagents must still win over GROK_SUBAGENTS=0"
+                );
+        },
+    );
 }
 #[test]
 fn subagents_config_models_with_env_var_enables() {

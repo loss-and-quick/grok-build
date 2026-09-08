@@ -846,16 +846,17 @@ pub(crate) fn resolve_string_flag(
     None
 }
 /// Resolve `enabled` for section-based configs (memory, subagents, etc.).
-/// Feature flag only applies when the TOML section is absent.
+/// `has_local_enabled` is whether the TOML section carries the `enabled` key itself.
+/// A section written to tune other keys is not local intent, so the feature flag and the default still apply.
 pub(crate) fn resolve_enabled(
     cli_flag: Option<bool>,
     env_var: &str,
     config_enabled: bool,
-    has_local_section: bool,
+    has_local_enabled: bool,
     feature_flag_val: Option<bool>,
     default: bool,
 ) -> Resolved<bool> {
-    let config_val = if has_local_section {
+    let config_val = if has_local_enabled {
         Some(config_enabled)
     } else {
         None
