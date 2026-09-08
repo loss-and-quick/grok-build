@@ -48,7 +48,8 @@ pub(crate) fn legacy_effort_options() -> Vec<ReasoningEffortOption> {
 ///   - `/effort`: the option id (`"deep"`)
 ///   - `/model` chained phase: `"ModelName deep"`
 ///
-/// `match_text` gets an `a `/`b `/…` sort prefix so the matcher's alphabetical tiebreak preserves the option order.
+/// Rows come out in `options` order, and both dropdowns keep that order on equal-scoring rows,
+/// so `match_text` carries only text the user can see on the row or type into the prompt.
 pub(crate) fn build_effort_arg_items(
     options: &[ReasoningEffortOption],
     current_effort: Option<ReasoningEffort>,
@@ -57,20 +58,28 @@ pub(crate) fn build_effort_arg_items(
 ) -> Vec<ArgItem> {
     options
         .iter()
-        .enumerate()
-        .map(|(idx, option)| {
+        .map(|option| {
             let active = mark_active && current_effort == Some(option.value);
             let active_suffix = if active { " (active)" } else { "" };
             let insert_text = insert_text_for(option);
-            // Sort-key prefix: 'a' for top row, 'b' for next, etc
-            // Only affects matcher tiebreak ordering, never rendered
-            let sort_prefix = char::from(b'a' + idx as u8);
             ArgItem {
                 display: format!("{}{active_suffix}", option.label),
-                match_text: format!("{sort_prefix} {insert_text}"),
+                match_text: insert_text.clone(),
                 insert_text,
                 description: option.description.clone().unwrap_or_default(),
             }
         })
         .collect()
+}
+
+/// Whether `query` keeps `item` in the `ArgPicker` modal (`app/modals.rs` filters rows
+/// by substring over `match_text`, `display` and `description`) while neither text the
+/// row draws contains it. Such a row answers a query with nothing on it that explains
+/// the hit, so a test asserts no effort row ever does.
+#[cfg(test)]
+pub(crate) fn matches_only_on_text_the_row_never_draws(item: &ArgItem, query: &str) -> bool {
+    let q = query.to_lowercase();
+    item.match_text.to_lowercase().contains(&q)
+        && !item.display.to_lowercase().contains(&q)
+        && !item.description.to_lowercase().contains(&q)
 }

@@ -77,7 +77,9 @@ impl SlashCommand for EffortCommand {
 mod tests {
     use super::*;
     use crate::acp::model_state::ModelState;
-    use crate::slash::commands::effort_levels::EFFORT_LEVELS;
+    use crate::slash::commands::effort_levels::{
+        EFFORT_LEVELS, matches_only_on_text_the_row_never_draws,
+    };
     use agent_client_protocol as acp;
     use std::sync::Arc;
     use xai_grok_shell::sampling::types::ReasoningEffort;
@@ -360,7 +362,44 @@ mod tests {
         assert_eq!(items[1].display, "high (active)");
         assert_eq!(items[2].insert_text, "medium");
         assert_eq!(items[3].insert_text, "low");
-        assert!(items[0].match_text.starts_with("a "));
-        assert!(items[3].match_text.starts_with("d "));
+        assert_eq!(items[0].match_text, "xhigh");
+        assert_eq!(items[3].match_text, "low");
+    }
+
+    /// The picker filters rows on a substring of their own texts, so a row that
+    /// carries anything the user cannot read on it answers queries out of nowhere.
+    /// The rows used to be keyed `a xhigh`, `b high`, …, and typing `a ` picked the top one.
+    #[test]
+    fn no_row_answers_a_query_nothing_on_it_shows() {
+        let mut state = ModelState::default();
+        let (id, info) = model_with_reasoning("reasoning-x", "Reasoning X");
+        state.available.insert(id.clone(), info);
+        state.current = Some(id);
+        state.reasoning_effort = Some(ReasoningEffort::High);
+
+        let ctx = AppCtx {
+            models: &state,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            workflows_available: true,
+            saved_workflows: &[],
+            workflow_runs: &[],
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
+        };
+        let items = EffortCommand.suggest_args(&ctx, "").unwrap();
+        for query in ["a ", "b ", "c ", "d "] {
+            let hits: Vec<&str> = items
+                .iter()
+                .filter(|item| matches_only_on_text_the_row_never_draws(item, query))
+                .map(|item| item.display.as_str())
+                .collect();
+            assert!(
+                hits.is_empty(),
+                "{query:?} matched rows showing nothing like it: {hits:?}"
+            );
+        }
     }
 }

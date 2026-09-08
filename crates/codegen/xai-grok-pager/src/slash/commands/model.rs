@@ -175,6 +175,7 @@ fn build_effort_items(models: &ModelState, model_id: &acp::ModelId) -> Vec<ArgIt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slash::commands::effort_levels::matches_only_on_text_the_row_never_draws;
     use std::sync::Arc;
     use xai_grok_shell::sampling::types::ReasoningEffort;
 
@@ -303,9 +304,24 @@ mod tests {
         assert_eq!(items[3].insert_text, "Reasoning X low");
         // Display is just the level so the user sees a clean column.
         assert_eq!(items[0].display, "xhigh");
-        // match_text carries the sort-key prefix that forces the matcher's alphabetical tiebreak to render rows in EFFORT_LEVELS order
-        assert!(items[0].match_text.starts_with("a "));
-        assert!(items[3].match_text.starts_with("d "));
+        // Each row matches on what it inserts, and nothing else
+        assert_eq!(items[0].match_text, "Reasoning X xhigh");
+        assert_eq!(items[3].match_text, "Reasoning X low");
+
+        // The picker filters rows on a substring of their own texts, so a row carrying
+        // text the user cannot read on it answers queries out of nowhere. These rows were
+        // once keyed `a Reasoning X xhigh`, `b …`, and typing `a ` picked the top one.
+        for query in ["a ", "b ", "c ", "d "] {
+            let hits: Vec<&str> = items
+                .iter()
+                .filter(|item| matches_only_on_text_the_row_never_draws(item, query))
+                .map(|item| item.display.as_str())
+                .collect();
+            assert!(
+                hits.is_empty(),
+                "{query:?} matched rows showing nothing like it: {hits:?}"
+            );
+        }
     }
 
     #[test]

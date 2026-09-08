@@ -1232,11 +1232,17 @@ impl SlashController {
         if trimmed.is_empty() {
             return items.iter().map(SuggestionRow::from_arg).collect();
         }
-        let hits = self
+        let mut hits = self
             .matcher
             .rank(items.as_slice(), trimmed, items.len(), |item| {
                 item.match_text.as_str()
             });
+        // Equal-scoring rows keep the order the command produced them in.
+        // The matcher breaks ties alphabetically on the ranked text, which reorders menus
+        // whose order is meaningful (effort strongest-first, `/export` directories before
+        // files) unless the command smuggles a sort key into `match_text` — text the picker
+        // then filters on although nothing on the row shows it.
+        hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         hits.into_iter()
             .map(|(idx, _)| {
                 let mut row = SuggestionRow::from_arg(&items[idx]);
@@ -2128,6 +2134,38 @@ mod tests {
                 .any(|row| row.display.contains("Example"))
         );
         assert!(snapshot.args_range.is_some());
+    }
+
+    /// `/model` hands its effort rows over strongest-first, and ranking must leave
+    /// equal-scoring rows in that order. The matcher's own tiebreak is alphabetical,
+    /// which used to be worked around with a hidden `a `/`b ` sort key inside
+    /// `match_text` — text no row showed, yet the picker filtered on it.
+    #[test]
+    fn effort_rows_keep_the_order_the_command_produced_them_in() {
+        let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
+        let state = SlashState::default();
+        let mut models = ModelState::default();
+        let model_id = acp::ModelId::new(Arc::from("reasoning-x"));
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "supportsReasoningEffort".into(),
+            serde_json::Value::Bool(true),
+        );
+        models.available.insert(
+            model_id.clone(),
+            acp::ModelInfo::new(model_id, "Reasoning X".to_string())
+                .meta(serde_json::Value::Object(meta).as_object().cloned()),
+        );
+
+        let text = "/model Reasoning X ";
+        ctrl.refresh(&state, text, text.len(), &models);
+        let rows: Vec<String> = state
+            .snapshot()
+            .matches
+            .iter()
+            .map(|row| row.display.clone())
+            .collect();
+        assert_eq!(rows, ["xhigh", "high", "medium", "low"]);
     }
 
     #[test]
