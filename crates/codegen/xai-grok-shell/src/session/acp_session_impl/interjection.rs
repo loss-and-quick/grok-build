@@ -407,7 +407,20 @@ impl SessionActor {
         // Queue (default) must not re-parse config on every tool, model, or turn-end drain
         // `follow_up_steer_enabled` is mtime-keyed on config.toml, so a live pager settings write is visible without restarting the shell agent
         // The pager is a separate process; an unchanged mtime is a cheap stat
-        if crate::util::config::follow_up_steer_enabled().await {
+        let steer = crate::util::config::follow_up_steer_enabled().await;
+        self.drain_interjections_at_safe_point_steering(steer).await
+    }
+
+    /// [`drain_interjections_at_safe_point`] with the Steer verdict already resolved.
+    ///
+    /// The verdict is a parameter so a caller that knows the mode can state it. Behind
+    /// `follow_up_steer_enabled` is one process-wide cache, which in the unit-test binary means
+    /// every case shares it: a test that set it to reach this branch was writing a global that
+    /// every other case in the binary could read or overwrite.
+    ///
+    /// [`drain_interjections_at_safe_point`]: Self::drain_interjections_at_safe_point
+    pub(super) async fn drain_interjections_at_safe_point_steering(&self, steer: bool) -> bool {
+        if steer {
             let has_held = {
                 let state = self.state.lock().await;
                 let running = state.running_prompt_id();

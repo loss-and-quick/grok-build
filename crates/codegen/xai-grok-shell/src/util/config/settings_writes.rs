@@ -21,7 +21,14 @@ const FOLLOW_UP_CACHE_STEER: u8 = 2;
 static FOLLOW_UP_STEER_CACHE: AtomicU8 = AtomicU8::new(FOLLOW_UP_CACHE_UNKNOWN);
 static FOLLOW_UP_STEER_MTIME_NS: AtomicU64 = AtomicU64::new(0);
 
-/// Nanoseconds since epoch for the user `config.toml` mtime, or 0 if missing.
+/// Cache key for the user `config.toml`: nanoseconds since epoch for its mtime, or 0 if missing.
+///
+/// Missing is a *state*, not the absence of one: a user who never wrote a setting runs on the
+/// defaults, and that answer keys and caches like any other. 0 is safe as its key because a real
+/// mtime is never 0, so the file appearing or being removed still invalidates.
+///
+/// The user file is the whole key. The managed and MDM layers `load_effective_config` merges do
+/// not invalidate, for a user without a `config.toml` any more than for one with it.
 fn follow_up_config_mtime_ns() -> u64 {
     let path = crate::util::grok_home::grok_home().join("config.toml");
     std::fs::metadata(path)
@@ -45,9 +52,21 @@ pub fn set_follow_up_steer_cache(steer: bool) {
     FOLLOW_UP_STEER_MTIME_NS.store(follow_up_config_mtime_ns(), Ordering::Relaxed);
 }
 
+/// Whether the cached Steer verdict still answers for `mtime`; `None` means re-resolve.
+///
+/// A change of key is the only thing that may invalidate the cache. Demanding a *non-zero* key on
+/// top of that would exclude the no-`config.toml` state from the cache entirely: every safe-point
+/// drain would re-parse the effective config, and the verdict [`set_follow_up_steer_cache`] just
+/// stored would be discarded on the very next read.
+fn cached_follow_up_steer(cached: u8, cached_mtime: u64, mtime: u64) -> Option<bool> {
+    (cached != FOLLOW_UP_CACHE_UNKNOWN && mtime == cached_mtime)
+        .then_some(cached == FOLLOW_UP_CACHE_STEER)
+}
+
 /// Whether Steer is enabled in this process.
 ///
 /// Hits disk only when the cache is cold or the `config.toml` mtime has changed since the last resolve.
+/// "No `config.toml`" is one of those keys, not a permanent miss.
 /// That lets the pager toggle Follow-up behavior live without restarting the shell agent.
 /// A failed effective-config load does not pin Queue: the previous cache is kept, or a cold failure returns false for this call only.
 /// The cold failure writes neither QUEUE nor the mtime.
@@ -55,8 +74,8 @@ pub async fn follow_up_steer_enabled() -> bool {
     let mtime = follow_up_config_mtime_ns();
     let cached_mtime = FOLLOW_UP_STEER_MTIME_NS.load(Ordering::Relaxed);
     let cached = FOLLOW_UP_STEER_CACHE.load(Ordering::Relaxed);
-    if cached != FOLLOW_UP_CACHE_UNKNOWN && mtime != 0 && mtime == cached_mtime {
-        return cached == FOLLOW_UP_CACHE_STEER;
+    if let Some(steer) = cached_follow_up_steer(cached, cached_mtime, mtime) {
+        return steer;
     }
     let root = match crate::config::load_effective_config() {
         Ok(root) => root,
@@ -449,4 +468,34 @@ pub async fn set_show_tips(value: bool) -> Result<()> {
 /// Restart-required: auto-update check fires once on startup.
 pub async fn set_auto_update(value: bool) -> Result<()> {
     update_config(|cfg| cfg.cli.auto_update = Some(value)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cached verdict answers for the key it was stored against, missing `config.toml` included.
+    ///
+    /// Keying "missing" out of the cache stopped [`set_follow_up_steer_cache`] from taking effect
+    /// at all until some other writer created the file, which in the unit-test binary was a
+    /// sibling case sharing the one redirected grok home.
+    #[test]
+    fn a_cached_verdict_survives_a_missing_config_toml() {
+        assert_eq!(
+            cached_follow_up_steer(FOLLOW_UP_CACHE_STEER, 0, 0),
+            Some(true)
+        );
+        assert_eq!(
+            cached_follow_up_steer(FOLLOW_UP_CACHE_QUEUE, 0, 0),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn a_cold_cache_and_a_changed_mtime_both_re_resolve() {
+        assert_eq!(cached_follow_up_steer(FOLLOW_UP_CACHE_UNKNOWN, 0, 0), None);
+        // config.toml written since the last resolve, and removed since the last resolve
+        assert_eq!(cached_follow_up_steer(FOLLOW_UP_CACHE_STEER, 0, 42), None);
+        assert_eq!(cached_follow_up_steer(FOLLOW_UP_CACHE_STEER, 42, 0), None);
+    }
 }

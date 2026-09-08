@@ -1693,7 +1693,8 @@ async fn promote_queued_as_interjections_skips_auto_wake() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            crate::util::config::set_follow_up_steer_cache(true);
+            // No Steer verdict to set: `promote_queued_as_interjections` is the branch Steer
+            // guards, not a reader of it, so this calls the promotion directly.
             let (actor, _rx) = build_actor().await;
             {
                 let mut state = actor.state.lock().await;
@@ -1728,7 +1729,6 @@ async fn drain_at_safe_point_with_steer_off_does_not_promote_held_row() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            crate::util::config::set_follow_up_steer_cache(false);
             let (actor, _rx) = build_actor().await;
             {
                 let mut state = actor.state.lock().await;
@@ -1737,7 +1737,11 @@ async fn drain_at_safe_point_with_steer_off_does_not_promote_held_row() {
                 state.running_task = Some(running_task_stub("running"));
             }
 
-            assert!(!actor.drain_interjections_at_safe_point().await);
+            assert!(
+                !actor
+                    .drain_interjections_at_safe_point_steering(false)
+                    .await
+            );
             let state = actor.state.lock().await;
             let order: Vec<&str> = state
                 .pending_inputs
@@ -1760,7 +1764,6 @@ async fn drain_at_safe_point_with_steer_on_promotes_and_drains_held_row() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            crate::util::config::set_follow_up_steer_cache(true);
             let (actor, _rx) = build_actor().await;
             {
                 let mut state = actor.state.lock().await;
@@ -1770,7 +1773,7 @@ async fn drain_at_safe_point_with_steer_on_promotes_and_drains_held_row() {
             }
 
             assert!(
-                actor.drain_interjections_at_safe_point().await,
+                actor.drain_interjections_at_safe_point_steering(true).await,
                 "Steer must promote and drain the held follow-up"
             );
             let state = actor.state.lock().await;
@@ -1994,7 +1997,6 @@ async fn drain_at_safe_point_with_steer_on_leaves_protected_row_queued() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            crate::util::config::set_follow_up_steer_cache(true);
             let (actor, _rx) = build_actor().await;
             {
                 let mut state = actor.state.lock().await;
@@ -2005,7 +2007,7 @@ async fn drain_at_safe_point_with_steer_on_leaves_protected_row_queued() {
             }
 
             assert!(
-                !actor.drain_interjections_at_safe_point().await,
+                !actor.drain_interjections_at_safe_point_steering(true).await,
                 "protected-only held prefix must not arm steer promotion"
             );
             let state = actor.state.lock().await;
