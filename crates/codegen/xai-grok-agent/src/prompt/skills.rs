@@ -1600,6 +1600,7 @@ mod tests {
                 exec: None,
                 network: None,
                 tools: None,
+                slash_commands: None,
                 config: None,
                 oauth_label: None,
                 settings: None,

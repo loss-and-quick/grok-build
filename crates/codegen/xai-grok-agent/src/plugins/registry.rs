@@ -29,6 +29,10 @@ pub struct SidecarSpec {
     /// registered in the session tool catalog as `<plugin>__<name>` and
     /// executed in the sidecar via `tool_invoke`.
     pub tools: Vec<super::manifest::SidecarToolSpec>,
+    /// Validated slash commands from the manifest's `slashCommands` array,
+    /// advertised in the `/` menu and executed in the sidecar via
+    /// `command_invoke`.
+    pub commands: Vec<super::manifest::SidecarCommandSpec>,
     /// Manifest-declared default config object (`plugin.json`'s `config`), or
     /// `{}` when absent. User `[plugins.<name>]` entries from config.toml are
     /// shallow-merged over these defaults by the shell before the result is
@@ -253,6 +257,7 @@ impl PluginRegistry {
                     plugin_data: PathBuf::from(&plugin_data),
                     network: dp.manifest.network_enabled(),
                     tools: dp.manifest.sidecar_tools(),
+                    commands: dp.manifest.sidecar_commands(),
                     config: dp.manifest.sidecar_config_defaults(),
                 });
 
@@ -900,6 +905,7 @@ mod tests {
                 exec: None,
                 network: None,
                 tools: None,
+                slash_commands: None,
                 config: None,
                 oauth_label: None,
                 settings: None,
@@ -1561,6 +1567,12 @@ mod tests {
                     description: Some("echo back".to_string()),
                     input_schema: None,
                     timeout_ms: Some(1_000),
+                }]),
+                slash_commands: Some(vec![super::super::manifest::ManifestSlashCommandSpec {
+                    name: "status".to_string(),
+                    description: Some("show status".to_string()),
+                    argument_hint: Some("[env]".to_string()),
+                    timeout_ms: Some(2_000),
                 }]),
                 config: Some(serde_json::json!({ "participants": ["alice"] })),
                 oauth_label: None,

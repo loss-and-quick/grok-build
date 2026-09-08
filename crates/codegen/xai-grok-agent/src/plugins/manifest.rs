@@ -308,6 +308,19 @@ pub struct PluginManifest {
     /// [`PluginManifest::sidecar_tools`].
     #[serde(default)]
     pub tools: Option<Vec<ManifestToolSpec>>,
+    /// Slash commands the sidecar serves via `command_invoke` — a plugin
+    /// command that runs the plugin's *code*, as opposed to the `commands`
+    /// field above, which points at a directory of markdown whose body is
+    /// substituted into the user's message.
+    ///
+    /// Both may be declared at once. On a name collision the markdown command
+    /// keeps the bare name (it is the older contract and needs no trust) and
+    /// this one is advertised as `<plugin>:<name>`; see
+    /// `EffectivePluginCommandCatalog` in the shell. Like `tools`, the manifest
+    /// is the source of truth: the catalog is built before any sidecar starts,
+    /// so a lazily-started plugin still appears in the `/` menu.
+    #[serde(default)]
+    pub slash_commands: Option<Vec<ManifestSlashCommandSpec>>,
     /// Default per-plugin configuration object (`plugin.json`'s `config`).
     /// Surfaced to the sidecar at `initialize` and via `config_get`; user
     /// `[plugins.<name>]` entries from config.toml are shallow-merged over
@@ -539,6 +552,38 @@ pub struct SidecarToolSpec {
     pub timeout_ms: u64,
 }
 
+/// One slash command declared in a sidecar plugin's manifest (`slashCommands`
+/// array). The shell advertises it in the `/` menu and dispatches it to the
+/// plugin's sidecar over `command_invoke`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestSlashCommandSpec {
+    /// Bare command name, with no leading `/` and no plugin prefix.
+    pub name: String,
+    /// One-line description shown in the `/` menu.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Free-text usage hint rendered beside the name, the same `argument-hint`
+    /// idiom skills and builtins use. Purely a display string: arguments reach
+    /// the plugin as the unparsed remainder of the line.
+    #[serde(default)]
+    pub argument_hint: Option<String>,
+    /// Per-command `command_invoke` deadline override in milliseconds
+    /// (0/absent → the host default).
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// A validated sidecar slash command ready for catalog advertising.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarCommandSpec {
+    pub name: String,
+    pub description: String,
+    pub argument_hint: Option<String>,
+    /// `0` → the host's default command timeout.
+    pub timeout_ms: u64,
+}
+
 /// Max length of a bare sidecar tool name.
 const MAX_TOOL_NAME_LEN: usize = 64;
 
@@ -549,6 +594,21 @@ fn is_valid_sidecar_tool_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_TOOL_NAME_LEN
         && !name.contains("__")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Max length of a bare sidecar slash-command name.
+const MAX_COMMAND_NAME_LEN: usize = 64;
+
+/// Whether `name` is a valid bare sidecar slash-command name: 1-64 chars of
+/// `[a-zA-Z0-9_-]`. `:` is excluded because it is the separator of the
+/// `<plugin>:<name>` qualified form the catalog falls back to, and a name
+/// containing one could not be told apart from an already-qualified spelling.
+fn is_valid_sidecar_command_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_COMMAND_NAME_LEN
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -775,6 +835,58 @@ impl PluginManifest {
                 description: tool.description.clone().unwrap_or_default(),
                 input_schema,
                 timeout_ms: tool.timeout_ms.unwrap_or(0),
+            });
+        }
+        out
+    }
+
+    /// Validated sidecar slash commands from the manifest's `slashCommands`
+    /// array.
+    ///
+    /// Follows the component-loading convention `sidecar_tools` sets: an
+    /// invalid entry (bad name, duplicate) is warned about and skipped rather
+    /// than failing the whole plugin, and a `slashCommands` array without a
+    /// sidecar entry yields nothing — with no `exec` there is nothing that
+    /// could serve `command_invoke`, so the menu entry would only ever error.
+    pub fn sidecar_commands(&self) -> Vec<SidecarCommandSpec> {
+        let Some(commands) = &self.slash_commands else {
+            return Vec::new();
+        };
+        if !self.has_sidecar() {
+            if !commands.is_empty() {
+                tracing::warn!(
+                    plugin = %self.name,
+                    "manifest declares slashCommands but no sidecar entry (`exec`); ignoring them"
+                );
+            }
+            return Vec::new();
+        }
+        let mut out: Vec<SidecarCommandSpec> = Vec::new();
+        for command in commands {
+            if !is_valid_sidecar_command_name(&command.name) {
+                tracing::warn!(
+                    plugin = %self.name,
+                    command = %command.name,
+                    "skipping sidecar slash command with invalid name \
+                     (1-{MAX_COMMAND_NAME_LEN} chars of [a-zA-Z0-9_-])"
+                );
+                continue;
+            }
+            if out.iter().any(|c| c.name == command.name) {
+                tracing::warn!(plugin = %self.name, command = %command.name,
+                    "skipping duplicate sidecar slash command declaration");
+                continue;
+            }
+            out.push(SidecarCommandSpec {
+                name: command.name.clone(),
+                description: command.description.clone().unwrap_or_default(),
+                argument_hint: command
+                    .argument_hint
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                    .map(str::to_string),
+                timeout_ms: command.timeout_ms.unwrap_or(0),
             });
         }
         out
@@ -1450,6 +1562,7 @@ mod tests {
             exec: None,
             network: None,
             tools: None,
+            slash_commands: None,
             config: None,
             oauth_label: None,
             settings: None,
@@ -1486,6 +1599,7 @@ mod tests {
             exec: None,
             network: None,
             tools: None,
+            slash_commands: None,
             config: None,
             oauth_label: None,
             settings: None,
@@ -1524,6 +1638,7 @@ mod tests {
             exec: None,
             network: None,
             tools: None,
+            slash_commands: None,
             config: None,
             oauth_label: None,
             settings: None,
@@ -1562,6 +1677,7 @@ mod tests {
             exec: None,
             network: None,
             tools: None,
+            slash_commands: None,
             config: None,
             oauth_label: None,
             settings: None,
@@ -1600,6 +1716,7 @@ mod tests {
             exec: None,
             network: None,
             tools: None,
+            slash_commands: None,
             config: None,
             oauth_label: None,
             settings: None,
@@ -1639,6 +1756,7 @@ mod tests {
             exec: None,
             network: None,
             tools: None,
+            slash_commands: None,
             config: None,
             oauth_label: None,
             settings: None,
@@ -1671,6 +1789,7 @@ mod tests {
             exec: None,
             network: None,
             tools: None,
+            slash_commands: None,
             config: None,
             oauth_label: None,
             settings: None,
@@ -1841,6 +1960,81 @@ mod tests {
         assert!(
             manifest.sidecar_tools().is_empty(),
             "tools without a `plugin` sidecar entry have nothing to serve them"
+        );
+    }
+
+    // ── Sidecar slash commands (`slashCommands`) ────────────────────────
+
+    #[test]
+    fn sidecar_commands_parse_with_defaults_and_camel_case() {
+        let json = r#"{
+            "name": "deployer",
+            "exec": "./index.ts",
+            "commands": "./prompt-macros/",
+            "slashCommands": [
+                {
+                    "name": "deploy",
+                    "description": "Deploy the current branch",
+                    "argumentHint": "<env> [--dry-run]",
+                    "timeoutMs": 30000
+                },
+                { "name": "bare_command" }
+            ]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let commands = manifest.sidecar_commands();
+        assert_eq!(commands.len(), 2);
+
+        assert_eq!(commands[0].name, "deploy");
+        assert_eq!(commands[0].description, "Deploy the current branch");
+        assert_eq!(
+            commands[0].argument_hint.as_deref(),
+            Some("<env> [--dry-run]")
+        );
+        assert_eq!(commands[0].timeout_ms, 30_000);
+
+        // Omitted fields default: empty description, no hint, timeout 0 (host
+        // default).
+        assert_eq!(commands[1].name, "bare_command");
+        assert_eq!(commands[1].description, "");
+        assert_eq!(commands[1].argument_hint, None);
+        assert_eq!(commands[1].timeout_ms, 0);
+
+        // The markdown `commands` directory is a separate field and is
+        // untouched by the handler declaration.
+        assert!(matches!(manifest.commands, Some(PathOrPaths::Single(_))));
+    }
+
+    #[test]
+    fn sidecar_commands_skip_invalid_entries() {
+        let json = r#"{
+            "name": "deployer",
+            "exec": "./index.ts",
+            "slashCommands": [
+                { "name": "ok-command" },
+                { "name": "" },
+                { "name": "deployer:qualified" },
+                { "name": "bad name!" },
+                { "name": "ok-command" }
+            ]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let commands = manifest.sidecar_commands();
+        // Only the first `ok-command` survives: empty / `:` (the qualified-name
+        // separator) / bad charset / duplicate are each warned and skipped.
+        assert_eq!(
+            commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec!["ok-command"]
+        );
+    }
+
+    #[test]
+    fn sidecar_commands_without_sidecar_entry_are_ignored() {
+        let json = r#"{ "name": "no-sidecar", "slashCommands": [{ "name": "ghost" }] }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(
+            manifest.sidecar_commands().is_empty(),
+            "a slash command with no `exec` has nothing to serve `command_invoke`"
         );
     }
 

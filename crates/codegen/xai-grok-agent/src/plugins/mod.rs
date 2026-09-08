@@ -22,8 +22,9 @@ pub use discovery::{
 pub use hooks_adapter::parse_plugin_hooks;
 pub use install_registry::InstallRegistry;
 pub use manifest::{
-    ExecEntry, ManifestOauthAccount, ManifestSettingSpec, OauthAccount, PluginManifest,
-    PluginSettingChoice, PluginSettingKind, PluginSettingSpec, SidecarLaunch, SidecarToolSpec,
+    ExecEntry, ManifestOauthAccount, ManifestSettingSpec, ManifestSlashCommandSpec, OauthAccount,
+    PluginManifest, PluginSettingChoice, PluginSettingKind, PluginSettingSpec, SidecarCommandSpec,
+    SidecarLaunch, SidecarToolSpec,
 };
 pub use registry::{
     LoadedPlugin, OauthLoginProvider, PluginRegistry, SharedPluginRegistryHandle, SidecarSpec,
