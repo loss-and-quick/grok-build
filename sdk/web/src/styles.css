@@ -501,18 +501,55 @@ button.tool-title:focus-visible .tool-bullet-mark {
   color: var(--grok-text-primary, canvastext);
 }
 
-/* `bg_dark` is the panel the pager puts a read body on. */
+/* `bg_dark` is the panel the pager puts a read body and a search's hits on. */
 .tool-panel {
   padding: 0.4rem 0;
   background: var(--grok-bg-dark, canvas);
 }
 
-.tool-read {
+/* One scroll box per result, never one per file group: a search over six files
+ * is one list in the terminal, and giving each group its own scrollbar would
+ * make the browser harder to read than the pane this is copying. */
+.tool-read,
+.tool-search {
   grid-column: 2;
   margin-top: 0.25rem;
   min-width: 0;
   max-height: 24rem;
   overflow: auto;
+}
+
+.tool-search .tool-panel + .tool-panel {
+  margin-top: 0.5rem;
+}
+
+/* The hit line number is a fixed four-wide field in the terminal (`{:>4}`),
+ * shared across every file group so they read as one list. */
+.tool-hit-line {
+  min-width: 4ch;
+}
+
+.tool-hit-path {
+  padding: 0 0.4rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  color: var(--grok-path, canvastext);
+  overflow-wrap: anywhere;
+}
+
+.tool-search-meta {
+  margin-bottom: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--grok-gray, canvastext);
+}
+
+.tool-meta-key {
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.tool-meta-value {
+  color: var(--grok-text-primary, canvastext);
 }
 
 /* Whatever a fold is hiding, said in the muted role the pager uses for its own

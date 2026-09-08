@@ -1,16 +1,21 @@
 import { For, Match, Show, Switch, type JSX } from "solid-js";
 
 import { ellipsisFor, truncationFor, type DisplayMode } from "../toolcall.ts";
-import type { ReadResult, TypedResult } from "../toolresult.ts";
+import {
+  resultPath,
+  type ReadResult,
+  type SearchResult,
+  type TypedResult,
+} from "../toolresult.ts";
 
 /**
  * A tool call's result, drawn from the typed `rawOutput` rather than from prose.
  *
  * Every layout decision below is the pager's, cited where it is made; the ones
  * that are not are marked as this client's and given a reason. Nothing here
- * builds markup from a string — a file's text is arbitrary bytes from someone's
- * disk, and it reaches the page as text nodes for the same reason panel
- * markdown does.
+ * builds markup from a string — a hit line and a file's text are arbitrary
+ * bytes from someone's disk, and they reach the page as text nodes for the same
+ * reason panel markdown does.
  */
 export function ToolResult(props: {
   result: TypedResult;
@@ -21,6 +26,9 @@ export function ToolResult(props: {
     <Switch>
       <Match when={props.result.kind === "read" ? (props.result as ReadResult) : null}>
         {(read) => <ReadBody read={read()} mode={props.mode} />}
+      </Match>
+      <Match when={props.result.kind === "search" ? (props.result as SearchResult) : null}>
+        {(search) => <SearchBody search={search()} cwd={props.cwd} />}
       </Match>
     </Switch>
   );
@@ -83,6 +91,86 @@ function ReadRow(props: {
         {props.base + props.row.at}
       </span>
       <span class="tool-line">{props.row.text}</span>
+    </div>
+  );
+}
+
+/**
+ * A search, as the hits it found.
+ *
+ * `SearchToolCallBlock::output` (`blocks/tool/search.rs`): a metadata line, a
+ * blank, then one group per file — the path in the `path` role, and under it
+ * each hit as a right-aligned line number in the muted role, two spaces, and
+ * the line. `(no results)` when there were none, which is the second half of
+ * the `(no matches)` the header already carries.
+ *
+ * The pager prints a hit's path exactly as the tool reported it, absolute and
+ * with the `/./` a scope of `.` leaves in. This client relativises it against
+ * the session root, which is what its titles already do and the only root a
+ * browser can honestly measure against.
+ */
+function SearchBody(props: { search: SearchResult; cwd: string }): JSX.Element {
+  const meta = (): { key: string; value: string }[] => {
+    const parts: { key: string; value: string }[] = [
+      { key: "mode: ", value: props.search.meta.mode },
+    ];
+    if (props.search.meta.fileType) parts.push({ key: "type: ", value: props.search.meta.fileType });
+    if (props.search.meta.caseInsensitive) parts.push({ key: "case-insensitive: ", value: "true" });
+    if (props.search.meta.multiline) parts.push({ key: "multiline: ", value: "true" });
+    return parts;
+  };
+  const empty = (): boolean =>
+    props.search.files.length === 0 && props.search.paths.length === 0;
+
+  return (
+    <div class="tool-search">
+      <div class="tool-search-meta">
+        <For each={meta()}>
+          {(part, at) => (
+            <>
+              <Show when={at() > 0}>
+                <span class="tool-meta-key">, </span>
+              </Show>
+              <span class="tool-meta-key">{part.key}</span>
+              <span class="tool-meta-value">{part.value}</span>
+            </>
+          )}
+        </For>
+      </div>
+      <Show when={empty() && props.search.matchCount === 0}>
+        <div class="tool-fold-note">(no results)</div>
+      </Show>
+      <For each={props.search.files}>
+        {(file) => (
+          <div class="tool-panel tool-hits">
+            <div class="tool-hit-path">{resultPath(props.cwd, file.path)}</div>
+            <For each={file.matches}>
+              {(hit) => (
+                <div class="tool-row">
+                  {/* Width four, the pager's own fixed field (`{:>4}`), rather
+                      than one sized to the widest hit: its groups are laid out
+                      independently and a shared column is what keeps them
+                      reading as one list. */}
+                  <span class="tool-gutter tool-hit-line">{hit.line}</span>
+                  <span class="tool-line">{hit.text}</span>
+                </div>
+              )}
+            </For>
+          </div>
+        )}
+      </For>
+      <Show when={props.search.paths.length > 0}>
+        <div class="tool-panel tool-hits">
+          <For each={props.search.paths}>
+            {(path) => <div class="tool-hit-path">{resultPath(props.cwd, path)}</div>}
+          </For>
+        </div>
+      </Show>
+      <Show when={props.search.hidden > 0}>
+        <div class="tool-fold-note">
+          {"…"} {props.search.hidden} more not shown
+        </div>
+      </Show>
     </div>
   );
 }
