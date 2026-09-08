@@ -205,3 +205,99 @@ async fn marketplace_add_resolves_a_relative_source_against_the_session_root() {
         "the source must resolve against the session's root, got {message:?}"
     );
 }
+
+/// Names of the entries `x.ai/fs/list` returned, for order-insensitive asserts.
+fn listed_names(result: &serde_json::Value) -> Vec<String> {
+    result["nodes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("fs/list must return nodes: {result}"))
+        .iter()
+        .filter_map(|n| n["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// A client can enumerate a directory the leader was not launched in.
+///
+/// This is what lets a client offer a directory to start a session in: without
+/// it the only roots reachable are the ones some earlier terminal already
+/// opened. The walk is a plain local walk over the resolved absolute path
+/// (`session::file_system::list`); the process-wide `WorkspaceOps` is consulted
+/// only by `extensions::fs::confine_local`, whose confinement is off in local
+/// mode (`WorkspaceHandle::new_minimal` sets `confine_fs_to_workspace_root:
+/// false`), so it returns the path untouched and no walk root.
+///
+/// Serial for the same reason as the cases above: the first `fs` call builds
+/// the local workspace handle, which resolves launch-dir trust out of `HOME`.
+#[tokio::test]
+#[serial_test::serial]
+async fn fs_list_enumerates_a_directory_outside_the_leaders_launch_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home = EnvGuard::set("HOME", &home);
+    let _userprofile = EnvGuard::set("USERPROFILE", &home);
+    let _grok = EnvGuard::set("GROK_HOME", &home);
+
+    let elsewhere = tmp.path().join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("src")).unwrap();
+    std::fs::write(elsewhere.join("Cargo.toml"), "[package]\n").unwrap();
+
+    let launch_cwd = std::env::current_dir().unwrap();
+    assert!(
+        !elsewhere.starts_with(&launch_cwd),
+        "the fixture must lie outside the launch dir to prove anything"
+    );
+
+    let agent = build_minimal_agent_for_tests();
+    let result = ext_result(
+        &agent,
+        "x.ai/fs/list",
+        serde_json::json!({ "path": elsewhere.to_string_lossy() }),
+    )
+    .await;
+
+    let names = listed_names(&result);
+    assert!(
+        names.iter().any(|n| n == "Cargo.toml") && names.iter().any(|n| n == "src"),
+        "a directory outside the launch root must enumerate, got {names:?}"
+    );
+}
+
+/// A relative `fs/list` answers about the named session's root, not the
+/// leader's launch dir — the same rule the rest of this file pins.
+#[tokio::test]
+#[serial_test::serial]
+async fn fs_list_resolves_a_relative_path_against_the_named_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home = EnvGuard::set("HOME", &home);
+    let _userprofile = EnvGuard::set("USERPROFILE", &home);
+    let _grok = EnvGuard::set("GROK_HOME", &home);
+
+    let root_b = tmp.path().join("b");
+    std::fs::create_dir_all(&root_b).unwrap();
+    std::fs::write(root_b.join("only-in-b.txt"), "b\n").unwrap();
+
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("fs-list-root-sess");
+    let mut handle = make_test_handle("test-model", false, None);
+    handle.info = Info {
+        id: sid.clone(),
+        cwd: root_b.to_string_lossy().into_owned(),
+    };
+    agent.insert_resident(&sid, handle);
+
+    let result = ext_result(
+        &agent,
+        "x.ai/fs/list",
+        serde_json::json!({ "sessionId": sid.0.as_ref(), "path": "." }),
+    )
+    .await;
+
+    let names = listed_names(&result);
+    assert!(
+        names.iter().any(|n| n == "only-in-b.txt"),
+        "a relative list must walk the session's root, got {names:?}"
+    );
+}
