@@ -443,7 +443,7 @@ one capped at a hundred, directory mode, drilling in, and the email guard.
 pager renders.
 
 ```sh
-GROK_HOME=/tmp/…                                     # or your real ~/.grok
+GROK_HOME=~/.cache/grok-panel-probe                   # or your real ~/.grok
 cp -rL sdk/web/test/fixtures/panel-probe "$GROK_HOME/plugins/panel-probe"
 ```
 
@@ -457,6 +457,63 @@ enabled = ["panel-probe"]
 Start a session and the panel appears. Type into a field and press **Echo**: the
 press routes back through `x.ai/plugins/panel_action`, the plugin republishes the
 panel with what it received, and the new version replaces the old one.
+
+Typing survives that re-publish. A plugin repaints its whole panel on every
+status tick, and the terminal treats keeping the half-typed line through it as
+this layer's headline property (`PanelState::merge`, and a test named
+`merge_reuses_editor_and_discards_new_value`). The browser now matches it: the
+field is the same element after a repaint, and the value the re-publish carried
+for a field that already exists is discarded.
+
+## The widget rail
+
+Panels can live in a column beside the session instead of in a stack above the
+transcript. The shape is not ours: the pager designed it as `views/dock.rs`,
+the Figma "Exploration" layout — named sections, a header carrying a count and a
+rule, a section that folds, and a dock with nothing in it drawing nothing at all
+— and the plugin protocol has promised a panel a "compact sidebar widget" since
+it was written without any client building one.
+
+The gate is the agent's. `dock_enabled` rides `x.ai/settings/update`, which the
+shell forwards to **every** attached client rather than to the terminal that
+caused the refresh, and this client used to drop that notification, so an
+account the dock was on for saw no sign of it here. The checkbox in the sidebar
+is the browser's own layer above it, and it is not an invention either: the
+pager resolves the same feature through pin, environment, config file, then the
+cohort flag, and a `[features] dock` in a file on that machine outranks the
+rollout. A browser has no such file, so storage takes that place. The label says
+which way the agent has voted, because a switch whose default comes from
+elsewhere is unreadable without it.
+
+Each section folds from its header; `↑` and `↓` walk headers and rows
+together, as the dock's cursor does, and clamp at the ends rather than wrapping. **Open**
+raises the panel in a dialog — the F6 overlay as a button, since F6 itself moves
+focus between browser regions and is an accessibility control. Both surfaces
+share one set of editors, so a code typed into the widget is still there in the
+dialog. A plugin that throws while being drawn takes down its own widget and
+nothing else.
+
+### Which widths hold three columns
+
+Measured in Chromium against a live gateway and a plugin publishing a
+four-column table, not assumed:
+
+| window | what it does |
+| --- | --- |
+| ≥ 1200px | three columns; the rail is 360–384px, which is what that table needs |
+| < 1200px | the rail becomes a strip directly above the prompt, full width — the pager's own geometry, where the same table has 400px or more |
+| < 760px | the navigator becomes a drawer: a button opens it, Escape and the scrim close it, and the page behind is `inert` while it is open |
+
+At 1100px a third column is 300px wide and cuts that table's last column off
+with nothing on screen to say so, which is why the breakpoint is 1200 and not
+the round number.
+
+**700px is the narrowest window this client is meant for.** It is not a guess:
+at 700px the session column is 676px, and 80 monospace columns at this font are
+672px — below that the transcript is narrower than the terminal it mirrors.
+Nothing breaks between 480px and 700px (checked: no horizontal page scroll,
+every control reachable), and below 480px it is untested. A phone layout is
+deliberately not attempted: this is a view of a local machine over loopback.
 
 ## Folder trust
 
@@ -692,9 +749,11 @@ back as the same objects, so `<For>` leaves their DOM — and any selection in i
 | `src/commands.ts` | the slash catalog: provenance, matching, reading the composer |
 | `src/markdown.ts` | the markdown parser's configuration, and which links keep an href |
 | `src/panel.ts` | tone-to-role, and the block-kind exhaustiveness guard |
+| `src/rail.ts` | the rail's line walk, ported from `views/dock.rs`, and who decides it is drawn |
+| `src/focus.ts` | the focus trap every surface claiming `aria-modal` calls |
 | `src/theme.ts` | generated palette to CSS custom properties |
 | `src/App.tsx` | the screen and its routes |
-| `src/components/` | AuthCard, Roster, Session, ToolResult, Subagents, Panel, Markdown, ModelPicker, Settings, PermissionCard, FolderTrustCard, DirectoryPicker, CommandMenu |
+| `src/components/` | AuthCard, Roster, Session, ToolResult, Subagents, Panel, Rail, Widget, Overlay, Markdown, ModelPicker, Settings, PermissionCard, FolderTrustCard, DirectoryPicker, CommandMenu |
 
 `src/wire.ts` is hand-written on purpose and the reasoning is at the top of the
 file: the panel types and the palette *are* generated and are imported, never
