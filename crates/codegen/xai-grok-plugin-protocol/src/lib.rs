@@ -1259,12 +1259,14 @@ pub struct AgentSendResult {
 // ui_publish_panel / ui_close_panel (plugin→core requests) and panel_action
 // (core→plugin notification) — the generic plugin UI panel surface.
 //
-// A plugin pushes a declarative [`PanelViewModel`] to the host; the pager renders
-// it both as a full-screen overlay (opened with Ctrl+P) and as a compact sidebar
-// widget. The pager owns all interaction state — Table row selection/scroll and
-// button focus — so the view model is pure data, re-published wholesale on every
-// change (latest-wins, keyed by `id`). When a button is activated the pager
-// routes it back to the publishing plugin as a [`PanelActionParams`] notification.
+// A plugin pushes a declarative [`PanelViewModel`] to the host, and each host
+// decides where to draw it: the pager as a full-screen overlay (F6) plus a
+// one-line chip in the status bar, `sdk/web` as a section of its widget rail
+// plus the same panel in a dialog. The host owns all interaction state — Table
+// row selection/scroll, the line editors, and button focus — so the view model
+// is pure data, re-published wholesale on every change (latest-wins, keyed by
+// `id`). When a button is activated the host routes it back to the publishing
+// plugin as a [`PanelActionParams`] notification.
 //
 // The host maps each `id` to the sidecar that published it; `id` is the plugin's
 // own local string and carries no plugin identity of its own.

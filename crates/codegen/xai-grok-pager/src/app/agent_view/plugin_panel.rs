@@ -22,7 +22,9 @@ impl AgentView {
     /// `(plugin, view_model.id)`. On re-publish of an existing key the live
     /// [`PanelState`] is merged so in-progress input survives; a genuinely new
     /// panel becomes the active one if none is active yet. Does NOT open the
-    /// overlay — a fresh panel shows in the sidebar until the user opens it.
+    /// overlay — until the user presses F6 a fresh panel shows only as the
+    /// status-bar chip ([`Self::plugin_panel_status_chip`]). The pager has no
+    /// sidebar; the surface of that name is `sdk/web`'s widget rail.
     pub(crate) fn apply_plugin_panel(
         &mut self,
         plugin: String,
