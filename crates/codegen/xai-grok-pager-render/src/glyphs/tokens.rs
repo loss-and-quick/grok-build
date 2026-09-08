@@ -55,7 +55,7 @@ use super::{
     disclosure_open, dot_spinner_frames, enlarge, enlarge_button, filled_dot, heavy_horizontal,
     hollow_dot, is_legacy_windows_console, light_horizontal, monitor_icon_frames, prompt_arrow,
     record_dot, selection_bar, timeline_chevron_down, timeline_chevron_up, timeline_tick_active,
-    timeline_tick_hover, token_arrow,
+    timeline_tick_hover, token_arrow, warning_sign,
 };
 
 /// Path of the generated artifact, relative to the repository root.
@@ -97,6 +97,7 @@ const CENSUS: &[(&str, Reach)] = &[
     ("ballot_x", Reach::Exported("ballot_x")),
     ("check_mark", Reach::Exported("check_mark")),
     ("enlarge", Reach::Exported("enlarge")),
+    ("warning_sign", Reach::Exported("warning_sign")),
     ("copy_icon", Reach::Exported("copy_icon")),
     ("token_arrow", Reach::Exported("token_arrow")),
     (
@@ -210,6 +211,9 @@ struct GlyphStrings {
     ballot_x: &'static str,
     /// `[✗]` — the pre-composed bracketed button form of `ballot_x`.
     ballot_x_button: &'static str,
+    /// `⚠` — the "blocked on you" marker the terminal title carries as
+    /// `⚠ Action Required` while a permission request is unanswered.
+    warning_sign: &'static str,
     /// `↗` — the enlarge / view button.
     enlarge: &'static str,
     /// `[↗]` — its pre-composed bracketed button form.
@@ -295,6 +299,7 @@ fn glyph_strings() -> Vec<(&'static str, &'static str, &'static str)> {
         ballot_x: cross,
         ballot_x_button: cross_button,
         enlarge: grow,
+        warning_sign: warning,
         enlarge_button: grow_button,
         copy_icon: copy,
         token_arrow: tokens,
@@ -328,6 +333,7 @@ fn glyph_strings() -> Vec<(&'static str, &'static str, &'static str)> {
         ("ballot_x", cross),
         ("ballot_x_button", cross_button),
         ("enlarge", grow),
+        ("warning_sign", warning),
         ("enlarge_button", grow_button),
         ("copy_icon", copy),
         ("token_arrow", tokens),
@@ -422,6 +428,7 @@ fn exported_strings() -> GlyphStrings {
         ballot_x: ballot_x(),
         ballot_x_button: ballot_x_button(),
         enlarge: enlarge(),
+        warning_sign: warning_sign(),
         enlarge_button: enlarge_button(),
         copy_icon: copy_icon(),
         token_arrow: token_arrow(),

@@ -72,6 +72,18 @@ pub fn check_mark() -> &'static str {
     }
 }
 
+/// `"⚠"` (U+26A0 WARNING SIGN) normally, `"!"` on legacy ConHost. Always 1 column wide.
+///
+/// The "blocked on you" marker: the terminal title carries it as `⚠ Action Required` while a permission request sits unanswered.
+/// CP437 has no warning sign, so the fallback is the exclamation mark it does have, which still reads as an alert in a one-column slot.
+pub fn warning_sign() -> &'static str {
+    if is_legacy_windows_console() {
+        "!"
+    } else {
+        "\u{26A0}"
+    }
+}
+
 /// `"↗"` (U+2197 NORTH EAST ARROW) normally, `"o"` on legacy ConHost. Always 1 column wide.
 ///
 /// The enlarge / view / fullscreen button glyph.

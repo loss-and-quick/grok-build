@@ -193,7 +193,8 @@ fn write_item(
                 return false;
             }
             push_separator(buf, has_parts);
-            buf.push_str("\u{26A0} Action Required");
+            buf.push_str(xai_grok_pager_render::glyphs::warning_sign());
+            buf.push_str(" Action Required");
         }
     }
     *has_parts = true;

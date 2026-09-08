@@ -56,6 +56,11 @@ export interface Glyphs {
   ballot_x_button: string;
   /** `↗` — the enlarge / view button. */
   enlarge: string;
+  /**
+   * `⚠` — the "blocked on you" marker the terminal title carries as
+   * `⚠ Action Required` while a permission request is unanswered.
+   */
+  warning_sign: string;
   /** `[↗]` — its pre-composed bracketed button form. */
   enlarge_button: string;
   /** `⧉` — the copy button. */
@@ -130,6 +135,7 @@ export const GLYPHS = {
   ballot_x: "\u{2717}",
   ballot_x_button: "[\u{2717}]",
   enlarge: "\u{2197}",
+  warning_sign: "\u{26A0}",
   enlarge_button: "[\u{2197}]",
   copy_icon: "\u{29C9}",
   token_arrow: "\u{21E3}",
