@@ -81,12 +81,19 @@ impl MvpAgent {
 impl acp::Agent for MvpAgent {
     /// The response meta carries `model_state` so the client can display the available models and the default model.
     ///
-    /// SINGLE-CALL INVARIANT: this method is the sole writer of `self.auth_method_id` during initialization.
-    /// It is called exactly once per agent process by the ACP server before any session-creating requests.
-    /// At that point `auth_method_id` is still `None` (initialized at `MvpAgent::new`).
-    /// The auth-method block below relies on that invariant when it unconditionally writes the default id from `auth_method::build_auth_methods`.
-    /// If you ever need to call `initialize()` more than once, restore an `is_none()` guard around the `auth_method_id` write at the call site.
-    /// Without the guard a re-init silently downgrades an api-key user to a session-token user.
+    /// AUTH-METHOD WRITE, ONCE PER CLIENT: this method is the sole writer of `self.auth_method_id` during initialization,
+    /// but it is NOT called once per process. In leader mode every client that registers sends its own `initialize`,
+    /// and while `self.initialize_request` is a `OnceLock` whose second `set` fails (logged as "called on reconnect"),
+    /// the rest of the body — including the `build_auth_methods` block below — runs again in full.
+    /// Verified against a running leader: a second client produces a second `auth: initialize() built auth_methods`.
+    ///
+    /// That re-run is deliberate rather than tolerated, so do NOT add an `is_none()` guard here.
+    /// The write is `if let Some(default_id)`, so a re-run can only replace the installed method, never clear it,
+    /// and the replacement is recomputed from the same `auth.json` and environment every client reads.
+    /// A guard would pin the first client's answer for the agent's life — a browser joining after a `grok logout`,
+    /// or after a login that minted the first credential this machine has, would keep a method that no longer exists.
+    /// The write is safe for a different reason than "it happens once": the value is a property of the one credential
+    /// store this process owns, not of the client that asked.
     async fn initialize(
         &self,
         arguments: acp::InitializeRequest,
