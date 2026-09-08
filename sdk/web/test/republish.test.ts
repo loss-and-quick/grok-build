@@ -120,6 +120,41 @@ describe("a panel that repaints while someone types", () => {
   });
 });
 
+describe("a panel whose fields come and go", () => {
+  test("stops sending a field the plugin has taken away", () => {
+    // `PanelActionParams.inputs` is what the plugin reads to decide what was
+    // submitted. A field the panel no longer draws must not still be in there:
+    // an OAuth panel that removes its code box after a successful exchange
+    // would otherwise keep posting the old code back on every later press.
+    const { republish, field, press, seen } = mount(publish("first", null, true));
+    field().value = "abc";
+    field(1).value = "gone";
+    republish(publish("second", null));
+    press();
+    expect(seen.at(-1)?.inputs).toEqual({ code: "abc" });
+  });
+
+  test("and follows an id that moves under a field it is already drawing", () => {
+    // Walking by position keeps the element; the registration has to follow the
+    // block's id anyway, or the value of one field is delivered under another
+    // field's name.
+    const renamed: PanelViewModel = {
+      id: "p",
+      title: "second",
+      blocks: [
+        { kind: "status", items: [{ label: "tick", value: "second", tone: "neutral" }] },
+        { kind: "input", id: "other", label: "Other", placeholder: null, value: "y", secret: false },
+        { kind: "actions", buttons: [{ id: "go", label: "Go", key: null }] },
+      ],
+    };
+    const { republish, field, press, seen } = mount(publish("first", null));
+    field().value = "abc";
+    republish(renamed);
+    press();
+    expect(seen.at(-1)?.inputs).toEqual({ other: "y" });
+  });
+});
+
 describe("the panel store", () => {
   test("treats a re-publish as a change to the panel, not a new one", () => {
     // Writing an object at a store path merges into what is there, so the

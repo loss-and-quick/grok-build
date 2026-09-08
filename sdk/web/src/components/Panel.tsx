@@ -1,6 +1,16 @@
 import type { PanelBlock } from "@grok-build/plugin/generated/PanelBlock.ts";
 import type { PanelViewModel } from "@grok-build/plugin/generated/PanelViewModel.ts";
-import { For, Index, Match, Switch, type JSX } from "solid-js";
+import {
+  For,
+  Index,
+  Match,
+  Switch,
+  createEffect,
+  createMemo,
+  onCleanup,
+  untrack,
+  type JSX,
+} from "solid-js";
 
 import { toneColor, type PanelAction } from "../panel.ts";
 import { Markdown } from "./Markdown.tsx";
@@ -36,6 +46,8 @@ interface Fields {
   adopt(id: string, field: HTMLInputElement, published: string | null): void;
   /** Remember an edit, so it survives an element this component has to rebuild. */
   record(id: string, field: HTMLInputElement): void;
+  /** Drop a field the panel no longer draws, so nothing collects it again. */
+  forget(id: string): void;
   /** What a button press carries back, from the fields that are on screen now. */
   collect(): Record<string, string>;
 }
@@ -55,6 +67,10 @@ function createFields(): Fields {
     },
     record(id, field) {
       typed.set(id, field.value);
+    },
+    forget(id) {
+      mounted.delete(id);
+      typed.delete(id);
     },
     collect() {
       return Object.fromEntries([...mounted].map(([id, field]) => [id, field.value]));
@@ -189,19 +205,37 @@ export function Panel(props: {
 /**
  * One `input` block.
  *
- * The value is written in the `ref` — once, as the element is built — rather
- * than bound to the block. A binding would re-apply on every re-publish, which
- * is the behaviour the pager deliberately does not have: it keeps the live
- * editor for an id it already knows and ignores the value that came with it.
+ * Registration follows the block's **id**, and is undone when that id goes
+ * away. Solid calls a `ref` once, at creation, and never on removal, so a map
+ * filled from one would only ever grow: a panel that dropped its code box after
+ * a successful exchange went on posting the code back with every later press,
+ * and a field whose id moved delivered its value under the name of a field that
+ * no longer existed. An effect keyed on the id both registers and cleans up,
+ * which is what makes the collector describe the panel that is on screen.
+ *
+ * The value seeds a field once, as the id arrives, rather than being bound to
+ * the block. A binding would re-apply on every re-publish, which is the
+ * behaviour the pager deliberately does not have: it keeps the live editor for
+ * an id it already knows and ignores the value that came with it.
  */
 function Field(props: { block: BlockOf<"input">; fields: Fields }): JSX.Element {
+  let field!: HTMLInputElement;
+  // Through a memo, so the effect wakes when the *id* changes and not merely
+  // because a re-publish handed down a new object carrying the same id — which
+  // is every status tick, and would re-seed the field on each one.
+  const id = createMemo(() => props.block.id);
+  createEffect(() => {
+    const key = id();
+    props.fields.adopt(key, field, untrack(() => props.block.value));
+    onCleanup(() => props.fields.forget(key));
+  });
   return (
     <label class="grok-panel-input">
       <span class="grok-panel-input-label">{props.block.label}</span>
       <input
         type={props.block.secret ? "password" : "text"}
         placeholder={props.block.placeholder ?? undefined}
-        ref={(field) => props.fields.adopt(props.block.id, field, props.block.value)}
+        ref={field}
         onInput={(event) => props.fields.record(props.block.id, event.currentTarget)}
       />
     </label>
