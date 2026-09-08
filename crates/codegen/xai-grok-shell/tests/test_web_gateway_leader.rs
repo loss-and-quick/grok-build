@@ -312,6 +312,84 @@ async fn browser_sessions_declare_no_terminal_and_no_filesystem() {
     harness.leader.cancel.cancel();
 }
 
+/// A browser draws the folder-trust card, and the whole round-trip has to survive the two hops the
+/// gateway adds.
+///
+/// Both halves are load-bearing and neither is visible from the gateway alone. The capability is
+/// per client — the leader stamps it into `_meta` from the registration, and the agent prefers that
+/// over its shared, last-initialize-wins flag — so a browser session that does not carry
+/// `interactiveTrust` is a session on a non-launch-dir root that resolves untrusted with no card and
+/// no notice. And the request itself is routed driver-only rather than broadcast
+/// (`is_interaction_request`, `leader/server.rs`), so it reaches the browser only because that
+/// browser is the driver of the session it opened.
+#[tokio::test]
+async fn a_browser_session_carries_the_trust_card_and_receives_it() {
+    let mut harness = Harness::start().await;
+    let mut browser = harness.connect_browser().await;
+    harness.wait_for_client_count(KEEPER + 1).await;
+
+    browser
+        .send(Message::text(
+            r#"{"jsonrpc":"2.0","id":11,"method":"session/new","params":{"cwd":"/repo","mcpServers":[]}}"#,
+        ))
+        .await
+        .unwrap();
+
+    let forwarded = harness.next_agent_request().await;
+    assert_eq!(forwarded["method"], "session/new");
+    assert_eq!(
+        forwarded["params"]["_meta"]["interactiveTrust"], true,
+        "a browser session must tell the agent this client can answer the card"
+    );
+    let request_id = forwarded["id"].as_str().unwrap().to_string();
+
+    // The agent's reply names the session, and that is what makes this browser its driver.
+    let session_id = "sess-folder-trust";
+    harness
+        .leader
+        .response_tx
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","id":"{request_id}","result":{{"sessionId":"{session_id}"}}}}"#
+        ))
+        .unwrap();
+    let at_browser = next_browser_json(&mut browser).await;
+    assert_eq!(at_browser["id"], 11);
+
+    harness
+        .leader
+        .response_tx
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","id":"trust-1","method":"x.ai/folder_trust/request","params":{{"sessionId":"{session_id}","cwd":"/repo","workspace":"/repo","configKinds":["mcp"]}}}}"#
+        ))
+        .unwrap();
+
+    let card = next_browser_json(&mut browser).await;
+    assert_eq!(card["method"], "x.ai/folder_trust/request");
+    assert_eq!(card["params"]["sessionId"], session_id);
+    assert_eq!(card["params"]["workspace"], "/repo");
+
+    // The decision goes back bare. An `ExtMethodResult` envelope here would reach the agent's
+    // `serde_json::from_str::<FolderTrustResponse>` as an undecodable payload, and every grant would
+    // read as "not a decision" and leave the workspace gated.
+    browser
+        .send(Message::text(format!(
+            r#"{{"jsonrpc":"2.0","id":{},"result":{{"outcome":"trust"}}}}"#,
+            card["id"]
+        )))
+        .await
+        .unwrap();
+    let answer = harness.next_agent_request().await;
+    assert_eq!(answer["id"], "trust-1");
+    assert_eq!(answer["result"]["outcome"], "trust");
+    assert!(
+        answer["result"].get("result").is_none(),
+        "the agent parses the payload bare: {}",
+        answer["result"]
+    );
+
+    harness.leader.cancel.cancel();
+}
+
 /// A browser that disappears mid-session must not leave a registration behind.
 ///
 /// Dropping the channels alone would not do it: the leader client's write task keeps sending

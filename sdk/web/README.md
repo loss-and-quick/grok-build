@@ -115,11 +115,13 @@ this request to the client that opened the session and never replays it, so it
 can arrive before that session is attached, and a card dropped for that reason
 is a project silently running without its own configuration.
 
-**The gateway does not send it yet.** `browser_capabilities()` in
-`crates/codegen/xai-grok-shell/src/agent/web_gateway.rs` pins
-`interactive_trust: Some(false)`, which is what suppresses the request for every
-browser. That was correct while nothing here could answer; the comment there
-names the one line to flip.
+`browser_capabilities()` in
+`crates/codegen/xai-grok-shell/src/agent/web_gateway.rs` registers
+`interactive_trust: Some(true)`, which is what makes the agent send the request
+to a browser at all. It declares that for every authenticated WebSocket client,
+not only this one, and it can afford to: a client that answers with an error, an
+undecodable payload or nothing at all leaves the workspace gated exactly as a
+refusal to declare would. Only an explicit `"trust"` unblocks.
 
 ## Tests
 

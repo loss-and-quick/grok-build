@@ -1944,7 +1944,9 @@ async fn test_leader_interactive_trust_client_isolation() {
     .await
     .unwrap();
 
-    // A browser joining the same leader: nothing on the far side answers `x.ai/folder_trust/request`.
+    // A second client that cannot draw the card and says so. The gateway's own browsers now register
+    // `Some(true)` (`web_gateway::browser_capabilities`); what is under test here is the isolation,
+    // so this side has to be a client whose declared answer is the opposite of the TUI's.
     let web_client = LeaderClient::connect(
         sock_path,
         "grok-web",

@@ -158,12 +158,27 @@ pub type LeaderAttach = Arc<
 ///
 /// `code_nav_enabled` and `status_line` are false for the same reason: nothing here renders them.
 ///
-/// `interactive_trust` is `Some(false)`, an explicit refusal rather than `None`. A browser could in principle draw
-/// the folder-trust card, but nothing on the far side of this socket answers `x.ai/folder_trust/request` today, and
-/// an unanswered card just holds the round-trip open until it times out while the workspace stays gated. `None` would
-/// be worse still: it lets the agent fall back to whichever client initialized last, so a TUI sharing this leader
-/// would aim its own `true` at a browser that cannot reply. Flip this to `Some(true)` in this one place when a
-/// browser front-end implements the card.
+/// `interactive_trust` is `Some(true)`: a browser draws and answers the folder-trust card. `sdk/web` implements
+/// `x.ai/folder_trust/request` and returns a bare `{"outcome": …}` — no `ExtMethodResult` envelope, which the agent's
+/// `serde_json::from_str::<FolderTrustResponse>` would not decode — with dismissal sent back as a JSON-RPC error.
+/// Without this, a browser session on any root that is not the launch dir resolves untrusted with no card and no
+/// notice, silently dropping that project's MCP servers, hooks, plugins, LSP and permission rules.
+///
+/// This is a claim made for **every** authenticated WebSocket client, not only `sdk/web`, and the gateway cannot check
+/// it: the leader registration is opened before the browser has sent a frame, and `ClientMessage` (`leader/protocol.rs`)
+/// has no way to revise capabilities afterwards, so there is nothing to derive the answer from. It is safe to claim
+/// anyway because every non-answer fails closed in `mvp_agent/folder_trust_prompt.rs`: an error reply (what an ACP peer
+/// without the card returns for an unknown method) and an undecodable one leave the workspace gated and release the
+/// dedup key, and silence hits `TRUST_PROMPT_TIMEOUT` with the workspace still gated. The session was created gated and
+/// the round-trip runs detached, so nothing waits on it. Only an explicit `"trust"` unblocks; a client that ignores the
+/// request ends up exactly where `Some(false)` left it.
+///
+/// `None` would not be that client-neutral middle ground. It means "did not say", which sends the agent back to its
+/// shared, last-initialize-wins flag — and a browser's `initialize` declares no `x.ai/folderTrust` meta, so a browser
+/// session's card would be decided by whichever client initialized last, a TUI sharing this leader included. Declaring
+/// it in the browser's `initialize` instead would write that same shared flag and hand this `true` to every client that
+/// registered `None`, which is the cross-client leak the per-client capability exists to close. The honest per-client
+/// answer has to come from the registration.
 fn browser_capabilities() -> ClientCapabilities {
     ClientCapabilities {
         terminal: false,
@@ -171,7 +186,7 @@ fn browser_capabilities() -> ClientCapabilities {
         fs_write: false,
         code_nav_enabled: false,
         status_line: false,
-        interactive_trust: Some(false),
+        interactive_trust: Some(true),
         client_version: Some(xai_grok_version::VERSION.to_string()),
         ..ClientCapabilities::default()
     }
@@ -496,6 +511,13 @@ mod tests {
         assert!(!caps.terminal);
         assert!(!caps.fs_read);
         assert!(!caps.fs_write);
+    }
+
+    /// `Some(true)`, and specifically not `None`: absence is "did not say", which drops the agent back on its shared
+    /// last-initialize-wins flag, so a TUI sharing this leader would decide whether a browser session is ever asked.
+    #[test]
+    fn browser_claims_the_folder_trust_card_per_client() {
+        assert_eq!(browser_capabilities().interactive_trust, Some(true));
     }
 
     /// The registration `client_type` is load-bearing: `inject_session_request_context` early-returns
