@@ -193,8 +193,57 @@ pin the constants.
 (`default_display_mode` returns `Collapsed`). Pressing the header opens it, to
 the head-and-tail the terminal keeps for a read or a shell command — with the
 pager's own `… +N lines` — or the whole thing for a kind the terminal never
-truncates. A failed call colours its bullet and its rail `accent_error` and says
-what failed, down to the exit code, which rides on the wire.
+truncates. The one exception is an edit that succeeded: it opens showing its
+diff, because `edit_default_display_mode` expands a fresh edit block whenever
+`collapsed_edit_blocks` is off, and off is that flag's default. A failed call
+colours its bullet and its rail `accent_error` and says what failed, down to the
+exit code, which rides on the wire.
+
+### The results the wire already carries
+
+Three tools put their whole result on `rawOutput`, and this client draws it
+rather than the prose beside it. `src/toolresult.ts` decodes each shape and
+names the Rust that builds it; `test/toolresult.test.ts` reads those files so a
+rename fails here rather than drifting.
+
+| the tool sends | the page draws |
+| --- | --- |
+| `ReadFile::FileContent` — `raw_output`, `offset`, `total_lines` | the file's own text against its own line numbers |
+| `GrepSearch` — `file_matches[].matches[].{line_number, content}` | one group per file, each hit at its line number |
+| `SearchReplace::EditsApplied` — `edits.details[]` | a diff, banded and gutter-coloured per side |
+
+**The read's numbers are the one place these two clients disagree on purpose.**
+`offset` is one-based — the tool's own `resolve_read_start_line` says so in as
+many words — and the pager computes `off + 1`, so it labels a read of lines
+50-59 as `(51-60)` and numbers its gutter from 51. A line number is the part of
+a read a person carries back out to an editor, so this client uses the tool's.
+
+**A diff is not recomputed, because the hunk is on the wire.** Each edit detail
+arrives with its line numbers on both sides and three lines of context already
+cut — the same `MAX_CONTEXT` the pager's hunk builder would apply. What is not
+on the wire is which lines *inside* the replacement survived it, and that is
+computed: `similar::TextDiff::from_lines` in the terminal, and here a walk over
+a longest common subsequence. Both are shortest edit scripts, so they agree on
+how much changed; they can pick differently between two equally short scripts
+when a line repeats, and that is the whole divergence. A library was weighed under
+`docs/WEB-DEPS.md` and refused — `jsdiff` is a third implementation, not
+`similar`, so it buys no agreement with the terminal while minimality, the
+entire specification here, is what an LCS gives by construction.
+
+**Two truncations are this client's own**, because the pager caps neither: its
+search block draws every hit it was given and its blocks are bounded only by the
+pane's height, which a scrolling page does not have. The transcript is not
+virtualized, so a 2000-hit search would be 2000 live DOM nodes; hits and diff
+rows stop at the grep tool's own `CONTENT_LINE_DEFAULT`, and whatever is dropped
+is counted on the line that says so. A read keeps the pager's 5-and-3 elision
+unchanged — with the numbers in the gutter, the bare `…` now states its own gap.
+
+Syntax highlighting is the one thing here that is genuinely not a browser's:
+`syntect` picks a grammar by file extension and, for a diff, re-reads the
+post-edit file off disk on a worker thread so a construct opening above the hunk
+still closes. Nothing on the wire carries either. Match spans inside a grep hit
+are not drawn, and the terminal does not draw them either — the regex offsets
+never leave the tool.
 
 ### ANSI, and the half of it that is not a browser's job
 
@@ -496,6 +545,7 @@ back as the same objects, so `<For>` leaves their DOM — and any selection in i
 | `src/directory.ts` | absolute-path arithmetic, and the listing params a picker needs |
 | `src/transcript.ts` | folding `session/update` into a store |
 | `src/toolcall.ts` | the title, the fold and the truncation the terminal gives a tool call |
+| `src/toolresult.ts` | the typed result — a read's gutter, a search's hits, an edit's hunks |
 | `src/ansi.ts` | escape sequences off arbitrary program output, and where that stops |
 | `src/subagents.ts` | the fan-out: the fold, the labels, and what stays unknown |
 | `src/commands.ts` | the slash catalog: provenance, matching, reading the composer |
@@ -503,7 +553,7 @@ back as the same objects, so `<For>` leaves their DOM — and any selection in i
 | `src/panel.ts` | tone-to-role, and the block-kind exhaustiveness guard |
 | `src/theme.ts` | generated palette to CSS custom properties |
 | `src/App.tsx` | the screen and its routes |
-| `src/components/` | AuthCard, Roster, Session, Subagents, Panel, Markdown, Settings, PermissionCard, FolderTrustCard, DirectoryPicker, CommandMenu |
+| `src/components/` | AuthCard, Roster, Session, ToolResult, Subagents, Panel, Markdown, Settings, PermissionCard, FolderTrustCard, DirectoryPicker, CommandMenu |
 
 `src/wire.ts` is hand-written on purpose and the reasoning is at the top of the
 file: the panel types and the palette *are* generated and are imported, never
