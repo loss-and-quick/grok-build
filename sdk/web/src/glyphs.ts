@@ -39,6 +39,9 @@ export const CHEVRON = "›";
 /** `‹` — `chevron()`'s mirror: the pager's "previous", and here the way up. `chevron_left()`. */
 export const CHEVRON_LEFT = "‹";
 
+/** `▾` — the expanded-section marker; here, a subagent row showing its detail. `disclosure_open()`. */
+export const DISCLOSURE_OPEN = "▾";
+
 /** `▸` — the collapsed-section marker; here, a directory you can descend into. `disclosure_closed()`. */
 export const DISCLOSURE_CLOSED = "▸";
 
@@ -47,6 +50,12 @@ export const DOT_FILLED = "●";
 
 /** `○` — its unselected partner, a literal at `permission_view.rs` and `question_view.rs`. */
 export const DOT_HOLLOW = "○";
+
+/** `✓` — the done marker. `check_mark()`. */
+export const CHECK_MARK = "✓";
+
+/** `✗` — its failure sibling, and the pager's own stop button. `ballot_x()`. */
+export const BALLOT_X = "✗";
 
 /** Braille spinner frames, cycled every 4 ticks. `braille_spinner_frames()`. */
 export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"] as const;

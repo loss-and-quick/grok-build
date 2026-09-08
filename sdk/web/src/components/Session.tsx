@@ -10,6 +10,7 @@ import type { TranscriptEntry } from "../transcript.ts";
 import { CommandMenu, createCommandMenu } from "./CommandMenu.tsx";
 import { Panel } from "./Panel.tsx";
 import { PermissionCard } from "./PermissionCard.tsx";
+import { Subagents } from "./Subagents.tsx";
 
 /**
  * One attached session: its panels, its transcript, and the composer.
@@ -85,6 +86,10 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
               )}
             </For>
           </div>
+
+          {/* Between the panels and the transcript: a fan-out is state the
+              transcript would scroll away, and the composer must stay put. */}
+          <Subagents gateway={props.gateway} />
 
           <div class="transcript">
             <For each={current().transcript.entries}>

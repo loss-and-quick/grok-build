@@ -2,10 +2,13 @@ import { describe, expect, test } from "bun:test";
 
 import {
   ACCENT_BAR,
+  BALLOT_X,
   BULLET,
+  CHECK_MARK,
   CHEVRON,
   CHEVRON_LEFT,
   DISCLOSURE_CLOSED,
+  DISCLOSURE_OPEN,
   DOT_FILLED,
   GROUP_DIAMOND,
   PROMPT_ARROW,
@@ -60,6 +63,9 @@ describe("the glyphs are the pager's, and stay the pager's", () => {
     ["chevron", CHEVRON],
     ["chevron_left", CHEVRON_LEFT],
     ["disclosure_closed", DISCLOSURE_CLOSED],
+    ["disclosure_open", DISCLOSURE_OPEN],
+    ["check_mark", CHECK_MARK],
+    ["ballot_x", BALLOT_X],
   ])("`%s` is what this client draws", (fn, ours) => {
     // `prompt_arrow` returns `"❯ "` — two columns, the glyph plus its own pad.
     // A terminal pays for spacing in cells; here CSS does, so the pad is not

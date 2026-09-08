@@ -7,6 +7,7 @@ import { render } from "@solidjs/testing-library";
 
 import { Session } from "../src/components/Session.tsx";
 import type { Gateway } from "../src/gateway.ts";
+import { createSubagents } from "../src/subagents.ts";
 import { createTranscript } from "../src/transcript.ts";
 import type { AvailableCommand, RosterEntry } from "../src/wire.ts";
 
@@ -48,8 +49,11 @@ function catalog(): AvailableCommand[] {
 function stub(over: Partial<Gateway> = {}): { gateway: Gateway; sent: string[] } {
   const sent: string[] = [];
   const transcript = createTranscript();
+  // The real `attach` builds one per session, so a stub that omits it is a
+  // gateway shape this client never produces.
+  const subagents = createSubagents(ENTRY.sessionId);
   const gateway = {
-    attached: () => ({ entry: ENTRY, transcript }),
+    attached: () => ({ entry: ENTRY, transcript, subagents }),
     permissions: [],
     status: () => "connected",
     commands: () => catalog(),
