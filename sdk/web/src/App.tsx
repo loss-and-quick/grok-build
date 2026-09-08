@@ -106,19 +106,29 @@ export function createLink(
    * asked for. That is a no-op because `attach` refuses a session it is already
    * on *on this socket*; a plain "is it attached" test would refuse the
    * reconnect this exists for.
+   *
+   * The id is taken *before* the connect, because the connect drops the session
+   * on screen — it belonged to the socket that closed. Reading it afterwards is
+   * what made this the only thing standing between a reconnect and a blank
+   * page, and it is also why the note below can be honest: a session missing
+   * from the roster of the *same* gateway is a session the leader no longer
+   * has, while one missing after an address change is simply somewhere else.
    */
-  const resume = async (): Promise<void> => {
-    const id = target.attached()?.entry.sessionId;
+  const resume = async (id: string | undefined, moved: boolean): Promise<void> => {
     if (!id) return;
     const entry = target.roster.get(id);
     if (!entry) {
-      setNote(`Session ${id} is no longer on the leader; the transcript above is the old one.`);
+      if (!moved) {
+        setNote(`Session ${id} is no longer on the leader.`);
+      }
       return;
     }
     await target.attach(entry);
   };
 
   const tryOnce = async (url: string, secret: string): Promise<boolean> => {
+    const was = target.attached()?.entry.sessionId;
+    const moved = url !== endpoint();
     credentials = { url, secret };
     setEndpoint(url);
     setPhase("connecting");
@@ -130,7 +140,7 @@ export function createLink(
     setPhase("live");
     setAttempt(0);
     setNote("");
-    await resume();
+    await resume(was, moved);
     return true;
   };
 

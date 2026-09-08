@@ -402,6 +402,20 @@ export function createGateway() {
   const connect = async (base: string, secret: string): Promise<void> => {
     client?.close();
     say("connecting…");
+    // The session on screen belonged to the socket that just closed. Its
+    // transcript, its subagents and its model catalog were built from one
+    // leader's replay, and the roster about to arrive is another leader's — so
+    // keeping it would draw instance A's conversation under instance B's list
+    // of sessions, with nothing on screen saying the two are unrelated.
+    // `disconnect` has always cleared this; `connect` never did, which made
+    // "hang up, then connect elsewhere" and "connect elsewhere" differ.
+    //
+    // Re-attaching after a *reconnect* is not lost by this: the caller that
+    // wants it reads the session id before it calls here (`Link.resume`), which
+    // is also what lets it tell "the link came back" from "we moved".
+    setAttached(null);
+    attachedOn = null;
+    setModels(null);
     // A new socket is a new client on the leader's books, so the search id from
     // the old one is unusable: its status stream is addressed to a client that
     // no longer exists, and a `close` has nowhere to go. Forget it rather than
