@@ -672,3 +672,62 @@ export type ThemeName = keyof typeof THEMES;
 
 /** The palette `Theme::default()` builds, and what `auto` falls back to. */
 export const DEFAULT_THEME: ThemeName = "groknight";
+
+/**
+ * The pager's turn animation: the running wave and the "waiting on you" pulse.
+ *
+ * Every speed here is radians *per tick*, so `ticks_per_second` is part of each
+ * of these timings. The pager advances its tick counter on a timer and a
+ * browser derives the same counter from wall-clock; both then read one curve.
+ *
+ * `wave_rows` is absent on purpose. The pager paints a running rail as a column
+ * of terminal cells and offsets each cell's phase by its row, and `wave_rows`
+ * is how many rows one full wave spans — terminal geometry, which a client
+ * without a row grid has nothing to apply. Such a client's rail is the pager's
+ * row 0, so it is not quietly using someone else's value for it; it has no use
+ * for the value at all.
+ */
+export interface AnimationConstants {
+  /**
+   * Ticks per second: the cadence `AnimationConfig::fps` ships with.
+   *
+   * That is a `pager.toml` knob, and nothing carries a retuned terminal cadence
+   * to another client, so this is the default rather than a user's value.
+   */
+  ticks_per_second: number;
+  /**
+   * Radians per tick for the running accent wave: tool rails, running
+   * bullets, and the running verb-group diamond.
+   *
+   * A rail travels one full wave every `2π / wave_speed` ticks.
+   */
+  wave_speed: number;
+  /**
+   * Radians per tick for every "waiting on you" diamond, whatever is being
+   * waited on.
+   *
+   * The pulse is `sin²`, whose period is π, so at 30 ticks per second this
+   * is about a 1.3s cycle.
+   */
+  waiting_pulse_speed: number;
+  /**
+   * Brightness the waiting pulse never drops below.
+   *
+   * The diamond dims at the trough instead of going dark, which is what
+   * keeps "paused on you" legible.
+   */
+  waiting_floor: number;
+  /**
+   * Brightness the waiting pulse adds above the floor at its peak; floor
+   * plus range is full accent.
+   */
+  waiting_range: number;
+}
+
+export const ANIMATION = {
+  ticks_per_second: 30,
+  wave_speed: 0.15,
+  waiting_pulse_speed: 0.08,
+  waiting_floor: 0.3,
+  waiting_range: 0.7,
+} as const satisfies AnimationConstants;

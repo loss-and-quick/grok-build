@@ -1,13 +1,17 @@
-// The palette is generated; this module only re-exports it.
+// The palette and the turn animation are generated; this module only re-exports
+// them.
 //
-// `src/generated/themes.ts` is serialized from the Rust `Theme` constructors in
-// crates/codegen/xai-grok-pager-render/src/theme/, which are what the pager
-// paints from. Add nothing here that invents a color: a second palette is the
-// drift the generator exists to prevent.
+// `src/generated/themes.ts` is serialized from the Rust in
+// crates/codegen/xai-grok-pager-render/src/theme/ — the `Theme` constructors the
+// pager paints from, and the `ANIMATION` constants it animates on. Add nothing
+// here that invents a colour or a speed: a second copy of either is the drift
+// the generator exists to prevent.
 export {
+  ANIMATION,
   ANSI16,
   DEFAULT_THEME,
   THEMES,
+  type AnimationConstants,
   type Theme,
   type ThemeColor,
   type ThemeColors,

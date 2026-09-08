@@ -1,4 +1,5 @@
-//! Palette export: the one place a non-terminal renderer gets its colors from.
+//! Palette and animation export: the one place a non-terminal renderer gets
+//! its colors and its turn animation from.
 //!
 //! ## Why the Rust struct is the definition
 //!
@@ -28,6 +29,15 @@
 //! per-theme table of which seed feeds which role, i.e. the enumerated role list
 //! again, one indirection poorer. So the exported contract is the role list.
 //!
+//! ## Animation as well as palette
+//!
+//! The same argument applies to the turn animation, one layer along: the
+//! palette says what colour a running rail is, and [`super::animation`] says
+//! how bright it is this frame. A client that derives the first and transcribes
+//! the second has moved the drift rather than removed it, so `ANIMATION` is
+//! serialized into the same file, under the same test, from a struct this file
+//! destructures without a `..` for exactly the reason [`color_roles`] does.
+//!
 //! ## What is deliberately not exported
 //!
 //! - **The quantization ladder.** [`Theme::quantized`], `windows_contrast_boost`
@@ -36,16 +46,24 @@
 //!   pre-adaptation palette, which is what a truecolor terminal shows too.
 //! - **Syntax highlighting.** Code spans come from syntect themes
 //!   ([`crate::syntax`]), not from `Theme`; they are a separate asset.
-//! - **Animation.** `wave_brightness` / `pulse_brightness` are behavior over a
-//!   tick counter, not palette.
+//! - **Terminal geometry and cadence.** `AnimationConfig::wave_rows` is how far
+//!   the wave's phase travels per *terminal row*, and `AnimationConfig::fps` is
+//!   how often the tick advances. Both are `pager.toml` knobs for the terminal
+//!   front-end itself, in the sense `settings::registry::SettingSurface::Terminal`
+//!   gives that phrase. The shipped cadence is exported because a browser needs
+//!   a tick to count in; `wave_rows` is not, because a browser paints a rail as
+//!   one element rather than a column of cells and so has no row to offset.
 
 use std::fmt::Write as _;
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 
+use documented::DocumentedFields;
 use ratatui::style::{Color, Modifier};
 
+use super::animation::{ANIMATION, AnimationConstants};
 use super::{Theme, ThemeKind};
+use crate::appearance::AnimationConfig;
 
 /// Path of the generated artifact, relative to the repository root.
 pub const ARTIFACT_REL_PATH: &str = "sdk/theme/src/generated/themes.ts";
@@ -345,8 +363,10 @@ pub fn generate() -> String {
     out.push_str("export type ThemeName = keyof typeof THEMES;\n\n");
     out.push_str(
         "/** The palette `Theme::default()` builds, and what `auto` falls back to. */\n\
-         export const DEFAULT_THEME: ThemeName = \"groknight\";\n",
+         export const DEFAULT_THEME: ThemeName = \"groknight\";\n\n",
     );
+
+    out.push_str(&animation_block());
     out
 }
 
@@ -529,6 +549,110 @@ fn theme_literal(exported: &Exported) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Animation
+// ---------------------------------------------------------------------------
+
+/// Every animation constant, in a fixed order, paired with its token name and
+/// the doc comment the field carries.
+///
+/// The destructuring pattern carries no `..`, exactly as [`color_roles`] does:
+/// a knob added to [`AnimationConstants`] is a compile error here until it is
+/// given a name on the wire. The prose comes from the struct's own field docs
+/// rather than being restated, so the artifact explains the numbers in the
+/// sentences the Rust already uses.
+pub fn animation_constants() -> Vec<(&'static str, &'static str, f32)> {
+    let AnimationConstants {
+        wave_speed,
+        waiting_pulse_speed,
+        waiting_floor,
+        waiting_range,
+    } = ANIMATION;
+
+    [
+        ("wave_speed", wave_speed),
+        ("waiting_pulse_speed", waiting_pulse_speed),
+        ("waiting_floor", waiting_floor),
+        ("waiting_range", waiting_range),
+    ]
+    .into_iter()
+    .map(
+        |(name, value)| match AnimationConstants::get_field_docs(name) {
+            Ok(docs) => (name, docs, value),
+            Err(_) => panic!("`AnimationConstants::{name}` needs a doc comment to export"),
+        },
+    )
+    .collect()
+}
+
+/// Render a Rust doc comment as JSDoc at the given indent.
+fn jsdoc(docs: &str, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    let lines: Vec<&str> = docs.lines().map(str::trim).collect();
+    if let [only] = lines.as_slice() {
+        return format!("{pad}/** {only} */\n");
+    }
+
+    let mut out = format!("{pad}/**\n");
+    for line in lines {
+        if line.is_empty() {
+            let _ = writeln!(out, "{pad} *");
+        } else {
+            let _ = writeln!(out, "{pad} * {line}");
+        }
+    }
+    let _ = writeln!(out, "{pad} */");
+    out
+}
+
+fn animation_block() -> String {
+    let mut out = String::new();
+
+    out.push_str(
+        r#"/**
+ * The pager's turn animation: the running wave and the "waiting on you" pulse.
+ *
+ * Every speed here is radians *per tick*, so `ticks_per_second` is part of each
+ * of these timings. The pager advances its tick counter on a timer and a
+ * browser derives the same counter from wall-clock; both then read one curve.
+ *
+ * `wave_rows` is absent on purpose. The pager paints a running rail as a column
+ * of terminal cells and offsets each cell's phase by its row, and `wave_rows`
+ * is how many rows one full wave spans — terminal geometry, which a client
+ * without a row grid has nothing to apply. Such a client's rail is the pager's
+ * row 0, so it is not quietly using someone else's value for it; it has no use
+ * for the value at all.
+ */
+export interface AnimationConstants {
+  /**
+   * Ticks per second: the cadence `AnimationConfig::fps` ships with.
+   *
+   * That is a `pager.toml` knob, and nothing carries a retuned terminal cadence
+   * to another client, so this is the default rather than a user's value.
+   */
+  ticks_per_second: number;
+"#,
+    );
+    for (name, docs, _) in animation_constants() {
+        out.push_str(&jsdoc(docs, 2));
+        let _ = writeln!(out, "  {name}: number;");
+    }
+    out.push_str("}\n\n");
+
+    out.push_str("export const ANIMATION = {\n");
+    // The cadence is read off the config default rather than restated here, so
+    // the exported tick rate is the one the pager's own timer runs at.
+    let _ = writeln!(
+        out,
+        "  ticks_per_second: {},",
+        AnimationConfig::default().fps
+    );
+    for (name, _, value) in animation_constants() {
+        let _ = writeln!(out, "  {name}: {value},");
+    }
+    out.push_str("} as const satisfies AnimationConstants;\n");
+    out
+}
 /// Absolute path of the checked-in artifact.
 ///
 /// Test-only: `CARGO_MANIFEST_DIR` points into the source tree, which a shipped
@@ -723,6 +847,44 @@ mod tests {
             encode_modifier(Modifier::BOLD.union(Modifier::ITALIC)),
             vec!["bold", "italic"]
         );
+    }
+
+    /// Every animation constant, pinned by hand.
+    ///
+    /// The artifact test is satisfied by regenerating, so on its own it would let
+    /// a speed change through as a tidy diff. These are the numbers a user would
+    /// feel changing, so they are asserted independently of the generator — the
+    /// same reason `theme_anchor_colors_are_pinned` exists.
+    #[test]
+    fn animation_constants_are_pinned() {
+        assert_eq!(ANIMATION.wave_speed, 0.15);
+        assert_eq!(ANIMATION.waiting_pulse_speed, 0.08);
+        assert_eq!(ANIMATION.waiting_floor, 0.3);
+        assert_eq!(ANIMATION.waiting_range, 0.7);
+        // A browser counts ticks off wall-clock, so the exported cadence has to be
+        // the one the pager's own timer runs at.
+        assert_eq!(AnimationConfig::default().fps, 30);
+    }
+
+    /// Same shape as `every_role_is_exported`: the destructure makes a new knob a
+    /// compile error, this catches one dropped from the emitted list.
+    #[test]
+    fn every_animation_constant_is_exported() {
+        let constants = animation_constants();
+        assert_eq!(constants.len(), 4);
+
+        let artifact = generate();
+        assert!(
+            artifact.contains("ticks_per_second: 30,"),
+            "the artifact carries the tick cadence"
+        );
+        for (name, docs, _) in constants {
+            assert!(
+                artifact.contains(&format!("  {name}: ")),
+                "`{name}` is missing from the artifact"
+            );
+            assert!(!docs.is_empty(), "`{name}` exports an empty doc comment");
+        }
     }
 
     /// The terminal-native palette is the one that carries `reset`, and the one a

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "The pager's color palette, generated from the Rust theme constructors so a browser client cannot drift from the TUI.",
+  "description": "The pager's color palette and turn animation, generated from the Rust it renders from so a browser client cannot drift from the TUI.",
   "exports": {
     ".": "./src/index.ts"
   },
