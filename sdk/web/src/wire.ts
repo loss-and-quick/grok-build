@@ -146,14 +146,40 @@ export interface SessionUpdateToolCall {
   kind?: string;
   status?: ToolCallStatus;
   content?: ToolCallContent[];
+  /**
+   * The tool's own arguments, and the source the terminal titles a call from.
+   *
+   * The pager treats `title` as a fallback and reads the real subject out of
+   * here per kind — `command`, `file_path`, `pattern`, `url`
+   * (`tool_call_to_block`, `pager/src/acp/tracker.rs`). Untyped because the
+   * shape is each tool's own; `toolcall.ts` names the fields it reads.
+   */
+  rawInput?: unknown;
+  /**
+   * The tool's typed result. `ToolOutput` is `#[serde(tag = "type")]`
+   * (`xai-grok-tools/src/types/output.rs`) and `raw_output` is serialized
+   * straight through with no rewriting
+   * (`shell/src/session/acp_conversion.rs`), so the variant name and its
+   * fields arrive intact.
+   *
+   * Worth saying plainly, because it is the fix to a defect that looked like a
+   * browser problem: a shell call's `ToolOutput::Bash` carries
+   * `output_for_prompt`, which the shell already built by stripping ANSI —
+   * **the clean text is on the wire**, while `content` carries the raw PTY
+   * stream.
+   */
+  rawOutput?: unknown;
 }
 
 export interface SessionUpdateToolCallUpdate {
   sessionUpdate: "tool_call_update";
   toolCallId: string;
   title?: string;
+  kind?: string;
   status?: ToolCallStatus;
   content?: ToolCallContent[];
+  rawInput?: unknown;
+  rawOutput?: unknown;
 }
 
 /** The grok extension variant that carries a plugin's panel. */

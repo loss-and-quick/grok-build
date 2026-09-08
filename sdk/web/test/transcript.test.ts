@@ -60,6 +60,29 @@ describe("session update fold", () => {
     expect(call.title).toBe("Read main.rs");
   });
 
+  test("a tool call keeps the arguments it was announced with", () => {
+    // A `tool_call_update` carries what changed. The title is derived from
+    // arguments that arrive once, so a later frame without them must not be
+    // read as a frame clearing them.
+    const t = createTranscript();
+    t.apply({
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-1",
+      title: "Execute `cargo build`",
+      kind: "execute",
+      status: "pending",
+      rawInput: { command: "cargo build" },
+    } as SessionUpdate);
+    t.apply({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-1",
+      status: "completed",
+    } as SessionUpdate);
+    const call = t.entries[0] as ToolCallEntry;
+    expect(call.toolKind).toBe("execute");
+    expect(call.rawInput).toEqual({ command: "cargo build" });
+  });
+
   test("output comes off the raw bytes, which are the only ones still able to erase", () => {
     // All three channels as they arrive from a real `cargo build`. The stripped
     // copy lost its `CSI K` and kept its `\r`, so its progress bar is smeared
@@ -111,6 +134,7 @@ describe("session update fold", () => {
       title: "Execute `exit 3`",
       kind: "execute",
       status: "pending",
+      rawInput: { command: "exit 3", description: "Exit with status 3." },
       content: [{ type: "content", content: { type: "text", text: "Exit with status 3." } }],
     } as SessionUpdate);
     t.apply({

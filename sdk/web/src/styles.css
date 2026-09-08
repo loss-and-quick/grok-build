@@ -357,12 +357,91 @@ button:disabled {
   color: var(--grok-accent-running, canvastext);
 }
 
+/* The header is the fold control, the way the pager folds on the entry itself
+ * rather than on a widget beside it — so the button keeps no button chrome and
+ * stays on the transcript's own grid. */
 .tool-title {
-  color: var(--grok-text-secondary, canvastext);
+  grid-column: 2;
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  text-align: left;
+  color: var(--grok-text-primary, canvastext);
 }
 
-.tool-failed .tool-title {
-  color: var(--grok-accent-error, canvastext);
+button.tool-title {
+  cursor: pointer;
+}
+
+/* One cell, two glyphs, only ever one of them visible — the diamond, and the
+ * chevron that replaces it while the row is under the pointer or the keyboard
+ * focus. Grid-stacked rather than swapped, so the title next to it does not
+ * shift when the glyph changes. */
+.tool-bullet {
+  display: inline-grid;
+}
+
+.tool-bullet-mark,
+.tool-bullet-open {
+  grid-area: 1 / 1;
+}
+
+.tool-bullet-open {
+  visibility: hidden;
+  color: var(--grok-gray-bright, canvastext);
+}
+
+button.tool-title:hover .tool-bullet-open,
+button.tool-title:focus-visible .tool-bullet-open {
+  visibility: visible;
+}
+
+button.tool-title:hover .tool-bullet-mark,
+button.tool-title:focus-visible .tool-bullet-mark {
+  visibility: hidden;
+}
+
+/* The verb is bold in `primary` and every fragment after it takes the role the
+ * pager gives it: a search term in `accent_success`, a path in `path`, a
+ * command in `command`, and the trailing count muted. A failed call recolours
+ * the bullet and the error body — not the header, which the pager leaves
+ * alone. */
+.tool-verb {
+  font-weight: bold;
+}
+
+.tool-part-term {
+  color: var(--grok-accent-success, canvastext);
+}
+
+.tool-part-path {
+  color: var(--grok-path, canvastext);
+}
+
+.tool-part-command {
+  color: var(--grok-command, canvastext);
+}
+
+.tool-part-detail {
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+/* A `rawInput.description` takes the title line and the command drops below
+ * it, behind the same dim `$` the pager's shell header style uses. */
+.tool-command {
+  grid-column: 2;
+  color: var(--grok-command, canvastext);
+  overflow-wrap: anywhere;
+}
+
+.tool-command-mark {
+  margin-right: 0.4rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
 }
 
 .tool-output {
@@ -374,6 +453,15 @@ button:disabled {
   white-space: pre-wrap;
   background: var(--grok-bg-terminal, canvas);
   color: var(--grok-text-secondary, canvastext);
+}
+
+.tool-output.tool-error {
+  color: var(--grok-accent-error, canvastext);
+}
+
+.tool-ellipsis {
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
 }
 
 .composer {

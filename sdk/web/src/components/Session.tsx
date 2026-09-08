@@ -1,12 +1,25 @@
 import { For, Match, Show, Switch, createSignal, type JSX } from "solid-js";
+import { Dynamic } from "solid-js/web";
 
 import { blendToward, createTick, waveBrightness } from "../animation.ts";
 import { acceptRow, argumentHint, type CommandRow } from "../commands.ts";
-import { ACCENT_BAR, BULLET, PROMPT_ARROW, spinnerFrame } from "../glyphs.ts";
+import { ACCENT_BAR, BULLET, CHEVRON, PROMPT_ARROW, spinnerFrame } from "../glyphs.ts";
+import {
+  ellipsisFor,
+  failureText,
+  hasFailed,
+  nextMode,
+  toolTitle,
+  truncate,
+  type DisplayMode,
+  type ToolCallFacts,
+  type ToolTitle,
+  type TruncatedOutput,
+} from "../toolcall.ts";
 
 import type { Gateway } from "../gateway.ts";
 import { sessionLabel } from "../roster.ts";
-import type { TranscriptEntry } from "../transcript.ts";
+import type { ToolCallEntry, TranscriptEntry } from "../transcript.ts";
 import { CommandMenu, createCommandMenu } from "./CommandMenu.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { Panel } from "./Panel.tsx";
@@ -66,7 +79,12 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
       {(current) => (
         <>
           <header class="session-header">
-            <h1 class="session-title">{sessionLabel(current().entry)}</h1>
+            {/* The transcript is where the pager's third fallback reads from
+                too: `entry_title` takes the first user prompt out of the
+                scrollback before it gives up and names the session by its id. */}
+            <h1 class="session-title">
+              {sessionLabel(current().entry, firstPrompt(current().transcript.entries))}
+            </h1>
             <div class="session-cwd">{current().entry.cwd}</div>
           </header>
 
@@ -94,7 +112,7 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
 
           <div class="transcript">
             <For each={current().transcript.entries}>
-              {(entry) => <Entry entry={entry} tick={tick} />}
+              {(entry) => <Entry entry={entry} cwd={current().entry.cwd} tick={tick} />}
             </For>
           </div>
 
@@ -159,7 +177,19 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
   );
 }
 
-function Entry(props: { entry: TranscriptEntry; tick: () => number }): JSX.Element {
+/** The first thing the user said, which is what an untitled session is called. */
+function firstPrompt(entries: readonly TranscriptEntry[]): string | undefined {
+  for (const entry of entries) {
+    if (entry.kind === "message" && entry.role === "user") return entry.text;
+  }
+  return undefined;
+}
+
+function Entry(props: {
+  entry: TranscriptEntry;
+  cwd: string;
+  tick: () => number;
+}): JSX.Element {
   return (
     <Switch>
       <Match when={props.entry.kind === "message" ? props.entry : null}>
@@ -191,44 +221,135 @@ function Entry(props: { entry: TranscriptEntry; tick: () => number }): JSX.Eleme
         )}
       </Match>
       <Match when={props.entry.kind === "tool_call" ? props.entry : null}>
-        {(call) => (
-          <article class={`tool tool-${call().status}`}>
-            {/* The accent rail waves while the call runs — the pager's own
-                curve, speed and phase — and freezes flat when it finishes. */}
-            <span
-              class="tool-rail"
-              aria-hidden="true"
-              style={
-                call().status === "in_progress"
-                  ? {
-                      color: blendToward(
-                        "var(--grok-bg-base)",
-                        "var(--grok-accent-running)",
-                        waveBrightness(props.tick()),
-                      ),
-                    }
-                  : undefined
-              }
-            >
-              {ACCENT_BAR}
-            </span>
-            <div class="tool-title">
-              <span class="tool-bullet" aria-hidden="true">
-                {BULLET}
-              </span>
-              {call().title}
-              <Show when={call().status === "in_progress"}>
-                <span class="tool-spinner" aria-hidden="true">
-                  {spinnerFrame(props.tick())}
-                </span>
-              </Show>
-            </div>
-            <Show when={call().output}>
-              <pre class="tool-output">{call().output}</pre>
-            </Show>
-          </article>
-        )}
+        {(call) => <ToolCall call={call()} cwd={props.cwd} tick={props.tick} />}
       </Match>
     </Switch>
+  );
+}
+
+/**
+ * One tool call: the title the terminal would have drawn, and a fold over its
+ * output.
+ *
+ * **Output starts hidden**, which is the pager's own default for an agent tool
+ * call (`default_display_mode` returns `Collapsed` in `read.rs`, `execute.rs`
+ * and every sibling). That is the whole answer to a JSON blob pasted into the
+ * transcript: the terminal never showed it either, and a client that prints
+ * every byte of `content` is not being more informative than the terminal, it
+ * is being less legible than it.
+ */
+function ToolCall(props: {
+  call: ToolCallEntry;
+  cwd: string;
+  tick: () => number;
+}): JSX.Element {
+  const [mode, setMode] = createSignal<DisplayMode>("collapsed");
+  const facts = (): ToolCallFacts => ({
+    title: props.call.title,
+    kind: props.call.toolKind,
+    rawInput: props.call.rawInput,
+    rawOutput: props.call.rawOutput,
+    status: props.call.status,
+    cwd: props.cwd,
+  });
+  const failed = (): boolean => hasFailed(facts());
+  const body = (): string =>
+    failed() ? failureText(facts(), props.call.output) : props.call.output;
+  const lines = (): string[] => {
+    const text = body();
+    return text === "" ? [] : text.replace(/\n+$/, "").split("\n");
+  };
+  const fold = (): TruncatedOutput => truncate(lines(), props.call.toolKind);
+  const title = (): ToolTitle => toolTitle(facts());
+
+  // A non-zero exit is a failure even when ACP calls the call completed, so
+  // the class follows what the entry means rather than what the status field
+  // literally said.
+  return (
+    <article class={`tool tool-${failed() ? "failed" : props.call.status}`}>
+      {/* The accent rail waves while the call runs — the pager's own
+          curve, speed and phase — and freezes flat when it finishes. */}
+      <span
+        class="tool-rail"
+        aria-hidden="true"
+        style={
+          props.call.status === "in_progress"
+            ? {
+                color: blendToward(
+                  "var(--grok-bg-base)",
+                  "var(--grok-accent-running)",
+                  waveBrightness(props.tick()),
+                ),
+              }
+            : undefined
+        }
+      >
+        {ACCENT_BAR}
+      </span>
+      {/* The header is the control, because in the terminal the whole entry is:
+          the pager folds an entry by acting on the row, not on a widget beside
+          it. With no output there is nothing to fold, so it stops being a
+          button rather than becoming a dead one. */}
+      <Dynamic
+        component={lines().length > 0 ? "button" : "div"}
+        class="tool-title"
+        type={lines().length > 0 ? "button" : undefined}
+        aria-expanded={lines().length > 0 ? mode() !== "collapsed" : undefined}
+        onClick={
+          lines().length > 0
+            ? () => setMode(nextMode(props.call.toolKind, mode()))
+            : undefined
+        }
+      >
+        {/* Hovering a foldable row swaps the diamond for a chevron in place,
+            which is how the terminal says an entry opens — the pager overwrites
+            that one cell with `expandable_indicator_char` (`›`) on hover
+            (`scrollback_pane.rs`), so the affordance costs no column. */}
+        <span class="tool-bullet" aria-hidden="true">
+          <span class="tool-bullet-mark">{BULLET}</span>
+          <Show when={lines().length > 0}>
+            <span class="tool-bullet-open">{CHEVRON}</span>
+          </Show>
+        </span>
+        <Show when={title().verb}>
+          {(verb) => <span class="tool-verb">{verb()}</span>}
+        </Show>
+        <For each={title().parts}>
+          {(part) => <span class={`tool-part tool-part-${part.role}`}>{part.text}</span>}
+        </For>
+        <Show when={props.call.status === "in_progress"}>
+          <span class="tool-spinner" aria-hidden="true">
+            {spinnerFrame(props.tick())}
+          </span>
+        </Show>
+      </Dynamic>
+      {/* A description took the title line, so the command goes under it —
+          `$` dim, exactly where the pager puts it, and only once the entry is
+          open: `header_lines` is called with `include_command = false` while
+          collapsed, for the same density this fold is for. */}
+      <Show when={mode() !== "collapsed" && title().secondary}>
+        {(command) => (
+          <div class="tool-command">
+            <span class="tool-command-mark" aria-hidden="true">
+              $
+            </span>
+            {command()}
+          </div>
+        )}
+      </Show>
+      <Show when={mode() !== "collapsed" && lines().length > 0}>
+        <pre class="tool-output" classList={{ "tool-error": failed() }}>
+          <Show when={mode() === "truncated" && fold().hidden > 0} fallback={lines().join("\n")}>
+            {fold().head.join("\n")}
+            <span class="tool-ellipsis">
+              {"\n"}
+              {ellipsisFor(props.call.toolKind, fold().hidden)}
+              {"\n"}
+            </span>
+            {fold().tail.join("\n")}
+          </Show>
+        </pre>
+      </Show>
+    </article>
   );
 }

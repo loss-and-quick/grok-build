@@ -22,8 +22,15 @@ export interface MessageEntry {
 export interface ToolCallEntry {
   kind: "tool_call";
   toolCallId: string;
+  /** The ACP `title`, kept as the fallback the pager treats it as. */
   title: string;
+  /** ACP `kind`: what decides how the terminal titles and folds this call. */
+  toolKind: string;
   status: ToolCallStatus;
+  /** The tool's arguments, which is what a title is really derived from. */
+  rawInput: unknown;
+  /** The tool's typed result, which carries the counts and the clean output. */
+  rawOutput: unknown;
   output: string;
 }
 
@@ -86,7 +93,10 @@ export function createTranscript(): Transcript {
           kind: "tool_call",
           toolCallId: String(update["toolCallId"]),
           title: String(update["title"] ?? ""),
+          toolKind: String(update["kind"] ?? "other"),
           status: (update["status"] as ToolCallStatus | undefined) ?? "pending",
+          rawInput: update["rawInput"],
+          rawOutput: update["rawOutput"],
           output: toolOutput(update["rawOutput"], update["content"]),
         };
         toolCallAt.set(call.toolCallId, entries.length);
@@ -97,7 +107,9 @@ export function createTranscript(): Transcript {
         const at = toolCallAt.get(String(update["toolCallId"]));
         if (at === undefined) return;
         const title = update["title"];
+        const toolKind = update["kind"];
         const status = update["status"];
+        const rawInput = update["rawInput"];
         const rawOutput = update["rawOutput"];
         const content = update["content"];
         const output = toolOutput(rawOutput, content);
@@ -108,7 +120,13 @@ export function createTranscript(): Transcript {
           produce((entry) => {
             if (entry.kind !== "tool_call") return;
             if (typeof title === "string") entry.title = title;
+            if (typeof toolKind === "string") entry.toolKind = toolKind;
             if (typeof status === "string") entry.status = status as ToolCallStatus;
+            // A later frame carrying no `rawInput` is not a frame clearing it:
+            // the agent sends the fields that changed, and the title is derived
+            // from arguments that were only ever sent once.
+            if (rawInput !== undefined) entry.rawInput = rawInput;
+            if (rawOutput !== undefined) entry.rawOutput = rawOutput;
             // A frame that carries an output field is authoritative about the
             // output, *including* when it says there was none. Only writing
             // non-empty text left the placeholder the first frame carried —
