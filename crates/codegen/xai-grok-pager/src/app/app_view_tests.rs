@@ -6696,6 +6696,7 @@ fn plain_agent_ctrl_x_does_not_arm_overlay_stop() {
 /// When the attached agent disappears externally,
 /// the `handle_input` filter must clear `attached_agent`
 /// immediately rather than waiting for the next draw frame.
+#[serial_test::serial]
 #[test]
 fn minimal_double_ctrl_c_arms_then_quits() {
     let prev = crate::app::minimal_mode_active();

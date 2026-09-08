@@ -158,7 +158,15 @@ pub(crate) fn minimal_mode_active() -> bool {
     MINIMAL_MODE_ACTIVE.load(Ordering::Acquire)
 }
 /// Test-only override for [`minimal_mode_active`] (unit tests exercising minimal-gated input paths without a terminal).
-/// Save/restore around use: this is process-global state.
+///
+/// Callers save and restore, and hold `#[serial_test::serial]` while they do.
+/// The restore is what needs the lock: two cases overlapping here each read the
+/// other's temporary value as the baseline, and the loser writes it back for
+/// good — leaving the gate stuck for every later case that reads it.
+/// The same group covers the other screen-mode-derived globals
+/// ([`VOICE_MODE_ENABLED`], [`VOICE_KEYBIND_ENABLED`],
+/// `modal_window::embedded()`) and `mode_switch`'s reseed, which flips the
+/// whole set at once.
 #[cfg(test)]
 pub(crate) fn set_minimal_mode_active_for_test(on: bool) {
     MINIMAL_MODE_ACTIVE.store(on, Ordering::Release);
@@ -212,6 +220,7 @@ pub(crate) fn voice_mode_enabled() -> bool {
     VOICE_MODE_ENABLED.load(Ordering::Acquire)
 }
 /// Test helper for the process-global voice gate.
+/// Save/restore under `#[serial_test::serial]`; see [`set_minimal_mode_active_for_test`].
 pub fn set_voice_mode_enabled_for_test(on: bool) {
     VOICE_MODE_ENABLED.store(on, Ordering::Release);
 }
@@ -223,6 +232,7 @@ pub(crate) fn voice_keybind_enabled() -> bool {
     VOICE_KEYBIND_ENABLED.load(Ordering::Acquire)
 }
 /// Test helper for the process-global voice-keybind gate.
+/// Save/restore under `#[serial_test::serial]`; see [`set_minimal_mode_active_for_test`].
 pub fn set_voice_keybind_enabled_for_test(on: bool) {
     VOICE_KEYBIND_ENABLED.store(on, Ordering::Release);
 }

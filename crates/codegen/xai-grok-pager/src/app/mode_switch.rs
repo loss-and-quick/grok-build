@@ -240,9 +240,14 @@ fn dismiss_agent_surfaces(agent: &mut AgentView) {
 mod tests {
     use super::*;
 
+    /// Serial because the reseed flips the whole screen-mode global set —
+    /// `embedded()`, `minimal_mode_active()`, hidden scrollbars, the
+    /// terminal-native theme lock — for the entire process, and the cases that
+    /// toggle those one at a time share this same group. The theme pin below
+    /// covers only the last of the four.
+    #[serial_test::serial]
     #[test]
     fn reseed_round_trip_flips_every_mode_derived_gate() {
-        // Serializes process-global mutation with other theme-touching tests.
         let _guard = crate::theme::cache::pin_theme();
         // Pretend startup resolved a theme so reseed never reads the host config.
         mark_theme_resolved();

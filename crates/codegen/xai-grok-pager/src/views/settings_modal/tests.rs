@@ -208,6 +208,7 @@ fn setting_row_visible_hides_voice_rows_when_voice_mode_off() {
     assert!(setting_row_visible(keybind, false, false, true));
 }
 
+#[serial_test::serial]
 #[test]
 fn rebuild_rows_drops_voice_settings_when_gate_turns_off() {
     let prev = crate::app::voice_mode_enabled();
@@ -555,6 +556,7 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
 /// It also holds the Editor entry `multiline_mode`, the Agent entries `permission_mode` and `plan_mode`, and the Privacy entry `coding_data_sharing`.
 /// The Models entry `default_model` and the Advanced entries `show_tips` and `auto_update` complete the list.
 /// `default_reasoning_effort` and `auto_compact_threshold_percent` are not exposed in the modal.
+#[serial_test::serial]
 #[test]
 fn rows_contain_categories_and_settings_through_pr_14() {
     let prev_voice = crate::app::voice_mode_enabled();

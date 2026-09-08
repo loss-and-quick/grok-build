@@ -3769,6 +3769,7 @@ mod voice_keybind_gate_tests {
     /// The per-pane chord route drops `VoiceToggle` while the Voice shortcut
     /// setting is off (the event-loop intercept skips the chord in that state,
     /// so this route is what would otherwise leak it through).
+    #[serial_test::serial]
     #[test]
     fn resolve_action_honors_voice_keybind_gate() {
         let prev = crate::app::voice_keybind_enabled();
