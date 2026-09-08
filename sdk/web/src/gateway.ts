@@ -29,6 +29,13 @@ import {
 } from "./auth.ts";
 import { GatewayClient, gatewayUrl } from "./client.ts";
 import type { PanelAction } from "./panel.ts";
+import {
+  applyModelChanged,
+  defaultModelWrite,
+  readModelState,
+  setModelRequest,
+  type SessionModelState,
+} from "./models.ts";
 import { createRoster, type Roster } from "./roster.ts";
 import { createSubagents, type Subagents } from "./subagents.ts";
 import { createTranscript, type Transcript } from "./transcript.ts";
@@ -193,6 +200,10 @@ export function createGateway() {
   // is not installed.
   const [seedCommands, setSeedCommands] = createSignal<AvailableCommand[]>([]);
   const [commands, setCommands] = createSignal<AvailableCommand[]>([]);
+  // The model catalog for the attached session, straight off the `session/load`
+  // reply. `null` means no catalog has been sent, which is not the same as an
+  // empty one — see `readModelState`.
+  const [models, setModels] = createSignal<SessionModelState | null>(null);
   const [settings, setSettings] = createStore<{ rows: SettingRow[]; terminalOnly: number; values: Record<string, unknown>; locks: Record<string, { reason: string }> }>({
     rows: [],
     terminalOnly: 0,
@@ -341,6 +352,13 @@ export function createGateway() {
       if (update.sessionUpdate === "available_commands_update") {
         const advertised = (update as Record<string, unknown>)["availableCommands"];
         setCommands(Array.isArray(advertised) ? (advertised as AvailableCommand[]) : []);
+        return;
+      }
+      if (update.sessionUpdate === "model_changed") {
+        // Broadcast to every subscriber, so a terminal on the same leader — or
+        // a second tab — moves this picker too.
+        const state = models();
+        if (state) setModels(applyModelChanged(state, update as Record<string, unknown>));
         return;
       }
       if (update.sessionUpdate === "interaction_resolved") {
@@ -720,15 +738,22 @@ export function createGateway() {
     // `session/load` triggers that advertisement, so the gap is one round-trip
     // wide — and during it the menu offers only what every session has.
     setCommands(seedCommands());
+    // The catalog belongs to the session being left, so it goes with it. Showing
+    // the previous session's current model over a session still loading would be
+    // a wrong answer where "not yet" is the true one.
+    setModels(null);
     say(`loading ${entry.sessionId}…`);
     try {
       // `cwd` comes straight off the roster row. That it is there at all is the
       // reason a second client can attach to a session it did not create.
-      await client.request("session/load", {
+      const loaded = await client.request("session/load", {
         sessionId: entry.sessionId,
         cwd: entry.cwd,
         mcpServers: [],
       });
+      // This reply used to be discarded whole, which is the only reason the
+      // model picker looked like it needed a wire change: `models` is on it.
+      setModels(readModelState(loaded));
       say(`attached to ${entry.sessionId}`);
     } catch (e) {
       // Nothing was replayed, so nothing is on this socket to be replayed
@@ -842,6 +867,10 @@ export function createGateway() {
         cwd,
         mcpServers: [],
       })) as NewSessionResponse;
+      // Same catalog, same field: `session/new` builds its reply with
+      // `.models(...)` too (`session_setup.rs:751-754`). Navigating to the new
+      // session attaches and replaces this, so it only ever fills the gap.
+      setModels(readModelState(created));
       await refreshRoster();
       say(`created ${created.sessionId}`);
       return created.sessionId;
@@ -869,6 +898,72 @@ export function createGateway() {
     } catch (e) {
       say(`prompt failed: ${String(e)}`);
     }
+  };
+
+  /**
+   * Switch the attached session's model, and — for a switch that has no effort
+   * with it — remember it as the default.
+   *
+   * **Two calls, not one, and sending either alone diverges from the terminal.**
+   * `/model <name>` there emits both `Effect::PersistSetting { key:
+   * "default_model" }` and `Effect::SwitchModel`
+   * (`pager/src/app/dispatch/settings/setters.rs:1776-1801`), while the
+   * shell-side setter behind that key only writes the file
+   * (`xai-grok-shell/src/util/config/settings_apply.rs:233-240`). So a client
+   * that writes the setting alone saves a preference and leaves the live session
+   * on the old model — contradicting the row's own description, which promises
+   * "Changing this also switches the active session".
+   *
+   * `effort` is the other case and must NOT be persisted: it is session-scoped
+   * and rides in `_meta` on the same `set_model` (`app/effects/mod.rs:1846-1873`),
+   * which is why `persist` follows from whether an effort was picked rather than
+   * being a second choice offered to the caller.
+   *
+   * The switch goes first. If it fails there is nothing to remember, and the
+   * write would otherwise leave the next session starting on a model this one
+   * refused.
+   */
+  const setModel = async (modelId: string, effort?: string | null): Promise<void> => {
+    const current = attached();
+    if (!client || !current) return;
+    const sessionId = current.entry.sessionId;
+    try {
+      await client.request("session/set_model", setModelRequest(sessionId, modelId, effort));
+    } catch (e) {
+      say(`could not switch model: ${String(e)}`);
+      return;
+    }
+    // The agent broadcasts `model_changed` to every subscriber including this
+    // one, but only when the session actor gets there; applying the answer to
+    // this client's own request keeps the list from lagging its own click.
+    const state = models();
+    if (state) {
+      setModels(
+        applyModelChanged(state, { model_id: modelId, ...(effort ? { reasoning_effort: effort } : {}) }),
+      );
+    }
+    if (effort) {
+      say(`switched to ${modelId} at ${effort} for this session`);
+      return;
+    }
+    let response: { applied?: boolean; refusal?: { message?: string } } | undefined;
+    try {
+      response = (await client.ext("x.ai/settings/set", defaultModelWrite(sessionId, modelId))) as {
+        applied?: boolean;
+        refusal?: { message?: string };
+      };
+    } catch (e) {
+      say(`switched to ${modelId}, but could not remember it: ${String(e)}`);
+      return;
+    }
+    // A refusal is not a failure: a `config.toml` grok was not given to rewrite
+    // is exactly what `update_config`'s `stat` is there to protect, and the
+    // sentence naming the file is the shell's, not this client's.
+    say(
+      response?.applied === false
+        ? `switched to ${modelId}; not remembered: ${response.refusal?.message ?? "declined"}`
+        : `switched to ${modelId}`,
+    );
   };
 
   const panelAction = async (plugin: string, action: PanelAction): Promise<void> => {
@@ -920,6 +1015,7 @@ export function createGateway() {
     attached,
     agentCwd,
     commands,
+    models,
     roster,
     settings,
     auth,
@@ -937,6 +1033,7 @@ export function createGateway() {
     prompt,
     cancelSubagent,
     panelAction,
+    setModel,
     refreshRoster,
   };
 }

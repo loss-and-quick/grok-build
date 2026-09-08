@@ -57,6 +57,9 @@ function stub(over: Partial<Gateway> = {}): { gateway: Gateway; sent: string[] }
     permissions: [],
     status: () => "connected",
     commands: () => catalog(),
+    // No catalog on the wire is a real state (a session whose reply carried
+    // none), and the one this stub is in: the picker draws nothing.
+    models: () => null,
     prompt: async (text: string) => {
       sent.push(text);
     },

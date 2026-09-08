@@ -264,6 +264,86 @@ second one written in JavaScript would be a second opinion about the same bytes.
 Colour in tool output belongs on the wire, next to `output_for_prompt`, not in
 each client.
 
+## Switching the model
+
+The model this session runs on sits in the header; pressing it opens the same
+two-phase list the terminal opens on Ctrl+M. Type to filter, arrows to move,
+Enter to take a row, Escape to step back out of the effort phase and then to
+close.
+
+**Nothing was added to the wire for it, and nothing changed in Rust.** The
+catalog is in the reply to `session/load` — field `models`, an ACP
+`SessionModelState` — and this client used to discard that reply whole. The
+switch is standard ACP `session/set_model`. `session/new` answers with the same
+field, and `initialize` carries a pre-session copy under `_meta.modelState`,
+which is what the terminal's dashboard reads when there is no session yet.
+
+Both phases are the pager's, row for row: the `(current)` suffix on `display`
+only, so it can never affect the filter; the `(active)` suffix on an effort row
+only when the chosen model is also the session's; and the filter itself, which
+for *this* screen is a case-insensitive substring over the name, the label and
+the description (`app/modals.rs`) rather than the `nucleo` ranking the inline
+slash dropdown uses. That is why it is reproduced exactly instead of
+approximated — `docs/WEB-DEPS.md` rejects JS fuzzy libraries because a different
+algorithm is a different match set, and here there is no algorithm to port.
+
+### The two calls, and why sending one is wrong
+
+`/model <name>` in the terminal emits **two** effects — a `default_model` write
+*and* a session switch (`app/dispatch/settings/setters.rs`) — while the
+shell-side setter behind that key only writes the file
+(`util/config/settings_apply.rs`). A client that sent the setting alone would
+save a preference and leave the live session on the old model, contradicting the
+catalog row's own description: *"Changing this also switches the active
+session."* So a model with no reasoning effort switches **and** is remembered,
+switch first: a default remembered for a model the agent refused would start the
+*next* session on a model this one could not use.
+
+`/model <name> <effort>` is the opposite and must **not** persist. The effort is
+session-scoped and rides in `_meta.reasoningEffort` on the same `set_model`, so
+the footer of the dialog says which of the two is about to happen.
+
+A refused write is not a failure. `x.ai/settings/set` answers `applied: false`
+with the shell's own sentence naming the file, which is `update_config`'s `stat`
+protecting a declaratively configured machine from a browser exactly as it does
+from a terminal.
+
+### What is carried, and what is not
+
+- **A row is keyed by id.** The terminal's rows are text to be typed into a
+  composer, so its `insert_text` holds the model's *name* and it resolves that
+  again on dispatch. An effort row is the sharper case: its menu id and its
+  canonical value are different fields, and only the value goes on the wire
+  (`sampling-types`, `ReasoningEffortOption`). Sending the id would name a level
+  the agent does not have.
+- **"More input expected" is a boolean, not a trailing space.** The terminal
+  marks a reasoning model by ending `insert_text` with a space and detecting it
+  with `ends_with(char::is_whitespace)`. That is a composer convention; a list
+  can show a chevron.
+- **`supportsReasoningEffort` defaults to false**, where its neighbours
+  `firstParty` and `acceptsImages` default to true — so an absent flag means no
+  effort menu, not an empty one. An absent, empty, junk or non-array
+  `reasoningEfforts` all collapse to the built-in `xhigh/high/medium/low` menu,
+  which the wire states as a contract.
+- **A hidden sort prefix is not.** The pager's effort rows carry an invisible
+  `"a "` / `"b "` in `match_text`, there to steer a `nucleo` tiebreak — in a
+  modal that does not rank with `nucleo` but filters with `contains` over that
+  same field. Typing `a ` in the terminal's effort phase therefore matches
+  `xhigh` for no visible reason. It is a bug, it is not copied, and a test pins
+  that it is not.
+- **A switch made elsewhere moves this picker.** The shell broadcasts
+  `model_changed` to every subscriber of the session, so a terminal on the same
+  leader, or a second tab, is reflected here without asking for anything.
+
+**One thing the terminal can do that this cannot:** make a *reasoning* model the
+remembered default. Chosen from the terminal's own dialog it cannot either — the
+effort phase is session-scoped — and the terminal's other route is typing
+`/model <name>`, which is a pager command the shell never advertises, so a
+browser has nothing to dispatch. The wire's home for it is the `default_model`
+row of the settings catalog, already `surface: any` with `kind: dynamicEnum {
+source: activeModelCatalog }` and already drawn here; this client still renders
+settings read-only, and that is where the gap closes.
+
 ## Slash commands
 
 Press `/` in the composer and the shell's own catalog opens: its builtins, the
@@ -544,6 +624,7 @@ back as the same objects, so `<For>` leaves their DOM — and any selection in i
 | `src/roster.ts` | the roster, grouped by `cwd` |
 | `src/directory.ts` | absolute-path arithmetic, and the listing params a picker needs |
 | `src/transcript.ts` | folding `session/update` into a store |
+| `src/models.ts` | the model catalog, the two phases, and the two calls a switch is |
 | `src/toolcall.ts` | the title, the fold and the truncation the terminal gives a tool call |
 | `src/toolresult.ts` | the typed result — a read's gutter, a search's hits, an edit's hunks |
 | `src/ansi.ts` | escape sequences off arbitrary program output, and where that stops |
@@ -553,7 +634,7 @@ back as the same objects, so `<For>` leaves their DOM — and any selection in i
 | `src/panel.ts` | tone-to-role, and the block-kind exhaustiveness guard |
 | `src/theme.ts` | generated palette to CSS custom properties |
 | `src/App.tsx` | the screen and its routes |
-| `src/components/` | AuthCard, Roster, Session, ToolResult, Subagents, Panel, Markdown, Settings, PermissionCard, FolderTrustCard, DirectoryPicker, CommandMenu |
+| `src/components/` | AuthCard, Roster, Session, ToolResult, Subagents, Panel, Markdown, ModelPicker, Settings, PermissionCard, FolderTrustCard, DirectoryPicker, CommandMenu |
 
 `src/wire.ts` is hand-written on purpose and the reasoning is at the top of the
 file: the panel types and the palette *are* generated and are imported, never

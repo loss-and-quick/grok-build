@@ -1,23 +1,20 @@
-// PROTOTYPE — the model picker, built only from what this client already receives.
+// The model picker: the terminal's `/model` screen, from data this client is
+// already sent.
 //
-// Deliberately not wired into `gateway.ts`: another agent is working in this
-// package, and the point of this module is the finding, not the plumbing. What
-// it demonstrates is that `/model` needs no wire change, no Rust change and no
-// new declarative vocabulary — the catalog is already in two responses this
-// client makes and throws away.
+// Nothing here is new on the wire and nothing in Rust changed for it. Where the
+// catalog comes from, both paths verified in Rust:
 //
-// Where the catalog comes from, both paths verified in Rust:
-//
-//   - `initialize` reply, `_meta.modelState` — the pager reads exactly this
-//     (`xai-grok-pager/src/acp/mod.rs:591-595`);
 //   - `session/new` and `session/load` replies, field `models`
-//     (`xai-grok-shell/src/agent/mvp_agent/session_setup.rs:751-754` builds the
-//     reply with `.models(...)` and `.config_options(...)`).
+//     (`xai-grok-shell/src/agent/mvp_agent/session_setup.rs:751-754` and
+//     `:1107-1110` build the replies with `.models(...)`);
+//   - `initialize` reply, `_meta.modelState` — the pre-session catalog, which
+//     the pager reads for its session-less dashboard
+//     (`xai-grok-pager/src/acp/mod.rs:591-595`). This client has no
+//     session-less model screen, so it reads the session replies; `readModelState`
+//     accepts both because the same catalog rides both.
 //
-// `wire.ts:663-664` already says the second one carries "much more (models,
-// config options, `_meta`)" and describes only the id; `gateway.ts` calls
-// `session/load` and discards the reply entirely. So the gap here was never a
-// missing mechanism.
+// `gateway.ts` used to call `session/load` and discard the reply entirely, which
+// is why this screen looked like a missing mechanism and was a discarded field.
 //
 // The switch is standard ACP, not an `x.ai/*` extension: `session/set_model`
 // (`agent-client-protocol-schema-0.11.4/src/agent.rs:4096`), implemented by the
@@ -64,27 +61,26 @@ export interface EffortOption {
 /**
  * One row of either phase of the picker.
  *
- * The field names are the pager's `ArgItem`
+ * `display`, `matchText` and `description` are the pager's `ArgItem`
  * (`xai-grok-pager/src/slash/command.rs:74-83`) because the filter below
  * searches all three, and dropping one would change which rows match.
+ *
+ * The pager's fourth field, `insert_text`, is not reproduced. It is a composer
+ * concept carrying two things at once — which model or level the row means, and
+ * whether more input is expected (a trailing space, `slash/commands/model.rs:140-144`,
+ * read back by `ends_with(char::is_whitespace)` at `app/modals.rs:23-29`). A
+ * list that is not a text field can say both outright, so they are `id` and
+ * `chainsToEffort` here.
  */
 export interface PickerRow {
+  /** The model id, or the effort option id, this row selects. */
+  id: string;
   /** What the list shows. */
   display: string;
   /** What the filter searches, in addition to `display` and `description`. */
   matchText: string;
-  /** What selecting the row means; see `chainsToEffort`. */
-  insertText: string;
   description: string;
-  /**
-   * True when this row opens the effort phase rather than applying.
-   *
-   * The pager encodes the same fact as a trailing space on `insert_text`
-   * (`slash/commands/model.rs:140-144`) and detects it by
-   * `ends_with(char::is_whitespace)` (`app/modals.rs:23-29`). A string that
-   * means "more input expected" is a terminal-composer convention, so it is
-   * carried here as a boolean and the trailing space is not reproduced.
-   */
+  /** True when this row opens the effort phase rather than applying. */
   chainsToEffort: boolean;
 }
 
@@ -169,9 +165,9 @@ export function modelRows(state: SessionModelState): PickerRow[] {
   return state.availableModels.map((info) => {
     const isCurrent = info.modelId === state.currentModelId;
     return {
+      id: info.modelId,
       display: isCurrent ? `${info.name} (current)` : info.name,
       matchText: info.name,
-      insertText: info.name,
       description: info.description ?? "",
       chainsToEffort: supportsEffort(info),
     };
@@ -193,6 +189,17 @@ export function modelRows(state: SessionModelState): PickerRow[] {
  * `contains` over `match_text` (`app/modals.rs:642-652`) — so in the terminal
  * today, typing `a` in the effort phase matches the xhigh row through an
  * invisible sort key. Copying that would be copying a bug.
+ *
+ * **`id` is the option's `value`, not its `id`, and the two genuinely differ.**
+ * `ReasoningEffortOption` says so in as many words — "`id`/`label` are
+ * presentation and input; `value` is the canonical value sent on the wire"
+ * (`xai-grok-sampling-types/src/types.rs:874-883`) — and a server-supplied
+ * option may well be `{ id: "deep", value: "xhigh" }`. The terminal only gets
+ * away with putting `id` in `insert_text` because it resolves that token back
+ * through `resolve_effort_token_for` before sending
+ * (`pager/src/acp/model_state.rs:211-228`); a client that skipped the
+ * resolution and sent the id would ask for an effort that does not exist.
+ * `matchText` stays the id, because the id is what the terminal filters on.
  */
 export function effortRows(state: SessionModelState, modelId: string): PickerRow[] {
   const info = modelById(state, modelId);
@@ -200,9 +207,9 @@ export function effortRows(state: SessionModelState, modelId: string): PickerRow
   const isCurrentModel = state.currentModelId === modelId;
   const active = currentEffort(info);
   return effortOptions(info).map((option) => ({
+    id: option.value,
     display: isCurrentModel && active === option.value ? `${option.label} (active)` : option.label,
     matchText: option.id,
-    insertText: option.id,
     description: option.description ?? "",
     chainsToEffort: false,
   }));
@@ -306,4 +313,47 @@ export function readModelState(reply: unknown): SessionModelState | null {
     return null;
   }
   return state as SessionModelState;
+}
+
+/**
+ * Fold a `model_changed` broadcast back into the catalog.
+ *
+ * The switch is not private to whoever made it: the shell announces every one
+ * on `x.ai/session_notification` as `SessionUpdate::ModelChanged`
+ * (`xai-grok-shell/src/agent/handlers/model_switch.rs:335-356`), and the leader
+ * broadcasts it to every client subscribed to the session. So a terminal
+ * pressing Ctrl+M, or a second browser tab, moves this one's picker too — which
+ * is the whole reason this client reads the update rather than trusting only its
+ * own request's reply.
+ *
+ * The shell's own doc comment says the originating client "skips applying it"
+ * because its in-flight response is authoritative and drives its one "Switched
+ * to X" scrollback line (`extensions/notification.rs:828-832`). This client has
+ * no scrollback line to draw twice, and the fold is idempotent, so it applies
+ * the broadcast unconditionally rather than keeping a pending flag whose only
+ * job would be to suppress a no-op.
+ *
+ * Field names are snake_case: `rename_all` on that enum renames the *tag* only,
+ * so the variant's own fields stay as Rust wrote them — pinned by the shell's
+ * `model_changed_serializes_snake_case_with_optional_effort`.
+ *
+ * `reasoning_effort` is omitted when the model has none, so an absent key must
+ * leave the previous effort alone rather than clearing it.
+ */
+export function applyModelChanged(
+  state: SessionModelState,
+  update: Record<string, unknown>,
+): SessionModelState {
+  const modelId = update["model_id"];
+  if (typeof modelId !== "string" || !modelId) return state;
+  const effort = update["reasoning_effort"];
+  return {
+    ...state,
+    currentModelId: modelId,
+    availableModels: state.availableModels.map((info) =>
+      info.modelId === modelId && typeof effort === "string"
+        ? { ...info, _meta: { ...(info._meta ?? {}), [EFFORT_KEY]: effort } }
+        : info,
+    ),
+  };
 }

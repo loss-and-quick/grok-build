@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  applyModelChanged,
   currentEffort,
   defaultModelWrite,
   effortOptions,
   effortRows,
   filterRows,
   legacyEffortOptions,
+  modelById,
   modelRows,
   readModelState,
   setModelRequest,
@@ -14,7 +16,7 @@ import {
   type SessionModelState,
 } from "../src/models.ts";
 
-// PROTOTYPE. Every expectation below is pinned against a named line of the
+// Every expectation below is pinned against a named line of the
 // pager, because the claim this module makes is not "a model picker works" but
 // "the browser can reproduce the terminal's picker from data it already has".
 // A test that only checked the TypeScript would prove the first and not the
@@ -231,5 +233,67 @@ describe("the catalog row for `default_model` already describes this screen", ()
     expect(row).toBeDefined();
     expect(row!.surface).toBe("any");
     expect(row!.kind).toMatchObject({ type: "dynamicEnum", source: "activeModelCatalog" });
+  });
+});
+
+describe("what a row carries back", () => {
+  test("a model row is keyed by model id, not by the name shown", () => {
+    // The picker resolves nothing: it hands `id` straight to `session/set_model`.
+    // The terminal cannot, because its rows are text to be typed into a
+    // composer — so it puts the *name* in `insert_text` and resolves it again
+    // with `resolve_by_name_or_id` (`model.rs:52-53`). Two catalog entries can
+    // share a display name; ids cannot.
+    expect(modelRows(state).map((r) => r.id)).toEqual(["grok-4.5", "grok-4-fast", "bare"]);
+  });
+
+  test("an effort row carries the option's VALUE, not its id", () => {
+    // `ReasoningEffortOption` says which is which: "`id`/`label` are
+    // presentation and input; `value` is the canonical value sent on the wire"
+    // (`xai-grok-sampling-types/src/types.rs:874-883`). The terminal puts the id
+    // in the text it inserts and converts it back through
+    // `resolve_effort_token_for` (`pager/src/acp/model_state.rs:211-228`); a
+    // client that skipped that step and sent `deep` would name a level the
+    // agent does not have.
+    const model = {
+      modelId: "m",
+      name: "m",
+      _meta: {
+        supportsReasoningEffort: true,
+        reasoningEfforts: [{ id: "deep", value: "xhigh", label: "Deep" }],
+      },
+    };
+    const catalog: SessionModelState = { currentModelId: "m", availableModels: [model] };
+    const rows = effortRows(catalog, "m");
+    expect(rows.map((r) => r.id)).toEqual(["xhigh"]);
+    // And the id stays the thing the filter searches, because it is what the
+    // terminal filters on.
+    expect(rows.map((r) => r.matchText)).toEqual(["deep"]);
+    expect(setModelRequest("s1", "m", rows[0]!.id)._meta).toEqual({ reasoningEffort: "xhigh" });
+  });
+});
+
+describe("a switch made somewhere else", () => {
+  test("`model_changed` moves the catalog, effort and all", () => {
+    // Broadcast to every subscriber of the session
+    // (`xai-grok-shell/src/agent/handlers/model_switch.rs:335-356`), so a
+    // terminal on the same leader moves the browser's picker. snake_case
+    // fields: `rename_all` on that enum renames only the tag.
+    const next = applyModelChanged(state, { model_id: "grok-4-fast", reasoning_effort: "low" });
+    expect(next.currentModelId).toBe("grok-4-fast");
+    expect(currentEffort(modelById(next, "grok-4-fast"))).toBe("low");
+    // The old current keeps its own effort: the update speaks about one model.
+    expect(currentEffort(modelById(next, "grok-4.5"))).toBe("high");
+  });
+
+  test("an omitted effort leaves the model's own alone", () => {
+    // `reasoning_effort` is `skip_serializing_if = "Option::is_none"`, so absent
+    // means "this model has none to report", not "clear it".
+    const next = applyModelChanged(state, { model_id: "grok-4.5" });
+    expect(next.currentModelId).toBe("grok-4.5");
+    expect(currentEffort(modelById(next, "grok-4.5"))).toBe("high");
+  });
+
+  test("a frame with no model id changes nothing", () => {
+    expect(applyModelChanged(state, { reasoning_effort: "low" })).toBe(state);
   });
 });

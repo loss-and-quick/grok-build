@@ -889,6 +889,15 @@ button.tool-title:focus-visible .tool-bullet-mark {
   inset: 0;
   z-index: 1;
   display: grid;
+  /* One row and one column of exactly the free space, rather than the `auto`
+   * both would otherwise be. The card's own `height: min(…, 100%)` cannot be
+   * resolved while the track it sits in is being sized *by that card*, so the
+   * percentage is dropped, the track takes the card's full max-content — every
+   * row of a long list — and centring inside a track taller than the window
+   * pushes the card off the bottom of the screen. Naming the tracks breaks the
+   * cycle: they are the window, so the percentage resolves against them. */
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   padding: 1rem;
   background: color-mix(in srgb, var(--grok-bg-dark, canvas) 82%, transparent);
@@ -1685,5 +1694,116 @@ button.picker-row:focus-visible {
 
 .subagent-stop:disabled {
   cursor: default;
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+/* -- model picker --------------------------------------------------------- */
+
+/* The header gains a third thing, so it becomes a row: the session on the left,
+ * what it is running on the right. */
+.session-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "title model"
+    "cwd   model";
+  align-items: baseline;
+  gap: 0 0.75rem;
+}
+
+.session-title {
+  grid-area: title;
+}
+
+.session-cwd {
+  grid-area: cwd;
+}
+
+/* `accent_model` is the palette's own role for naming a model; the two clients
+ * are reading the same generated value, not agreeing on a colour. */
+.model-current {
+  grid-area: model;
+  align-self: center;
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.15rem 0.5rem;
+  color: var(--grok-accent-model, canvastext);
+  border-color: var(--grok-prompt-border, canvastext);
+}
+
+.model-current:hover {
+  border-color: var(--grok-hover-border, canvastext);
+  background: var(--grok-bg-hover, canvas);
+}
+
+.model-effort {
+  font-size: 0.75rem;
+  color: var(--grok-gray, canvastext);
+}
+
+/* Shorter than the directory picker: a catalog is a list and nothing else, so
+ * there is no room to reserve for breadcrumbs or a path field. */
+.model-picker {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  height: min(28rem, 100%);
+  width: min(38rem, 100%);
+}
+
+.model-back {
+  padding: 0 0.25rem;
+  background: transparent;
+  border-color: transparent;
+  color: var(--grok-accent-assistant, canvastext);
+  font-size: inherit;
+}
+
+.model-filter {
+  width: 100%;
+}
+
+/* The same four columns as the slash menu, and inherited through `subgrid` for
+ * the same reason: the pager sizes one label column for the whole list
+ * (`compute_label_column_w`), so every description starts in the same place. */
+.model-picker .picker-list {
+  display: grid;
+  scrollbar-gutter: stable;
+  grid-template-columns: 1.25rem minmax(0, max-content) minmax(0, 1fr) 1ch;
+  align-content: start;
+}
+
+.model-row {
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  gap: 0 0.75rem;
+  align-items: baseline;
+  cursor: pointer;
+}
+
+.model-row.selected {
+  background: var(--grok-bg-visual, canvas);
+}
+
+.model-row-name {
+  color: var(--grok-accent-model, canvastext);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-row-description {
+  color: var(--grok-text-secondary, canvastext);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-row-more {
+  color: var(--grok-gray, canvastext);
+}
+
+.model-note {
+  margin: 0;
+  color: var(--grok-gray, canvastext);
   opacity: var(--grok-muted-opacity, 1);
 }

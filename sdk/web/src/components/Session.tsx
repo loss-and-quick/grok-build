@@ -24,6 +24,7 @@ import { sessionLabel } from "../roster.ts";
 import type { ToolCallEntry, TranscriptEntry } from "../transcript.ts";
 import { CommandMenu, createCommandMenu } from "./CommandMenu.tsx";
 import { Markdown } from "./Markdown.tsx";
+import { ModelPicker } from "./ModelPicker.tsx";
 import { Panel } from "./Panel.tsx";
 import { PermissionCard } from "./PermissionCard.tsx";
 import { Subagents } from "./Subagents.tsx";
@@ -89,6 +90,10 @@ export function Session(props: { gateway: Gateway }): JSX.Element {
               {sessionLabel(current().entry, firstPrompt(current().transcript.entries))}
             </h1>
             <div class="session-cwd">{current().entry.cwd}</div>
+            {/* In the header rather than by the composer: the terminal keeps the
+                model in its status bar, where it is a property of the session
+                rather than of the message being typed. */}
+            <ModelPicker gateway={props.gateway} />
           </header>
 
           <div class="permissions">
