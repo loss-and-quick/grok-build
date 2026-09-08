@@ -28,6 +28,14 @@ const DELETE_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(
 fn stage_budget(deadline: tokio::time::Instant, cap: std::time::Duration) -> std::time::Duration {
     cap.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
 }
+/// The key a session root is held under by the consumers that canonicalize.
+///
+/// Same rule as `SharedPluginRegistryHandle::root_key` and the discovery
+/// watcher's `canonical_root_key`, including the fallback: a root that no longer
+/// resolves keeps its raw path, so a deleted tree still matches itself.
+fn canonical_root(root: &std::path::Path) -> std::path::PathBuf {
+    dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
 /// What a close did.
 /// `Superseded`: a live session replaced the target and survived.
 #[must_use]
@@ -200,14 +208,35 @@ impl MvpAgent {
     /// non-recursive watches on `<cwd>/` and `<cwd>/.grok/` hang off this one
     /// liveness check; `ConfigFileWatcher::unwatch_path` documents that its
     /// caller must ref-count, and this is that caller.
+    ///
+    /// The two hold their entries under different keys, so each gets its own
+    /// count. A session cwd is whatever spelling the client sent, and a
+    /// symlinked or trailing-slash spelling of a tree another session already
+    /// opened is one root to the registry and two to the watcher:
+    /// `SharedPluginRegistryHandle` canonicalizes, so both spellings share a
+    /// single memoized registry, while `ConfigFileWatcher` tracks the path it
+    /// was handed and so holds a watch pair per spelling. Counting either on
+    /// the other's key is wrong in one direction each — the registry would go
+    /// while a session still reads it, or a watch pair would be stranded for
+    /// the life of the leader.
     fn release_session_root(&self, cwd: &str) {
         let cwd = std::path::Path::new(cwd);
-        let mut still_live = false;
+        let canonical = canonical_root(cwd);
+        let mut spelling_live = false;
+        let mut tree_live = false;
         self.session_registry.for_each_resident(|_, h| {
-            still_live |= std::path::Path::new(&h.info.cwd) == cwd;
+            let other = std::path::Path::new(h.info.cwd.as_str());
+            if other == cwd {
+                spelling_live = true;
+                tree_live = true;
+            } else if !tree_live {
+                tree_live = canonical_root(other) == canonical;
+            }
         });
-        if !still_live {
+        if !tree_live {
             self.plugin_registry_handle.release_root(cwd);
+        }
+        if !spelling_live {
             self.notify_session_cwd_unwatched(cwd);
         }
     }

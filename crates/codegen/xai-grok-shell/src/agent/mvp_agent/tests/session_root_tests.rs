@@ -301,3 +301,98 @@ async fn fs_list_resolves_a_relative_path_against_the_named_session() {
         "a relative list must walk the session's root, got {names:?}"
     );
 }
+
+/// An agent whose plugin discovery finds one plugin from any root, so a
+/// memoized per-root registry is `Some` and can be compared by pointer.
+#[cfg(unix)]
+fn agent_with_cli_plugin(plugin_dir: &std::path::Path) -> crate::agent::mvp_agent::MvpAgent {
+    use crate::agent::config::Config as AgentConfig;
+    use crate::auth::{AuthManager, GrokComConfig};
+    let auth_home = tempfile::tempdir().unwrap();
+    let auth_manager =
+        std::sync::Arc::new(AuthManager::new(auth_home.path(), GrokComConfig::default()));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let gateway = xai_acp_lib::AcpAgentGatewaySender::new(tx);
+    let mut cfg = AgentConfig::default();
+    cfg.plugins.cli_plugin_dirs = vec![plugin_dir.to_path_buf()];
+    crate::agent::mvp_agent::MvpAgent::new(gateway, &cfg, auth_manager, None)
+        .expect("valid test config")
+}
+
+/// Regression: a client may open a tree under a symlink while another session
+/// holds it under its real path. Those are two roots to the config watcher,
+/// which watches the path it was handed, and one root to the plugin registry,
+/// which canonicalizes its key — so closing one of them must hand back that
+/// spelling's watches while leaving the registry the other session still reads.
+///
+/// Comparing the raw cwds for both, as the release path did, dropped the shared
+/// registry on the first close and the surviving session silently rebuilt a
+/// different one.
+///
+/// Serial because plugin discovery and folder trust resolve out of `HOME`.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial]
+async fn closing_one_spelling_keeps_the_root_a_live_session_still_holds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home = EnvGuard::set("HOME", &home);
+    let _userprofile = EnvGuard::set("USERPROFILE", &home);
+    let _grok = EnvGuard::set("GROK_HOME", &home);
+
+    let real = tmp.path().join("tree");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = tmp.path().join("tree-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let plugin_dir = tmp.path().join("plugin");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{"name": "root-release-plugin"}"#,
+    )
+    .unwrap();
+
+    let mut agent = agent_with_cli_plugin(&plugin_dir);
+    let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.set_config_watcher_path_tx(watch_tx);
+
+    for (id, cwd) in [("root-real", &real), ("root-link", &link)] {
+        let sid = acp::SessionId::new(id);
+        let mut handle = make_test_handle("test-model", false, None);
+        handle.info = Info {
+            id: sid.clone(),
+            cwd: cwd.to_string_lossy().into_owned(),
+        };
+        agent.insert_resident(&sid, handle);
+    }
+
+    let held = agent
+        .plugin_registry_for_root(&real)
+        .expect("the cli plugin dir must give this root a registry");
+
+    agent.take_session(&acp::SessionId::new("root-link"));
+
+    assert!(
+        agent
+            .plugin_registry_for_root(&real)
+            .is_some_and(|now| std::sync::Arc::ptr_eq(&held, &now)),
+        "the real-path session still holds this tree, so its registry must survive"
+    );
+    assert_eq!(
+        watch_rx.try_recv().ok(),
+        Some(crate::config::watcher::ConfigWatchRequest::Unwatch(
+            link.clone()
+        )),
+        "the closed spelling's own watch pair must still be handed back"
+    );
+
+    agent.take_session(&acp::SessionId::new("root-real"));
+    assert!(
+        agent
+            .plugin_registry_for_root(&real)
+            .is_some_and(|rebuilt| !std::sync::Arc::ptr_eq(&held, &rebuilt)),
+        "the last session leaving the tree must release the memoized registry"
+    );
+}
