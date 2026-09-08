@@ -1,87 +1,67 @@
+// The pager's animation, read from the generated artifact.
+//
+// Nothing here spells out a speed or a curve constant, for the same reason
+// nothing in `theme.ts` spells out a colour: `ANIMATION` is serialized from the
+// Rust the pager itself animates on
+// (`xai-grok-pager-render/src/theme/animation.rs`), so a tweak there fails
+// `theme::tokens::tests::generated_theme_tokens_match_the_pager_palette` until
+// it is regenerated, and lands here when it is.
+//
+// What the artifact deliberately does not carry is `wave_rows`. The pager
+// paints a running rail as a *column of terminal cells* and offsets each cell's
+// phase by its row; `wave_rows` is how many rows one full wave spans. A rail
+// here is a single element, so it is the pager's row 0 and there is no row
+// index to offset. `wave_rows` is therefore terminal geometry rather than a
+// preference this client quietly fails to honour, which is also why it stays a
+// `pager.toml` knob — `SettingSurface::Terminal` defines itself as exactly
+// that, "a column width, the frame cadence".
 import { createSignal, onCleanup, onMount } from "solid-js";
-
-// The pager's animation, reproduced.
-//
-// ## Why these numbers are written here and not imported
-//
-// The palette is generated from the pager's Rust, which is why no colour is
-// spelled out anywhere in this package. Animation is not generated:
-// `theme/tokens.rs` excludes it on purpose — "`wave_brightness` /
-// `pulse_brightness` are behavior over a tick counter, not palette" — so there
-// is nothing to import, and the constants below are transcribed from named
-// Rust constants rather than derived from an artifact.
-//
-// That is a gap, not a decision I am happy with, and the fix is the same one
-// that fixed the palette: emit them. It needs a small Rust move first, because
-// the curves live in `xai-grok-pager-render` while their speeds live one crate
-// up in `xai-grok-pager`:
-//
-//   - `WAVE_SPEED` — scrollback/wrappers/entry_renderer.rs
-//   - `USER_WAITING_PULSE_SPEED` — views/turn_status.rs
-//
-// Move those beside `wave_brightness`/`pulse_brightness` in
-// `xai-grok-pager-render/src/theme/`, have the pager import them, and
-// `tokens.rs` can then emit an `ANIMATION` block guarded by the same
-// compare-never-rewrite test as the colours. Until that lands, a pager edit
-// silently desynchronises this file, which is exactly the failure the theme
-// generator exists to prevent — so `animationConstantsMatchThePager` pins them
-// and this comment names the source lines.
+import { ANIMATION } from "@grok-build/theme";
 
 /**
- * Frame cadence. The pager's tick counter advances at roughly 30fps, and every
- * speed below is radians *per tick*, so the cadence is part of the timing.
- */
-export const TICKS_PER_SECOND = 30;
-
-/**
- * Radians per tick for the accent wave: running tool rails, running bullets and
- * the running verb-group diamond.
+ * Frame cadence. Every speed below is radians *per tick*, so the cadence is
+ * part of the timing.
  *
- * `WAVE_SPEED` in `entry_renderer.rs`.
+ * This is the pager's shipped default. `pager.toml` can retune the terminal's
+ * own cadence, and nothing carries that to a browser — which the generated
+ * artifact says in as many words.
  */
-export const WAVE_SPEED = 0.15;
+export const TICKS_PER_SECOND = ANIMATION.ticks_per_second;
 
 /**
- * Radians per tick for the "waiting on you" pulse on the turn-status diamond.
+ * `sin²(tick·speed)` — the pager's `pulse_brightness`.
  *
- * `USER_WAITING_PULSE_SPEED` in `turn_status.rs`; about a 1.3s cycle at 30fps.
+ * Everything driven by one tick pulses in unison, which is what makes a row of
+ * bullets read as one animation rather than several.
  */
-export const PULSE_SPEED = 0.08;
-
-/**
- * Rows per full wave cycle, so the wave travels down a block at a fixed rate
- * regardless of its height.
- *
- * `AnimationConfig::wave_rows` default in `appearance/config.rs`. It is a user
- * setting in the pager and has no wire form, so a browser cannot read the
- * user's value — see the settings finding.
- */
-export const WAVE_ROWS = 32;
-
-/**
- * `sin²(tick·speed + 2π·row/waveRows)` — the pager's `wave_brightness`.
- *
- * Each row carries a fixed phase offset, which is what makes the brightness
- * travel down a block rather than blink in unison.
- */
-export function waveBrightness(tick: number, row: number, waveRows = WAVE_ROWS, speed = WAVE_SPEED): number {
-  const phase = (row / Math.max(1, waveRows)) * 2 * Math.PI;
-  const s = Math.sin(tick * speed + phase);
-  return s * s;
-}
-
-/** `sin²(tick·speed)` — the pager's `pulse_brightness`; everything on one tick pulses together. */
-export function pulseBrightness(tick: number, speed = PULSE_SPEED): number {
+export function pulseBrightness(tick: number, speed: number): number {
   const s = Math.sin(tick * speed);
   return s * s;
 }
 
 /**
- * The pager's "waiting on you" diamond floor: `0.3 + sin²(…)·0.7`, so it dims
- * without ever going dark. `pending_diamond_color` in `turn_status.rs`.
+ * The running accent wave: tool rails, running bullets, the running verb-group
+ * diamond.
+ *
+ * The pager's `wave_brightness` at row 0. A rail here is one element, so there
+ * is no per-row phase offset to apply — see the note at the top of this file.
+ */
+export function waveBrightness(tick: number): number {
+  return pulseBrightness(tick, ANIMATION.wave_speed);
+}
+
+/**
+ * The "waiting on you" pulse: the pager's `waiting_brightness`, a pulse lifted
+ * onto a floor so the diamond dims without ever going dark.
+ *
+ * That floor is what separates *paused on you* from *still working*, which is
+ * why it is a generated constant rather than a rounded-off literal.
  */
 export function waitingBrightness(tick: number): number {
-  return 0.3 + pulseBrightness(tick) * 0.7;
+  return (
+    ANIMATION.waiting_floor +
+    pulseBrightness(tick, ANIMATION.waiting_pulse_speed) * ANIMATION.waiting_range
+  );
 }
 
 /**
@@ -96,7 +76,8 @@ export function tickAt(nowMs: number): number {
 }
 
 /**
- * A shared 30fps tick signal, started lazily and stopped when nothing reads it.
+ * A shared tick signal at the pager's cadence, started lazily and stopped when
+ * nothing reads it.
  *
  * One `requestAnimationFrame` loop for the whole page: everything animated in
  * the pager shares a single tick counter, and sharing it here is what keeps a

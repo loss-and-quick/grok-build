@@ -126,7 +126,7 @@ function Entry(props: { entry: TranscriptEntry; tick: () => number }): JSX.Eleme
                       color: blendToward(
                         "var(--grok-bg-base)",
                         "var(--grok-accent-running)",
-                        waveBrightness(props.tick(), 0),
+                        waveBrightness(props.tick()),
                       ),
                     }
                   : undefined
