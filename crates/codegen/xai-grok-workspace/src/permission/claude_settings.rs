@@ -469,13 +469,38 @@ pub fn load_claude_env_with_project(cwd: &Path, project_trusted: bool) -> HashMa
 // We re-implement a small reader here because the gate consumers live in this crate and can't depend on shell (it would create a cycle)
 // Caching is intentionally omitted; if this becomes a hotspot we can lift it into a shared crate
 
+/// Test-installed answer for [`is_claude_import_marked`]: `0` unset, `1` marked, `2` not marked.
+///
+/// The escape hatch a shell test needs, because the shell-side marker cache it
+/// writes lives in a crate this one cannot depend on. It used to be the
+/// environment variable `_GROK_CLAUDE_MARKER_OVERRIDE`, which shipped: anyone
+/// who exported it in a real session turned off every `.claude/` permission,
+/// hook and MCP fallback in the resolver below, with nothing in the config to
+/// show for it. In-process state cannot be set from outside the process.
+///
+/// Runtime-activated rather than feature-gated: Bazel compiles production and
+/// test targets with one shared feature set, so a feature would leak into
+/// production builds anyway.
+static MARKER_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Force [`is_claude_import_marked`] to `value` for this process, or `None` to
+/// go back to reading the config. Process-wide: callers hold a serial guard.
+pub fn set_claude_import_marker_override(value: Option<bool>) {
+    let encoded = match value {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => 2,
+    };
+    MARKER_OVERRIDE.store(encoded, std::sync::atomic::Ordering::Release);
+}
+
 /// True when the user marked Claude settings imported (`[claude_compat].imported` in config.toml, or the test override).
 /// Public so callers that mirror this gate elsewhere use the same check.
 pub fn is_claude_import_marked() -> bool {
-    // Test escape hatch: shell tests call `refresh_marker_cache(true)`, which lives in xai-grok-shell (inaccessible from here at runtime)
-    // They also set this env var so the gate in this crate honours the override without a cross-crate dependency
-    if std::env::var("_GROK_CLAUDE_MARKER_OVERRIDE").as_deref() == Ok("1") {
-        return true;
+    match MARKER_OVERRIDE.load(std::sync::atomic::Ordering::Acquire) {
+        1 => return true,
+        2 => return false,
+        _ => {}
     }
     let Some(config_path) = xai_grok_config::user_grok_home().map(|g| g.join("config.toml")) else {
         return false;

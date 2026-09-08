@@ -493,6 +493,13 @@ pub fn find_project_root(cwd: &Path) -> PathBuf {
 /// Cached result of [`is_claude_import_marked`]; see its doc for the caching rationale and trade-offs.
 /// `RwLock<Option<bool>>` rather than `OnceLock<bool>` so tests can reset the state between cases.
 /// The fast path is a read lock and a cached `bool`, far below the cost of the uncached `read_to_string` and TOML parse.
+///
+/// Every test that seeds it holds `#[serial]`, but the gate it feeds is read
+/// by five production modules that ordinary parallel cases exercise, so a
+/// seeded `true` is visible to them for as long as the serial case runs.
+/// Closing that needs the gate passed in rather than looked up — a change to
+/// the signatures of `load_mcp_json_servers`, `discover_hook_source_paths`,
+/// `merge_claude_enabled_plugins` and their callers, not to this cache.
 static MARKER_CACHE: std::sync::RwLock<Option<bool>> = std::sync::RwLock::new(None);
 
 /// Whether the current user has already imported Claude settings.
@@ -1367,8 +1374,10 @@ mod tests {
     impl Drop for MarkerGuard {
         fn drop(&mut self) {
             reset_marker_cache_for_test();
-            // Also clear the workspace-side env-var override so it doesn't leak into subsequent tests
-            unsafe { std::env::remove_var("_GROK_CLAUDE_MARKER_OVERRIDE") };
+            // Also clear the workspace-side override so it doesn't leak into subsequent tests
+            xai_grok_workspace::permission::claude_settings::set_claude_import_marker_override(
+                None,
+            );
         }
     }
 
@@ -2031,8 +2040,10 @@ extra_rule_dirs = ["/c/rules"]
     async fn gate_resolve_permissions_with_provenance_skips_claude_when_marker_set() {
         let _g = MarkerGuard;
         refresh_marker_cache(true);
-        // Also set the env-var override so the workspace-resident marker reader (which can't see the shell-side cache) honours the gate
-        unsafe { std::env::set_var("_GROK_CLAUDE_MARKER_OVERRIDE", "1") };
+        // Also drive the workspace-resident marker reader, which cannot see the shell-side cache
+        xai_grok_workspace::permission::claude_settings::set_claude_import_marker_override(Some(
+            true,
+        ));
         let dir = tempfile::tempdir().unwrap();
         // Drop a Claude permissions file in the tempdir; with the marker set the gate should skip reading it
         let claude_dir = dir.path().join(".claude");

@@ -609,7 +609,6 @@ fn load_claude_env_merges_with_precedence() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("GROK_HOME", home.path());
-    let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
@@ -642,7 +641,6 @@ fn load_claude_env_empty_when_no_settings() {
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("GROK_HOME", home.path());
     let _real_home_guard = EnvVarGuard::set("HOME", home.path());
-    let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
     let tmp = tempfile::tempdir().unwrap();
     let env = load_claude_env_with_project(tmp.path(), true);
     assert!(env.is_empty());
@@ -657,7 +655,6 @@ fn load_claude_env_with_project_drops_repo_env_when_untrusted() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("GROK_HOME", home.path());
-    let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
@@ -1067,7 +1064,6 @@ fn untrusted_project_claude_permissions_are_not_honored() {
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("HOME", home.path());
     let _grok_guard = EnvVarGuard::set("GROK_HOME", home.path());
-    let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
 
     // Global user-tier allow (must survive untrusted project).
     let global_claude = home.path().join(".claude");
@@ -1129,7 +1125,6 @@ fn untrusted_project_config_toml_permissions_are_not_honored() {
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("HOME", home.path());
     let _grok_guard = EnvVarGuard::set("GROK_HOME", home.path());
-    let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
 
     // Global allow (survives untrusted project when GROK_HOME resolves here).
     std::fs::write(
@@ -3000,7 +2995,6 @@ fn explicit_default_mode_blocks_permission_mode_hint() {
         std::fs::write(claude_dir.join("settings.json"), settings).unwrap();
         let _home = EnvVarGuard::set("HOME", tmp.path());
         let _grok_home = EnvVarGuard::set("GROK_HOME", &tmp.path().join(".grok"));
-        let _marker = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
 
         let resolved = rt
             .block_on(resolve_permissions_with_provenance_inner(
