@@ -497,18 +497,10 @@ fn plugin_cta_catalog_reload_empty_candidates_preserves_installed_checkmark() {
 #[test]
 fn plugin_cta_catalog_load_recomputes_match_for_typed_draft() {
     use crate::app::agent_view::CtaPhase;
-    // Redirect config reads to an empty temp home so the catalog load's read of the dismissed set is hermetic, not just deterministic
-    {
-        use std::sync::OnceLock;
-        static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-        HOME.get_or_init(|| {
-            let tmp = tempfile::tempdir().expect("tempdir creation");
-            unsafe {
-                std::env::set_var("GROK_HOME", tmp.path());
-            }
-            tmp
-        });
-    }
+    // The catalog load reads the dismissed set from `grok_home()/config.toml`.
+    // That home is the temp directory the pre-main pin in `test_util` claimed,
+    // so the read is already hermetic; the `$GROK_HOME` this used to set could
+    // never have reached it, the home being memoised long before.
     // The user typed a matching word and the debounce already fired against the (still-empty) catalog, leaving the CTA Hidden
     // When the async catalog lands, the CTA must surface without waiting for another keystroke
     // Uses a unique name so the cached dismissed-set read can't suppress it
@@ -1644,20 +1636,10 @@ mod cta_e2e {
         })
     }
 
-    fn isolate_grok_home() {
-        use std::sync::OnceLock;
-        static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-        HOME.get_or_init(|| {
-            let tmp = tempfile::tempdir().expect("tempdir creation");
-            unsafe {
-                std::env::set_var("GROK_HOME", tmp.path());
-            }
-            tmp
-        });
-    }
-
     fn app_matched() -> AppView {
-        isolate_grok_home();
+        // No `$GROK_HOME` isolation here: the dismissed-set read goes through
+        // the memoised `grok_home()`, which the pre-main pin in `test_util`
+        // already points at a temp directory.
         let mut app = test_app_with_agent();
         let id = AgentId(0);
         app.plugin_cta_enabled = true;

@@ -1638,18 +1638,17 @@ pub(super) fn run_subagent_lifecycle_via_method(
     let finish = snapshot_after_subagent_finish(&app, child_sid);
     (spawn, finish)
 }
-/// Shared temp `GROK_HOME` for disk-replay tests.
-/// `grok_home()` uses a process-wide `OnceLock`, so parallel tests must not each set `GROK_HOME` to a different tempdir.
+/// Shared scratch home the disk-replay tests plant `sessions/` under.
+///
+/// The reading side reaches it through the thread-local override installed by
+/// [`with_replay_disk_home`], never through the environment: `grok_home()` is
+/// memoised, so `$GROK_HOME` could not have moved it anyway, and setting it
+/// here only moved the uncached resolvers under whichever of the thirty
+/// `#[serial(GROK_HOME)]` cases happened to be running at the time.
 pub(super) fn replay_disk_test_home() -> &'static std::path::Path {
     use std::sync::OnceLock;
     static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-    HOME.get_or_init(|| {
-            let tmp = tempfile::tempdir().expect("tempdir creation");
-            unsafe {
-                std::env::set_var("GROK_HOME", tmp.path());
-            }
-            tmp
-        })
+    HOME.get_or_init(|| tempfile::tempdir().expect("tempdir creation"))
         .path()
 }
 /// Runs `f` with a thread-local grok home override.
