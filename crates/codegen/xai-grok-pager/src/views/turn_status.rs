@@ -1674,4 +1674,28 @@ mod tests {
         // The assertion guards against an accidental tweak that would silently change the cadence of every "your turn" cue
         assert_eq!(USER_WAITING_PULSE_SPEED, 0.08);
     }
+
+    /// The colour the "waiting on you" diamond actually takes, tick by tick.
+    ///
+    /// `user_waiting_pulse_speed_is_stable` guards the speed; this guards what
+    /// the speed is fed into. The floor and range in `pending_diamond_color`
+    /// are as load-bearing as the speed — dropping the floor makes the diamond
+    /// vanish at the trough — and neither is visible from the constant alone.
+    #[test]
+    fn the_waiting_diamond_colour_is_pinned() {
+        let theme = Theme::groknight();
+        let colors: Vec<Color> = [0u64, 7, 20, 39]
+            .into_iter()
+            .map(|tick| pending_diamond_color(&theme, theme.accent_user, tick))
+            .collect();
+        assert_eq!(
+            colors,
+            vec![
+                Color::Rgb(74, 74, 74),
+                Color::Rgb(110, 110, 110),
+                Color::Rgb(200, 200, 200),
+                Color::Rgb(74, 74, 74),
+            ]
+        );
+    }
 }

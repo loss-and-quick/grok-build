@@ -1781,4 +1781,33 @@ mod tests {
             "flat render must keep semantic (non-panel) line backgrounds"
         );
     }
+
+    /// What a running block's rail actually looks like, frame by frame.
+    ///
+    /// `WAVE_SPEED` and the default `wave_rows` are the whole animation: one is
+    /// how fast the wave advances per tick, the other is how far its phase
+    /// travels per row. Sampling the curve at both pins the rendered result, so
+    /// a change to either shows up as a failing table rather than as an
+    /// animation that quietly runs at a different speed.
+    #[test]
+    fn the_running_rail_wave_is_pinned() {
+        let wave_rows = crate::appearance::AnimationConfig::default().wave_rows;
+        let samples: Vec<u32> = [
+            (0u64, 0u16),
+            (0, 8),
+            (0, 16),
+            (1, 0),
+            (7, 3),
+            (20, 31),
+            (39, 0),
+        ]
+        .into_iter()
+        .map(|(tick, row)| {
+            (theme::wave_brightness(tick, row, wave_rows, WAVE_SPEED) * 10_000.0).round() as u32
+        })
+        .collect();
+        assert_eq!(WAVE_SPEED, 0.15);
+        assert_eq!(wave_rows, 32);
+        assert_eq!(samples, vec![0, 10_000, 0, 223, 9_953, 1_099, 1_762]);
+    }
 }
