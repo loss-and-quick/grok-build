@@ -96,8 +96,63 @@ export function directoryLabel(cwd: string): string {
   return slash >= 0 && slash < trimmed.length - 1 ? trimmed.slice(slash + 1) : trimmed || "/";
 }
 
-export function sessionLabel(entry: RosterEntry): string {
-  return entry.title?.trim() || entry.lastTurnSummary?.trim() || entry.sessionId;
+/** Where a derived title is cut. `MAX_TITLE_CHARS` in `views/session_title.rs`. */
+export const MAX_TITLE_CHARS = 60;
+
+/** How much of a session id stands in for a name. `entry_title`'s `take(8)`. */
+export const SHORT_ID_CHARS = 8;
+
+/**
+ * Characters a title may not contain.
+ *
+ * `is_forbidden_title_char` (`shell/src/session/persistence.rs`): every control
+ * character, plus the bidi overrides and isolates. The terminal's reason is
+ * that a title is printed into a stream that reads escapes; the browser's is
+ * that a right-to-left override in a heading can make it read as something
+ * else entirely. Both want them gone, so the class is the same one.
+ */
+const FORBIDDEN_TITLE_CHAR = /[\p{Cc}\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu;
+
+/**
+ * Sanitise and cut a title, the way `entry_title` does before showing one.
+ *
+ * A forbidden character becomes `U+FFFD` rather than vanishing — the pager's
+ * choice, and the better one: something was there, and a reader should be able
+ * to tell.
+ */
+export function displayTitle(text: string): string {
+  const clean = text.replace(FORBIDDEN_TITLE_CHAR, "\uFFFD").trim();
+  const chars = [...clean];
+  return chars.length <= MAX_TITLE_CHARS
+    ? clean
+    : `${chars.slice(0, MAX_TITLE_CHARS).join("")}...`;
+}
+
+/** `session 3f2a1b9c` — what the pager calls a session with nothing else to call it. */
+export function shortSessionName(sessionId: string): string {
+  return `session ${[...sessionId].slice(0, SHORT_ID_CHARS).join("")}`;
+}
+
+/**
+ * What to call a session.
+ *
+ * `entry_title` (`pager/src/views/session_title.rs`) in the same order: the
+ * rename, then the generated title, then the first user prompt in the
+ * scrollback, then a short form of the id. The last step is the one that
+ * mattered — a live session with no title yet reached the fallback, and the
+ * fallback was the whole UUID, so the page was headed by 36 characters of hex
+ * where the terminal shows eight behind the word "session".
+ *
+ * `firstPrompt` is optional because the sidebar has no transcript to read one
+ * from; the pager's dashboard is in the same position and falls through the
+ * same way.
+ */
+export function sessionLabel(entry: RosterEntry, firstPrompt?: string): string {
+  for (const candidate of [entry.title, entry.lastTurnSummary, firstPrompt]) {
+    const trimmed = candidate?.trim();
+    if (trimmed) return displayTitle(trimmed);
+  }
+  return shortSessionName(entry.sessionId);
 }
 
 /**
