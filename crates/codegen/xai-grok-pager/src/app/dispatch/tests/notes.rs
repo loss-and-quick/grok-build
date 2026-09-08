@@ -2107,3 +2107,83 @@ fn send_feedback_preserves_composer_draft() {
         "composer draft must survive SendFeedback"
     );
 }
+
+/// Saving a memory note now names the session, which is what lets the agent do
+/// the writing. Without that, a browser could ask for the LLM rewrite and then
+/// have nowhere to put the result.
+#[test]
+fn saving_a_note_sends_it_to_the_agent_that_owns_the_file() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().active_modal = Some(ActiveModal::RememberNoteReview {
+        raw_content: "deploys need the staging flag".into(),
+        enhanced_content: None,
+        showing_enhanced: false,
+        scroll: 0,
+        window: crate::views::modal_window::ModalWindowState::new(),
+        cached_lines: None,
+        cwd: std::path::PathBuf::from("/tmp"),
+        agent_id: id,
+        rewrite_nonce: 0,
+    });
+
+    let effects = dispatch(Action::SaveRememberNoteFromModal, &mut app);
+
+    match effects.as_slice() {
+        [
+            Effect::SaveMemoryNote {
+                agent_id,
+                session_id,
+                text,
+                ..
+            },
+        ] => {
+            assert_eq!(*agent_id, id);
+            assert_eq!(
+                session_id.as_ref().map(|s| s.0.as_ref()),
+                Some("test-session"),
+                "the agent that owns the memory file is named"
+            );
+            assert_eq!(text, "deploys need the staging flag");
+        }
+        other => panic!("expected a memory note save, got {other:?}"),
+    }
+}
+
+/// A view whose session never came up has no agent to ask, so it keeps the
+/// local write. That is the one case the wire cannot cover, and it must not be
+/// mistaken for a preference for local disk.
+#[test]
+fn a_sessionless_view_still_saves_its_note() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.unbind_session_id();
+    agent.active_modal = Some(ActiveModal::RememberNoteReview {
+        raw_content: "note".into(),
+        enhanced_content: None,
+        showing_enhanced: false,
+        scroll: 0,
+        window: crate::views::modal_window::ModalWindowState::new(),
+        cached_lines: None,
+        cwd: std::path::PathBuf::from("/tmp"),
+        agent_id: id,
+        rewrite_nonce: 0,
+    });
+
+    let effects = dispatch(Action::SaveRememberNoteFromModal, &mut app);
+
+    match effects.as_slice() {
+        [
+            Effect::SaveMemoryNote {
+                session_id, cwd, ..
+            },
+        ] => {
+            assert!(session_id.is_none());
+            assert_eq!(cwd, std::path::Path::new("/tmp"));
+        }
+        other => panic!("expected a memory note save, got {other:?}"),
+    }
+}

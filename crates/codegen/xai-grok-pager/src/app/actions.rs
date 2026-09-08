@@ -1923,9 +1923,16 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    /// Save a remember note to global MEMORY.md (async file write).
+    /// Save a remember note to the global MEMORY.md.
+    ///
+    /// With a session, the note goes over the wire (`x.ai/memory/note`) and the
+    /// agent that owns the file writes it, which is what lets a browser finish
+    /// `/remember` at all. `cwd` is the fallback for the one case with no agent
+    /// to ask: a view whose session never came up, where the pager writes the
+    /// file it is sitting on.
     SaveMemoryNote {
         agent_id: AgentId,
+        session_id: Option<acp::SessionId>,
         text: String,
         cwd: std::path::PathBuf,
     },

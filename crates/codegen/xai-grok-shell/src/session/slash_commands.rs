@@ -572,7 +572,7 @@ pub const PAGER_COMMAND_KEYS: &[(&str, CommandSurface)] = &[
     ("recap", CommandSurface::Any),
     ("release-notes", CommandSurface::WireMissing), // fetches the changelog CDN itself and caches it under `~/.grok`
     ("reload-plugins", CommandSurface::Any),
-    ("remember", CommandSurface::WireMissing), // the note is appended to the memory file directly; only the optional rewrite crosses
+    ("remember", CommandSurface::Any), // the note is appended by the agent through `x.ai/memory/note`
     ("rename", CommandSurface::Any),
     ("resume", CommandSurface::Any),
     ("rewind", CommandSurface::Any),

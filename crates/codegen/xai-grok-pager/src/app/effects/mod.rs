@@ -3906,23 +3906,32 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SaveMemoryNote { agent_id, text, cwd } => {
+        Effect::SaveMemoryNote { agent_id, session_id, text, cwd } => {
+            let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                            let storage = xai_grok_shell::session::memory::MemoryStorage::new(
-                                &cwd,
-                                None,
-                            );
-                            storage
-                                .append_to_memory(
-                                    xai_grok_shell::session::memory::MemoryScope::Global,
-                                    &text,
-                                )
-                        })
-                        .await
-                        .map_err(|e| format!("task join error: {e}"))
-                        .and_then(|r| r.map_err(|e| format!("{e}")));
+                    // The agent owns the memory file, so it does the writing.
+                    // Only a view with no session falls back to this process's
+                    // own disk, because there is nothing to ask.
+                    let result = match session_id {
+                        Some(session_id) => save_memory_note(&session_id, &text, &tx).await,
+                        None => {
+                            tokio::task::spawn_blocking(move || {
+                                    let storage = xai_grok_shell::session::memory::MemoryStorage::new(
+                                        &cwd,
+                                        None,
+                                    );
+                                    storage
+                                        .append_to_memory(
+                                            xai_grok_shell::session::memory::MemoryScope::Global,
+                                            &text,
+                                        )
+                                })
+                                .await
+                                .map_err(|e| format!("task join error: {e}"))
+                                .and_then(|r| r.map_err(|e| format!("{e}")))
+                        }
+                    };
                     TaskResult::MemoryNoteSaved {
                         agent_id,
                         result,
@@ -4796,6 +4805,33 @@ async fn fetch_session_info(
     }
     envelope.result.ok_or_else(|| "session info response missing result".to_string())
 }
+/// Append a memory note via `x.ai/memory/note`.
+///
+/// The rewrite half of `/remember` already crossed the wire; this is the save
+/// that did not, so the note is filed by the agent that owns the file rather
+/// than by whichever client happened to be sitting on the same disk.
+async fn save_memory_note(
+    session_id: &acp::SessionId,
+    text: &str,
+    tx: &AcpAgentTx,
+) -> Result<(), String> {
+    let request = acp::ExtRequest::new(
+        "x.ai/memory/note",
+        serde_json::value::to_raw_value(
+                &serde_json::json!({
+            "sessionId": session_id.0.to_string(),
+            "text": text,
+        }),
+            )
+            .expect("serialize memory/note params")
+            .into(),
+    );
+    acp_send(request, tx)
+        .await
+        .map(|_| ())
+        .map_err(|e| sanitize_user_error(&e.to_string()))
+}
+
 /// Fetch this session's saved plan via `x.ai/session/plan`.
 ///
 /// The pager reads the plan the same way any other client does now: it asks the

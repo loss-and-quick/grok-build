@@ -245,12 +245,18 @@ impl MemoryStorage {
             .append(true)
             .open(&path)?;
 
+        // One `write_all` of one buffer, not a `write!` whose format pieces
+        // each become their own syscall. The file is opened `O_APPEND`, which
+        // makes a single write atomic against other appenders, so two notes
+        // arriving at once — two sessions, or a session and a client — land
+        // whole and in some order rather than interleaved half-and-half.
         use std::io::Write;
-        if file.metadata()?.len() > 0 {
-            write!(file, "\n\n{normalized}")?;
+        let payload = if file.metadata()?.len() > 0 {
+            format!("\n\n{normalized}")
         } else {
-            write!(file, "{normalized}")?;
-        }
+            normalized
+        };
+        file.write_all(payload.as_bytes())?;
 
         tracing::debug!(path = %path.display(), scope = ?scope, "appended to memory");
         Ok(())
@@ -1110,6 +1116,43 @@ mod tests {
 
         let content = std::fs::read_to_string(workspace_dir.join("MEMORY.md")).unwrap();
         assert_eq!(content, "## prefer tabs");
+    }
+
+    /// Notes now arrive from more than one writer — the terminal, another
+    /// session, and a browser through `x.ai/memory/note` — so two landing at
+    /// once must each land whole. One `write_all` to an `O_APPEND` handle is
+    /// what buys that; a `write!` whose format pieces became separate syscalls
+    /// could interleave a separator between another note's halves.
+    #[test]
+    fn concurrent_appends_each_land_whole() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let storage = MemoryStorage::with_paths(global_dir.clone(), global_dir.join("abc123"));
+        // Seeded so every append below takes the separator branch, which is the
+        // one that used to be two writes.
+        storage
+            .append_to_memory(MemoryScope::Global, "seed")
+            .unwrap();
+
+        const WRITERS: usize = 8;
+        std::thread::scope(|scope| {
+            for i in 0..WRITERS {
+                let storage = storage.clone();
+                scope.spawn(move || {
+                    storage
+                        .append_to_memory(MemoryScope::Global, &format!("note {i} body"))
+                        .unwrap()
+                });
+            }
+        });
+
+        let content = std::fs::read_to_string(global_dir.join("MEMORY.md")).unwrap();
+        for i in 0..WRITERS {
+            assert!(
+                content.contains(&format!("## note {i} body")),
+                "note {i} was torn or lost:\n{content}"
+            );
+        }
     }
 
     #[test]

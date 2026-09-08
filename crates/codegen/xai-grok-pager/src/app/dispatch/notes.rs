@@ -533,6 +533,7 @@ pub(super) fn dispatch_save_remember_note_from_modal(app: &mut AppView) -> Vec<E
         return vec![];
     };
 
+    let session_id = agent.session.session_id.clone();
     let (content, cwd) = if let Some(ActiveModal::RememberNoteReview {
         ref raw_content,
         ref enhanced_content,
@@ -558,6 +559,7 @@ pub(super) fn dispatch_save_remember_note_from_modal(app: &mut AppView) -> Vec<E
 
     vec![Effect::SaveMemoryNote {
         agent_id: id,
+        session_id,
         text: content,
         cwd,
     }]
