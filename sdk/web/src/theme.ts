@@ -67,6 +67,34 @@ export function cssVarName(role: ThemeRole): string {
   return `--grok-${role.replaceAll("_", "-")}`;
 }
 
+/**
+ * Whether a theme paints no diff bands, and so colours a changed line whole.
+ *
+ * `Theme::diff_uses_line_fg` (`pager-render/src/theme/mod.rs`): when both
+ * `diff_*_bg` roles are `"reset"` the pager drops the row band and paints the
+ * entire changed line in `diff_delete_fg` / `diff_insert_fg` instead of letting
+ * syntax colours through. Only `terminal-native` is built that way, and it is
+ * the one palette a browser must ask about — every other role resolves the
+ * same in both clients, but this one decides between two different renderings.
+ */
+export function diffUsesLineFg(theme: Theme): boolean {
+  return theme.colors.diff_delete_bg === "reset" && theme.colors.diff_insert_bg === "reset";
+}
+
+/**
+ * The foreground a changed diff row takes.
+ *
+ * On a banded theme the pager paints the line with `syntect` and falls back to
+ * `text_primary` when there is no grammar for the file. A browser has no
+ * `syntect`, so it is always on that fallback — which is the honest rendering,
+ * not a degraded one: `text_primary` on the band is exactly what the terminal
+ * shows for a file whose extension it does not know.
+ */
+export function diffLineFg(theme: Theme, side: "delete" | "insert"): ThemeRole {
+  if (!diffUsesLineFg(theme)) return "text_primary";
+  return side === "delete" ? "diff_delete_fg" : "diff_insert_fg";
+}
+
 /** Every role of a theme as CSS custom-property declarations. */
 export function themeCssVariables(theme: Theme): Record<string, string> {
   const vars: Record<string, string> = {};
@@ -81,6 +109,11 @@ export function themeCssVariables(theme: Theme): Record<string, string> {
   for (const [i, color] of theme.terminal.ansi.entries()) {
     vars[`--grok-ansi-${i}`] = resolveThemeColor(color) ?? "canvastext";
   }
+  // Two derived properties rather than a CSS rule, because the choice is the
+  // pager's own branch on the palette and CSS cannot ask whether a custom
+  // property resolved to `canvas`.
+  vars["--grok-diff-delete-line-fg"] = `var(${cssVarName(diffLineFg(theme, "delete"))})`;
+  vars["--grok-diff-insert-line-fg"] = `var(${cssVarName(diffLineFg(theme, "insert"))})`;
   return vars;
 }
 

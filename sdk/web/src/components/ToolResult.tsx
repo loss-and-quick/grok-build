@@ -1,8 +1,12 @@
-import { For, Match, Show, Switch, type JSX } from "solid-js";
+import { For, Show, Switch, Match, type JSX } from "solid-js";
 
 import { ellipsisFor, truncationFor, type DisplayMode } from "../toolcall.ts";
 import {
+  gutterWidth,
+  hunkSeparator,
   resultPath,
+  type DiffHunk,
+  type DiffResult,
   type ReadResult,
   type SearchResult,
   type TypedResult,
@@ -13,9 +17,9 @@ import {
  *
  * Every layout decision below is the pager's, cited where it is made; the ones
  * that are not are marked as this client's and given a reason. Nothing here
- * builds markup from a string — a hit line and a file's text are arbitrary
- * bytes from someone's disk, and they reach the page as text nodes for the same
- * reason panel markdown does.
+ * builds markup from a string — a hit line, a file's text and a diff row are
+ * all arbitrary bytes from someone's disk, and they reach the page as text
+ * nodes for the same reason panel markdown does.
  */
 export function ToolResult(props: {
   result: TypedResult;
@@ -29,6 +33,9 @@ export function ToolResult(props: {
       </Match>
       <Match when={props.result.kind === "search" ? (props.result as SearchResult) : null}>
         {(search) => <SearchBody search={search()} cwd={props.cwd} />}
+      </Match>
+      <Match when={props.result.kind === "diff" ? (props.result as DiffResult) : null}>
+        {(diff) => <DiffBody diff={diff()} />}
       </Match>
     </Switch>
   );
@@ -172,5 +179,59 @@ function SearchBody(props: { search: SearchResult; cwd: string }): JSX.Element {
         </div>
       </Show>
     </div>
+  );
+}
+
+/**
+ * An edit, as the diff the terminal draws.
+ *
+ * `render_diff_hunks_core` (`blocks/tool/edit.rs`) with its default
+ * `DiffRenderConfig`: a two-space indent, one line-number column, two spaces,
+ * then the row. The number is the new-file line for an equal or inserted row
+ * and the old-file line for a deleted one, and there is deliberately no `+`/`-`
+ * glyph — the sign is carried by the gutter's colour and the row's band, which
+ * is why the band and the gutter must both be there.
+ *
+ * Between hunks the separator counts what it skipped: `… 12 unchanged lines`.
+ */
+function DiffBody(props: { diff: DiffResult }): JSX.Element {
+  return (
+    <div class="tool-diff">
+      <For each={props.diff.hunks}>
+        {(hunk, at) => (
+          <>
+            <Show when={at() > 0}>
+              <div class="tool-fold-note">
+                {hunkSeparator(props.diff.hunks[at() - 1]!, hunk)}
+              </div>
+            </Show>
+            <Hunk hunk={hunk} />
+          </>
+        )}
+      </For>
+      <Show when={props.diff.hidden > 0}>
+        <div class="tool-fold-note">
+          {"…"} {props.diff.hidden} more lines
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+function Hunk(props: { hunk: DiffHunk }): JSX.Element {
+  const width = (): number => gutterWidth(props.hunk);
+  return (
+    <For each={props.hunk}>
+      {(line) => (
+        <div class={`tool-row tool-diff-${line.tag}`}>
+          <span class="tool-gutter" style={{ "min-width": `${width()}ch` }}>
+            {line.tag === "delete" ? line.lo : line.ln}
+          </span>
+          {/* A blank changed line still has to show its band, so an empty row
+              paints a space — the pager's `painted` helper, same reason. */}
+          <span class="tool-line">{line.text.replace(/\r?\n$/, "") || " "}</span>
+        </div>
+      )}
+    </For>
   );
 }

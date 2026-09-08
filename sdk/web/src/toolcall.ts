@@ -408,6 +408,27 @@ export function truncationFor(kind: string): { first: number; last: number } | n
 }
 
 /**
+ * The mode a call opens in.
+ *
+ * Collapsed for every kind but one. **A successful edit opens showing its
+ * diff**, and that is the terminal's own default rather than a preference:
+ * `edit_default_display_mode` (`scrollback/state/mod.rs`) expands a fresh edit
+ * block whenever `EditBlockConfig::effective_expanded` says so, and that reads
+ * `!collapsed_edit_blocks` — a rollout flag whose default is off, asserted as
+ * `"collapsed_edit_blocks must default OFF"` in `appearance/cache.rs`. A failed
+ * edit collapses, which is the same function's other arm.
+ *
+ * The `+N/-M` diffstat that goes with the collapsed shape is deliberately not
+ * drawn, for the same reason: `effective_line_summary` is
+ * `line_summary.unwrap_or(collapsed_edit_blocks)`, so with the flag off the
+ * terminal does not show it either. It exists for the one-liner view, and the
+ * one-liner view is not the default.
+ */
+export function defaultMode(kind: string, failed: boolean): DisplayMode {
+  return kind === "edit" && !failed ? "expanded" : "collapsed";
+}
+
+/**
  * The mode a click moves to.
  *
  * The pager's own two-state cycles, not a general three-state one: Read cycles
@@ -460,12 +481,9 @@ export function ellipsisFor(kind: string, hidden: number): string {
 //   - **Syntax highlighting.** Read content and Edit diffs are painted by
 //     `syntect` against the terminal's theme, selected from the file extension
 //     and, for a scoped highlight, by reading the file off disk
-//     (`app/edit_highlight_worker.rs`). Nothing on the wire carries it. A
-//     read's line numbers and its text *are* on the wire, and
-//     `toolresult.ts` draws them.
-//   - **Typed output re-laid-out.** `rawOutput` carries a grep's hits and an
-//     edit's diff as well, and neither is drawn from them yet. That is a gap
-//     in this client, not a gap in the protocol.
+//     (`app/edit_highlight_worker.rs`). Nothing on the wire carries it. The
+//     rest of what those two blocks draw *is* on the wire, and
+//     `toolresult.ts` draws it.
 //   - **Path surfaces by terminal width.** The pager shows a basename when
 //     collapsed, a cwd-relative path when expanded and fish-shortens either to
 //     fit the columns it has. A page has no column budget, so it shows the

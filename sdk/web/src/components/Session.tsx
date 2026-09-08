@@ -5,6 +5,7 @@ import { blendToward, createTick, waveBrightness } from "../animation.ts";
 import { acceptRow, argumentHint, type CommandRow } from "../commands.ts";
 import { ACCENT_BAR, BULLET, CHEVRON, PROMPT_ARROW, spinnerFrame } from "../glyphs.ts";
 import {
+  defaultMode,
   ellipsisFor,
   failureText,
   hasFailed,
@@ -245,7 +246,10 @@ function ToolCall(props: {
   cwd: string;
   tick: () => number;
 }): JSX.Element {
-  const [mode, setMode] = createSignal<DisplayMode>("collapsed");
+  // A user's fold, or nothing: the opening mode is derived, so an edit whose
+  // result has not arrived yet is not frozen collapsed by a signal initialised
+  // before the frame that says it succeeded.
+  const [folded, setFolded] = createSignal<DisplayMode | null>(null);
   const facts = (): ToolCallFacts => ({
     title: props.call.title,
     kind: props.call.toolKind,
@@ -255,6 +259,7 @@ function ToolCall(props: {
     cwd: props.cwd,
   });
   const failed = (): boolean => hasFailed(facts());
+  const mode = (): DisplayMode => folded() ?? defaultMode(props.call.toolKind, failed());
   const body = (): string =>
     failed() ? failureText(facts(), props.call.output) : props.call.output;
   const lines = (): string[] => {
@@ -303,7 +308,7 @@ function ToolCall(props: {
         type={openable() ? "button" : undefined}
         aria-expanded={openable() ? mode() !== "collapsed" : undefined}
         onClick={
-          openable() ? () => setMode(nextMode(props.call.toolKind, mode())) : undefined
+          openable() ? () => setFolded(nextMode(props.call.toolKind, mode())) : undefined
         }
       >
         {/* Hovering a foldable row swaps the diamond for a chevron in place,
@@ -342,8 +347,8 @@ function ToolCall(props: {
           </div>
         )}
       </Show>
-      {/* The typed result when the wire carried one, and the text body
-          otherwise. `rawOutput` is the whole result, not a
+      {/* The typed result when the wire carried one — a diff, hits, a gutter —
+          and the text body otherwise. `rawOutput` is the whole result, not a
           summary of it, so drawing prose over it was this client throwing away
           what it had already been sent. */}
       <Show when={mode() !== "collapsed" && openable()}>

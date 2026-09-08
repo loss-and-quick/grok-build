@@ -464,10 +464,10 @@ button.tool-title:focus-visible .tool-bullet-mark {
   opacity: var(--grok-muted-opacity, 1);
 }
 
-/* A read's body, with the file's own line numbers down the left.
+/* A typed result: a read's gutter, a search's hits, an edit's diff.
  *
- * The row shape is the pager's: a right-aligned line number, two spaces, then
- * the line. The number column is
+ * One row shape serves all three, because the pager gives them one: a
+ * right-aligned line number, two spaces, then the line. The number column is
  * sized in `ch` from the widest number the block actually shows — the pager's
  * own `gutter_width`/`gutter_layout` — so the two columns line up without a
  * table and without measuring anything. */
@@ -501,7 +501,8 @@ button.tool-title:focus-visible .tool-bullet-mark {
   color: var(--grok-text-primary, canvastext);
 }
 
-/* `bg_dark` is the panel the pager puts a read body and a search's hits on. */
+/* `bg_dark` is the panel the pager puts a read body and a search's hits on.
+ * A diff has none — its rows carry their own bands instead. */
 .tool-panel {
   padding: 0.4rem 0;
   background: var(--grok-bg-dark, canvas);
@@ -511,7 +512,8 @@ button.tool-title:focus-visible .tool-bullet-mark {
  * is one list in the terminal, and giving each group its own scrollbar would
  * make the browser harder to read than the pane this is copying. */
 .tool-read,
-.tool-search {
+.tool-search,
+.tool-diff {
   grid-column: 2;
   margin-top: 0.25rem;
   min-width: 0;
@@ -553,13 +555,50 @@ button.tool-title:focus-visible .tool-bullet-mark {
 }
 
 /* Whatever a fold is hiding, said in the muted role the pager uses for its own
- * `…` separator. */
+ * `…` separator and hunk gaps. */
 .tool-fold-note {
   padding: 0.1rem 0.4rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.85rem;
   color: var(--grok-gray, canvastext);
   opacity: var(--grok-muted-opacity, 1);
+}
+
+/* A diff row carries its sign in colour, not in a glyph: the pager emits no
+ * `+`/`-` at all, so the band and the coloured gutter are the whole signal and
+ * both have to be here. The band stops at the gutter, which is the pager's
+ * default (`gutter_bg: false`).
+ *
+ * `--grok-diff-*-line-fg` is set in `theme.ts` from the pager's own
+ * `diff_uses_line_fg`: a palette with no bands paints the whole changed line
+ * red or green instead. */
+.tool-diff-equal .tool-line {
+  color: var(--grok-diff-equal-fg, canvastext);
+}
+
+.tool-diff-delete .tool-line {
+  background: var(--grok-diff-delete-bg, canvas);
+  color: var(--grok-diff-delete-line-fg, canvastext);
+}
+
+.tool-diff-insert .tool-line {
+  background: var(--grok-diff-insert-bg, canvas);
+  color: var(--grok-diff-insert-line-fg, canvastext);
+}
+
+.tool-diff-equal .tool-gutter {
+  color: var(--grok-diff-gutter-fg, canvastext);
+  opacity: 1;
+}
+
+.tool-diff-delete .tool-gutter {
+  color: var(--grok-diff-delete-fg, canvastext);
+  opacity: 1;
+}
+
+.tool-diff-insert .tool-gutter {
+  color: var(--grok-diff-insert-fg, canvastext);
+  opacity: 1;
 }
 
 .composer {
