@@ -2149,3 +2149,64 @@ button.picker-row:focus-visible {
   min-height: 0;
   overflow: auto;
 }
+
+/* -- narrow windows -------------------------------------------------------- */
+
+/* Below this the navigator and a legible transcript stop fitting side by side,
+ * so the navigator leaves the grid and becomes a drawer. It is deliberately
+ * *not* a dialog and deliberately does not claim `aria-modal`: it is the same
+ * list of sessions it always was, and a claim of modality would have to be paid
+ * for with a focus trap. What it does instead is make the rest of the page
+ * `inert` while it is open, which is containment stated as a fact rather than
+ * as a promise. */
+.drawer-button {
+  display: none;
+}
+
+@media (max-width: 759.98px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .drawer-button {
+    position: fixed;
+    top: 0.5rem;
+    left: 0.5rem;
+    z-index: 12;
+    display: block;
+  }
+
+  .main {
+    padding-top: 2.6rem;
+  }
+
+  .sidebar {
+    position: fixed;
+    inset-block: 0;
+    left: 0;
+    z-index: 11;
+    width: min(22rem, 88vw);
+    transform: translateX(-100%);
+    transition: transform 120ms ease;
+  }
+
+  .drawer-open .sidebar {
+    transform: none;
+  }
+
+  .drawer-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    background: color-mix(in srgb, var(--grok-bg-dark, canvas) 60%, transparent);
+  }
+}
+
+/* A window that is asked not to animate is asked about the drawer too. There is
+ * no terminal counterpart to this setting and there cannot be one, which is not
+ * a divergence: the terminal has no notion of the preference at all. */
+@media (prefers-reduced-motion: reduce) {
+  .sidebar {
+    transition: none;
+  }
+}

@@ -1,5 +1,14 @@
 import { useNavigate, useParams } from "@solidjs/router";
-import { createEffect, createSignal, For, on, onMount, Show, type JSX } from "solid-js";
+import {
+  createEffect,
+  createSignal,
+  For,
+  on,
+  onCleanup,
+  onMount,
+  Show,
+  type JSX,
+} from "solid-js";
 import { THEMES, type ThemeName } from "@grok-build/theme";
 
 import { AuthCard } from "./components/AuthCard.tsx";
@@ -23,6 +32,17 @@ const gateway: Gateway = createGateway();
 
 /** The address a gateway answers on unless it was told otherwise. */
 const DEFAULT_GATEWAY = "ws://127.0.0.1:2420/ws";
+
+/**
+ * The width below which the navigator stops being a column.
+ *
+ * Measured, not borrowed: the navigator holds at 240px by its own `minmax`, and
+ * what runs out first is the transcript beside it — a session title, a path and
+ * a wrapped tool line stop being readable before the column does. The number is
+ * repeated in `styles.css`, where the media query lives; it is here because the
+ * drawer has to close itself when the window crosses it.
+ */
+const DRAWER_MAX_PX = 760;
 
 /**
  * Where the link stands, which is not the same question as where the last
@@ -267,6 +287,16 @@ export function App(props: { children?: JSX.Element }): JSX.Element {
     (remembered("theme", "groknight") as ThemeName) ?? "groknight",
   );
 
+  // Whether the navigator is open as a drawer. Only reachable below
+  // `DRAWER_MAX_PX`, where the stylesheet shows the button that sets it.
+  const [drawer, setDrawer] = createSignal(false);
+  let content: HTMLElement | undefined;
+  let navigator: HTMLElement | undefined;
+  let opener: HTMLButtonElement | undefined;
+  // The previous value, so focus is handed back on a close and not on every
+  // unrelated re-run of the effect below.
+  let was = false;
+
   createEffect(() => {
     applyTheme(document.documentElement, themeByName(theme()));
   });
@@ -276,11 +306,60 @@ export function App(props: { children?: JSX.Element }): JSX.Element {
     // bookmarked session opens attached instead of at a login form.
     const url = remembered("url");
     const secret = remembered("secret");
-    if (url && secret) void link.open(url, secret);  });
+    if (url && secret) void link.open(url, secret);
+
+    // A drawer that is open when the window grows past the breakpoint would
+    // leave the page it made `inert` inert for good, with nothing on screen to
+    // undo it. So the breakpoint is watched rather than only styled.
+    const wide = window.matchMedia(`(min-width: ${DRAWER_MAX_PX}px)`);
+    const onWide = (): void => {
+      if (wide.matches) setDrawer(false);
+    };
+    wide.addEventListener("change", onWide);
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape" && drawer()) setDrawer(false);
+    };
+    document.addEventListener("keydown", onKey);
+    onCleanup(() => {
+      wide.removeEventListener("change", onWide);
+      document.removeEventListener("keydown", onKey);
+    });
+  });
+
+  /**
+   * What the drawer does to the rest of the page.
+   *
+   * `inert` rather than `aria-modal`: the navigator is the same list of
+   * sessions it is at any other width, not a dialog, and `aria-modal` is a
+   * promise about focus that would have to be paid for with a trap
+   * (see `focus.ts`). `inert` is not a promise — it is the browser actually
+   * taking the content out of reach of both Tab and the reader — so the drawer
+   * contains focus without claiming to be something it is not.
+   */
+  createEffect(() => {
+    content?.toggleAttribute("inert", drawer());
+    if (drawer()) navigator?.querySelector<HTMLElement>("button, input, select")?.focus();
+    else if (was && !drawer()) opener?.focus();
+    was = drawer();
+  });
 
   return (
-    <div class="layout">
-      <aside class="sidebar">
+    <div class="layout" classList={{ "drawer-open": drawer() }}>
+      {/* Below 760px the navigator is a drawer, and this is what opens it. It
+          exists at every width and is hidden by the stylesheet above that one,
+          because a button that comes and goes with the window changes the tab
+          order under a keyboard user's hands. */}
+      <button
+        class="drawer-button"
+        type="button"
+        aria-expanded={drawer()}
+        aria-controls="navigator"
+        ref={opener}
+        onClick={() => setDrawer(!drawer())}
+      >
+        Sessions
+      </button>
+      <aside class="sidebar" id="navigator" ref={navigator}>
         <Connection />
         <div class="status">{gateway.status()}</div>
         <select
@@ -301,7 +380,10 @@ export function App(props: { children?: JSX.Element }): JSX.Element {
         <RailToggle />
         <Settings gateway={gateway} />
       </aside>
-      <main class="main">
+      <Show when={drawer()}>
+        <div class="drawer-scrim" onClick={() => setDrawer(false)} />
+      </Show>
+      <main class="main" ref={content}>
         {/* First, and above everything: with no credential of its own the
             agent refuses every session/new and session/load, so nothing below
             this can work until it is answered. */}
