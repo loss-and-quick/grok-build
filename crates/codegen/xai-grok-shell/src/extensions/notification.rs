@@ -628,7 +628,10 @@ pub enum SessionUpdate {
     CompactionCheckpoint(Box<CompactionCheckpointInfo>),
     /// A rewind marker written to `updates.jsonl` when a rewind occurs.
     ///
-    /// This is **persist-only**: it is never sent to the gateway/UI.
+    /// This is both persisted and sent to the session's other clients, so a
+    /// peer can drop the turns the rewind discarded instead of going on
+    /// drawing them. Replay filters markers out, so no client receives one as
+    /// history and truncates twice.
     /// Because `updates.jsonl` is append-only, rewinding creates a timeline branch.
     /// The marker tells the replay algorithm to discard accumulated state beyond `target_prompt_index` and continue from that point.
     RewindMarker {
