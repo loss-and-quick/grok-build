@@ -5,6 +5,7 @@ import { blendToward, createTick, waveBrightness } from "../animation.ts";
 import { acceptRow, argumentHint, type CommandRow } from "../commands.ts";
 import {
   ACCENT_BAR,
+  BALLOT_X,
   BULLET,
   CHEVRON,
   GLYPH_WARNING,
@@ -26,6 +27,17 @@ import {
 } from "../toolcall.ts";
 import { typedResult, type TypedResult } from "../toolresult.ts";
 
+import {
+  FRAME_BUDGET,
+  blockFor,
+  frameSize,
+  human,
+  isRefusal,
+  overBudget,
+  take as takeAttachment,
+  type Attachment,
+  type Refusal,
+} from "../attach.ts";
 import { decisionsFor } from "../decisions.ts";
 import type { Gateway } from "../gateway.ts";
 import { sessionLabel } from "../roster.ts";
@@ -69,6 +81,13 @@ export function Session(props: {
   const decisions = decisionsFor(props.gateway);
   /** Questions this session's turn has stopped on, parked or not. */
   const blocking = () => decisions.here();
+  // Files waiting to go with the next prompt, and the ones that were handed over
+  // and turned down. Refusals are state rather than a toast because the reason a
+  // file was not taken has to survive long enough to be read and acted on.
+  const [attachments, setAttachments] = createSignal<Attachment[]>([]);
+  const [refusals, setRefusals] = createSignal<Refusal[]>([]);
+  const [dragging, setDragging] = createSignal(false);
+  let picker: HTMLInputElement | undefined;
   const menu = createCommandMenu(() => props.gateway.commands());
   const files = createFileMenu(props.gateway.fileSearch);
   // The composer's text as state, not only as a DOM value: the menu reads it on
@@ -98,9 +117,25 @@ export function Session(props: {
 
   const send = (): void => {
     const text = composer?.value.trim() ?? "";
-    if (!text) return;
+    const carried = attachments();
+    if (!text && carried.length === 0) return;
+    // Checked here rather than trusted per file: the whole prompt is one
+    // WebSocket frame, and the gateway does not *refuse* an oversized one, it
+    // closes the socket. Sending it would look like the connection dying for no
+    // reason. See `attach.ts` for the measurement.
+    if (overBudget(text, carried)) {
+      setRefusals([
+        {
+          name: `${carried.length} attachment${carried.length === 1 ? "" : "s"}`,
+          reason: `Together they make a ${human(frameSize(text, carried))} message, over the ${human(FRAME_BUDGET)} one message may be. Send them across two turns.`,
+        },
+      ]);
+      return;
+    }
     if (composer) composer.value = "";
     setLine("");
+    setAttachments([]);
+    setRefusals([]);
     menu.sync("", 0);
     files.sync("", 0);
     setDirMode(false);
@@ -108,7 +143,36 @@ export function Session(props: {
     // dispatch path: the shell resolves the leading token against the same
     // catalog it advertised, and a plugin's command reaches that plugin's own
     // code over `command_invoke`. Nothing here needs a second method.
-    void props.gateway.prompt(text);
+    void props.gateway.prompt(text, carried.map(blockFor));
+  };
+
+  /**
+   * Take files from wherever they came: the picker, a drop, or a paste.
+   *
+   * All three land here because a person does not think of them as three
+   * things. What each file *becomes* is decided in `attach.ts`; this only reads
+   * the bytes and keeps the answers.
+   */
+  const absorb = async (incoming: readonly File[]): Promise<void> => {
+    if (incoming.length === 0) return;
+    const kept: Attachment[] = [];
+    const turned: Refusal[] = [];
+    for (const file of incoming) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const result = takeAttachment(file.name || "pasted", file.type, bytes, crypto.randomUUID());
+      if (isRefusal(result)) turned.push(result);
+      else kept.push(result);
+    }
+    setAttachments([...attachments(), ...kept]);
+    setRefusals(turned);
+  };
+
+  const drop = (event: DragEvent): void => {
+    const dropped = [...(event.dataTransfer?.files ?? [])];
+    if (dropped.length === 0) return;
+    event.preventDefault();
+    setDragging(false);
+    void absorb(dropped);
   };
 
   /** Take a row into the composer and put the caret after it. */
@@ -196,11 +260,24 @@ export function Session(props: {
             classList={{
               running: props.gateway.status() === "running…",
               blocked: blocking().length > 0,
+              dragging: dragging(),
             }}
             onSubmit={(event) => {
               event.preventDefault();
               send();
             }}
+            // A drop needs both handlers: without `dragover` being prevented the
+            // browser navigates to the file instead, which loses the page.
+            onDragOver={(event) => {
+              if (!event.dataTransfer?.types.includes("Files")) return;
+              event.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={(event) => {
+              if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+              setDragging(false);
+            }}
+            onDrop={drop}
           >
             {/* The pager does not let you type past a question it is blocked
                 on: the permission card is drawn *into the prompt slot*
@@ -249,6 +326,43 @@ export function Session(props: {
                 }
               />
             </Show>
+            {/* Above the input, in the row the blocked banner uses: what is
+                going with this message belongs beside the message, not under
+                the button that sends it. */}
+            <Show when={attachments().length > 0 || refusals().length > 0}>
+              <div class="attachments">
+                <For each={attachments()}>
+                  {(file) => (
+                    <span class="attachment" classList={{ [`attachment-${file.kind}`]: true }}>
+                      <span class="attachment-name">{file.name}</span>
+                      <span class="attachment-size">{human(file.size)}</span>
+                      <button
+                        class="attachment-drop"
+                        type="button"
+                        aria-label={`Remove ${file.name}`}
+                        onClick={() =>
+                          setAttachments(attachments().filter((other) => other.id !== file.id))
+                        }
+                      >
+                        {BALLOT_X}
+                      </button>
+                    </span>
+                  )}
+                </For>
+                {/* Named and explained. A file that quietly did not attach is
+                    the failure this whole path exists to avoid — the agent
+                    drops an undersized image mid-turn and only says so in a
+                    notice nobody is looking at. */}
+                <For each={refusals()}>
+                  {(refused) => (
+                    <span class="attachment attachment-refused">
+                      <span class="attachment-name">{refused.name}</span>
+                      <span class="attachment-reason">{refused.reason}</span>
+                    </span>
+                  )}
+                </For>
+              </div>
+            </Show>
             <textarea
               class="prompt-input"
               rows={3}
@@ -257,6 +371,16 @@ export function Session(props: {
               }
               ref={composer}
               onInput={reread}
+              // A screenshot in the clipboard is the commonest attachment there
+              // is, and the terminal already takes it that way — `grok wrap`
+              // ships the host pasteboard image over a private OSC so a remote
+              // pager can paste one (`wrap_clipboard_image.rs`).
+              onPaste={(event) => {
+                const pasted = [...(event.clipboardData?.files ?? [])];
+                if (pasted.length === 0) return;
+                event.preventDefault();
+                void absorb(pasted);
+              }}
               onClick={reread}
               onKeyUp={reread}
               onFocus={() => {
@@ -340,6 +464,25 @@ export function Session(props: {
                 }
               }}
             />
+            <input
+              class="attach-picker"
+              type="file"
+              multiple
+              ref={picker}
+              onChange={(event) => {
+                void absorb([...(event.currentTarget.files ?? [])]);
+                // Cleared so choosing the same file twice running still fires.
+                event.currentTarget.value = "";
+              }}
+            />
+            <button
+              class="attach"
+              type="button"
+              aria-label="Attach files"
+              onClick={() => picker?.click()}
+            >
+              Attach
+            </button>
             <button class="send" type="submit" disabled={blocking().length > 0}>
               Send
             </button>

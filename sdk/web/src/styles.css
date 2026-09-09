@@ -2573,15 +2573,13 @@ button.picker-row:focus-visible {
 
 /* -- the composer, while a question is open ------------------------------- */
 
-/* Placed rather than auto-flowed, and that is not fussiness. The composer is a
- * three-column grid whose first column is the 1.25rem prompt arrow; a banner
- * spanning all three takes a row of its own, and everything after it shifts one
- * cell — which put the textarea *in the arrow column*, 1.25rem wide with its own
- * scrollbar. Auto-placement in this grid has now been wrong twice (see the row
- * count that swallowed the transcript, `styles.css` above), and both times only
- * a real browser showed it. */
+/* Ordered above everything, for the reason spelled out beside `.attachments`
+ * below: this banner spans every column, and flowed rather than ordered it took
+ * a row of its own *after* the prompt arrow, pushing the textarea into the
+ * 1.25rem arrow column — 1.25rem wide, with its own scrollbar. Only a real
+ * browser showed that. */
 .composer-blocked {
-  grid-row: 1;
+  order: -1;
   grid-column: 1 / -1;
   display: flex;
   flex-wrap: wrap;
@@ -2589,21 +2587,6 @@ button.picker-row:focus-visible {
   align-items: baseline;
   margin-bottom: 0.35rem;
   color: var(--grok-warning, canvastext);
-}
-
-.composer.blocked::before {
-  grid-row: 2;
-  grid-column: 1;
-}
-
-.composer.blocked .prompt-input {
-  grid-row: 2;
-  grid-column: 2;
-}
-
-.composer.blocked .send {
-  grid-row: 2;
-  grid-column: 3;
 }
 
 .composer-blocked-open {
@@ -2788,4 +2771,101 @@ button.picker-row:focus-visible {
 .background-cwd {
   color: var(--grok-path, canvastext);
   font-size: 0.85rem;
+}
+
+/* == files carried with a prompt =========================================== */
+
+/* A fourth column, for the button that opens the picker. The composer was
+ * arrow / input / send; attaching is a second thing you do to a message you are
+ * writing, so it stands beside sending rather than above the line. */
+.composer {
+  grid-template-columns: 1.25rem 1fr auto auto;
+}
+
+/* Placed by `order`, not by row numbers. Grid auto-placement walks items in
+ * order-modified document order, so a negative `order` on the two full-width
+ * banners puts them above everything — including the `::before` prompt arrow,
+ * which no row number could have got in front of. The alternative, numbering
+ * rows, is the mistake this file has already made twice: a hand-counted row
+ * list once starved the transcript to zero height, and a banner spanning three
+ * columns once pushed the textarea into the 1.25rem arrow column. */
+.attachments {
+  order: -2;
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.35rem;
+}
+
+.attachment {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: baseline;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid var(--grok-selection-border, canvastext);
+  border-radius: 6px;
+  background: var(--grok-bg-highlight, canvas);
+}
+
+/* One role each, and they are the three answers `attach.ts` gives: a picture the
+ * model looks at, text it reads, bytes it is handed. */
+.attachment-image {
+  border-color: var(--grok-accent-skill, canvastext);
+}
+
+.attachment-text {
+  border-color: var(--grok-accent-tool, canvastext);
+}
+
+.attachment-binary {
+  border-color: var(--grok-gray, canvastext);
+}
+
+.attachment-refused {
+  border-color: var(--grok-accent-error, canvastext);
+  color: var(--grok-accent-error, canvastext);
+}
+
+.attachment-size,
+.attachment-reason {
+  color: var(--grok-gray, canvastext);
+}
+
+.attachment-drop {
+  padding: 0 0.2rem;
+  border: none;
+  background: none;
+  color: var(--grok-gray, canvastext);
+}
+
+.attachment-drop:hover,
+.attachment-drop:focus-visible {
+  color: var(--grok-accent-error, canvastext);
+}
+
+/* The picker is driven by the button beside it. Kept in the DOM rather than
+ * built on demand because a file input built inside a click handler is a popup
+ * the browser may decline to open. */
+.attach-picker {
+  display: none;
+}
+
+.attach {
+  align-self: end;
+  padding: 0.1rem 0.4rem;
+  color: var(--grok-gray, canvastext);
+}
+
+.attach:hover,
+.attach:focus-visible {
+  color: var(--grok-accent-user, canvastext);
+}
+
+/* A drop target that says so. The border is the composer's own focused role, so
+ * "something is about to land here" reads as the same family as "you are typing
+ * here" rather than as a new colour nobody has seen before. */
+.composer.dragging {
+  border-color: var(--grok-prompt-border-active, canvastext);
+  background: var(--grok-bg-highlight, canvas);
 }

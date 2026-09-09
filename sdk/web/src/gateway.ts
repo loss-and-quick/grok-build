@@ -51,6 +51,7 @@ import { createTasks, type Tasks } from "./tasks.ts";
 import { createTranscript, type Transcript } from "./transcript.ts";
 import { LIST_PARAMS, ROOT } from "./directory.ts";
 import {
+  type ContentBlock,
   PROTOCOL_VERSION,
   visibleSettingRows,
   FOLDER_TRUST_DISMISSED,
@@ -1380,15 +1381,27 @@ export function createGateway() {
     }
   };
 
-  const prompt = async (text: string): Promise<void> => {
+  const prompt = async (
+    text: string,
+    /**
+     * Files attached to this turn, already turned into blocks.
+     *
+     * Appended after the text, which is the order the terminal builds the same
+     * array in — `interjection.rs:89` extends the blocks with its pasted images
+     * once the typed text is in. What a given file *becomes* is a decision with
+     * its own measurements behind it, so it is made in `attach.ts` and arrives
+     * here already settled.
+     */
+    attachments: readonly ContentBlock[] = [],
+  ): Promise<void> => {
     const current = attached();
-    if (!text || !client || !current) return;
+    if ((!text && attachments.length === 0) || !client || !current) return;
     const driving = client;
     say("running…");
     try {
       const response = (await driving.request("session/prompt", {
         sessionId: current.entry.sessionId,
-        prompt: [{ type: "text", text }],
+        prompt: [...(text ? [{ type: "text", text } as ContentBlock] : []), ...attachments],
         // The agent echoes `promptId` on every notification it emits for this
         // turn, which is how a client tells a cancelled turn's chunks from the
         // next turn's. Not used for filtering yet, but omitting it would throw
