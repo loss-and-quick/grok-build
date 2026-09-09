@@ -6,7 +6,7 @@ use super::auth::{
 use super::billing::dispatch_open_supergrok_url;
 use super::ctx::{
     active_agent_session_id, get_active_agent_mut, navigate_clearing_selection, open_url_or_show,
-    sync_sleep_inhibitor, with_active_agent, with_scrollback,
+    sync_sleep_inhibitor, with_active_agent, with_agent_session, with_scrollback,
 };
 use super::dashboard::{
     dispatch_dashboard_attach, dispatch_dashboard_begin_rename, dispatch_dashboard_change_location,
@@ -714,6 +714,57 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_open_extensions_modal(app, tab, trigger)
         }
         Action::OpenConfigAgentsModal(tab) => dispatch_open_config_agents_modal(app, tab),
+        Action::OpenPersonaDetail { name, scope } => {
+            with_agent_session(app, |agent_id, session_id| Effect::FetchPersona {
+                agent_id,
+                session_id,
+                name,
+                scope,
+            })
+        }
+        Action::CreatePersona {
+            name,
+            description,
+            instructions,
+            scope,
+        } => with_agent_session(app, |agent_id, session_id| Effect::SavePersona {
+            agent_id,
+            session_id,
+            name,
+            scope,
+            // A create quotes no revision, so the shell refuses rather than
+            // overwrites when the name turns out to be taken.
+            base_revision: None,
+            fields: crate::views::persona_detail::PersonaFieldEdits {
+                description,
+                instructions,
+                ..Default::default()
+            },
+        }),
+        Action::SavePersona {
+            name,
+            scope,
+            base_revision,
+            fields,
+        } => with_agent_session(app, |agent_id, session_id| Effect::SavePersona {
+            agent_id,
+            session_id,
+            name,
+            scope,
+            base_revision: Some(base_revision),
+            fields,
+        }),
+        Action::DeletePersona {
+            name,
+            scope,
+            base_revision,
+        } => with_agent_session(app, |agent_id, session_id| Effect::DeletePersona {
+            agent_id,
+            session_id,
+            name,
+            scope,
+            base_revision,
+        }),
         Action::McpAuthTrigger { server_name } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];

@@ -5768,7 +5768,6 @@ fn open_agents_modal() -> crate::views::agents_modal::AgentsModalState {
     crate::views::agents_modal::AgentsModalState::new(
         std::path::Path::new("/nonexistent"),
         &std::collections::HashMap::new(),
-        &BundleState::default(),
         None,
         None,
         None,
@@ -5983,8 +5982,14 @@ fn overlay_open_modal_fails_empty_focused_prompt_guard() {
         "an open agents modal must fail the guard",
     );
     agent.agents_modal = None;
-    agent.persona_detail =
-        Some(crate::views::persona_detail::PersonaDetailState::from_name_only("researcher"));
+    agent.persona_detail = Some(
+        crate::views::persona_detail::PersonaDetailState::from_document(
+            &xai_grok_shell::extensions::personas::PersonaDocument {
+                name: "researcher".to_owned(),
+                ..Default::default()
+            },
+        ),
+    );
     assert!(
         !agent.is_empty_focused_prompt(),
         "an open persona detail must fail the guard",

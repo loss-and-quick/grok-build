@@ -2057,7 +2057,6 @@ mod btw_focus_tests {
         agents.agents_modal = Some(crate::views::agents_modal::AgentsModalState::new(
             std::path::Path::new("/nonexistent"),
             &std::collections::HashMap::new(),
-            &crate::app::bundle::BundleState::default(),
             None,
             None,
             None,
@@ -2365,7 +2364,6 @@ mod esc_would_cancel_turn_tests {
         agent.agents_modal = Some(crate::views::agents_modal::AgentsModalState::new(
             std::path::Path::new("/nonexistent"),
             &std::collections::HashMap::new(),
-            &crate::app::bundle::BundleState::default(),
             None,
             None,
             None,
@@ -2375,8 +2373,14 @@ mod esc_would_cancel_turn_tests {
             "an open agents modal owns Esc (close), not cancel"
         );
         let mut agent = running_agent(false);
-        agent.persona_detail =
-            Some(crate::views::persona_detail::PersonaDetailState::from_name_only("researcher"));
+        agent.persona_detail = Some(
+            crate::views::persona_detail::PersonaDetailState::from_document(
+                &xai_grok_shell::extensions::personas::PersonaDocument {
+                    name: "researcher".to_owned(),
+                    ..Default::default()
+                },
+            ),
+        );
         assert!(
             !agent.esc_would_cancel_turn(false),
             "an open persona detail owns Esc (back/close), not cancel"

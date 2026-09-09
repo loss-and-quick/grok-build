@@ -46,12 +46,6 @@ pub struct PersonaDetail {
     pub description: Option<String>,
     pub has_inputs: bool,
     pub has_outputs: bool,
-    /// Absolute path when the persona was loaded from disk (user/project).
-    #[serde(default)]
-    pub source_path: Option<String>,
-    /// `"user"` or `"project"` for local personas; omitted for bundled catalog entries.
-    #[serde(default)]
-    pub scope_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

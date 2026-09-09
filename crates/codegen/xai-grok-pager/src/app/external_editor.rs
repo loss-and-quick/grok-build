@@ -274,10 +274,25 @@ pub(crate) fn finish(
             }
             if let Some(tab) = refresh_agents_modal
                 && let ActiveView::Agent(id) = app.active_view
-                && let Some(agent) = app.agents.get_mut(&id)
-                && let Some(ref mut modal) = agent.agents_modal
             {
-                modal.refresh_after_editor(tab);
+                if let Some(agent) = app.agents.get_mut(&id)
+                    && let Some(ref mut modal) = agent.agents_modal
+                {
+                    modal.refresh_after_editor(tab);
+                }
+                // The editor wrote a persona file this process no longer reads,
+                // so the list has to come back from the agent that does.
+                if tab == crate::views::agents_modal::AgentsTab::Personas {
+                    let session_id = app
+                        .agents
+                        .get(&id)
+                        .and_then(|agent| agent.session.session_id.clone());
+                    app.pending_effects
+                        .push(crate::app::actions::Effect::FetchPersonas {
+                            agent_id: id,
+                            session_id,
+                        });
+                }
             }
         }
         PreparedEditorRequest::PromptDraft {

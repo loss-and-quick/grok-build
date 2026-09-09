@@ -61,7 +61,23 @@ use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentDeferredSend;
 use crate::app::app_view::{ActiveView, AppView, AuthState};
 use crate::scrollback::block::RenderBlock;
+use crate::views::agents_modal::AgentsModalMessage;
 use agent_client_protocol as acp;
+/// Ask the agent for the persona catalog.
+///
+/// Sent when the agents modal opens and again after every write. Re-reading is
+/// cheaper to keep honest than patching a local copy: there is one answer and
+/// it comes from the process that owns the files.
+pub(super) fn persona_list_effect(app: &AppView, agent_id: AgentId) -> Vec<Effect> {
+    let Some(agent) = app.agents.get(&agent_id) else {
+        return vec![];
+    };
+    vec![Effect::FetchPersonas {
+        agent_id,
+        session_id: agent.session.session_id.clone(),
+    }]
+}
+
 pub(super) fn unregister_session_effect(session_id: Option<acp::SessionId>) -> Vec<Effect> {
     session_id
         .map(|sid| Effect::UnregisterActiveSession { session_id: sid })
@@ -1553,6 +1569,73 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::BundleStatusFailed { error } => {
             tracing::warn!(error = %error, "bundle status fetch failed");
+            vec![]
+        }
+        TaskResult::PersonasReady {
+            agent_id,
+            personas,
+            project_scope_available,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && let Some(ref mut modal) = agent.agents_modal
+            {
+                modal.set_personas(personas, project_scope_available);
+            }
+            vec![]
+        }
+        TaskResult::PersonaReady { agent_id, document } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.persona_detail = Some(
+                    crate::views::persona_detail::PersonaDetailState::from_document(&document),
+                );
+            }
+            vec![]
+        }
+        TaskResult::PersonaWritten {
+            agent_id,
+            response,
+            deleted,
+        } => {
+            // A refusal is an answer, not a failure: the shell declined because
+            // the file is not what the client thought it was, and the only
+            // useful thing to do is say so where the user is looking.
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                // Only a save concerns the detail view. A delete is aimed from
+                // the list, and folding its answer into whatever persona
+                // happens to be open would put one persona's message on
+                // another's.
+                if !deleted && let Some(ref mut detail) = agent.persona_detail {
+                    detail.apply_write_result(&response);
+                }
+                if let Some(ref mut modal) = agent.agents_modal {
+                    modal.message = Some(match response.refusal {
+                        None if deleted => AgentsModalMessage::success(format!(
+                            "Deleted persona '{}'",
+                            response.name
+                        )),
+                        None => AgentsModalMessage::success(format!(
+                            "Saved persona '{}'",
+                            response.name
+                        )),
+                        Some(ref refusal) => AgentsModalMessage::error(refusal.message.clone()),
+                    });
+                }
+                if deleted && response.applied {
+                    agent.persona_detail = None;
+                }
+            }
+            // Re-read rather than patch the local list: the write already went
+            // through the agent, so the agent is also the cheapest thing to ask
+            // what the catalog looks like now.
+            persona_list_effect(app, agent_id)
+        }
+        TaskResult::PersonaFailed { agent_id, error } => {
+            tracing::warn!(error = %error, "persona request failed");
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && let Some(ref mut modal) = agent.agents_modal
+            {
+                modal.message = Some(AgentsModalMessage::error(error));
+            }
             vec![]
         }
         TaskResult::CatalogEntryReady {

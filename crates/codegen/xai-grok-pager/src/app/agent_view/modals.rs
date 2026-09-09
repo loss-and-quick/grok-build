@@ -43,28 +43,29 @@ impl AgentView {
                 }
                 InputOutcome::Changed
             }
-            crate::views::agents_modal::AgentsModalOutcome::OpenPersonaDetail {
-                name,
-                source_path,
-                editable,
-                scope_label,
-            } => {
-                use crate::views::persona_detail::PersonaDetailState;
-                let detail = if let Some(ref path) = source_path {
-                    PersonaDetailState::from_toml_file(path, editable, &scope_label)
-                } else {
-                    Some(PersonaDetailState::from_name_only(&name))
-                };
-                if detail.is_none()
-                    && let Some(ref mut modal) = self.agents_modal
-                {
-                    modal.message = Some(crate::views::agents_modal::AgentsModalMessage::error(
-                        format!("Failed to load persona '{name}'"),
-                    ));
-                }
-                self.persona_detail = detail;
-                InputOutcome::Changed
+            crate::views::agents_modal::AgentsModalOutcome::OpenPersonaDetail { name, scope } => {
+                InputOutcome::Action(Action::OpenPersonaDetail { name, scope })
             }
+            crate::views::agents_modal::AgentsModalOutcome::CreatePersona {
+                name,
+                description,
+                instructions,
+                scope,
+            } => InputOutcome::Action(Action::CreatePersona {
+                name,
+                description,
+                instructions,
+                scope,
+            }),
+            crate::views::agents_modal::AgentsModalOutcome::DeletePersona {
+                name,
+                scope,
+                base_revision,
+            } => InputOutcome::Action(Action::DeletePersona {
+                name,
+                scope,
+                base_revision,
+            }),
             crate::views::agents_modal::AgentsModalOutcome::EditInEditor { path, tab } => {
                 InputOutcome::Action(Action::SuspendForEditor {
                     path,
@@ -100,6 +101,8 @@ impl AgentView {
             }
             crate::views::agents_modal::AgentsModalOutcome::ViewAgent { .. }
             | crate::views::agents_modal::AgentsModalOutcome::OpenPersonaDetail { .. }
+            | crate::views::agents_modal::AgentsModalOutcome::CreatePersona { .. }
+            | crate::views::agents_modal::AgentsModalOutcome::DeletePersona { .. }
             | crate::views::agents_modal::AgentsModalOutcome::EditInEditor { .. } => {
                 // Mouse interactions don't trigger view/edit; ignore
                 InputOutcome::Unchanged
@@ -122,10 +125,6 @@ impl AgentView {
         match handle_persona_detail_key(detail, key) {
             PersonaDetailOutcome::Close => {
                 self.persona_detail = None;
-                // Refresh the personas list in case edits were made.
-                if let Some(ref mut modal) = self.agents_modal {
-                    modal.refresh_personas();
-                }
                 InputOutcome::Changed
             }
             PersonaDetailOutcome::EditInEditor { path } => {
@@ -135,6 +134,17 @@ impl AgentView {
                     refresh_agents_modal: Some(crate::views::agents_modal::AgentsTab::Personas),
                 })
             }
+            PersonaDetailOutcome::Save {
+                name,
+                scope,
+                base_revision,
+                fields,
+            } => InputOutcome::Action(Action::SavePersona {
+                name,
+                scope,
+                base_revision,
+                fields,
+            }),
             PersonaDetailOutcome::Changed => InputOutcome::Changed,
             PersonaDetailOutcome::Unchanged => InputOutcome::Unchanged,
         }
@@ -161,15 +171,12 @@ impl AgentView {
         match handle_persona_detail_mouse(detail, mouse) {
             PersonaDetailOutcome::Close => {
                 self.persona_detail = None;
-                if let Some(ref mut modal) = self.agents_modal {
-                    modal.refresh_personas();
-                }
                 InputOutcome::Changed
             }
             PersonaDetailOutcome::Changed => InputOutcome::Changed,
-            PersonaDetailOutcome::EditInEditor { .. } | PersonaDetailOutcome::Unchanged => {
-                InputOutcome::Unchanged
-            }
+            PersonaDetailOutcome::EditInEditor { .. }
+            | PersonaDetailOutcome::Save { .. }
+            | PersonaDetailOutcome::Unchanged => InputOutcome::Unchanged,
         }
     }
 
@@ -2978,14 +2985,7 @@ mod editor_paste_routing_tests {
         agent.prompt.set_text("hidden prompt");
 
         let cwd = tempfile::tempdir().expect("temp cwd");
-        let mut agents = AgentsModalState::new(
-            cwd.path(),
-            &HashMap::new(),
-            &BundleState::default(),
-            None,
-            None,
-            None,
-        );
+        let mut agents = AgentsModalState::new(cwd.path(), &HashMap::new(), None, None, None);
         agents.active_tab = AgentsTab::Personas;
         agent.agents_modal = Some(agents);
         let _ = agent.handle_input(

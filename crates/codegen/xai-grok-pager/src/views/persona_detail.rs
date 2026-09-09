@@ -3,6 +3,15 @@
 //! Opened by pressing Enter on a persona in the `/config-agents` Personas tab.
 //! Renders all persona TOML fields in labeled sections.
 //! Editable personas (user/project scope) support inline field editing; bundled personas are read-only.
+//!
+//! Neither the read nor the write touches a file. The fields arrive as a
+//! [`PersonaDocument`] from `x.ai/personas/get` and a committed edit leaves as
+//! [`PersonaDetailOutcome::Save`], which the app turns into `x.ai/personas/save`.
+//! The `revision` carried through is what makes that safe: it is the hash of
+//! the bytes this view was built from, and the shell refuses a save that quotes
+//! a revision the file no longer has, so an edit made against what the user saw
+//! cannot silently overwrite an edit made since — by another client or by the
+//! `$EDITOR` this same view offers on `i`.
 
 use std::path::{Path, PathBuf};
 
@@ -16,6 +25,9 @@ use crate::input::line_editor::{LineEditOutcome, LineEditor};
 use crate::theme::Theme;
 use crate::views::modal_window::{
     self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut,
+};
+use xai_grok_shell::extensions::personas::{
+    PersonaDocument, PersonaRefusalKind, PersonaScope, PersonaWriteResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -94,6 +106,18 @@ enum PersonaDetailMode {
 // Outcome
 // ---------------------------------------------------------------------------
 
+/// The seven inline-editable fields, as one save carries them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PersonaFieldEdits {
+    pub name: String,
+    pub description: String,
+    pub model: String,
+    pub reasoning_effort: String,
+    pub default_isolation: String,
+    pub instructions: String,
+    pub instructions_file: String,
+}
+
 #[derive(Debug)]
 pub enum PersonaDetailOutcome {
     /// The event was handled and the modal changed.
@@ -104,6 +128,16 @@ pub enum PersonaDetailOutcome {
     Close,
     /// Open the file in $EDITOR.
     EditInEditor { path: PathBuf },
+    /// A field edit was committed. The app sends it as `x.ai/personas/save`;
+    /// this view does not write, so that one write is one method for every
+    /// client instead of one per client.
+    Save {
+        name: String,
+        scope: PersonaScope,
+        /// What this view was built from. A mismatch on disk refuses the save.
+        base_revision: String,
+        fields: PersonaFieldEdits,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -118,12 +152,36 @@ pub struct PersonaIOEntry {
     pub description: String,
 }
 
+impl PersonaIOEntry {
+    fn from_wire(field: &xai_grok_shell::extensions::personas::PersonaIo) -> Self {
+        Self {
+            name: field.name.clone(),
+            io_type: field.io_type.clone(),
+            required: field.required,
+            description: field.description.clone(),
+        }
+    }
+}
+
+/// The word shown next to a persona name. The scope is the wire enum; this is
+/// the one place it becomes prose.
+pub fn scope_label(scope: PersonaScope) -> &'static str {
+    match scope {
+        PersonaScope::Bundled => "bundled",
+        PersonaScope::User => "user",
+        PersonaScope::Project => "project",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 pub struct PersonaDetailState {
     pub window: ModalWindowState,
+    /// The catalog name, i.e. the file stem. What a save and a delete address,
+    /// as against `name`, which is the editable `name` key inside the file.
+    pub catalog_name: String,
     pub name: String,
     pub description: String,
     pub model: String,
@@ -135,7 +193,10 @@ pub struct PersonaDetailState {
     pub outputs: Vec<PersonaIOEntry>,
     pub source_path: Option<PathBuf>,
     pub editable: bool,
-    pub scope_label: String,
+    pub scope: PersonaScope,
+    /// Hash of the bytes this view was built from. Quoted back on save so a
+    /// file that changed underneath refuses the write instead of losing it.
+    pub revision: String,
     pub selected_field: PersonaField,
     pub scroll_offset: usize,
     mode: PersonaDetailMode,
@@ -147,100 +208,33 @@ pub struct PersonaDetailState {
 }
 
 impl PersonaDetailState {
-    /// Load persona state from a TOML file on disk.
-    pub fn from_toml_file(path: &Path, editable: bool, scope_label: &str) -> Option<Self> {
-        let content = std::fs::read_to_string(path).ok()?;
-        let table: toml::Value = toml::from_str(&content).ok()?;
-
-        let get_str = |key: &str| -> String {
-            table
-                .get(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_owned()
-        };
-
-        let parse_io = |key: &str| -> Vec<PersonaIOEntry> {
-            table
-                .get(key)
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .map(|item| PersonaIOEntry {
-                            name: item
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?")
-                                .to_owned(),
-                            io_type: item
-                                .get("io_type")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("file")
-                                .to_owned(),
-                            required: item
-                                .get("required")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false),
-                            description: item
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_owned(),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-
-        let name_from_file = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_owned();
-
-        Some(Self {
-            window: ModalWindowState::new(),
-            name: {
-                let n = get_str("name");
-                if n.is_empty() { name_from_file } else { n }
-            },
-            description: get_str("description"),
-            model: get_str("model"),
-            reasoning_effort: get_str("reasoning_effort"),
-            default_isolation: get_str("default_isolation"),
-            instructions: get_str("instructions"),
-            instructions_file: get_str("instructions_file"),
-            inputs: parse_io("inputs"),
-            outputs: parse_io("outputs"),
-            source_path: Some(path.to_path_buf()),
-            editable,
-            scope_label: scope_label.to_owned(),
-            selected_field: PersonaField::Name,
-            scroll_offset: 0,
-            mode: PersonaDetailMode::Browse,
-            dirty: false,
-            instructions_expanded: false,
-            instructions_scroll: 0,
-            message: None,
-        })
-    }
-
-    /// Create a minimal detail state for personas with no file on disk.
-    pub fn from_name_only(name: &str) -> Self {
+    /// Build the view from one `x.ai/personas/get` answer.
+    ///
+    /// `name` shows the persona's own `name` key when it declares one and the
+    /// catalog name otherwise, which is what a reader expects to see; the
+    /// catalog name is kept separately because that, not the displayed one, is
+    /// what a save addresses.
+    pub fn from_document(doc: &PersonaDocument) -> Self {
         Self {
             window: ModalWindowState::new(),
-            name: name.to_owned(),
-            description: String::new(),
-            model: String::new(),
-            reasoning_effort: String::new(),
-            default_isolation: String::new(),
-            instructions: String::new(),
-            instructions_file: String::new(),
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-            source_path: None,
-            editable: false,
-            scope_label: "bundled".to_owned(),
+            catalog_name: doc.name.clone(),
+            name: if doc.declared_name.is_empty() {
+                doc.name.clone()
+            } else {
+                doc.declared_name.clone()
+            },
+            description: doc.description.clone(),
+            model: doc.model.clone(),
+            reasoning_effort: doc.reasoning_effort.clone(),
+            default_isolation: doc.default_isolation.clone(),
+            instructions: doc.instructions.clone(),
+            instructions_file: doc.instructions_file.clone(),
+            inputs: doc.inputs.iter().map(PersonaIOEntry::from_wire).collect(),
+            outputs: doc.outputs.iter().map(PersonaIOEntry::from_wire).collect(),
+            source_path: (!doc.source_path.is_empty()).then(|| PathBuf::from(&doc.source_path)),
+            editable: doc.editable,
+            scope: doc.scope,
+            revision: doc.revision.clone(),
             selected_field: PersonaField::Name,
             scroll_offset: 0,
             mode: PersonaDetailMode::Browse,
@@ -312,37 +306,50 @@ impl PersonaDetailState {
         }
     }
 
-    /// Save current state back to the TOML file using toml_edit to preserve formatting.
-    fn save_to_file(&self) -> Result<(), String> {
-        let Some(ref path) = self.source_path else {
-            return Err("No source file to save to".to_string());
-        };
-        let content =
-            std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))?;
-        let mut doc: toml_edit::DocumentMut = content
-            .parse()
-            .map_err(|e| format!("Failed to parse TOML: {e}"))?;
-
-        // Update simple string fields.
-        let fields: &[(&str, &str)] = &[
-            ("name", &self.name),
-            ("description", &self.description),
-            ("instructions", &self.instructions),
-            ("instructions_file", &self.instructions_file),
-            ("model", &self.model),
-            ("reasoning_effort", &self.reasoning_effort),
-            ("default_isolation", &self.default_isolation),
-        ];
-        for &(key, value) in fields {
-            if value.is_empty() {
-                doc.remove(key);
-            } else {
-                doc[key] = toml_edit::value(value);
+    /// Fold one `x.ai/personas/save` answer back into the view.
+    ///
+    /// A refused save keeps the stale revision on purpose. Adopting the one the
+    /// refusal carries would make the very next keystroke overwrite the write
+    /// that beat us, which is the lost edit this whole path exists to prevent;
+    /// leaving it stale means every save from this view keeps refusing until
+    /// the user reopens the persona and sees what is actually in the file.
+    pub fn apply_write_result(&mut self, response: &PersonaWriteResponse) {
+        match &response.refusal {
+            None => {
+                if let Some(ref revision) = response.revision {
+                    self.revision = revision.clone();
+                }
+                self.dirty = false;
+                self.message = Some("Saved".to_string());
+            }
+            Some(refusal) if refusal.kind == PersonaRefusalKind::Conflict => {
+                self.message = Some(format!(
+                    "{} — reopen it to see the current file",
+                    refusal.message
+                ));
+            }
+            Some(refusal) => {
+                self.message = Some(refusal.message.clone());
             }
         }
+    }
 
-        std::fs::write(path, doc.to_string()).map_err(|e| format!("Failed to write file: {e}"))?;
-        Ok(())
+    /// The seven editable fields as the save method wants them.
+    ///
+    /// All seven go every time, empty included, because empty is how a key is
+    /// removed. The tables this view does not show — `inputs`, `outputs` — are
+    /// not in the request at all, so the shell's document edit leaves them, and
+    /// any comments, exactly where the user put them.
+    fn field_edits(&self) -> PersonaFieldEdits {
+        PersonaFieldEdits {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            default_isolation: self.default_isolation.clone(),
+            instructions: self.instructions.clone(),
+            instructions_file: self.instructions_file.clone(),
+        }
     }
 }
 
@@ -854,11 +861,13 @@ fn handle_editing_key(state: &mut PersonaDetailState, key: &KeyEvent) -> Persona
         if changed {
             state.set_field_value(field, new_value);
             state.dirty = true;
-            if let Err(e) = state.save_to_file() {
-                state.message = Some(format!("Save failed: {e}"));
-            } else {
-                state.message = Some("Saved".to_string());
-            }
+            state.message = Some("Saving…".to_string());
+            return PersonaDetailOutcome::Save {
+                name: state.catalog_name.clone(),
+                scope: state.scope,
+                base_revision: state.revision.clone(),
+                fields: state.field_edits(),
+            };
         }
         return PersonaDetailOutcome::Changed;
     }

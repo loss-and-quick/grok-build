@@ -1502,7 +1502,6 @@ pub(super) mod paste_key_tests {
         agent.agents_modal = Some(crate::views::agents_modal::AgentsModalState::new(
             std::path::Path::new("/nonexistent"),
             &HashMap::new(),
-            &crate::app::bundle::BundleState::default(),
             None,
             None,
             None,

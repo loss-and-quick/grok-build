@@ -5,6 +5,9 @@ use super::super::task_result::{
     show_clipboard_failure, wrap_host_image_request_eligible,
 };
 use super::*;
+use xai_grok_shell::extensions::personas::{
+    PersonaDocument, PersonaScope, PersonaSummary, PersonaWriteResponse,
+};
 use xai_grok_shell::session::helpers::session_compact::COMPACT_CANCELLED_MSG;
 use xai_grok_shell::session::unified_list::ListScope;
 
@@ -1562,8 +1565,6 @@ fn bundle_status_ready_populates_state() {
                 description: Some("thorough researcher".into()),
                 has_inputs: true,
                 has_outputs: false,
-                source_path: None,
-                scope_label: None,
             }],
             role_details: vec![crate::app::bundle::RoleDetail {
                 name: "reviewer".into(),
@@ -3414,4 +3415,216 @@ fn compact_complete_renders_one_failure_line_per_completion() {
         agent.session.state.is_idle(),
         "compact state must be exited after the first completion"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Personas over the wire
+// ---------------------------------------------------------------------------
+
+fn persona_summary(name: &str, scope: PersonaScope) -> PersonaSummary {
+    PersonaSummary {
+        name: name.to_owned(),
+        description: None,
+        has_inputs: false,
+        has_outputs: false,
+        scope,
+        source_path: format!("/personas/{name}.toml"),
+        editable: scope != PersonaScope::Bundled,
+        revision: format!("rev-{name}"),
+    }
+}
+
+fn app_with_agents_modal() -> AppView {
+    let mut app = test_app_with_agent();
+    let cwd = std::path::PathBuf::from("/nonexistent");
+    if let Some(agent) = app.agents.get_mut(&AgentId(0)) {
+        agent.agents_modal = Some(crate::views::agents_modal::AgentsModalState::new(
+            &cwd,
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            None,
+        ));
+    }
+    app
+}
+
+/// The catalog the modal draws is the one the agent answered with; this process
+/// has no directory walk left to disagree with it.
+#[test]
+fn personas_ready_fills_the_open_modal() {
+    let mut app = app_with_agents_modal();
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PersonasReady {
+            agent_id: AgentId(0),
+            personas: vec![
+                persona_summary("researcher", PersonaScope::Bundled),
+                persona_summary("scribe", PersonaScope::User),
+            ],
+            project_scope_available: true,
+        }),
+        &mut app,
+    );
+
+    let modal = app.agents[&AgentId(0)]
+        .agents_modal
+        .as_ref()
+        .expect("modal");
+    assert_eq!(modal.personas.len(), 2);
+    assert_eq!(modal.personas[1].name, "scribe");
+    assert!(modal.project_scope_available);
+}
+
+/// Without a session the shell cannot resolve a workspace, so it says so and
+/// the modal must record that a project write is not on offer.
+#[test]
+fn personas_ready_records_that_project_scope_is_unavailable() {
+    let mut app = app_with_agents_modal();
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PersonasReady {
+            agent_id: AgentId(0),
+            personas: vec![persona_summary("scribe", PersonaScope::User)],
+            project_scope_available: false,
+        }),
+        &mut app,
+    );
+
+    let modal = app.agents[&AgentId(0)]
+        .agents_modal
+        .as_ref()
+        .expect("modal");
+    assert!(!modal.project_scope_available);
+}
+
+#[test]
+fn persona_ready_opens_the_detail_modal_on_the_answer() {
+    let mut app = app_with_agents_modal();
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PersonaReady {
+            agent_id: AgentId(0),
+            document: Box::new(PersonaDocument {
+                name: "scribe".into(),
+                description: "takes notes".into(),
+                scope: PersonaScope::User,
+                editable: true,
+                revision: "rev-1".into(),
+                ..Default::default()
+            }),
+        }),
+        &mut app,
+    );
+
+    let detail = app.agents[&AgentId(0)]
+        .persona_detail
+        .as_ref()
+        .expect("detail modal");
+    assert_eq!(detail.catalog_name, "scribe");
+    assert_eq!(detail.description, "takes notes");
+    assert_eq!(detail.revision, "rev-1");
+}
+
+/// A write that landed re-asks for the catalog rather than patching the local
+/// copy, so the list cannot drift from what the agent sees.
+#[test]
+fn an_applied_write_says_so_and_re_asks_for_the_catalog() {
+    let mut app = app_with_agents_modal();
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PersonaWritten {
+            agent_id: AgentId(0),
+            response: Box::new(PersonaWriteResponse {
+                applied: true,
+                name: "scribe".into(),
+                scope: PersonaScope::User,
+                path: "/personas/scribe.toml".into(),
+                revision: Some("rev-2".into()),
+                refusal: None,
+            }),
+            deleted: false,
+        }),
+        &mut app,
+    );
+
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::FetchPersonas { .. })),
+        "a write must be followed by a fresh list"
+    );
+    let modal = app.agents[&AgentId(0)]
+        .agents_modal
+        .as_ref()
+        .expect("modal");
+    assert!(
+        modal
+            .message
+            .as_ref()
+            .expect("message")
+            .text
+            .contains("Saved")
+    );
+}
+
+/// A refusal is an answer, not a failure: it reaches the user as the modal's
+/// message and nothing local is quietly rewritten.
+#[test]
+fn a_refused_write_reports_the_reason() {
+    let mut app = app_with_agents_modal();
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PersonaWritten {
+            agent_id: AgentId(0),
+            response: Box::new(PersonaWriteResponse {
+                applied: false,
+                name: "scribe".into(),
+                scope: PersonaScope::User,
+                path: "/personas/scribe.toml".into(),
+                revision: Some("rev-9".into()),
+                refusal: Some(xai_grok_shell::extensions::personas::PersonaRefusal {
+                    kind: xai_grok_shell::extensions::personas::PersonaRefusalKind::Conflict,
+                    message: "persona 'scribe' changed on disk since it was read".into(),
+                }),
+            }),
+            deleted: false,
+        }),
+        &mut app,
+    );
+
+    let modal = app.agents[&AgentId(0)]
+        .agents_modal
+        .as_ref()
+        .expect("modal");
+    assert!(
+        modal
+            .message
+            .as_ref()
+            .expect("message")
+            .text
+            .contains("changed on disk")
+    );
+}
+
+/// A shell that does not know the method, or cannot read the files, leaves the
+/// modal empty with a message rather than taking the pager down with it.
+#[test]
+fn a_failed_persona_request_only_leaves_a_message() {
+    let mut app = app_with_agents_modal();
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PersonaFailed {
+            agent_id: AgentId(0),
+            error: "method not found".into(),
+        }),
+        &mut app,
+    );
+
+    let modal = app.agents[&AgentId(0)]
+        .agents_modal
+        .as_ref()
+        .expect("modal");
+    assert!(modal.personas.is_empty());
+    assert!(modal.message.is_some());
 }

@@ -496,7 +496,7 @@ pub enum CommandSurface {
 /// Synced by pager contract tests (`pager_builtin_triggers_are_reserved_in_shell`, `pager_blocked_acp_names_are_reserved_in_shell`).
 /// Add names here when adding a pager builtin or a pager-blocked shell command; the tuple makes naming the surface part of adding the name, so a command the browser cannot serve is stated rather than discovered.
 pub const PAGER_COMMAND_KEYS: &[(&str, CommandSurface)] = &[
-    ("agents", CommandSurface::WireMissing), // alias of `config-agents`
+    ("agents", CommandSurface::Any), // alias of `config-agents`
     ("agents-dashboard", CommandSurface::Any),
     ("always-approve", CommandSurface::Any),
     ("announcements", CommandSurface::WireMissing), // the hidden-announcement ids are a pager-side file with no wire method
@@ -510,7 +510,7 @@ pub const PAGER_COMMAND_KEYS: &[(&str, CommandSurface)] = &[
     ("compact", CommandSurface::Any),
     ("compact-mode", CommandSurface::Any),
     ("config", CommandSurface::Any),
-    ("config-agents", CommandSurface::WireMissing), // personas are read and written as `.grok/personas/*.toml` by the pager
+    ("config-agents", CommandSurface::Any), // the persona catalog, one persona and its writes all cross as `x.ai/personas/*`
     ("context", CommandSurface::Any),
     ("copy", CommandSurface::Any),
     ("cost", CommandSurface::Any),
@@ -558,7 +558,7 @@ pub const PAGER_COMMAND_KEYS: &[(&str, CommandSurface)] = &[
     ("multiline", CommandSurface::Any),
     ("new", CommandSurface::Any),
     ("onboarding", CommandSurface::WireMissing), // alias of `tutorial`
-    ("personas", CommandSurface::WireMissing), // same `.grok/personas/*.toml` reads and writes as `config-agents`
+    ("personas", CommandSurface::Any), // same `x.ai/personas/*` reads and writes as `config-agents`
     ("plan", CommandSurface::Any),
     ("plan-view", CommandSurface::Any), // alias of `view-plan`
     ("plugin", CommandSurface::Any),

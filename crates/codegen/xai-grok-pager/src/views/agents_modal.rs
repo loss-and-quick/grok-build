@@ -1,14 +1,22 @@
 //! Agents modal popup: lists all agent definitions (built-in, user, project, bundled).
 //!
 //! Opened by `/config-agents` (alias `/agents`).
+//!
+//! The Personas tab reads and writes nothing on this process's disk. The
+//! catalog arrives from `x.ai/personas/list`, a persona's fields from
+//! `x.ai/personas/get`, and create and delete leave as outcomes the app turns
+//! into `x.ai/personas/save` and `x.ai/personas/delete`. The merge over
+//! `~/.grok/personas` and `{cwd}/.grok/personas` that used to live here is
+//! gone, along with the path guards it needed: the shell builds every path from
+//! a scope and a name, so no caller can aim one.
 //! Uses the shared [`ModalWindow`](super::modal_window) chrome.
 //! Blocks all input until closed with `Esc`.
-use crate::app::bundle::{BundleState, PersonaDetail};
 use crate::input::line_editor::{LineEditOutcome, LineEditor};
 use crate::theme::Theme;
 use crate::views::modal_window::{
     self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut,
 };
+use crate::views::persona_detail::scope_label;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -18,6 +26,7 @@ use std::path::{Path, PathBuf};
 use unicode_width::UnicodeWidthStr;
 use xai_grok_agent::config::{AgentDefinition, AgentScope, BuiltinAgentName};
 use xai_grok_shell::agent::config::AgentSelectionConfig;
+use xai_grok_shell::extensions::personas::{PersonaScope, PersonaSummary};
 use xai_grok_tools::implementations::skills::discovery::extract_first_paragraph;
 use xai_grok_tools::registry::types::ToolServerConfig;
 use xai_grok_tools::types::template_renderer::TemplateRenderer;
@@ -98,6 +107,7 @@ impl AgentsModalMessage {
     }
 }
 /// Outcome of processing input on the agents modal.
+#[derive(Debug)]
 pub enum AgentsModalOutcome {
     Close,
     Changed,
@@ -112,12 +122,27 @@ pub enum AgentsModalOutcome {
         /// Fallback: in-memory markdown content (for built-in agents).
         content: Option<String>,
     },
-    /// Open the persona detail/edit modal.
+    /// Fetch the persona through `x.ai/personas/get` and open the detail modal
+    /// on the answer.
     OpenPersonaDetail {
         name: String,
-        source_path: Option<PathBuf>,
-        editable: bool,
-        scope_label: String,
+        scope: PersonaScope,
+    },
+    /// Create one persona through `x.ai/personas/save`, quoting no revision —
+    /// which is how the shell is told this name is meant to be new, and how it
+    /// refuses rather than overwrites when the name is already taken.
+    CreatePersona {
+        name: String,
+        description: String,
+        instructions: String,
+        scope: PersonaScope,
+    },
+    /// Delete one persona through `x.ai/personas/delete`, quoting the revision
+    /// the list was built from so a persona edited since is left alone.
+    DeletePersona {
+        name: String,
+        scope: PersonaScope,
+        base_revision: String,
     },
     /// Open a user/project config file in `$EDITOR` (TUI suspends until exit).
     EditInEditor {
@@ -133,6 +158,15 @@ pub enum ConfigFileScope {
     Project,
 }
 impl ConfigFileScope {
+    /// The wire scope this writes to. [`PersonaScope`] also has `Bundled`,
+    /// which a create form must not be able to name, so the form keeps the
+    /// two-valued type and converts here.
+    pub fn persona_scope(self) -> PersonaScope {
+        match self {
+            Self::User => PersonaScope::User,
+            Self::Project => PersonaScope::Project,
+        }
+    }
     pub fn label(self) -> &'static str {
         match self {
             Self::User => "user",
@@ -224,7 +258,16 @@ impl PersonaCreateInput {
 }
 /// Pending confirmation action (delete local persona).
 pub enum PersonaConfirmAction {
-    Delete { name: String, path: PathBuf },
+    Delete {
+        name: String,
+        scope: PersonaScope,
+        /// Shown in the dialog so the user can see which file is going. Never
+        /// sent back: the shell builds the path from the scope and the name.
+        path: String,
+        /// The revision the row was drawn from, carried to the delete so a
+        /// confirmation aimed at what the user saw cannot carry off a newer file.
+        base_revision: String,
+    },
 }
 /// Modal state for the agents listing.
 pub struct AgentsModalState {
@@ -250,8 +293,6 @@ pub struct AgentsModalState {
     pub message: Option<AgentsModalMessage>,
     /// Working directory for rebuilding the agent list.
     pub cwd: PathBuf,
-    /// Snapshot of bundle catalog used to merge persona lists.
-    bundle: BundleState,
     /// Resolved startup agent name (same chain as the shell: `[agent]`, `GROK_AGENT`, model `agentType`, then `grok-build`).
     pub default_agent: String,
     /// Agent running in the current session (`session/info` `agentName`).
@@ -260,7 +301,14 @@ pub struct AgentsModalState {
     model_agent_type: Option<String>,
     /// Plugin registry snapshot for listing plugin-provided agents (`None` when no plugins are installed or enabled).
     plugin_registry: Option<xai_grok_agent::plugins::PluginRegistry>,
-    pub personas: Vec<PersonaDetail>,
+    /// The catalog as `x.ai/personas/list` last answered. Empty until the
+    /// first answer arrives, and replaced wholesale by each one after: this
+    /// view no longer reads a directory, so there is nothing here to drift
+    /// from what the agent sees.
+    pub personas: Vec<PersonaSummary>,
+    /// False when the shell had no session to resolve a workspace against, so
+    /// `{workspace}/.grok/personas` was not searched and cannot be written.
+    pub project_scope_available: bool,
     pub persona_selected: usize,
     pub persona_scroll: usize,
     /// Indices of expanded personas (showing description + capability tags).
@@ -279,18 +327,18 @@ fn user_visible_builtins() -> &'static [BuiltinAgentName] {
     ]
 }
 impl AgentsModalState {
-    /// Create a new agents modal, discovering agents from `cwd` and
-    /// populating personas from `bundle`.
+    /// Create a new agents modal, discovering agents from `cwd`.
+    ///
+    /// Personas start empty and arrive from `x.ai/personas/list`; the modal
+    /// opens on an empty tab rather than blocking on a directory walk.
     pub fn new(
         cwd: &Path,
         toggle: &HashMap<String, bool>,
-        bundle: &BundleState,
         model_agent_type: Option<&str>,
         active_agent: Option<String>,
         plugin_registry: Option<xai_grok_agent::plugins::PluginRegistry>,
     ) -> Self {
         let agents = build_agent_list(cwd, toggle, plugin_registry.as_ref());
-        let personas = merge_persona_lists(bundle, cwd);
         let default_agent = resolve_default_agent_name(cwd, model_agent_type);
         Self {
             window: ModalWindowState::with_tabs(AgentsTab::ALL.len()),
@@ -306,12 +354,12 @@ impl AgentsModalState {
             persona_confirm: None,
             message: None,
             cwd: cwd.to_path_buf(),
-            bundle: bundle.clone(),
             default_agent,
             active_agent,
             model_agent_type: model_agent_type.map(str::to_owned),
             plugin_registry,
-            personas,
+            personas: Vec::new(),
+            project_scope_available: false,
             persona_selected: 0,
             persona_scroll: 0,
             persona_expanded: std::collections::HashSet::new(),
@@ -325,19 +373,22 @@ impl AgentsModalState {
             self.selected = self.agents.len().saturating_sub(1);
         }
     }
-    /// Rebuild the persona list from the bundle cache and local disk.
-    pub fn refresh_personas(&mut self) {
-        self.personas = merge_persona_lists(&self.bundle, &self.cwd);
+    /// Take one `x.ai/personas/list` answer.
+    pub fn set_personas(&mut self, personas: Vec<PersonaSummary>, project_scope_available: bool) {
+        self.personas = personas;
+        self.project_scope_available = project_scope_available;
         self.persona_expanded.clear();
         if self.persona_selected >= self.personas.len() {
             self.persona_selected = self.personas.len().saturating_sub(1);
         }
     }
     /// Reload list data after an external editor session (e.g. `$EDITOR` on `i`).
+    ///
+    /// Only the agent list is rebuilt here. Personas have nothing local left to
+    /// rebuild from, so the caller re-asks `x.ai/personas/list` instead.
     pub fn refresh_after_editor(&mut self, tab: AgentsTab) {
-        match tab {
-            AgentsTab::Agents => self.rebuild_agents(),
-            AgentsTab::Personas => self.refresh_personas(),
+        if tab == AgentsTab::Agents {
+            self.rebuild_agents();
         }
     }
     pub fn search_query(&self) -> &str {
@@ -469,120 +520,6 @@ pub fn build_agent_list(
     }
     entries
 }
-/// Base persona list from bundle status (bundled cache catalog).
-fn personas_from_bundle(bundle: &BundleState) -> Vec<PersonaDetail> {
-    if !bundle.persona_details.is_empty() {
-        bundle.persona_details.clone()
-    } else {
-        bundle
-            .personas
-            .iter()
-            .map(|name| PersonaDetail {
-                name: name.clone(),
-                description: None,
-                has_inputs: false,
-                has_outputs: false,
-                source_path: None,
-                scope_label: None,
-            })
-            .collect()
-    }
-}
-/// Union bundled personas with local `~/.grok/personas` and `{cwd}/.grok/personas`.
-///
-/// Bundled names take precedence; local-only names are appended with scope tags.
-pub fn merge_persona_lists(bundle: &BundleState, cwd: &Path) -> Vec<PersonaDetail> {
-    let mut list = personas_from_bundle(bundle);
-    let mut names: std::collections::HashSet<String> =
-        list.iter().map(|p| p.name.clone()).collect();
-    let grok_home = xai_grok_config::grok_home();
-    let bundled_dir = grok_home.join("bundled").join("personas");
-    for persona in &mut list {
-        if persona.source_path.is_none() {
-            let path = bundled_dir.join(format!("{}.toml", persona.name));
-            if path.exists() {
-                persona.source_path = Some(path.display().to_string());
-                if persona.scope_label.is_none() {
-                    persona.scope_label = Some("bundled".to_string());
-                }
-            }
-        }
-    }
-    let dirs = [
-        (ConfigFileScope::Project, cwd.join(".grok").join("personas")),
-        (ConfigFileScope::User, grok_home.join("personas")),
-    ];
-    for (scope, dir) in dirs {
-        append_local_personas_in_dir(&dir, scope, &mut list, &mut names);
-    }
-    list
-}
-fn append_local_personas_in_dir(
-    dir: &Path,
-    scope: ConfigFileScope,
-    list: &mut Vec<PersonaDetail>,
-    names: &mut std::collections::HashSet<String>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut stems: Vec<String> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                return None;
-            }
-            path.file_stem()?.to_str().map(str::to_owned)
-        })
-        .collect();
-    stems.sort();
-    for name in stems {
-        if names.contains(&name) {
-            continue;
-        }
-        let path = dir.join(format!("{name}.toml"));
-        if let Some(detail) = persona_detail_from_local_file(&path, &name, scope) {
-            names.insert(name);
-            list.push(detail);
-        }
-    }
-}
-fn persona_detail_from_local_file(
-    path: &Path,
-    name: &str,
-    scope: ConfigFileScope,
-) -> Option<PersonaDetail> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let table: toml::Value = toml::from_str(&content).ok()?;
-    let desc = table
-        .get("description")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            table
-                .get("instructions")
-                .and_then(|v| v.as_str())
-                .and_then(extract_first_paragraph)
-        });
-    let has_inputs = table
-        .get("inputs")
-        .and_then(|v| v.as_array())
-        .is_some_and(|a| !a.is_empty());
-    let has_outputs = table
-        .get("outputs")
-        .and_then(|v| v.as_array())
-        .is_some_and(|a| !a.is_empty());
-    Some(PersonaDetail {
-        name: name.to_owned(),
-        description: desc,
-        has_inputs,
-        has_outputs,
-        source_path: Some(path.display().to_string()),
-        scope_label: Some(scope.label().to_string()),
-    })
-}
 /// Load the `[subagents.toggle]` map from config.toml.
 pub fn load_agent_toggle() -> HashMap<String, bool> {
     let root = match xai_grok_shell::config::load_effective_config() {
@@ -602,115 +539,6 @@ pub fn load_agent_toggle() -> HashMap<String, bool> {
         .iter()
         .filter_map(|(k, v)| v.as_bool().map(|b| (k.to_string(), b)))
         .collect()
-}
-/// Sanitize a name for use as a filename: replace non-alphanumeric chars (except `-` and `_`) with `-`, require at least one alphanumeric char.
-pub fn sanitize_config_name(name: &str) -> Result<String, String> {
-    let sanitized: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if !sanitized.chars().any(|c| c.is_alphanumeric()) {
-        return Err("Name must contain at least one alphanumeric character".to_string());
-    }
-    Ok(sanitized)
-}
-fn personas_dir_for_scope(scope: ConfigFileScope, cwd: &Path) -> PathBuf {
-    match scope {
-        ConfigFileScope::User => xai_grok_config::grok_home().join("personas"),
-        ConfigFileScope::Project => cwd.join(".grok").join("personas"),
-    }
-}
-#[derive(serde::Serialize)]
-struct PersonaTomlTemplate<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instructions: Option<&'a str>,
-}
-/// Create a new persona `.toml` under user or project personas directory.
-pub fn create_persona_template(
-    name: &str,
-    description: &str,
-    instructions: &str,
-    scope: ConfigFileScope,
-    cwd: &Path,
-) -> Result<PathBuf, String> {
-    let sanitized = sanitize_config_name(name)?;
-    let personas_dir = personas_dir_for_scope(scope, cwd);
-    if let Err(e) = std::fs::create_dir_all(&personas_dir) {
-        return Err(format!("Failed to create personas directory: {e}"));
-    }
-    let path = personas_dir.join(format!("{sanitized}.toml"));
-    if path.exists() {
-        return Err(format!("Persona '{}' already exists", sanitized));
-    }
-    let desc_opt = (!description.trim().is_empty()).then(|| description.trim());
-    let instr_opt = (!instructions.trim().is_empty()).then(|| instructions.trim());
-    let template = PersonaTomlTemplate {
-        description: desc_opt,
-        instructions: instr_opt,
-    };
-    let content =
-        toml::to_string_pretty(&template).map_err(|e| format!("Failed to format persona: {e}"))?;
-    std::fs::write(&path, content).map_err(|e| format!("Failed to write persona file: {e}"))?;
-    Ok(path)
-}
-/// True when `path` is a deletable local persona file (user or project `.grok/personas`).
-pub fn persona_path_is_deletable(path: &Path) -> bool {
-    config_path_is_user_or_project(path, "personas")
-}
-/// Shared guard: canonical path under `~/.grok/{subdir}` or `{cwd}/.grok/{subdir}`, not bundled.
-fn config_path_is_user_or_project(path: &Path, subdir: &str) -> bool {
-    let Ok(canonical) = dunce::canonicalize(path) else {
-        return false;
-    };
-    if canonical
-        .components()
-        .any(|c| matches!(c, std::path::Component::Normal(s) if s == "bundled"))
-    {
-        return false;
-    }
-    let grok_home = xai_grok_config::grok_home();
-    let in_user = dunce::canonicalize(grok_home.join(subdir))
-        .ok()
-        .is_some_and(|d| canonical.starts_with(&d));
-    let project_suffix = std::path::Path::new(".grok").join(subdir);
-    let in_project = canonical
-        .ancestors()
-        .any(|a| a.ends_with(project_suffix.as_path()));
-    in_user || in_project
-}
-/// Whether the persona can be edited on disk from the modal (local user/project only).
-pub fn persona_is_editable(persona: &PersonaDetail) -> bool {
-    persona_is_deletable(persona)
-}
-/// Whether the persona can be deleted from the modal (local user/project only).
-pub fn persona_is_deletable(persona: &PersonaDetail) -> bool {
-    persona
-        .source_path
-        .as_ref()
-        .map(|p| persona_path_is_deletable(Path::new(p)))
-        .unwrap_or(false)
-}
-/// Delete a local persona file from disk.
-pub fn delete_persona_file(path: &Path) -> Result<(), String> {
-    if !persona_path_is_deletable(path) {
-        if dunce::canonicalize(path).ok().is_some_and(|c| {
-            c.components()
-                .any(|comp| matches!(comp, std::path::Component::Normal(s) if s == "bundled"))
-        }) {
-            return Err("Cannot delete bundled personas".to_string());
-        }
-        return Err("Persona file is not in a known personas directory".to_string());
-    }
-    std::fs::remove_file(path).map_err(|e| format!("Failed to delete persona file: {e}"))?;
-    Ok(())
 }
 /// Load `[agent]` from effective config (merged shell + pager config layers).
 fn load_agent_selection_config() -> AgentSelectionConfig {
@@ -1689,8 +1517,8 @@ fn render_personas_tab(
                 }
                 buf.set_string(x, row_y, &name_display, name_style);
                 x += name_display.width() as u16;
-                if let Some(ref scope) = persona.scope_label {
-                    let badge = format!(" {scope} ");
+                {
+                    let badge = format!(" {} ", scope_label(persona.scope));
                     let mut scope_style = Style::default().fg(theme.accent_user);
                     if let Some(bg_color) = bg {
                         scope_style = scope_style.bg(bg_color);
@@ -1933,7 +1761,7 @@ fn render_persona_confirm_dialog(
     confirm: &PersonaConfirmAction,
     theme: &Theme,
 ) {
-    let PersonaConfirmAction::Delete { name, path } = confirm;
+    let PersonaConfirmAction::Delete { name, path, .. } = confirm;
     let mut y = content_area.y;
     let title = "Delete Persona";
     let title_style = Style::default()
@@ -1949,7 +1777,7 @@ fn render_persona_confirm_dialog(
         Style::default().fg(theme.text_primary),
     );
     y += 1;
-    let path_msg = format!("  {}", path.display());
+    let path_msg = format!("  {path}");
     buf.set_string(
         content_area.x,
         y,
@@ -2302,17 +2130,9 @@ fn handle_personas_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agen
         }
         KeyCode::Enter | KeyCode::Char('o') => {
             if let Some(persona) = state.personas.get(state.persona_selected) {
-                let source_path = persona.source_path.as_ref().map(PathBuf::from);
-                let editable = persona_is_editable(persona);
-                let scope_label = persona
-                    .scope_label
-                    .clone()
-                    .unwrap_or_else(|| "bundled".to_string());
                 return AgentsModalOutcome::OpenPersonaDetail {
                     name: persona.name.clone(),
-                    source_path,
-                    editable,
-                    scope_label,
+                    scope: persona.scope,
                 };
             }
             AgentsModalOutcome::Unchanged
@@ -2323,19 +2143,17 @@ fn handle_personas_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agen
         }
         KeyCode::Char('d') => {
             if let Some(persona) = state.personas.get(state.persona_selected) {
-                if !persona_is_deletable(persona) {
+                if !persona.editable {
                     state.message =
                         Some(AgentsModalMessage::error("Cannot delete bundled personas"));
                     return AgentsModalOutcome::Changed;
                 }
-                if let Some(ref path_str) = persona.source_path {
-                    state.persona_confirm = Some(PersonaConfirmAction::Delete {
-                        name: persona.name.clone(),
-                        path: PathBuf::from(path_str),
-                    });
-                } else {
-                    state.message = Some(AgentsModalMessage::error("Persona has no source file"));
-                }
+                state.persona_confirm = Some(PersonaConfirmAction::Delete {
+                    name: persona.name.clone(),
+                    scope: persona.scope,
+                    path: persona.source_path.clone(),
+                    base_revision: persona.revision.clone(),
+                });
             }
             AgentsModalOutcome::Changed
         }
@@ -2399,7 +2217,6 @@ fn handle_persona_create_form_key(
     let Some(input) = state.persona_input.as_mut() else {
         return AgentsModalOutcome::Unchanged;
     };
-    let cwd = state.cwd.clone();
     if key.code == KeyCode::Esc {
         state.persona_input = None;
         return AgentsModalOutcome::Changed;
@@ -2423,25 +2240,24 @@ fn handle_persona_create_form_key(
         let name = input.name().trim().to_string();
         let description = input.description().trim().to_string();
         let instructions = input.instructions().trim().to_string();
-        let scope = input.scope;
+        let scope = input.scope.persona_scope();
         if name.is_empty() {
             state.message = Some(AgentsModalMessage::error("Name is required"));
             return AgentsModalOutcome::Changed;
         }
-        match create_persona_template(&name, &description, &instructions, scope, &cwd) {
-            Ok(path) => {
-                let label = path.file_stem().and_then(|s| s.to_str()).unwrap_or(&name);
-                state.persona_input = None;
-                state.refresh_personas();
-                state.message = Some(AgentsModalMessage::success(format!(
-                    "Created persona '{label}'"
-                )));
-            }
-            Err(e) => {
-                state.message = Some(AgentsModalMessage::error(e));
-            }
+        if scope == PersonaScope::Project && !state.project_scope_available {
+            state.message = Some(AgentsModalMessage::error(
+                "No workspace to create a project persona in",
+            ));
+            return AgentsModalOutcome::Changed;
         }
-        return AgentsModalOutcome::Changed;
+        state.persona_input = None;
+        return AgentsModalOutcome::CreatePersona {
+            name,
+            description,
+            instructions,
+            scope,
+        };
     }
     let Some(editor) = input.active_editor_mut() else {
         return AgentsModalOutcome::Unchanged;
@@ -2455,19 +2271,17 @@ fn handle_persona_confirm_key(state: &mut AgentsModalState, key: &KeyEvent) -> A
             let Some(confirm) = state.persona_confirm.take() else {
                 return AgentsModalOutcome::Unchanged;
             };
-            let PersonaConfirmAction::Delete { name, path } = confirm;
-            match delete_persona_file(&path) {
-                Ok(()) => {
-                    state.refresh_personas();
-                    state.message = Some(AgentsModalMessage::success(format!(
-                        "Deleted persona '{name}'"
-                    )));
-                }
-                Err(e) => {
-                    state.message = Some(AgentsModalMessage::error(e));
-                }
+            let PersonaConfirmAction::Delete {
+                name,
+                scope,
+                path: _,
+                base_revision,
+            } = confirm;
+            AgentsModalOutcome::DeletePersona {
+                name,
+                scope,
+                base_revision,
             }
-            AgentsModalOutcome::Changed
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             state.persona_confirm = None;
@@ -2607,220 +2421,109 @@ mod tests {
             assert_eq!(tab.prev().next(), tab);
         }
     }
+    /// The persona catalog arrives whole from `x.ai/personas/list`. What is
+    /// left to test here is that the modal takes an answer and keeps its
+    /// selection sane — the merge and the disk walk it used to do are the
+    /// shell's now, and are tested there against real directories.
     #[test]
-    fn build_persona_list_from_details() {
-        let bundle = BundleState {
-            persona_details: vec![
-                PersonaDetail {
-                    name: "researcher".to_string(),
-                    description: Some("thorough researcher".to_string()),
-                    has_inputs: true,
-                    has_outputs: false,
-                    source_path: None,
-                    scope_label: None,
-                },
-                PersonaDetail {
-                    name: "auditor".to_string(),
-                    description: None,
-                    has_inputs: false,
-                    has_outputs: true,
-                    source_path: None,
-                    scope_label: None,
-                },
-            ],
-            personas: vec!["ignored".to_string()],
-            ..Default::default()
-        };
-        let list = merge_persona_lists(&bundle, Path::new("/tmp"));
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].name, "researcher");
-        assert_eq!(list[0].description.as_deref(), Some("thorough researcher"));
-        assert!(list[0].has_inputs);
-        assert!(!list[0].has_outputs);
-        assert_eq!(list[1].name, "auditor");
-        assert!(list[1].description.is_none());
-        assert!(!list[1].has_inputs);
-        assert!(list[1].has_outputs);
+    fn set_personas_replaces_the_catalog_and_records_project_availability() {
+        let mut state = make_persona_state(three_personas(), "", 0);
+        state.set_personas(vec![persona_summary("only-one", PersonaScope::User)], true);
+        assert_eq!(state.personas.len(), 1);
+        assert_eq!(state.personas[0].name, "only-one");
+        assert!(state.project_scope_available);
     }
+
+    /// A shorter answer must not leave the cursor pointing past the end.
     #[test]
-    fn build_persona_list_fallback_to_names() {
-        let bundle = BundleState {
-            personas: vec!["alpha".to_string(), "beta".to_string()],
-            persona_details: vec![],
-            ..Default::default()
-        };
-        let list = merge_persona_lists(&bundle, Path::new("/tmp"));
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].name, "alpha");
-        assert!(list[0].description.is_none());
-        assert!(!list[0].has_inputs);
-        assert!(!list[0].has_outputs);
-        assert_eq!(list[1].name, "beta");
+    fn set_personas_clamps_a_selection_that_no_longer_exists() {
+        let mut state = make_persona_state(three_personas(), "", 2);
+        state.set_personas(vec![persona_summary("only-one", PersonaScope::User)], false);
+        assert_eq!(state.persona_selected, 0);
+        assert!(!state.project_scope_available);
     }
+
+    /// `d` on a bundled persona refuses locally rather than sending a delete
+    /// the shell would only refuse again.
     #[test]
-    fn build_persona_list_empty_bundle() {
-        let bundle = BundleState::default();
-        let list = merge_persona_lists(&bundle, Path::new("/tmp"));
-        assert!(list.is_empty());
-    }
-    #[test]
-    fn merge_persona_lists_appends_local_only() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let personas_dir = dir.path().join(".grok").join("personas");
-        std::fs::create_dir_all(&personas_dir).expect("mkdir");
-        std::fs::write(
-            personas_dir.join("local-only.toml"),
-            "instructions = \"be local\"\n",
-        )
-        .expect("write");
-        let bundle = BundleState {
-            persona_details: vec![PersonaDetail {
-                name: "bundled-one".to_string(),
-                description: None,
-                has_inputs: false,
-                has_outputs: false,
-                source_path: None,
-                scope_label: None,
-            }],
-            ..Default::default()
-        };
-        let list = merge_persona_lists(&bundle, dir.path());
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].name, "bundled-one");
-        assert_eq!(list[1].name, "local-only");
-        assert_eq!(list[1].scope_label.as_deref(), Some("project"));
-        assert!(list[1].source_path.is_some());
-    }
-    #[test]
-    fn create_persona_template_project_scope_writes_toml() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = create_persona_template(
-            "helper",
-            "helps",
-            "always be helpful",
-            ConfigFileScope::Project,
-            dir.path(),
-        )
-        .expect("create");
-        assert!(path.ends_with("helper.toml"));
-        let content = std::fs::read_to_string(&path).expect("read");
-        assert!(content.contains("always be helpful"));
-        assert!(content.contains("helps"));
-    }
-    #[test]
-    fn sanitize_config_name_rejects_empty_alphanumeric() {
-        assert!(sanitize_config_name("---").is_err());
-        assert_eq!(sanitize_config_name("my-agent").unwrap(), "my-agent");
-        assert_eq!(sanitize_config_name("a b").unwrap(), "a-b");
-    }
-    #[test]
-    fn create_persona_template_empty_instructions_ok() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = create_persona_template(
-            "minimal",
-            "just a name",
+    fn delete_key_refuses_a_bundled_persona_without_a_request() {
+        let mut state = make_persona_state(
+            vec![persona_summary("researcher", PersonaScope::Bundled)],
             "",
-            ConfigFileScope::Project,
-            dir.path(),
-        )
-        .expect("create");
-        let content = std::fs::read_to_string(&path).expect("read");
-        assert!(content.contains("just a name"));
-        assert!(!content.contains("instructions"));
+            0,
+        );
+        let outcome = handle_agents_key(
+            &mut state,
+            &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert!(matches!(outcome, AgentsModalOutcome::Changed));
+        assert!(state.persona_confirm.is_none());
+        assert!(state.message.is_some());
     }
+
+    /// `d` then `y` on a local persona asks the shell to delete it, quoting the
+    /// revision the row was drawn from.
     #[test]
-    fn persona_is_deletable_local_vs_bundled() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let local = dir.path().join(".grok").join("personas").join("p.toml");
-        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
-        std::fs::write(&local, "instructions = \"x\"\n").unwrap();
-        let local_detail = PersonaDetail {
-            name: "p".into(),
-            description: None,
-            has_inputs: false,
-            has_outputs: false,
-            source_path: Some(local.display().to_string()),
-            scope_label: Some("project".into()),
-        };
-        assert!(persona_is_deletable(&local_detail));
-        let bundled_detail = PersonaDetail {
-            name: "b".into(),
-            description: None,
-            has_inputs: false,
-            has_outputs: false,
-            source_path: Some("/home/user/.grok/bundled/personas/b.toml".into()),
-            scope_label: None,
-        };
-        assert!(!persona_is_deletable(&bundled_detail));
+    fn delete_key_then_confirm_asks_the_shell_quoting_the_revision() {
+        let mut state = make_persona_state(
+            vec![persona_summary("scribe", PersonaScope::Project)],
+            "",
+            0,
+        );
+        handle_agents_key(
+            &mut state,
+            &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert!(state.persona_confirm.is_some());
+        match handle_agents_key(
+            &mut state,
+            &KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        ) {
+            AgentsModalOutcome::DeletePersona {
+                name,
+                scope,
+                base_revision,
+            } => {
+                assert_eq!(name, "scribe");
+                assert_eq!(scope, PersonaScope::Project);
+                assert_eq!(base_revision, "rev-scribe");
+            }
+            other => panic!("expected a delete request, got {other:?}"),
+        }
     }
+
+    /// Enter on a row asks for that persona by scope and name — never by the
+    /// path the row happens to display.
     #[test]
-    fn delete_persona_file_rejects_outside_dirs() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let outside = dir.path().join("evil.toml");
-        std::fs::write(&outside, "instructions = \"x\"\n").unwrap();
-        assert!(delete_persona_file(&outside).is_err());
+    fn enter_asks_for_the_persona_by_scope_and_name() {
+        let mut state =
+            make_persona_state(vec![persona_summary("scribe", PersonaScope::User)], "", 0);
+        match handle_agents_key(
+            &mut state,
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ) {
+            AgentsModalOutcome::OpenPersonaDetail { name, scope } => {
+                assert_eq!(name, "scribe");
+                assert_eq!(scope, PersonaScope::User);
+            }
+            other => panic!("expected a get request, got {other:?}"),
+        }
     }
-    #[test]
-    fn delete_persona_file_allows_project_persona() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join(".grok").join("personas").join("gone.toml");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "instructions = \"bye\"\n").unwrap();
-        delete_persona_file(&path).expect("delete");
-        assert!(!path.exists());
-    }
+
     #[test]
     fn filtered_persona_indices_matches_name_and_description() {
-        let bundle = BundleState {
-            persona_details: vec![
-                PersonaDetail {
-                    name: "researcher".to_string(),
-                    description: Some("finds info".to_string()),
-                    has_inputs: false,
-                    has_outputs: false,
-                    source_path: None,
-                    scope_label: None,
-                },
-                PersonaDetail {
-                    name: "auditor".to_string(),
-                    description: Some("reviews code".to_string()),
-                    has_inputs: false,
-                    has_outputs: false,
-                    source_path: None,
-                    scope_label: None,
-                },
-            ],
-            ..Default::default()
-        };
-        let personas = merge_persona_lists(&bundle, Path::new("/tmp"));
-        let make_state = |query: &str| -> AgentsModalState {
-            let mut state = AgentsModalState {
-                window: ModalWindowState::with_tabs(2),
-                active_tab: AgentsTab::Personas,
-                agents: Vec::new(),
-                selected: 0,
-                scroll: 0,
-                search: LineEditor::default(),
-                search_active: false,
-                row_map: Vec::new(),
-                content_rect: None,
-                persona_input: None,
-                persona_confirm: None,
-                message: None,
-                cwd: PathBuf::new(),
-                bundle: bundle.clone(),
-                default_agent: DEFAULT_AGENT_TYPE.to_string(),
-                active_agent: None,
-                model_agent_type: None,
-                plugin_registry: None,
-                personas: personas.clone(),
-                persona_selected: 0,
-                persona_scroll: 0,
-                persona_expanded: std::collections::HashSet::new(),
-            };
-            state.set_search_query(query);
-            state
-        };
+        let personas = vec![
+            PersonaSummary {
+                description: Some("finds info".to_owned()),
+                ..persona_summary("researcher", PersonaScope::Bundled)
+            },
+            PersonaSummary {
+                description: Some("reviews code".to_owned()),
+                ..persona_summary("auditor", PersonaScope::User)
+            },
+        ];
+        let make_state =
+            |query: &str| -> AgentsModalState { make_persona_state(personas.clone(), query, 0) };
         let s = make_state("");
         assert_eq!(s.filtered_persona_indices(), vec![0, 1]);
         let s = make_state("audit");
@@ -2831,8 +2534,20 @@ mod tests {
         assert!(s.filtered_persona_indices().is_empty());
     }
     /// Helper: build a minimal `AgentsModalState` for persona navigation tests.
+    fn persona_summary(name: &str, scope: PersonaScope) -> PersonaSummary {
+        PersonaSummary {
+            name: name.to_owned(),
+            description: None,
+            has_inputs: false,
+            has_outputs: false,
+            scope,
+            source_path: format!("/personas/{name}.toml"),
+            editable: scope != PersonaScope::Bundled,
+            revision: format!("rev-{name}"),
+        }
+    }
     fn make_persona_state(
-        personas: Vec<PersonaDetail>,
+        personas: Vec<PersonaSummary>,
         query: &str,
         selected: usize,
     ) -> AgentsModalState {
@@ -2850,12 +2565,12 @@ mod tests {
             persona_confirm: None,
             message: None,
             cwd: PathBuf::new(),
-            bundle: BundleState::default(),
             default_agent: DEFAULT_AGENT_TYPE.to_string(),
             active_agent: None,
             model_agent_type: None,
             plugin_registry: None,
             personas,
+            project_scope_available: true,
             persona_selected: selected,
             persona_scroll: 0,
             persona_expanded: std::collections::HashSet::new(),
@@ -2863,33 +2578,14 @@ mod tests {
         state.set_search_query(query);
         state
     }
-    fn three_personas() -> Vec<PersonaDetail> {
-        vec![
-            PersonaDetail {
-                name: "alpha".to_string(),
-                description: Some("first".to_string()),
-                has_inputs: false,
-                has_outputs: false,
-                source_path: None,
-                scope_label: None,
-            },
-            PersonaDetail {
-                name: "beta".to_string(),
-                description: Some("second".to_string()),
-                has_inputs: false,
-                has_outputs: false,
-                source_path: None,
-                scope_label: None,
-            },
-            PersonaDetail {
-                name: "gamma".to_string(),
-                description: Some("third".to_string()),
-                has_inputs: false,
-                has_outputs: false,
-                source_path: None,
-                scope_label: None,
-            },
-        ]
+    fn three_personas() -> Vec<PersonaSummary> {
+        [("alpha", "first"), ("beta", "second"), ("gamma", "third")]
+            .into_iter()
+            .map(|(name, description)| PersonaSummary {
+                description: Some(description.to_owned()),
+                ..persona_summary(name, PersonaScope::User)
+            })
+            .collect()
     }
     #[test]
     fn persona_select_next_advances() {
@@ -3223,11 +2919,13 @@ mod tests {
             CreateField::Name
         );
     }
+    /// The form validates only what it can see. Sanitizing the name and
+    /// refusing one that is already taken belong to the shell now, and are
+    /// tested there against real directories; what is left here is that an
+    /// empty name never leaves, and that a filled one leaves verbatim.
     #[test]
-    fn persona_create_validates_sanitizes_persists_and_rejects_duplicates() {
-        let directory = tempfile::tempdir().unwrap();
+    fn persona_create_requires_a_name_then_hands_the_form_over() {
         let mut state = make_persona_state(vec![], "", 0);
-        state.cwd = directory.path().to_path_buf();
         let _ = handle_personas_tab_key(
             &mut state,
             &KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
@@ -3237,11 +2935,12 @@ mod tests {
             &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
         assert!(matches!(outcome, AgentsModalOutcome::Changed));
-        assert!(state.persona_input.is_some());
+        assert!(state.persona_input.is_some(), "the form stays open");
         assert_eq!(
             state.message.as_ref().map(|message| message.text.as_str()),
             Some("Name is required")
         );
+
         for ch in "my persona".chars() {
             let _ = handle_agents_key(
                 &mut state,
@@ -3271,24 +2970,40 @@ mod tests {
             state.persona_input.as_ref().unwrap().scope(),
             ConfigFileScope::Project
         );
-        let _ = handle_agents_key(
+
+        match handle_agents_key(
             &mut state,
             &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
-        let path = directory
-            .path()
-            .join(".grok")
-            .join("personas")
-            .join("my-persona.toml");
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("description = \"helps\""));
-        assert!(content.contains("instructions = \"be useful\""));
-        assert!(state.persona_input.is_none());
+        ) {
+            AgentsModalOutcome::CreatePersona {
+                name,
+                description,
+                instructions,
+                scope,
+            } => {
+                // Verbatim: the shell owns the fold into a filename, so the
+                // two clients cannot disagree about what `my persona` becomes.
+                assert_eq!(name, "my persona");
+                assert_eq!(description, "helps");
+                assert_eq!(instructions, "be useful");
+                assert_eq!(scope, PersonaScope::Project);
+            }
+            other => panic!("expected a create request, got {other:?}"),
+        }
+        assert!(state.persona_input.is_none(), "the form closes");
+    }
+
+    /// Without a session there is no workspace to resolve `project` against, so
+    /// the form says so rather than sending a write the shell cannot place.
+    #[test]
+    fn persona_create_refuses_project_scope_with_no_workspace() {
+        let mut state = make_persona_state(vec![], "", 0);
+        state.project_scope_available = false;
         let _ = handle_personas_tab_key(
             &mut state,
             &KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
         );
-        for ch in "my persona".chars() {
+        for ch in "scribe".chars() {
             let _ = handle_agents_key(
                 &mut state,
                 &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
@@ -3301,16 +3016,17 @@ mod tests {
             &mut state,
             &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
         );
-        let _ = handle_agents_key(
+        let outcome = handle_agents_key(
             &mut state,
             &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
+        assert!(matches!(outcome, AgentsModalOutcome::Changed));
         assert!(state.persona_input.is_some());
         assert!(
             state
                 .message
                 .as_ref()
-                .is_some_and(|message| message.text.contains("already exists"))
+                .is_some_and(|message| message.text.contains("No workspace"))
         );
     }
     #[test]

@@ -527,7 +527,6 @@ pub(super) fn dispatch_open_config_agents_modal(
         toast_session_only_slash(app, config_agents_slash_name(initial_tab));
         return vec![];
     };
-    let bundle = app.bundle_state.clone();
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -552,7 +551,6 @@ pub(super) fn dispatch_open_config_agents_modal(
     let mut modal = AgentsModalState::new(
         &cwd,
         &toggle,
-        &bundle,
         model_agent_type.as_deref(),
         active_agent,
         plugin_registry,
@@ -561,13 +559,20 @@ pub(super) fn dispatch_open_config_agents_modal(
         modal.active_tab = tab;
     }
     agent.agents_modal = Some(modal);
+    // The persona tab opens empty and fills from `x.ai/personas/list`. It has
+    // to: the catalog spans the bundle cache and two directories the agent may
+    // be the only one able to see.
+    let mut effects = vec![Effect::FetchPersonas {
+        agent_id: id,
+        session_id: session_id.clone(),
+    }];
     if let Some(session_id) = session_id {
-        return vec![Effect::FetchSessionSnapshot {
+        effects.push(Effect::FetchSessionSnapshot {
             agent_id: id,
             session_id,
-        }];
+        });
     }
-    vec![]
+    effects
 }
 
 /// `agentType` / `agent_type` from a catalog `ModelInfo` meta blob.

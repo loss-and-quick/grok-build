@@ -2498,6 +2498,10 @@ impl acp::Agent for MvpAgent {
             "x.ai/memory/flush" | "x.ai/memory/note" | "x.ai/memory/rewrite" => {
                 crate::extensions::memory::handle(self, &args).await
             }
+            "x.ai/personas/list" | "x.ai/personas/get" | "x.ai/personas/save"
+            | "x.ai/personas/delete" => {
+                crate::extensions::personas::handle(self, &args).await
+            }
             "x.ai/skills/refresh-baseline" => {
                 self.refresh_skill_baseline_for_all_sessions();
                 crate::extensions::to_ext_response(

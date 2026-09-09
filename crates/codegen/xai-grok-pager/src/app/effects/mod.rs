@@ -4058,6 +4058,120 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::FetchPersonas { agent_id, session_id } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({
+                        "sessionId": session_id.map(|id| id.0.to_string()),
+                    });
+                    match persona_request("x.ai/personas/list", params, &tx).await {
+                        Ok(json) => {
+                            match serde_json::from_value::<
+                                xai_grok_shell::extensions::personas::PersonaListResponse,
+                            >(json) {
+                                Ok(r) => {
+                                    TaskResult::PersonasReady {
+                                        agent_id,
+                                        personas: r.personas,
+                                        project_scope_available: r.project_scope_available,
+                                    }
+                                }
+                                Err(e) => {
+                                    TaskResult::PersonaFailed {
+                                        agent_id,
+                                        error: format!("couldn't read the persona list: {e}"),
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => TaskResult::PersonaFailed { agent_id, error: e },
+                    }
+                });
+        }
+        Effect::FetchPersona { agent_id, session_id, name, scope } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({
+                        "sessionId": session_id.map(|id| id.0.to_string()),
+                        "name": name,
+                        "scope": scope,
+                    });
+                    match persona_request("x.ai/personas/get", params, &tx).await {
+                        Ok(json) => {
+                            match serde_json::from_value::<
+                                xai_grok_shell::extensions::personas::PersonaDocument,
+                            >(json) {
+                                Ok(document) => {
+                                    TaskResult::PersonaReady {
+                                        agent_id,
+                                        document: Box::new(document),
+                                    }
+                                }
+                                Err(e) => {
+                                    TaskResult::PersonaFailed {
+                                        agent_id,
+                                        error: format!("couldn't read the persona: {e}"),
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => TaskResult::PersonaFailed { agent_id, error: e },
+                    }
+                });
+        }
+        Effect::SavePersona {
+            agent_id,
+            session_id,
+            name,
+            scope,
+            base_revision,
+            fields,
+        } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    // Every field goes every time, empty included: empty is how
+                    // the shell is told to remove a key. Absent would mean
+                    // "leave it alone", which is not what clearing a field is.
+                    let params = serde_json::json!({
+                        "sessionId": session_id.map(|id| id.0.to_string()),
+                        "name": name,
+                        "scope": scope,
+                        "baseRevision": base_revision,
+                        "fields": {
+                            "name": fields.name,
+                            "description": fields.description,
+                            "model": fields.model,
+                            "reasoningEffort": fields.reasoning_effort,
+                            "defaultIsolation": fields.default_isolation,
+                            "instructions": fields.instructions,
+                            "instructionsFile": fields.instructions_file,
+                        },
+                    });
+                    persona_write_result(agent_id, "x.ai/personas/save", params, false, &tx).await
+                });
+        }
+        Effect::DeletePersona {
+            agent_id,
+            session_id,
+            name,
+            scope,
+            base_revision,
+        } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({
+                        "sessionId": session_id.map(|id| id.0.to_string()),
+                        "name": name,
+                        "scope": scope,
+                        "baseRevision": base_revision,
+                    });
+                    persona_write_result(agent_id, "x.ai/personas/delete", params, true, &tx).await
+                });
+        }
         Effect::FetchCatalogEntry { kind, name } => {
             let tx = acp_tx.clone();
             tasks
@@ -4807,6 +4921,58 @@ async fn fetch_session_info(
     }
     envelope.result.ok_or_else(|| "session info response missing result".to_string())
 }
+/// One `x.ai/personas/*` round trip, returning the bare JSON answer.
+///
+/// The persona methods answer without the `ExtMethodResult` envelope, the way
+/// `x.ai/settings/*` does, so there is nothing to unwrap here beyond the
+/// transport error. A shell too old to know the method answers
+/// `method_not_found`, which arrives as that transport error and leaves the
+/// modal empty rather than wrong.
+async fn persona_request(
+    method: &str,
+    params: serde_json::Value,
+    tx: &AcpAgentTx,
+) -> Result<serde_json::Value, String> {
+    let request = acp::ExtRequest::new(
+        method,
+        serde_json::value::to_raw_value(&params)
+            .expect("serialize persona params")
+            .into(),
+    );
+    let resp = acp_send(request, tx)
+        .await
+        .map_err(|e| sanitize_user_error(&e.to_string()))?;
+    serde_json::from_str(resp.0.get()).map_err(|e| format!("invalid persona response: {e}"))
+}
+
+/// A persona save or delete, folded into the one task result both produce.
+async fn persona_write_result(
+    agent_id: crate::app::agent::AgentId,
+    method: &str,
+    params: serde_json::Value,
+    deleted: bool,
+    tx: &AcpAgentTx,
+) -> TaskResult {
+    match persona_request(method, params, tx).await {
+        Ok(json) => {
+            match serde_json::from_value::<
+                xai_grok_shell::extensions::personas::PersonaWriteResponse,
+            >(json) {
+                Ok(response) => TaskResult::PersonaWritten {
+                    agent_id,
+                    response: Box::new(response),
+                    deleted,
+                },
+                Err(e) => TaskResult::PersonaFailed {
+                    agent_id,
+                    error: format!("couldn't read the persona write result: {e}"),
+                },
+            }
+        }
+        Err(error) => TaskResult::PersonaFailed { agent_id, error },
+    }
+}
+
 /// Append a memory note via `x.ai/memory/note`.
 ///
 /// The rewrite half of `/remember` already crossed the wire; this is the save

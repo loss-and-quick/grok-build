@@ -351,6 +351,33 @@ pub enum Action {
     /// Open the agents modal (listing all agent definitions).
     /// Optionally opens directly on a specific tab.
     OpenConfigAgentsModal(Option<crate::views::agents_modal::AgentsTab>),
+    /// Open one persona's detail modal, fetching its fields first.
+    OpenPersonaDetail {
+        name: String,
+        scope: xai_grok_shell::extensions::personas::PersonaScope,
+    },
+    /// Create one persona. No revision is quoted, which is what tells the shell
+    /// the name is meant to be new.
+    CreatePersona {
+        name: String,
+        description: String,
+        instructions: String,
+        scope: xai_grok_shell::extensions::personas::PersonaScope,
+    },
+    /// Write the edited fields of one persona, quoting the revision the editor
+    /// was opened on.
+    SavePersona {
+        name: String,
+        scope: xai_grok_shell::extensions::personas::PersonaScope,
+        base_revision: String,
+        fields: crate::views::persona_detail::PersonaFieldEdits,
+    },
+    /// Delete one persona, quoting the revision its row was drawn from.
+    DeletePersona {
+        name: String,
+        scope: xai_grok_shell::extensions::personas::PersonaScope,
+        base_revision: String,
+    },
     /// Trigger OAuth for an MCP server from the modal.
     McpAuthTrigger {
         server_name: String,
@@ -1917,6 +1944,44 @@ pub enum Effect {
     },
     /// Fetch current bundle cache status via `x.ai/bundle/status`.
     FetchBundleStatus,
+    /// Fetch the persona catalog via `x.ai/personas/list`.
+    ///
+    /// Dispatched when the agents modal opens and again after every write, so
+    /// the list the user is looking at is the one the agent can see rather than
+    /// one this process assembled from its own disk.
+    FetchPersonas {
+        agent_id: AgentId,
+        session_id: Option<acp::SessionId>,
+    },
+    /// Fetch one persona's fields via `x.ai/personas/get`, to open the detail
+    /// modal on the answer.
+    FetchPersona {
+        agent_id: AgentId,
+        session_id: Option<acp::SessionId>,
+        name: String,
+        scope: xai_grok_shell::extensions::personas::PersonaScope,
+    },
+    /// Create or update one persona via `x.ai/personas/save`.
+    ///
+    /// `base_revision` is absent for a create and present for an update. The
+    /// shell refuses rather than overwrites when it does not match what is on
+    /// disk, so a stale editor loses its save instead of someone else's work.
+    SavePersona {
+        agent_id: AgentId,
+        session_id: Option<acp::SessionId>,
+        name: String,
+        scope: xai_grok_shell::extensions::personas::PersonaScope,
+        base_revision: Option<String>,
+        fields: crate::views::persona_detail::PersonaFieldEdits,
+    },
+    /// Delete one persona via `x.ai/personas/delete`.
+    DeletePersona {
+        agent_id: AgentId,
+        session_id: Option<acp::SessionId>,
+        name: String,
+        scope: xai_grok_shell::extensions::personas::PersonaScope,
+        base_revision: String,
+    },
     /// Fetch a bundled entry's raw content via `x.ai/bundle/entry/get`.
     FetchCatalogEntry { kind: String, name: String },
     /// Send feedback about the current session (fire-and-forget POST).
@@ -2859,6 +2924,31 @@ pub enum TaskResult {
     },
     /// Bundle status fetch failed.
     BundleStatusFailed {
+        error: String,
+    },
+    /// The persona catalog, as `x.ai/personas/list` answered.
+    PersonasReady {
+        agent_id: AgentId,
+        personas: Vec<xai_grok_shell::extensions::personas::PersonaSummary>,
+        project_scope_available: bool,
+    },
+    /// One persona's fields, for the detail modal.
+    PersonaReady {
+        agent_id: AgentId,
+        document: Box<xai_grok_shell::extensions::personas::PersonaDocument>,
+    },
+    /// A persona write finished. `response` carries whether it applied, and the
+    /// refusal when it did not — a refusal is a normal answer, so it reaches
+    /// the user as a message rather than as a failure.
+    PersonaWritten {
+        agent_id: AgentId,
+        response: Box<xai_grok_shell::extensions::personas::PersonaWriteResponse>,
+        /// True for a delete, so the message can say which verb refused.
+        deleted: bool,
+    },
+    /// A persona request never got an answer.
+    PersonaFailed {
+        agent_id: AgentId,
         error: String,
     },
     /// Catalog entry content fetched successfully.

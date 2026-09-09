@@ -456,8 +456,6 @@ mod tests {
             description: Some("thorough researcher".into()),
             has_inputs: false,
             has_outputs: false,
-            source_path: None,
-            scope_label: None,
         }];
         state.role_details = vec![RoleDetail {
             name: "reviewer".into(),
@@ -490,8 +488,6 @@ mod tests {
             description: Some(String::new()),
             has_inputs: false,
             has_outputs: false,
-            source_path: None,
-            scope_label: None,
         }];
         pane.sync_from_bundle(&state);
 

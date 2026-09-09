@@ -20,6 +20,24 @@ pub(super) fn active_agent_session_id(app: &AppView) -> Option<acp::SessionId> {
     app.agents.get(&id)?.session.session_id.clone()
 }
 
+/// Build one effect for the active agent view, from its id and session id.
+///
+/// The session id is what anchors a persona write to a workspace: the shell
+/// resolves `project` scope against the session's own cwd, so no client gets to
+/// name the directory it writes into.
+pub(super) fn with_agent_session(
+    app: &AppView,
+    f: impl FnOnce(AgentId, Option<acp::SessionId>) -> crate::app::actions::Effect,
+) -> Vec<crate::app::actions::Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get(&id) else {
+        return vec![];
+    };
+    vec![f(id, agent.session.session_id.clone())]
+}
+
 /// Apply a closure to the active agent (if any).
 ///
 /// When a subagent view is active, resolves to the **child** view so
