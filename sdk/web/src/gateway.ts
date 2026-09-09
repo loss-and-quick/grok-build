@@ -96,6 +96,7 @@ import {
   type RosterListResponse,
   type SessionInfoResponse,
   type SessionNotification,
+  type SessionPlanResponse,
   type SessionUpdate,
   type SettingRow,
   type SettingsListResponse,
@@ -196,6 +197,7 @@ export interface Attached {
    * `task_completed` and `scheduled_task_*` rows, so the two sections come back
    * from the log rather than being carried between sessions.
    */
+  tasks: Tasks;
   /**
    * The prompts this session is holding but has not started.
    *
@@ -206,7 +208,6 @@ export interface Attached {
    * client's, a terminal's, or the session's own drain — fires.
    */
   queue: Queue;
-  tasks: Tasks;
   /**
    * How much of this session's event log this client has drawn.
    *
@@ -749,6 +750,7 @@ export function createGateway() {
     setFolderTrusts([]);
     setModels(null);
     setSessionInfo(null);
+    setPlan(null);
     setDockEnabled(null);
     // The identity belongs to the socket being replaced. Keeping it would let
     // the line above the roster name the machine we have just left.
@@ -1127,6 +1129,46 @@ export function createGateway() {
     }
   };
 
+  /**
+   * The plan this session has saved, or `null` while nobody has asked.
+   *
+   * Held beside {@link sessionInfo} rather than inside it, which is the shape
+   * the wire chose and for the reason it chose it: `session/info` is a poll,
+   * re-asked at every turn boundary, and a plan body is an unbounded document.
+   */
+  const [plan, setPlan] = createSignal<SessionPlanResponse | null>(null);
+
+  /**
+   * Ask the agent for the saved plan.
+   *
+   * **Asked, never streamed**, like the context window — and asked on the
+   * pager's own cadence rather than a cadence invented here: on attach
+   * (`dispatch/session/load.rs`, "a resumed session may already have a plan,
+   * written before this client existed") and at the end of a turn *while plan
+   * mode is active* (`turn_completion.rs`, "a plan-mode turn is the model's
+   * chance to have written the plan"). Never on a timer, because nothing but a
+   * turn writes the file.
+   *
+   * An agent too old to know the method answers `method not found`. That is
+   * "no plan available" and is stored as an empty snapshot, not reported: there
+   * is nothing a person can do about it and nothing they would do differently.
+   */
+  const refreshPlan = async (): Promise<void> => {
+    const current = attached();
+    if (!client || !current) return;
+    const asked = current.entry.sessionId;
+    try {
+      const response = (await client.ext("x.ai/session/plan", {
+        sessionId: asked,
+      })) as SessionPlanResponse;
+      if (attached()?.entry.sessionId !== asked) return;
+      setPlan(response ?? {});
+    } catch {
+      if (attached()?.entry.sessionId !== asked) return;
+      setPlan({});
+    }
+  };
+
   // -------------------------------------------------------------------------
   // The queue, mutated
   //
@@ -1408,6 +1450,10 @@ export function createGateway() {
     // reads as this session's own.
     setModels(null);
     setSessionInfo(null);
+    // The plan is the same case, and the sharpest of the three: a document
+    // headed "plan.md" left standing over another conversation reads as advice
+    // about that conversation rather than as a stale panel.
+    setPlan(null);
     say(cursor === null ? `loading ${entry.sessionId}…` : `resuming ${entry.sessionId}…`);
     let arrived: Arrival;
     try {
@@ -1436,6 +1482,10 @@ export function createGateway() {
     // to answer one extension method hold up the session that is already
     // loaded.
     void refreshSessionInfo();
+    // And the plan, for the same reason the pager asks here: a session resumed
+    // into may already have one, written before this client existed, and
+    // nothing else would ever mention it.
+    void refreshPlan();
   };
 
   /**
@@ -1878,6 +1928,10 @@ export function createGateway() {
       // cadence and there is no timer beside it. Not awaited: the turn is over
       // either way, and the composer must not wait on a number.
       void refreshSessionInfo();
+      // And the plan, but only in plan mode — the pager's own condition
+      // (`turn_completion.rs`): a plan-mode turn is the model's chance to have
+      // written the file, and every other turn is a round trip for nothing.
+      if (sessionMode() === "plan") void refreshPlan();
     } catch (e) {
       // A socket that closed is not a turn that failed. `session/prompt` is
       // rejected along with every other request in flight when the link goes
@@ -2005,6 +2059,8 @@ export function createGateway() {
     );
     setSeedCommands([]);
     setCommands([]);
+    setSessionInfo(null);
+    setPlan(null);
     say("not connected");
   };
 
@@ -2020,6 +2076,7 @@ export function createGateway() {
     fileSearch,
     settings,
     sessionInfo,
+    plan,
     auth,
     permissions,
     folderTrusts,
@@ -2047,6 +2104,7 @@ export function createGateway() {
     rewoundElsewhere,
     refreshRoster,
     refreshSessionInfo,
+    refreshPlan,
     queueEdit,
     queueRemove,
     queueClear,

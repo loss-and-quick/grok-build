@@ -3342,3 +3342,64 @@ button.picker-row:focus-visible {
     justify-content: flex-end;
   }
 }
+
+/* == the saved plan ======================================================= */
+
+.session-plan {
+  padding: 0.15rem 0.5rem;
+  border-color: var(--grok-prompt-border, canvastext);
+}
+
+.session-plan:hover {
+  border-color: var(--grok-hover-border, canvastext);
+  background: var(--grok-bg-hover, canvas);
+}
+
+/* A parked approval is a turn that has stopped, so the button carries the same
+ * warning role the blocked composer and the tab title carry for the same
+ * situation — one meaning, one colour, wherever it is said. */
+.session-plan.awaiting {
+  color: var(--grok-warning, canvastext);
+  border-color: var(--grok-warning, canvastext);
+}
+
+.session-plan-mark {
+  padding-right: 0.3rem;
+}
+
+.plan {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.plan-awaiting {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  border-left: 2px solid var(--grok-warning, canvastext);
+  color: var(--grok-warning, canvastext);
+}
+
+.plan-awaiting-mark {
+  padding-right: 0.4rem;
+}
+
+.plan-empty {
+  margin: 0;
+  color: var(--grok-gray, canvastext);
+}
+
+.plan-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The file, under the document it holds, in the colour every other path in this
+ * client takes. */
+.plan-path {
+  margin: 0;
+  color: var(--grok-path, canvastext);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}

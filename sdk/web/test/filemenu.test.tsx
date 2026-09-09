@@ -70,6 +70,7 @@ function mount() {
     permissions: [],
     folderTrusts: [],
     sessionMode: () => null,
+    plan: () => null,
     setSessionMode: async () => {},
     setPermissionMode: () => {},
     status: () => "connected",

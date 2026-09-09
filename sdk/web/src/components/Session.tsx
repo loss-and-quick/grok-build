@@ -51,6 +51,7 @@ import { Modes } from "./Modes.tsx";
 import { Panel } from "./Panel.tsx";
 import { Rail } from "./Rail.tsx";
 import { ForkPicker } from "./ForkPicker.tsx";
+import { PlanView } from "./PlanView.tsx";
 import { Queue } from "./Queue.tsx";
 import { RewindPicker } from "./RewindPicker.tsx";
 
@@ -101,6 +102,24 @@ export function Session(props: {
   const [dragging, setDragging] = createSignal(false);
   const [rewinding, setRewinding] = createSignal(false);
   const [forking, setForking] = createSignal(false);
+  const [planning, setPlanning] = createSignal(false);
+  /**
+   * Whether there is a plan to offer.
+   *
+   * The terminal's chip is `(plan_mode_active || show_plan_chip) &&
+   * plan_preview_available`, and this is the second half of it with the first
+   * left out on purpose. The chip competes for a cell in a status bar that is
+   * always on screen, so the pager hides it once plan mode ends and offers
+   * `show_plan_chip = true` for people who want it back; a header button
+   * competes with nothing. And the mode itself is not a reliable gate here:
+   * `sessionMode()` is only ever what a `current_mode_update` broadcast said,
+   * so it is `null` on a fresh attach — exactly the moment a parked approval
+   * most needs to be visible.
+   */
+  const hasPlan = (): boolean => {
+    const plan = props.gateway.plan();
+    return Boolean(plan && ((plan.content ?? "") !== "" || plan.awaitingApproval));
+  };
   let picker: HTMLInputElement | undefined;
   const menu = createCommandMenu(() => props.gateway.commands());
   const files = createFileMenu(props.gateway.fileSearch);
@@ -227,6 +246,29 @@ export function Session(props: {
                 rather than of the message being typed. */}
             <ModelPicker gateway={props.gateway} />
             <div class="session-actions">
+              {/* Only when there is one. A button that opens on "no plan
+                  written yet" is a button whose whole content is the answer to
+                  whether it was worth pressing. */}
+              <Show when={hasPlan()}>
+                <button
+                  class="session-plan"
+                  classList={{ awaiting: props.gateway.plan()?.awaitingApproval === true }}
+                  type="button"
+                  title={
+                    props.gateway.plan()?.awaitingApproval === true
+                      ? "The agent has stopped and is waiting for this plan to be approved"
+                      : "Read the plan this session has saved"
+                  }
+                  onClick={() => setPlanning(true)}
+                >
+                  <Show when={props.gateway.plan()?.awaitingApproval === true}>
+                    <span class="session-plan-mark" aria-hidden="true">
+                      {GLYPH_WARNING}
+                    </span>
+                  </Show>
+                  Plan
+                </button>
+              </Show>
               {/* Off while a turn runs, and that is the whole of this client's
                   answer to the pager's `CancelOffer` phase: the terminal offers
                   to cancel the turn and then rewind, and cancelling a turn is
@@ -270,6 +312,10 @@ export function Session(props: {
             </div>
           </header>
 
+
+          <Show when={planning()}>
+            <PlanView gateway={props.gateway} onClose={() => setPlanning(false)} />
+          </Show>
           <Show when={rewinding()}>
             <RewindPicker
               gateway={props.gateway}

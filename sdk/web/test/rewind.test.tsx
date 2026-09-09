@@ -556,6 +556,7 @@ describe("the phase a browser cannot offer", () => {
       permissions: [],
       folderTrusts: [],
       sessionMode: () => null,
+      plan: () => null,
       setSessionMode: async () => {},
       setPermissionMode: () => {},
       status: () => "running…",

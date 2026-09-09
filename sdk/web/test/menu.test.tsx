@@ -58,6 +58,7 @@ function stub(over: Partial<Gateway> = {}): { gateway: Gateway; sent: string[] }
     permissions: [],
     folderTrusts: [],
     sessionMode: () => null,
+    plan: () => null,
     setSessionMode: async () => {},
     setPermissionMode: () => {},
     status: () => "connected",

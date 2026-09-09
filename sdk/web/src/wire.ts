@@ -1262,6 +1262,54 @@ export interface QueueChanged {
 }
 
 // ---------------------------------------------------------------------------
+// The saved plan — crates/codegen/xai-grok-shell/src/session/plan_snapshot.rs
+//
+// A method of its own rather than a field on `session/info`, and the reason is
+// worth keeping here because it decides how this client asks: `session/info` is
+// a counter poll, re-asked after every settings writeback and at every turn
+// boundary, and a plan body is an unbounded document. Bolting the document onto
+// the poll makes every poll pay for it.
+//
+// It is pulled, never pushed. The one moment the agent genuinely has something
+// to say — the `exit_plan_mode` approval — it says by sending that request.
+// ---------------------------------------------------------------------------
+
+/**
+ * `x.ai/session/plan`'s reply (`plan_snapshot.rs`, `SessionPlanResponse`
+ * flattened over `PlanSnapshot`).
+ *
+ * A session id that names nothing resolves to an empty snapshot rather than an
+ * error, and an agent too old to know the method answers `method not found` —
+ * which is this client's "no plan available", not something to report.
+ */
+export interface SessionPlanResponse {
+  sessionId?: string;
+  /**
+   * The plan body, absent when nothing has been written yet.
+   *
+   * A file holding only whitespace is reported absent too: the agent collapses
+   * the two before sending, so every reader tests one thing.
+   */
+  content?: string | null;
+  /**
+   * Absolute path of the plan file on the agent's machine.
+   *
+   * The one part of this a client could not compute for itself — it is
+   * `grok_home` joined with the URL-encoded cwd and the session id — and the
+   * reason this client can name the file it is showing.
+   */
+  path?: string | null;
+  /**
+   * Whether an `exit_plan_mode` approval is parked on this plan.
+   *
+   * The field a browser needs most. `content: null` together with this set is
+   * the approved-but-empty case, which still means the agent has stopped and is
+   * waiting on a person.
+   */
+  awaitingApproval?: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Background work — the dock's Tasks and Watchers
 //
 // Nothing here is new on the wire, and that is the whole point of the section.
