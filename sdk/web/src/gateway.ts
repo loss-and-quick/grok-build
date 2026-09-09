@@ -85,7 +85,9 @@ import {
   type KillTaskResponse,
   type ListRunningSubagentsResponse,
   type ListTasksResponse,
+  type MemoryNoteResponse,
   type NewSessionResponse,
+  type NoteScope,
   type PanelActionResponse,
   type PromptResponse,
   type QueueChanged,
@@ -1169,6 +1171,31 @@ export function createGateway() {
     }
   };
 
+  /**
+   * File a note in the user's memory file, and say where it landed.
+   *
+   * The write goes to the agent that owns the file. **No path and no cwd cross
+   * the wire** — the handler takes neither, deliberately, so that no caller can
+   * aim a write at a directory of its choosing; the session names the workspace
+   * (`extensions/memory.rs`, `handle_note`). The `scope` is the one thing a
+   * caller chooses, and it chooses between two files the agent already has.
+   *
+   * The returned path is not a nicety. The handler is explicit that an append
+   * racing the user's own editor is a **lost note** — an editor writes back a
+   * whole buffer it read earlier — so this client says where the note went and
+   * refuses to imply that it was filed somewhere unreachable.
+   */
+  const saveMemoryNote = async (text: string, scope: NoteScope): Promise<string> => {
+    const current = attached();
+    if (!client || !current) throw new Error("no session to file a note against");
+    const response = (await client.ext("x.ai/memory/note", {
+      sessionId: current.entry.sessionId,
+      text,
+      scope,
+    })) as MemoryNoteResponse;
+    return response?.path ?? "";
+  };
+
   // -------------------------------------------------------------------------
   // The queue, mutated
   //
@@ -2105,6 +2132,7 @@ export function createGateway() {
     refreshRoster,
     refreshSessionInfo,
     refreshPlan,
+    saveMemoryNote,
     queueEdit,
     queueRemove,
     queueClear,

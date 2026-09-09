@@ -1310,6 +1310,29 @@ export interface SessionPlanResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Memory notes — crates/codegen/xai-grok-shell/src/extensions/memory.rs
+// ---------------------------------------------------------------------------
+
+/**
+ * Which memory file a note is appended to (`memory.rs`, `NoteScope`).
+ *
+ * Named on the wire rather than hardcoded because the storage layer has always
+ * had both files. `/remember` in the terminal only ever writes the global one.
+ */
+export type NoteScope = "global" | "workspace";
+
+/**
+ * `x.ai/memory/note`'s reply (`memory.rs`, `NoteResponse`).
+ *
+ * The path is the whole answer: a note is appended to a file the person also
+ * edits by hand, so where it went is the only thing that makes the write
+ * checkable by them.
+ */
+export interface MemoryNoteResponse {
+  path?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Background work — the dock's Tasks and Watchers
 //
 // Nothing here is new on the wire, and that is the whole point of the section.

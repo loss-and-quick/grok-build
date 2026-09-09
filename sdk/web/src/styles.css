@@ -3345,12 +3345,14 @@ button.picker-row:focus-visible {
 
 /* == the saved plan ======================================================= */
 
-.session-plan {
+.session-plan,
+.session-remember {
   padding: 0.15rem 0.5rem;
   border-color: var(--grok-prompt-border, canvastext);
 }
 
-.session-plan:hover {
+.session-plan:hover,
+.session-remember:hover {
   border-color: var(--grok-hover-border, canvastext);
   background: var(--grok-bg-hover, canvas);
 }
@@ -3403,3 +3405,73 @@ button.picker-row:focus-visible {
   font-size: 0.85rem;
   overflow-wrap: anywhere;
 }
+
+
+/* == a note filed in memory =============================================== */
+
+.remember,
+.remember-done {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.remember-label {
+  color: var(--grok-text-secondary, canvastext);
+}
+
+.remember-note {
+  width: 100%;
+  resize: vertical;
+}
+
+.remember-scopes {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.remember-scope {
+  padding: 0.15rem 0.5rem;
+  border-color: var(--grok-prompt-border, canvastext);
+}
+
+.remember-scope[aria-pressed="true"] {
+  border-color: var(--grok-prompt-border-active, canvastext);
+  color: var(--grok-accent-assistant, canvastext);
+}
+
+.remember-scope-marker {
+  padding-right: 0.35rem;
+}
+
+.remember-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.remember-failed {
+  margin: 0;
+  color: var(--grok-accent-error, canvastext);
+}
+
+.remember-landed {
+  margin: 0;
+  color: var(--grok-text-secondary, canvastext);
+}
+
+.remember-path {
+  margin: 0;
+  color: var(--grok-path, canvastext);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* The caveat is not fine print. An append racing a hand edit is a lost note,
+ * and this is the only place a person is told before they go and check. */
+.remember-caveat {
+  margin: 0;
+  color: var(--grok-gray, canvastext);
+  font-size: 0.85rem;
+}
+

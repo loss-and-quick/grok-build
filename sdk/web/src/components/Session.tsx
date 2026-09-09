@@ -53,6 +53,7 @@ import { Rail } from "./Rail.tsx";
 import { ForkPicker } from "./ForkPicker.tsx";
 import { PlanView } from "./PlanView.tsx";
 import { Queue } from "./Queue.tsx";
+import { Remember } from "./Remember.tsx";
 import { RewindPicker } from "./RewindPicker.tsx";
 
 import { Subagents } from "./Subagents.tsx";
@@ -103,6 +104,7 @@ export function Session(props: {
   const [rewinding, setRewinding] = createSignal(false);
   const [forking, setForking] = createSignal(false);
   const [planning, setPlanning] = createSignal(false);
+  const [remembering, setRemembering] = createSignal(false);
   /**
    * Whether there is a plan to offer.
    *
@@ -269,6 +271,18 @@ export function Session(props: {
                   Plan
                 </button>
               </Show>
+              {/* Beside the two acts about the conversation rather than by the
+                  composer, because a note is not part of the message being
+                  typed: it outlives this session and every session in this
+                  workspace. */}
+              <button
+                class="session-remember"
+                type="button"
+                title="Write something into the agent's memory"
+                onClick={() => setRemembering(true)}
+              >
+                Remember…
+              </button>
               {/* Off while a turn runs, and that is the whole of this client's
                   answer to the pager's `CancelOffer` phase: the terminal offers
                   to cancel the turn and then rewind, and cancelling a turn is
@@ -312,10 +326,14 @@ export function Session(props: {
             </div>
           </header>
 
-
           <Show when={planning()}>
             <PlanView gateway={props.gateway} onClose={() => setPlanning(false)} />
           </Show>
+
+          <Show when={remembering()}>
+            <Remember gateway={props.gateway} onClose={() => setRemembering(false)} />
+          </Show>
+
           <Show when={rewinding()}>
             <RewindPicker
               gateway={props.gateway}
