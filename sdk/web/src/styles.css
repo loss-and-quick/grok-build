@@ -1947,10 +1947,10 @@ button.picker-row:focus-visible {
  * what it is running on the right. */
 .session-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   grid-template-areas:
-    "title model"
-    "cwd   model";
+    "title model rewind"
+    "cwd   model rewind";
   align-items: baseline;
   gap: 0 0.75rem;
 }
@@ -2954,4 +2954,126 @@ button.picker-row:focus-visible {
 .mode-confirm {
   border-color: var(--grok-warning, canvastext);
   color: var(--grok-warning, canvastext);
+}
+
+/* -- rewind --------------------------------------------------------------- */
+
+/* Beside the model, because it is about the conversation rather than about the
+ * message being typed — the same reason the model is there. */
+.session-rewind {
+  grid-area: rewind;
+  align-self: center;
+  padding: 0.15rem 0.5rem;
+  border-color: var(--grok-prompt-border, canvastext);
+}
+
+.session-rewind:hover:not(:disabled) {
+  border-color: var(--grok-hover-border, canvastext);
+  background: var(--grok-bg-hover, canvas);
+}
+
+/* The same frame as the model catalog: a list and nothing else. */
+.rewind-picker {
+  grid-template-rows: auto minmax(0, 1fr);
+  height: min(28rem, 100%);
+  width: min(38rem, 100%);
+}
+
+/* One line of chrome for each of the phases that is not a list — loading,
+ * running, an empty catalog. They sit where the list would, so the card does
+ * not resize as it moves between them. */
+.rewind-state {
+  margin: 0;
+  padding: 0.5rem 0.3rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.rewind-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  gap: 0.4rem;
+  opacity: 1;
+}
+
+.rewind-failed-title {
+  margin: 0;
+  color: var(--grok-accent-error, canvastext);
+}
+
+.rewind-failed-message {
+  margin: 0;
+  color: var(--grok-text-primary, canvastext);
+  overflow-wrap: anywhere;
+}
+
+.rewind-picker .picker-list {
+  display: grid;
+  scrollbar-gutter: stable;
+  grid-template-columns: 1.25rem minmax(0, 1fr) auto;
+  align-content: start;
+}
+
+.rewind-row {
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  gap: 0 0.75rem;
+  align-items: baseline;
+  cursor: pointer;
+}
+
+.rewind-row.selected {
+  background: var(--grok-bg-visual, canvas);
+}
+
+.rewind-row-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A remark about the row rather than a column of its own, so it is dimmed and
+ * sits against the name it belongs to. */
+.rewind-row-files {
+  font-size: 0.75rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.rewind-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.3rem;
+}
+
+.rewind-question {
+  margin: 0;
+  color: var(--grok-accent-user, canvastext);
+}
+
+/* Warning, like the folder-trust card, because it is the same kind of moment:
+ * something is about to be discarded and other people are looking at it. */
+.rewind-warning {
+  margin: 0;
+  padding: 0.5rem;
+  background: var(--grok-bg-highlight, canvas);
+  border: 1px solid var(--grok-warning, canvastext);
+  border-radius: 4px;
+  color: var(--grok-text-secondary, canvastext);
+}
+
+.rewind-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.rewind-go {
+  border-color: var(--grok-accent-error, canvastext);
+  color: var(--grok-accent-error, canvastext);
+}
+
+.rewind-go:hover {
+  background: var(--grok-bg-hover, canvas);
 }

@@ -50,6 +50,7 @@ import { ModelPicker } from "./ModelPicker.tsx";
 import { Modes } from "./Modes.tsx";
 import { Panel } from "./Panel.tsx";
 import { Rail } from "./Rail.tsx";
+import { RewindPicker } from "./RewindPicker.tsx";
 
 import { Subagents } from "./Subagents.tsx";
 import { ToolResult } from "./ToolResult.tsx";
@@ -88,6 +89,7 @@ export function Session(props: {
   const [attachments, setAttachments] = createSignal<Attachment[]>([]);
   const [refusals, setRefusals] = createSignal<Refusal[]>([]);
   const [dragging, setDragging] = createSignal(false);
+  const [rewinding, setRewinding] = createSignal(false);
   let picker: HTMLInputElement | undefined;
   const menu = createCommandMenu(() => props.gateway.commands());
   const files = createFileMenu(props.gateway.fileSearch);
@@ -213,7 +215,44 @@ export function Session(props: {
                 model in its status bar, where it is a property of the session
                 rather than of the message being typed. */}
             <ModelPicker gateway={props.gateway} />
+            {/* Off while a turn runs, and that is the whole of this client's
+                answer to the pager's `CancelOffer` phase: the terminal offers
+                to cancel the turn and then rewind, and cancelling a turn is not
+                something this client can do. Saying so is better than opening a
+                picker whose first act would be to truncate a conversation the
+                agent is still writing into. */}
+            <button
+              class="session-rewind"
+              type="button"
+              disabled={props.gateway.status() === "running…"}
+              title={
+                props.gateway.status() === "running…"
+                  ? "Wait for this turn to finish before rewinding"
+                  : "Go back to an earlier turn, discarding everything after it"
+              }
+              onClick={() => setRewinding(true)}
+            >
+              Rewind…
+            </button>
           </header>
+
+          <Show when={rewinding()}>
+            <RewindPicker
+              gateway={props.gateway}
+              onClose={() => setRewinding(false)}
+              onRewound={(promptText) => {
+                // What the terminal does with the same field: the prompt that
+                // was just discarded goes back where it was typed, so the turn
+                // can be redone rather than remembered. A rewind that answered
+                // with no text leaves whatever is in the box alone.
+                if (!composer || promptText === null) return;
+                composer.value = promptText;
+                composer.setSelectionRange(promptText.length, promptText.length);
+                reread();
+                composer.focus();
+              }}
+            />
+          </Show>
 
           {/* Where a panel goes when the rail is off: a stack over the
               transcript, which is where every panel went before the rail

@@ -46,6 +46,14 @@ import {
   type Resumption,
 } from "./resume.ts";
 import { permissionModeParams, readModeUpdate, type PermissionMode } from "./modes.ts";
+import {
+  readRewindPoints,
+  readRewindResult,
+  rewindExecuteParams,
+  rewindPointsParams,
+  type RewindPoint,
+  type RewindResult,
+} from "./rewind.ts";
 import { createRoster, type Roster } from "./roster.ts";
 import { createSubagents, type Subagents } from "./subagents.ts";
 import { createTasks, type Tasks } from "./tasks.ts";
@@ -1062,6 +1070,62 @@ export function createGateway() {
     };
   };
 
+  /**
+   * Ask the agent for this session's history: the tail after `cursor`, or all
+   * of it.
+   *
+   * The whole round trip, so the two callers cannot come to disagree about it.
+   * There are two — the first attach to a session and the reload a rewind needs
+   * — and a rewind writing its own would be a second way of rebuilding a
+   * transcript, which is exactly the thing that took two tries to get right the
+   * first time.
+   *
+   * The line above the request is the one that makes it safe. A cursored load
+   * whose cursor the agent cannot resolve comes back as a full replay, and
+   * `verdict` turns the first replayed frame into `"rebuild"`, which wipes the
+   * screen before the new copy is folded in ({@link "./resume.ts"}). A load with
+   * **no** cursor cannot do that — nothing is in flight to recognise, so the
+   * replay is folded in as ordinary frames — so the transcript it lands in has
+   * to be empty already. It always is on a first attach; anything else has to
+   * make it so.
+   */
+  const loadTranscript = async (current: Attached, cursor: string | null): Promise<Arrival> => {
+    if (!client) throw new Error("gateway is not connected");
+    if (cursor === null) current.transcript.reset();
+    // The cursor is behind the screen by whatever was still streaming when the
+    // link died, and the tail will send that back whole. Bringing the screen
+    // down to the cursor is what keeps the two from being drawn on top of each
+    // other; it can only remove what is about to be replaced.
+    else current.transcript.rewind(current.resumption.mark());
+    current.resumption.loading(cursor);
+    try {
+      // `cwd` comes straight off the roster row. That it is there at all is the
+      // reason a second client can attach to a session it did not create.
+      const loaded = await client.request("session/load", {
+        sessionId: current.entry.sessionId,
+        cwd: current.entry.cwd,
+        mcpServers: [],
+        // Omitted rather than sent as null on a first attach. The agent reads
+        // the key's absence and an unresolvable value identically, but the two
+        // are different statements and one of them is a lie.
+        ...(cursor === null ? {} : { _meta: { cursor } }),
+      });
+      // This reply used to be discarded whole, which is the only reason the
+      // model picker looked like it needed a wire change: `models` is on it.
+      setModels(readModelState(loaded));
+      // Everything the load was going to send has been sent: the agent drains
+      // its replay before it answers (`agent/mvp_agent/replay.rs:243-249`), so
+      // by here the count is final and so is which of the two answers it was.
+      return current.resumption.loaded();
+    } catch (e) {
+      // Close the window the request opened. A load that failed still leaves
+      // this expecting the replay it asked for, and an expectation left open is
+      // a licence for a stray replayed frame to wipe the transcript.
+      current.resumption.loaded();
+      throw e;
+    }
+  };
+
   const attach = async (entry: RosterEntry): Promise<void> => {
     if (!client) return;
     // Already on this session, on this socket: asking again would replay the
@@ -1094,12 +1158,6 @@ export function createGateway() {
     // and the agent reads an absent cursor and a stale one the same way — a
     // full replay — so this is about honesty rather than about the outcome.
     const cursor = resumed ? current.resumption.cursor() : null;
-    // The cursor is behind the screen by whatever was still streaming when the
-    // link died, and the tail will send that back whole. Bringing the screen
-    // down to the cursor is what keeps the two from being drawn on top of each
-    // other; it can only remove what is about to be replaced.
-    if (resumed) current.transcript.rewind(current.resumption.mark());
-    current.resumption.loading(cursor);
     setAttached(current);
     // Back to the pre-session builtins until this session advertises its own.
     // `session/load` triggers that advertisement, so the gap is one round-trip
@@ -1113,40 +1171,20 @@ export function createGateway() {
     setModels(null);
     setSessionInfo(null);
     say(cursor === null ? `loading ${entry.sessionId}…` : `resuming ${entry.sessionId}…`);
+    let arrived: Arrival;
     try {
-      // `cwd` comes straight off the roster row. That it is there at all is the
-      // reason a second client can attach to a session it did not create.
-      const loaded = await client.request("session/load", {
-        sessionId: entry.sessionId,
-        cwd: entry.cwd,
-        mcpServers: [],
-        // Omitted rather than sent as null on a first attach. The agent reads
-        // the key's absence and an unresolvable value identically, but the two
-        // are different statements and one of them is a lie.
-        ...(cursor === null ? {} : { _meta: { cursor } }),
-      });
-      // This reply used to be discarded whole, which is the only reason the
-      // model picker looked like it needed a wire change: `models` is on it.
-      setModels(readModelState(loaded));
-      // Everything the load was going to send has been sent: the agent drains
-      // its replay before it answers (`agent/mvp_agent/replay.rs:243-249`), so
-      // by here the count is final and so is which of the two answers it was.
-      const arrived = current.resumption.loaded();
-      if (resumed && relaunch()) current.transcript.notice(RESTARTED_NOTICE);
-      if (arrived.rebuilt) current.transcript.notice(REBUILT_NOTICE);
-      say(describeArrival(entry.sessionId, cursor !== null, arrived));
+      arrived = await loadTranscript(current, cursor);
     } catch (e) {
       // Nothing was replayed, so nothing is on this socket to be replayed
       // twice: release the claim rather than leaving the session unattachable
       // until the link is rebuilt.
       if (attachedOn?.client === asking) attachedOn = null;
-      // Close the window the request opened. A load that failed still leaves
-      // this expecting the replay it asked for, and an expectation left open is
-      // a licence for a stray replayed frame to wipe the transcript.
-      current.resumption.loaded();
       say(`load failed: ${String(e)}`);
       return;
     }
+    if (resumed && relaunch()) current.transcript.notice(RESTARTED_NOTICE);
+    if (arrived.rebuilt) current.transcript.notice(REBUILT_NOTICE);
+    say(describeArrival(entry.sessionId, cursor !== null, arrived));
     await seedRunningSubagents(entry.sessionId, subagents);
     // Not awaited, unlike the seed above it. That one fills counters that would
     // otherwise read "unknown" on rows already on screen; this one only
@@ -1396,6 +1434,97 @@ export function createGateway() {
   };
 
   /**
+   * The turns this session can be taken back to, newest first.
+   *
+   * Asked each time the picker opens rather than kept: every prompt adds one,
+   * and a rewind removes a run of them, so a cached list is wrong the moment
+   * anything happens — in this tab or in a terminal on the same session.
+   */
+  const rewindPoints = async (): Promise<RewindPoint[]> => {
+    const current = attached();
+    if (!client || !current) return [];
+    try {
+      return readRewindPoints(
+        await client.ext("x.ai/rewind/points", rewindPointsParams(current.entry.sessionId)),
+      );
+    } catch (e) {
+      say(`could not list rewind points: ${String(e)}`);
+      return [];
+    }
+  };
+
+  /**
+   * Discard everything after prompt `promptIndex`, then read the session back.
+   *
+   * **The reload is the point.** The agent is the only thing that knows what
+   * the conversation is now, and it says so the way it says everything else: a
+   * `session/load`. Computing the cut here instead would mean this client
+   * deciding which turns the agent kept, and being wrong about a compaction is
+   * how that goes wrong quietly.
+   *
+   * **And it goes out with no cursor**, which is a correction rather than a
+   * shortcut. The obvious version sends the cursor this client holds and leans
+   * on the argument in {@link "./resume.ts"}: a rewind truncates a suffix, so
+   * either the cursor line went with it and the whole transcript comes back, or
+   * it survived and so did everything before it. Against a live agent that
+   * argument has a third outcome, and it was measured rather than reasoned
+   * about — rewinding a two-turn session to prompt 0 left the screen showing
+   * the turn the leader had just discarded, while the reply said there was
+   * nothing further to send. The hole is that the log is not written in id
+   * order (`resume.ts`, and the real session it quotes), so a line the cursor
+   * names can sit *before* the rewind's cut in the file while the position this
+   * client recorded for it is late. The cursor then resolves, the tail after it
+   * is empty, and the mark restores a screen the agent no longer agrees with.
+   *
+   * A cursorless load has no such case: the transcript is cleared and the agent
+   * replays what it has. It costs one replay of a conversation that has just
+   * been made shorter, on an act a person performs deliberately.
+   *
+   * The one thing this client keeps for itself is the composer: `prompt_text`
+   * is the text of the prompt that was just discarded, and the terminal puts it
+   * back so the turn can be retyped rather than retyped from memory. Returned
+   * rather than written, because the composer belongs to the view.
+   *
+   * `null` means the call itself failed; a result with `success: false` is the
+   * agent refusing, and carries its reason.
+   */
+  const rewind = async (promptIndex: number): Promise<RewindResult | null> => {
+    const current = attached();
+    if (!client || !current) return null;
+    const sessionId = current.entry.sessionId;
+    say(`rewinding ${sessionId}…`);
+    let result: RewindResult;
+    try {
+      result = readRewindResult(
+        await client.ext("x.ai/rewind/execute", rewindExecuteParams(sessionId, promptIndex)),
+      );
+    } catch (e) {
+      say(`rewind failed: ${String(e)}`);
+      return null;
+    }
+    if (!result.success) {
+      say(`rewind failed: ${result.error ?? "the agent gave no reason"}`);
+      return result;
+    }
+    // Attaching elsewhere while the rewind was in flight leaves nothing here to
+    // reload: the session that moved on is a different `Attached` with a cursor
+    // of its own, and loading this one into it is the doubling `attachedOn`
+    // exists to prevent.
+    if (attached() !== current) return result;
+    try {
+      await loadTranscript(current, null);
+      say(`rewound ${sessionId}`);
+    } catch (e) {
+      say(`rewound ${sessionId}, but reloading it failed: ${String(e)}`);
+      return result;
+    }
+    // The window shrank by however many turns went, and nothing streams that
+    // number — the same reason the end of a turn refreshes it.
+    void refreshSessionInfo();
+    return result;
+  };
+
+  /**
    * Ask the agent to enter a session mode.
    *
    * Nothing local changes here on purpose. `session/set_mode` answers `{}`
@@ -1623,6 +1752,8 @@ export function createGateway() {
     sessionMode,
     setSessionMode: setSessionModeRequest,
     setPermissionMode,
+    rewindPoints,
+    rewind,
     refreshRoster,
     refreshSessionInfo,
   };
