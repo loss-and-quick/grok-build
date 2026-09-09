@@ -1949,8 +1949,8 @@ button.picker-row:focus-visible {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
   grid-template-areas:
-    "title model rewind"
-    "cwd   model rewind";
+    "title model actions"
+    "cwd   model actions";
   align-items: baseline;
   gap: 0 0.75rem;
 }
@@ -2956,18 +2956,25 @@ button.picker-row:focus-visible {
   color: var(--grok-warning, canvastext);
 }
 
-/* -- rewind --------------------------------------------------------------- */
+/* -- rewind and fork ------------------------------------------------------ */
 
-/* Beside the model, because it is about the conversation rather than about the
- * message being typed — the same reason the model is there. */
-.session-rewind {
-  grid-area: rewind;
+/* The two acts that are about the conversation rather than about the message
+ * being typed, beside the model for the same reason it is there. */
+.session-actions {
+  grid-area: actions;
   align-self: center;
+  display: flex;
+  gap: 0.4rem;
+}
+
+.session-rewind,
+.session-fork {
   padding: 0.15rem 0.5rem;
   border-color: var(--grok-prompt-border, canvastext);
 }
 
-.session-rewind:hover:not(:disabled) {
+.session-rewind:hover:not(:disabled),
+.session-fork:hover:not(:disabled) {
   border-color: var(--grok-hover-border, canvastext);
   background: var(--grok-bg-hover, canvas);
 }

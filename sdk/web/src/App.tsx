@@ -942,9 +942,23 @@ function MissingSession(props: { sessionId: string; wanted: string | undefined }
   );
 }
 
+/**
+ * Go to a session this page has just created.
+ *
+ * The same gesture the roster's "+ session here" makes, and for the same
+ * reason: creating and opening are one act to a person, but only the route
+ * opens — navigating is what attaches, so a session made here arrives at a URL
+ * like every other one, reloadable and linkable.
+ */
+function useOpenSession(): (sessionId: string) => void {
+  const navigate = useNavigate();
+  return (sessionId) => navigate(sessionHref(sessionId, currentId()));
+}
+
 /** `/` — connected but not attached. */
 export function Home(): JSX.Element {
-  return <Session gateway={gateway} rail={railShown()} />;
+  const open = useOpenSession();
+  return <Session gateway={gateway} rail={railShown()} onForked={open} />;
 }
 
 /**
@@ -970,6 +984,7 @@ export function Home(): JSX.Element {
 export function SessionRoute(): JSX.Element {
   const params = useParams<{ sessionId: string }>();
   const [search] = useSearchParams<{ i?: string }>();
+  const open = useOpenSession();
   createEffect(
     on([() => params.sessionId, () => gateway.roster.get(params.sessionId)], ([id, entry]) => {
       if (!id || !entry) return;
@@ -985,6 +1000,7 @@ export function SessionRoute(): JSX.Element {
     <Session
       gateway={gateway}
       rail={railShown()}
+      onForked={open}
       fallback={
         <Show when={missing()} fallback={<p class="empty">Pick a session on the left.</p>}>
           <MissingSession sessionId={params.sessionId} wanted={search.i} />
@@ -998,6 +1014,7 @@ export function SessionRoute(): JSX.Element {
 export function DirectoryRoute(): JSX.Element {
   const params = useParams<{ cwd: string }>();
   const navigate = useNavigate();
+  const open = useOpenSession();
   createEffect(
     on(
       () => gateway.roster.groups().find((g) => g.cwd === decodeURIComponent(params.cwd)),
@@ -1007,5 +1024,5 @@ export function DirectoryRoute(): JSX.Element {
       },
     ),
   );
-  return <Session gateway={gateway} rail={railShown()} />;
+  return <Session gateway={gateway} rail={railShown()} onForked={open} />;
 }

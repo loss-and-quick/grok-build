@@ -75,6 +75,14 @@ export function Session(props: {
    * things to be told.
    */
   fallback?: JSX.Element;
+  /**
+   * Open a session this component has just brought into being.
+   *
+   * Passed in for the reason the roster's own "+ session here" is: the route is
+   * what attaches, and the route belongs to the router rather than to a
+   * component that can also be rendered outside one.
+   */
+  onForked?: (sessionId: string) => void;
 }): JSX.Element {
   let composer: HTMLTextAreaElement | undefined;
   const tick = createTick();
@@ -90,7 +98,29 @@ export function Session(props: {
   const [refusals, setRefusals] = createSignal<Refusal[]>([]);
   const [dragging, setDragging] = createSignal(false);
   const [rewinding, setRewinding] = createSignal(false);
+  const [forking, setForking] = createSignal(false);
   let picker: HTMLInputElement | undefined;
+
+  /**
+   * Fork, then go to the child.
+   *
+   * The terminal switches to the fork the instant it dispatches, before the
+   * session exists — it builds a placeholder agent and calls
+   * `switch_to_agent(app, new_id, SwitchCause::Fork)`
+   * (`app/dispatch/session/fork.rs:230`). This waits, because the two clients
+   * disagree about what a placeholder is: the pager keeps both agents alive and
+   * can show a spinner in the new one while the old one goes on streaming,
+   * while a browser has one attached session per socket and a route that is the
+   * address of it. There is no honest URL for a session that does not exist
+   * yet, so the wait is one round trip and then a real address.
+   */
+  const branch = async (): Promise<void> => {
+    if (forking()) return;
+    setForking(true);
+    const forked = await props.gateway.fork();
+    setForking(false);
+    if (forked !== null) props.onForked?.(forked);
+  };
   const menu = createCommandMenu(() => props.gateway.commands());
   const files = createFileMenu(props.gateway.fileSearch);
   // The composer's text as state, not only as a DOM value: the menu reads it on
@@ -215,25 +245,43 @@ export function Session(props: {
                 model in its status bar, where it is a property of the session
                 rather than of the message being typed. */}
             <ModelPicker gateway={props.gateway} />
-            {/* Off while a turn runs, and that is the whole of this client's
-                answer to the pager's `CancelOffer` phase: the terminal offers
-                to cancel the turn and then rewind, and cancelling a turn is not
-                something this client can do. Saying so is better than opening a
-                picker whose first act would be to truncate a conversation the
-                agent is still writing into. */}
-            <button
-              class="session-rewind"
-              type="button"
-              disabled={props.gateway.status() === "running…"}
-              title={
-                props.gateway.status() === "running…"
-                  ? "Wait for this turn to finish before rewinding"
-                  : "Go back to an earlier turn, discarding everything after it"
-              }
-              onClick={() => setRewinding(true)}
-            >
-              Rewind…
-            </button>
+            <div class="session-actions">
+              {/* Off while a turn runs, and that is the whole of this client's
+                  answer to the pager's `CancelOffer` phase: the terminal offers
+                  to cancel the turn and then rewind, and cancelling a turn is
+                  not something this client can do. Saying so is better than
+                  opening a picker whose first act would be to truncate a
+                  conversation the agent is still writing into. */}
+              <button
+                class="session-rewind"
+                type="button"
+                disabled={props.gateway.status() === "running…"}
+                title={
+                  props.gateway.status() === "running…"
+                    ? "Wait for this turn to finish before rewinding"
+                    : "Go back to an earlier turn, discarding everything after it"
+                }
+                onClick={() => setRewinding(true)}
+              >
+                Rewind…
+              </button>
+              {/* Not disabled while a turn runs, and that is the terminal's
+                  decision rather than an oversight: `dispatch_fork` refuses
+                  only a session that has no id yet
+                  (`app/dispatch/session/fork.rs:48-51`). A fork copies the
+                  session's files as they stand, which is a coherent thing to do
+                  mid-turn — the child simply starts from what had been written
+                  by then. */}
+              <button
+                class="session-fork"
+                type="button"
+                disabled={forking()}
+                title="Start a new session from a copy of this conversation"
+                onClick={() => void branch()}
+              >
+                {forking() ? "Forking…" : "Fork"}
+              </button>
+            </div>
           </header>
 
           <Show when={rewinding()}>

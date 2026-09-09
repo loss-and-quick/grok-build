@@ -45,6 +45,7 @@ import {
   type Arrival,
   type Resumption,
 } from "./resume.ts";
+import { forkParams, readForkedSessionId } from "./fork.ts";
 import { permissionModeParams, readModeUpdate, type PermissionMode } from "./modes.ts";
 import {
   readRewindPoints,
@@ -1434,6 +1435,40 @@ export function createGateway() {
   };
 
   /**
+   * Branch the attached session, and answer with the child's id.
+   *
+   * Nothing here attaches to it. `fork_session` copies files and returns
+   * without starting a session (`shell/src/session/fork.rs:1-2`), and in this
+   * client the thing that starts one is the route — navigating is what
+   * attaches, which is the same arrangement `createSession` has. So the id goes
+   * back to the caller and the caller decides where the person lands.
+   *
+   * The roster is re-read first, because the fork's whole visible effect is a
+   * new row: the child has no resident actor yet, so it arrives as `Dormant`
+   * out of `merge_roster` (`shell/src/agent/roster.rs:137-140`), and the route
+   * for a session the roster has never heard of shows an empty screen.
+   */
+  const fork = async (): Promise<string | null> => {
+    const current = attached();
+    if (!client || !current) return null;
+    const entry = current.entry;
+    say(`forking ${entry.sessionId}…`);
+    try {
+      const forked = readForkedSessionId(await client.ext("x.ai/session/fork", forkParams(entry)));
+      if (forked === null) {
+        say("fork failed: the agent named no new session");
+        return null;
+      }
+      await refreshRoster();
+      say(`forked ${entry.sessionId} into ${forked}`);
+      return forked;
+    } catch (e) {
+      say(`fork failed: ${String(e)}`);
+      return null;
+    }
+  };
+
+  /**
    * The turns this session can be taken back to, newest first.
    *
    * Asked each time the picker opens rather than kept: every prompt adds one,
@@ -1752,6 +1787,7 @@ export function createGateway() {
     sessionMode,
     setSessionMode: setSessionModeRequest,
     setPermissionMode,
+    fork,
     rewindPoints,
     rewind,
     refreshRoster,
