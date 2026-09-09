@@ -5095,7 +5095,6 @@ impl MvpAgent {
         self.set_session_live_state(&session_info.id, SessionLiveState::IdleResident);
         self.ensure_session_supervisor();
         self.heap_profile_set_session_id(&session_info.id.0);
-        self.push_roster_delta_upserted(&session_info.id);
         if chat_history.is_empty() {
             let _timer = crate::instrumentation_timer!("session.system_prompt_inject");
             let system_prompt = build_spawn_system_prompt(
@@ -5171,6 +5170,12 @@ impl MvpAgent {
         if is_headless {
             self.session_registry.mark_headless(&session_info.id);
         }
+        // After `insert_resident`, not before it. `resident_roster_entry` is built from the hosted handle, so an upsert
+        // pushed earlier in this function read `None` and `emit_roster_changed` returned without sending anything: a
+        // session created or loaded here never announced itself, and every other client's roster stayed as it was until
+        // the next poll or the session's first turn-boundary activity delta.
+        // Also after `mark_headless`, so a headless session is excluded here rather than announced and then hidden.
+        self.push_roster_delta_upserted(&session_info.id);
         self.spawn_managed_gateway_tool_catalog_fetch();
         let cwd_for_maintenance = session_info.cwd.clone();
         tokio::spawn(async move {
