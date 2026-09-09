@@ -27,7 +27,7 @@ import {
   startupNeedsLogin,
   undrivableMessage,
 } from "./auth.ts";
-import { GatewayClient, gatewayUrl } from "./client.ts";
+import { GatewayClient, UNANSWERED, gatewayUrl } from "./client.ts";
 import { FUZZY_STATUS, createFileSearch, type FileSearch } from "./filesearch.ts";
 import type { PanelAction } from "./panel.ts";
 import {
@@ -66,6 +66,7 @@ import {
   type ContentBlock,
   PROTOCOL_VERSION,
   visibleSettingRows,
+  SHARED_INTERACTIONS,
   FOLDER_TRUST_DISMISSED,
   type AuthMethod,
   type AuthUrlMode,
@@ -746,6 +747,10 @@ export function createGateway() {
       if (method === "x.ai/folder_trust/request") {
         return askFolderTrust(params as FolderTrustRequest);
       }
+      // A question the agent asked every attached client at once. Saying
+      // "method not found" here would be answering it on their behalf, in
+      // milliseconds, while the person who can answer is still reading it.
+      if (SHARED_INTERACTIONS.has(method)) return UNANSWERED;
       return undefined;
     });
 

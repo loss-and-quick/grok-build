@@ -49,7 +49,29 @@ export const METHOD_NOT_FOUND = -32601;
 export const INTERNAL_ERROR = -32603;
 
 export type NotificationHandler = (method: string, params: unknown) => void;
-export type RequestHandler = (method: string, params: unknown) => Promise<unknown> | undefined;
+
+/**
+ * A handler's way of saying "this one is not mine to answer".
+ *
+ * Distinct from returning `undefined`, and the distinction is not cosmetic. A
+ * handful of the agent's reverse-requests are **shared interactions**: the
+ * leader broadcasts one request, with one id, to *every* client subscribed to
+ * the session, and the first answer wins (`leader/server.rs`,
+ * `is_interaction_request`). For those, "I do not implement that" is not a
+ * refusal this client makes on its own behalf — it is an answer sent on behalf
+ * of everyone, and it arrives instantly while a person is still reading the
+ * card in their terminal.
+ *
+ * So a client that cannot draw one of these must say nothing at all. Silence
+ * costs it nothing: the request is cached and replayed to whichever client can
+ * answer, and the agent is waiting on a person either way.
+ */
+export const UNANSWERED = Symbol("unanswered");
+
+export type RequestHandler = (
+  method: string,
+  params: unknown,
+) => Promise<unknown> | typeof UNANSWERED | undefined;
 
 /**
  * Build the gateway URL.
@@ -209,6 +231,9 @@ export class GatewayClient {
    * `method not found` rather than dropped. Silence would be worse than a
    * refusal: the agent waits on the response, and an unanswered
    * `session/request_permission` parks the turn until it times out.
+   *
+   * {@link UNANSWERED} is the exception, and it exists because that reasoning
+   * inverts for a request the agent asked *every* client at once.
    */
   onRequest(handler: RequestHandler): void {
     this.requestHandler = handler;
@@ -314,6 +339,10 @@ export class GatewayClient {
 
   private async answer(id: number | string, method: string, params: unknown): Promise<void> {
     const answered = this.requestHandler?.(unprefix(method), params);
+    // Left on the floor deliberately: another client is being asked the same
+    // question with the same id, and the first answer is the one the agent
+    // acts on. See {@link UNANSWERED}.
+    if (answered === UNANSWERED) return;
     if (answered === undefined) {
       this.send({
         jsonrpc: "2.0",

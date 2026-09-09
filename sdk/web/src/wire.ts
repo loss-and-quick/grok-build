@@ -643,6 +643,36 @@ export interface RequestPermissionResponse {
   outcome: RequestPermissionOutcome;
 }
 
+/**
+ * The reverse-requests the leader asks **every** attached client at once.
+ *
+ * `is_interaction_request` (`leader/server.rs`), minus the one this client
+ * draws. They are broadcast rather than routed to the session's driver, cached
+ * by `toolCallId`, replayed to a client that attaches afterwards, and retracted
+ * from the losers by an `interaction_resolved` notification — the whole
+ * apparatus of "any client may answer, first answer wins".
+ *
+ * That is precisely why the ones listed here must be met with **silence**. A
+ * `method not found` sent by this client is not a statement about this client:
+ * it is *the* answer, and it reaches the agent while the person who can
+ * actually answer is still reading the card in their terminal. For
+ * `x.ai/exit_plan_mode` the agent reads any error other than an undeliverable
+ * one as "the client disconnected mid-approval", abandons the tool call and
+ * cancels the turn (`acp_session_impl/tool_calls.rs`) — so an attached browser
+ * would break plan-mode approval for the terminal beside it.
+ *
+ * `session/request_permission` is deliberately absent: this client renders it,
+ * so its answer is a real one. `x.ai/folder_trust/request` is absent because it
+ * is not broadcast at all — it goes to the session's driver alone, once, and a
+ * client that stays silent on it leaves a workspace's configuration off with
+ * nobody else to ask.
+ */
+export const SHARED_INTERACTIONS: ReadonlySet<string> = new Set([
+  "x.ai/ask_user_question",
+  "x.ai/exit_plan_mode",
+  "x.ai/mcp/elicit",
+]);
+
 // ---------------------------------------------------------------------------
 // Folder trust — crates/codegen/xai-grok-shell/src/agent/mvp_agent/folder_trust_prompt.rs
 //
