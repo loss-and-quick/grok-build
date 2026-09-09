@@ -251,6 +251,22 @@ impl AgentView {
 
         // Resolve text and display kind from whichever mirror owns the row, plus the server `prompt_id` for server-origin rows
         // The save path in `save_edited_queued_row` and the modal-confirm `Save` arm branch on `server_id`
+        // A server row's images are the session's, and stay the session's: the row
+        // says how many it holds (`QueueEntryWire::images`) but the bytes never
+        // ride the queue broadcast, and `x.ai/queue/edit` carries text and nothing
+        // else. So the composer must NOT show them as chips — a chip the user can
+        // delete, on an attachment this edit has no way to detach, is a worse lie
+        // than showing none. Say it instead; the shell keeps them either way
+        // (`apply_queued_prompt_edit` rebuilds only the text block).
+        let server_images_kept = if is_server {
+            row.as_ref()
+                .and_then(|r| r.server_id.as_deref())
+                .and_then(|sid| self.shared_queue.iter().find(|e| e.id == sid))
+                .and_then(|w| w.images.as_ref())
+                .map_or(0, Vec::len)
+        } else {
+            0
+        };
         let entry_data: Option<QueueEditEntryData> = if is_server {
             row.as_ref()
                 .and_then(|r| r.server_id.clone())
@@ -269,7 +285,8 @@ impl AgentView {
                         })
                 })
         } else {
-            // Only local rows own image and chip state.
+            // A local row's attachments are this client's to hand to the composer,
+            // because this client is the only place they exist.
             self.session
                 .pending_prompts
                 .iter()
@@ -311,6 +328,16 @@ impl AgentView {
                 PromptInputMode::Normal
             };
             self.set_active_pane(AgentPane::Prompt, false);
+            if server_images_kept > 0 {
+                // The `[Image #N]` placeholders in the loaded text have no chips
+                // behind them here; without this the user reads that as the edit
+                // having thrown the pictures away.
+                self.show_toast(&format!(
+                    "{server_images_kept} attached image{} stay{} on this prompt",
+                    if server_images_kept == 1 { "" } else { "s" },
+                    if server_images_kept == 1 { "s" } else { "" },
+                ));
+            }
             if let (Some(sid), Some(session_id)) = (server_id, self.session.session_id.clone()) {
                 self.pending_effects
                     .push(crate::app::actions::Effect::QueueHoldEdit {
@@ -804,6 +831,57 @@ mod tests {
             other => panic!("expected EditingQueued with server_id Some, got {other:?}"),
         }
         assert_eq!(agent.prompt.text(), "server one");
+    }
+
+    /// Opening a server row that carries images says so.
+    ///
+    /// The session keeps them across the edit (only the text block is rebuilt), but the composer
+    /// has no chips to show for them and `x.ai/queue/edit` has no way to carry an attachment back,
+    /// so a silent load reads as the edit having detached the pictures. Now that the row says how
+    /// many it holds, say it.
+    #[test]
+    fn edit_server_row_with_images_says_they_stay_attached() {
+        let mut agent = make_running_agent();
+        agent.shared_queue[0].text = "explain [Image #1]".into();
+        agent.shared_queue[0].images = Some(vec![crate::app::prompt_queue::QueueImageWire {
+            display_number: 1,
+            mime_type: Some("image/png".into()),
+        }]);
+        let registry = non_vscode_registry();
+        let ids = agent.queue.entry_ids();
+        agent.queue.list_state.select_by_id(ids[0]);
+        let _ = agent.handle_queue_key(&edit_key(), &registry);
+
+        assert!(matches!(
+            agent.prompt_mode,
+            PromptMode::EditingQueued { .. }
+        ));
+        assert_eq!(
+            agent.toast.as_ref().map(|(message, _)| message.as_str()),
+            Some("1 attached image stays on this prompt"),
+        );
+        assert!(
+            agent.prompt.images.is_empty(),
+            "the composer must not offer a removable chip for an attachment it cannot detach"
+        );
+    }
+
+    /// A row the agent says has no images is silent; so is one from an agent that never said.
+    #[test]
+    fn edit_server_row_without_images_stays_quiet() {
+        for answer in [None, Some(Vec::new())] {
+            let mut agent = make_running_agent();
+            agent.shared_queue[0].images = answer.clone();
+            let registry = non_vscode_registry();
+            let ids = agent.queue.entry_ids();
+            agent.queue.list_state.select_by_id(ids[0]);
+            let _ = agent.handle_queue_key(&edit_key(), &registry);
+            assert!(
+                agent.toast.is_none(),
+                "no attachment to report, got {:?} for {answer:?}",
+                agent.toast
+            );
+        }
     }
 
     /// Idle + editing the shared-queue front blocks drain UI.
