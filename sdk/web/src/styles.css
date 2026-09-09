@@ -2869,3 +2869,22 @@ button.picker-row:focus-visible {
   border-color: var(--grok-prompt-border-active, canvastext);
   background: var(--grok-bg-highlight, canvas);
 }
+
+/* == being told when the tab is not the one you are looking at ============= */
+
+/* Offered beside the question rather than parked in settings, so it appears at
+ * the moment the offer means something. It is a link's weight, not a button's:
+ * everything it enables is already on the page without it. */
+.decision-notify {
+  padding: 0.25rem 0.5rem;
+  border: 1px dashed var(--grok-prompt-border, canvastext);
+  border-radius: 6px;
+  background: none;
+  color: var(--grok-gray, canvastext);
+}
+
+.decision-notify:hover,
+.decision-notify:focus-visible {
+  color: var(--grok-accent-user, canvastext);
+  border-color: var(--grok-prompt-border-active, canvastext);
+}

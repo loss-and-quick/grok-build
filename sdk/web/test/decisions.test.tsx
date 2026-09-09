@@ -136,10 +136,11 @@ function fakeGateway(
   return {
     permissions,
     folderTrusts,
+    status: () => "connected",
     attached: () =>
       sessionId
         ? {
-            entry: { sessionId },
+            entry: { sessionId, title: null },
             subagents: { childSessions: () => NO_CHILDREN },
           }
         : null,

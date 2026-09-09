@@ -1,10 +1,20 @@
-import { For, Show, onCleanup, onMount, type JSX } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 
 import { decisionsFor, type Decision, type Decisions as Arbiter } from "../decisions.ts";
 import { focusInto, trapFocus } from "../focus.ts";
 import type { Gateway } from "../gateway.ts";
 import { BULLET, CHEVRON, GLYPH_WARNING } from "../glyphs.ts";
+import { TICKS_PER_SECOND } from "../animation.ts";
+import {
+  BLINK_TICKS,
+  askToNotify,
+  composeTitle,
+  notifyPermission,
+  raise,
+  reducedMotion,
+  shouldInterrupt,
+} from "../notify.ts";
 import { FolderTrustCard } from "./FolderTrustCard.tsx";
 import { PermissionCard } from "./PermissionCard.tsx";
 
@@ -21,6 +31,7 @@ import { PermissionCard } from "./PermissionCard.tsx";
  */
 export function Decisions(props: { gateway: Gateway }): JSX.Element {
   const decisions = decisionsFor(props.gateway);
+  useNotifier(props.gateway, decisions);
 
   return (
     <>
@@ -144,6 +155,7 @@ function StandingBar(props: { gateway: Gateway; decisions: Arbiter }): JSX.Eleme
             </button>
           )}
         </For>
+        <NotifyOffer />
         <For each={elsewhere()}>
           {([sessionId, waiting]) => (
             <a class="decision-elsewhere" href={`/s/${sessionId}`}>
@@ -158,6 +170,113 @@ function StandingBar(props: { gateway: Gateway; decisions: Arbiter }): JSX.Eleme
           )}
         </For>
       </div>
+    </Show>
+  );
+}
+
+/**
+ * Keep the tab title, and the interruption, honest about what the agent needs.
+ *
+ * Mounted from `Decisions` because that is already the one component that knows
+ * every unanswered question in the page, and a second place holding the same
+ * knowledge is a second place for it to be wrong.
+ */
+function useNotifier(gateway: Gateway, decisions: Arbiter): void {
+  const [focused, setFocused] = createSignal(true);
+  const [blinkOn, setBlinkOn] = createSignal(true);
+  // Which questions have already been announced. Keyed like the decisions, so a
+  // question that is answered and asked again announces again, and one that is
+  // merely still open does not announce twice — the pager's own rule, where a
+  // batch of permissions is one notification rather than one each
+  // (`should_suppress_permission_notification`).
+  let announced = new Set<string>();
+  let wasBusy = false;
+
+  onMount(() => {
+    const sync = (): void => {
+      setFocused(document.hasFocus() && !document.hidden);
+    };
+    sync();
+    for (const event of ["focus", "blur", "visibilitychange"]) {
+      globalThis.addEventListener(event, sync);
+    }
+    onCleanup(() => {
+      for (const event of ["focus", "blur", "visibilitychange"]) {
+        globalThis.removeEventListener(event, sync);
+      }
+    });
+
+    // The flag blinks on a timer rather than on the animation tick: the tick
+    // runs at the pager's 30fps to drive colour curves, and a title does not
+    // need — or survive — thirty writes a second. `BLINK_TICKS` keeps the
+    // cadence the terminal's, expressed in the artifact's own units.
+    //
+    // A browser asked to reduce motion gets the flag standing still, exactly as
+    // a focused terminal does. That is not a divergence: the terminal has no
+    // notion of the setting, and its own answer to "someone is looking at this"
+    // is already to stop blinking.
+    if (reducedMotion()) return;
+    const period = (BLINK_TICKS / TICKS_PER_SECOND) * 1000;
+    const timer = setInterval(() => setBlinkOn((on) => !on), period);
+    onCleanup(() => clearInterval(timer));
+  });
+
+  createEffect(() => {
+    const waiting = decisions.all();
+    const busy = gateway.status() === "running…";
+    const name = gateway.attached()?.entry.title ?? null;
+
+    document.title = composeTitle({
+      waiting: waiting.length,
+      busy,
+      sessionName: name,
+      focused: focused(),
+      blinkOn: blinkOn(),
+    });
+
+    // A question nobody has been told about yet, while nobody is looking.
+    const fresh = waiting.filter((decision) => !announced.has(decision.key));
+    if (fresh.length > 0 && shouldInterrupt(focused())) {
+      const first = fresh[0]!;
+      raise(
+        `${GLYPH_WARNING} Grok needs you`,
+        first.kind === "permission"
+          ? first.pending.title
+          : `Trust the files in ${first.pending.workspace}?`,
+        "grok-decision",
+      );
+    }
+    announced = new Set(waiting.map((decision) => decision.key));
+
+    // The turn ending is the terminal's other default event. Only the edge, and
+    // only when the turn was not being watched.
+    if (wasBusy && !busy && shouldInterrupt(focused())) {
+      raise("Grok finished a turn", name ?? "Your session is idle.", "grok-turn");
+    }
+    wasBusy = busy;
+  });
+}
+
+/**
+ * The one-line offer to be interrupted, shown only when it can be accepted.
+ *
+ * It appears beside a question rather than in settings because this is the
+ * moment the offer means something: the agent is stopped, and the reader has
+ * just found out by coming back to the tab. It disappears for good once the
+ * browser has an answer either way — a granted permission needs no button, and
+ * a denied one must not be asked again.
+ */
+function NotifyOffer(): JSX.Element {
+  const [permission, setPermission] = createSignal(notifyPermission());
+  return (
+    <Show when={permission() === "default"}>
+      <button
+        class="decision-notify"
+        type="button"
+        onClick={() => void askToNotify().then(setPermission)}
+      >
+        Tell me even when this tab is in the background
+      </button>
     </Show>
   );
 }
