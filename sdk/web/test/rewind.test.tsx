@@ -27,6 +27,7 @@ import { Session } from "../src/components/Session.tsx";
 import { createGateway, type Gateway } from "../src/gateway.ts";
 import {
   NO_PREVIEW,
+  readRewindMarker,
   readRewindPoints,
   readRewindResult,
   rewindConfirmTitle,
@@ -122,7 +123,50 @@ class FakeSocket implements SocketLike {
     error: null,
   };
 
+  /**
+   * When set, `x.ai/rewind/execute` answers only on {@link release}.
+   *
+   * The agent broadcasts the marker *before* it answers the execute, so the one
+   * window that matters for the initiator is between the two. Holding the
+   * answer is the only way to open that window on purpose.
+   */
+  holdExecute = false;
+  private held: (() => void)[] = [];
+
   private listeners = new Map<string, ((event: never) => void)[]>();
+
+  /** Let a held `x.ai/rewind/execute` answer. */
+  release(): void {
+    const waiting = this.held;
+    this.held = [];
+    for (const answer of waiting) answer();
+  }
+
+  /**
+   * The rewind broadcast, on the carrier the agent sends it on.
+   *
+   * `send_xai_notification` puts it on `x.ai/session_notification` with the
+   * ordinary `_meta` every persisted update carries, so it arrives stamped with
+   * an `eventId` like any other frame — which is exactly why the client has to
+   * decide not to record it rather than never being offered the chance.
+   */
+  marker(target: number, event = 9, sessionId = ENTRY.sessionId): void {
+    this.receive(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "_x.ai/session_notification",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "rewind_marker",
+            target_prompt_index: target,
+            created_at: "2026-09-09T10:05:00Z",
+          },
+          _meta: { eventId: `${sessionId}-${event}` },
+        },
+      }),
+    );
+  }
 
   send(data: string): void {
     const frame = JSON.parse(data) as { id?: number; method?: string; params?: unknown };
@@ -157,7 +201,10 @@ class FakeSocket implements SocketLike {
     };
     const result = results[frame.method];
     if (result !== undefined) {
-      queueMicrotask(() => this.receive(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result })));
+      const answer = (): void =>
+        this.receive(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result }));
+      if (this.holdExecute && frame.method === "_x.ai/rewind/execute") this.held.push(answer);
+      else queueMicrotask(answer);
     }
   }
 
@@ -342,8 +389,11 @@ describe("picking a turn", () => {
     view.click(0);
     expect(socket.calls("_x.ai/rewind/execute")).toHaveLength(0);
     expect(view.question()).toBe("Rewind conversation to “second prompt”?");
-    // And it says the thing neither client can see from the rows.
-    expect(view.warning()).toContain("until it reloads");
+    // And it says the two things the rows cannot. The reach half of that
+    // sentence used to be a warning that the other clients would *not* see the
+    // rewind, which was true only while the agent kept the marker to itself.
+    expect(view.warning()).toContain("in every client attached to this session");
+    expect(view.warning()).toContain("Files are left alone");
   });
 
   test("saying no goes back to the list, and Escape steps back before closing", async () => {
@@ -517,5 +567,149 @@ describe("the phase a browser cannot offer", () => {
     const button = container.querySelector<HTMLButtonElement>(".session-rewind")!;
     expect(button.disabled).toBe(true);
     expect(button.title).toContain("Wait for this turn to finish");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A rewind performed by somebody else
+// ---------------------------------------------------------------------------
+//
+// The marker used to reach nobody: the agent persisted it through
+// `persist_xai_update_only`, a function whose whole job is to write without
+// sending, so every client but the one that asked went on drawing turns the
+// session had discarded. It is now sent as well as persisted
+// (`acp_session_impl/rewind.rs`), and these hold down the three decisions this
+// client makes about it.
+describe("a rewind somebody else performed", () => {
+  test("the marker is read either way, and a malformed one is not a rewind", () => {
+    expect(
+      readRewindMarker({
+        sessionUpdate: "rewind_marker",
+        target_prompt_index: 2,
+        created_at: "2026-09-09T10:05:00Z",
+      }),
+    ).toEqual({ targetPromptIndex: 2, createdAt: "2026-09-09T10:05:00Z" });
+    // The fields are snake_case in the Rust to begin with, so this spelling is
+    // the one on the wire; the other is read for the reason the points are.
+    expect(readRewindMarker({ sessionUpdate: "rewind_marker", targetPromptIndex: 0 })).toEqual({
+      targetPromptIndex: 0,
+      createdAt: "",
+    });
+    expect(readRewindMarker({ sessionUpdate: "rewind_marker" })).toBeNull();
+    expect(readRewindMarker({ sessionUpdate: "rewind_marker", target_prompt_index: -1 })).toBeNull();
+    expect(readRewindMarker({ sessionUpdate: "agent_message_chunk" })).toBeNull();
+    expect(readRewindMarker(null)).toBeNull();
+  });
+
+  test("it reloads without a cursor, and says so in the conversation", async () => {
+    // Not the pager's answer to the same marker. The pager truncates its own
+    // scrollback because it holds prompt indices on its blocks; this client
+    // holds none, and the cursored reload that looks equivalent has the third
+    // outcome the resume argument misses — a cursor can resolve against a line
+    // that sits before the cut, and the empty tail then restores a screen the
+    // agent has thrown away.
+    const gateway = await attached();
+    expect(texts(gateway)).toEqual([
+      "first prompt",
+      "first answer",
+      "second prompt",
+      "second answer",
+    ]);
+    expect(gateway.attached()!.resumption.cursor()).toBe("s1-3");
+
+    socket.replay = AFTER;
+    socket.marker(1);
+    await settle();
+
+    // Nothing was asked of the agent but the reload: this client did not rewind.
+    expect(socket.calls("_x.ai/rewind/execute")).toHaveLength(0);
+    const loads = socket.calls("session/load");
+    expect(loads).toHaveLength(2);
+    expect((loads[1]!["params"] as { _meta?: unknown })._meta).toBeUndefined();
+
+    const entries = gateway.attached()!.transcript.entries;
+    expect(entries.slice(0, 2).map((e) => (e as { text: string }).text)).toEqual([
+      "first prompt",
+      "first answer",
+    ]);
+    // Said in the conversation rather than on the status line, which the next
+    // thing that happens would overwrite.
+    const last = entries.at(-1)!;
+    expect(last.kind).toBe("message");
+    expect((last as { role: string }).role).toBe("notice");
+    expect((last as { text: string }).text).toContain("Another client");
+  });
+
+  test("the marker for this client's own rewind is left to its own answer", async () => {
+    // The marker goes out *before* the `x.ai/rewind/execute` response, so the
+    // initiator sees its own first. Acting on it would reload ahead of the
+    // answer that still has to hand the discarded prompt back to the composer,
+    // and would tell the person a peer did what they just did themselves.
+    const gateway = await attached();
+    socket.replay = AFTER;
+    socket.holdExecute = true;
+    const view = mount(gateway);
+    await settle();
+    view.click(0);
+    view.go();
+    await settle();
+
+    // The execute is in flight. This is the agent's own broadcast of it.
+    socket.marker(1);
+    await settle();
+    expect(socket.calls("session/load")).toHaveLength(1);
+
+    socket.release();
+    await settle();
+    // Exactly one reload, and it is the rewind's own.
+    expect(socket.calls("session/load")).toHaveLength(2);
+    expect(view.rewound()).toBe("second prompt");
+    expect(texts(gateway)).toEqual(["first prompt", "first answer"]);
+  });
+
+  test("an open picker closes, because its rows name a timeline that is gone", async () => {
+    // Every row and the confirm behind it are addressed by prompt index, and
+    // after a peer's cut those indices name different turns or none. Re-reading
+    // the list in place would silently swap what a half-finished gesture was
+    // pointing at.
+    const gateway = await attached();
+    const view = mount(gateway);
+    await settle();
+    expect(view.rows()).toHaveLength(2);
+
+    socket.replay = AFTER;
+    socket.marker(1);
+    await settle();
+    expect(view.closed()).toBe(true);
+  });
+
+  test("a marker with no usable target reloads nothing", async () => {
+    const gateway = await attached();
+    socket.receive(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "_x.ai/session_notification",
+        params: {
+          sessionId: ENTRY.sessionId,
+          update: { sessionUpdate: "rewind_marker", created_at: "2026-09-09T10:05:00Z" },
+          _meta: { eventId: "s1-9" },
+        },
+      }),
+    );
+    await settle();
+    expect(socket.calls("session/load")).toHaveLength(1);
+    expect(texts(gateway)).toHaveLength(4);
+  });
+
+  test("the marker does not become the cursor", async () => {
+    // A cursor is matched against the rewind-*filtered* log, and that filter
+    // drops every marker (`session/storage/mod.rs:1602`) — so a cursor naming
+    // one can never resolve, and recording it would guarantee the full replay
+    // the cursor exists to avoid.
+    const gateway = await attached();
+    socket.replay = AFTER;
+    socket.marker(1, 99);
+    await settle();
+    expect(gateway.attached()!.resumption.cursor()).not.toBe("s1-99");
   });
 });

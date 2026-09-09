@@ -48,10 +48,12 @@ import {
 import { forkParams, readForkedSessionId } from "./fork.ts";
 import { permissionModeParams, readModeUpdate, type PermissionMode } from "./modes.ts";
 import {
+  readRewindMarker,
   readRewindPoints,
   readRewindResult,
   rewindExecuteParams,
   rewindPointsParams,
+  REWIND_MARKER_TAG,
   type RewindPoint,
   type RewindResult,
 } from "./rewind.ts";
@@ -238,6 +240,24 @@ const REBUILT_NOTICE =
   "This conversation was reloaded from the agent, because it could no longer say what had changed since this page last saw it. What is above is the agent's own copy.";
 
 /**
+ * A third, and the only one that is not about this page's own connection.
+ *
+ * Said in the conversation for the same reason the two above are: a peer's
+ * rewind is an event at a point in the session — turns that were on this screen
+ * are not on it any more — and the status line is overwritten by the next thing
+ * that happens. The pager says the same thing in the same place, as a block
+ * rather than a toast (`acp_handler/session_notification.rs`,
+ * `apply_remote_rewind`).
+ *
+ * It does not name the turn it was taken back to. The index is on the wire and
+ * means nothing on this screen — the picker names turns by their first line and
+ * never by a number — so naming it here would describe the cut by the one thing
+ * the reader has never been shown.
+ */
+const PEER_REWIND_NOTICE =
+  "Another client took this conversation back to an earlier turn. Everything after it was discarded, and what is above is the agent's own copy of what is left.";
+
+/**
  * The status line for a finished attach.
  *
  * The count is not decoration. "Only what was missed" is the claim this whole
@@ -349,6 +369,15 @@ export function createGateway() {
   // The mode the agent has *confirmed*, never the one that was asked for. Null
   // until a `current_mode_update` arrives, because until then nothing is known.
   const [sessionMode, setSessionMode] = createSignal<string | null>(null);
+  /**
+   * How many rewinds somebody else has performed on the session on screen.
+   *
+   * A counter rather than a flag, because what the view has to do is act on
+   * each one: two rewinds in a row are two separate moments at which any open
+   * dialog is listing turns that no longer exist, and a boolean that was
+   * already true for the first would say nothing about the second.
+   */
+  const [rewoundElsewhere, setRewoundElsewhere] = createSignal(0);
   const [permissions, setPermissions] = createStore<PendingPermission[]>([]);
   const [folderTrusts, setFolderTrusts] = createStore<PendingFolderTrust[]>([]);
   const roster: Roster = createRoster();
@@ -375,6 +404,20 @@ export function createGateway() {
   let attachedOn: { client: GatewayClient; sessionId: string } | null = null;
   /** See {@link Carried}. Written by `connect`, read once by `attach`. */
   let carried: Carried | null = null;
+  /**
+   * The session whose rewind this client asked for, while it is still happening.
+   *
+   * The agent emits the marker *before* it answers `x.ai/rewind/execute`
+   * (`acp_session_impl/rewind.rs`), so the client that asked sees its own
+   * broadcast first. Acting on it would reload ahead of the answer that still
+   * has to hand the discarded prompt back to the composer, and would tell the
+   * person a peer did the thing they just did themselves. The pager skips its
+   * own the same way, on its `Executing` phase.
+   *
+   * Held from before the call until after the reload it drives, so the whole
+   * window is covered rather than the request alone.
+   */
+  let rewinding: string | null = null;
 
   /**
    * Take the carry-over, if it is this session on this machine.
@@ -536,6 +579,28 @@ export function createGateway() {
         // lifecycle fold sees it here rather than on the attached session.
         current.subagents.apply(notification.sessionId, update);
         current.subagents.applyChild(notification.sessionId, update);
+        return;
+      }
+      // Somebody rewound this session. Handled here, ahead of the gate, and
+      // deliberately never recorded as drawn.
+      //
+      // The gate exists so the cursor cannot fall behind the log, and this is
+      // the one frame where standing at it is worse than standing behind it. A
+      // cursor is matched against the *rewind-filtered* log, and that filter
+      // drops every marker (`session/storage/mod.rs:1602`), so a cursor naming
+      // a marker can never resolve — recording this one would guarantee the
+      // full replay the cursor exists to avoid. Being one line behind it costs
+      // nothing for the same reason: the line is not in the log the cursor is
+      // matched against either way.
+      //
+      // It is also the one frame that cannot arrive as history, so there is no
+      // replayed copy for the gate to have to recognise.
+      if (update.sessionUpdate === REWIND_MARKER_TAG) {
+        if (rewinding === notification.sessionId) return;
+        const marker = readRewindMarker(update);
+        // A marker with no usable target is not a rewind. Reloading on one
+        // would throw a conversation off the screen on a malformed frame.
+        if (marker !== null) void takePeerRewind(current);
         return;
       }
       // Every frame for the attached session goes through the gate, not only
@@ -1127,6 +1192,49 @@ export function createGateway() {
     }
   };
 
+  /**
+   * Take a rewind another client performed.
+   *
+   * **The same cursorless `session/load` this client's own rewind sends, and
+   * for the same measured reason** — which is why the pager's answer to the
+   * same marker is not copied. The pager truncates its scrollback locally, and
+   * it is right to: it holds prompt indices on its own blocks and trusts that
+   * cut for its own rewinds already. This client holds no indices, and the
+   * obvious substitute — a cursored reload, leaning on "a rewind truncates a
+   * suffix, so either the cursor went with it or everything before it survived"
+   * — has a third outcome that was measured rather than reasoned about. The log
+   * is not written in id order, so a cursor can resolve against a line sitting
+   * *before* the cut while the position recorded for it here is late; the tail
+   * then comes back empty and the mark restores a screen the agent has just
+   * disagreed with. See {@link rewind}, which found it.
+   *
+   * So the agent is asked what the conversation is now, exactly as it is after
+   * a rewind performed here. The only difference is what it costs: this reload
+   * was not asked for by the person watching it, which is why it is the one
+   * thing said out loud in the transcript afterwards.
+   */
+  const takePeerRewind = async (current: Attached): Promise<void> => {
+    // Before the reload rather than after it, so an open picker stops offering
+    // turns from the discarded timeline while the round trip is in flight.
+    setRewoundElsewhere(rewoundElsewhere() + 1);
+    say("another client rewound this session…");
+    try {
+      await loadTranscript(current, null);
+    } catch (e) {
+      say(`another client rewound this session, and reloading it failed: ${String(e)}`);
+      return;
+    }
+    // Moving to another session during the reload leaves this transcript
+    // off-screen; a notice appended to it would surface later as a statement
+    // about a conversation nobody was looking at.
+    if (attached() !== current) return;
+    current.transcript.notice(PEER_REWIND_NOTICE);
+    say("another client rewound this session");
+    // The window grew back by however many turns went, and nothing streams that
+    // number — the same reason this client's own rewind asks again.
+    void refreshSessionInfo();
+  };
+
   const attach = async (entry: RosterEntry): Promise<void> => {
     if (!client) return;
     // Already on this session, on this socket: asking again would replay the
@@ -1528,35 +1636,45 @@ export function createGateway() {
     if (!client || !current) return null;
     const sessionId = current.entry.sessionId;
     say(`rewinding ${sessionId}…`);
-    let result: RewindResult;
+    // Claimed before the call, because the agent broadcasts the marker before
+    // it answers: without this the initiator would receive its own rewind as a
+    // peer's and reload ahead of the reply that hands the discarded prompt back
+    // to the composer. Released in `finally`, so a refusal or a dead socket
+    // does not leave this client deaf to the next real one. See {@link rewinding}.
+    rewinding = sessionId;
     try {
-      result = readRewindResult(
-        await client.ext("x.ai/rewind/execute", rewindExecuteParams(sessionId, promptIndex)),
-      );
-    } catch (e) {
-      say(`rewind failed: ${String(e)}`);
-      return null;
-    }
-    if (!result.success) {
-      say(`rewind failed: ${result.error ?? "the agent gave no reason"}`);
+      let result: RewindResult;
+      try {
+        result = readRewindResult(
+          await client.ext("x.ai/rewind/execute", rewindExecuteParams(sessionId, promptIndex)),
+        );
+      } catch (e) {
+        say(`rewind failed: ${String(e)}`);
+        return null;
+      }
+      if (!result.success) {
+        say(`rewind failed: ${result.error ?? "the agent gave no reason"}`);
+        return result;
+      }
+      // Attaching elsewhere while the rewind was in flight leaves nothing here to
+      // reload: the session that moved on is a different `Attached` with a cursor
+      // of its own, and loading this one into it is the doubling `attachedOn`
+      // exists to prevent.
+      if (attached() !== current) return result;
+      try {
+        await loadTranscript(current, null);
+        say(`rewound ${sessionId}`);
+      } catch (e) {
+        say(`rewound ${sessionId}, but reloading it failed: ${String(e)}`);
+        return result;
+      }
+      // The window shrank by however many turns went, and nothing streams that
+      // number — the same reason the end of a turn refreshes it.
+      void refreshSessionInfo();
       return result;
+    } finally {
+      rewinding = null;
     }
-    // Attaching elsewhere while the rewind was in flight leaves nothing here to
-    // reload: the session that moved on is a different `Attached` with a cursor
-    // of its own, and loading this one into it is the doubling `attachedOn`
-    // exists to prevent.
-    if (attached() !== current) return result;
-    try {
-      await loadTranscript(current, null);
-      say(`rewound ${sessionId}`);
-    } catch (e) {
-      say(`rewound ${sessionId}, but reloading it failed: ${String(e)}`);
-      return result;
-    }
-    // The window shrank by however many turns went, and nothing streams that
-    // number — the same reason the end of a turn refreshes it.
-    void refreshSessionInfo();
-    return result;
   };
 
   /**
@@ -1790,6 +1908,7 @@ export function createGateway() {
     fork,
     rewindPoints,
     rewind,
+    rewoundElsewhere,
     refreshRoster,
     refreshSessionInfo,
   };

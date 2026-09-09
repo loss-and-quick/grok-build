@@ -167,3 +167,57 @@ export function rewindLabel(point: RewindPoint): string {
 export function rewindConfirmTitle(point: RewindPoint): string {
   return `Rewind conversation to “${point.promptPreview ?? "this turn"}”?`;
 }
+
+// ---------------------------------------------------------------------------
+// The marker, which is how a client learns that somebody else rewound
+// ---------------------------------------------------------------------------
+//
+// This used to reach nobody. The agent wrote the marker to `updates.jsonl`
+// through `persist_xai_update_only`, a function whose whole job is to persist
+// *without* sending, so the only client that knew a rewind had happened was the
+// one that asked for it; everyone else went on drawing turns the session no
+// longer had. It is now sent as well as persisted
+// (`acp_session_impl/rewind.rs`), and it carries a `sessionId`, so it fans out
+// under the same rule as every other turn delta and reaches nobody who is not
+// watching this session.
+//
+// It cannot arrive as history. `filter_rewind_lines` drops markers along with
+// the branch they cut (`session/storage/mod.rs:1602`), so a replay never
+// contains one and no client can act on the same rewind twice.
+//
+// The fields are snake_case, and that is not the seam described above: the
+// extension enum's `rename_all` applies to the *tag* only, and these two field
+// names are snake_case in the Rust to begin with
+// (`extensions/notification.rs:634`). Both spellings are read anyway, for the
+// same reason the points are.
+
+/** The `sessionUpdate` tag, as `wire_tags.rs:118` pins it. */
+export const REWIND_MARKER_TAG = "rewind_marker";
+
+/** A rewind that has already happened. */
+export interface RewindMarker {
+  /** The conversation now ends before this prompt. */
+  targetPromptIndex: number;
+  /** RFC 3339, when the rewind was performed. */
+  createdAt: string;
+}
+
+/**
+ * Read one marker, or `null` if it is not one.
+ *
+ * A marker with no usable index is refused rather than defaulted, for the
+ * reason {@link readRewindPoints} refuses a point with none: zero is a real
+ * target, and acting on an invented one would throw a whole conversation off
+ * the screen on a malformed frame.
+ */
+export function readRewindMarker(update: unknown): RewindMarker | null {
+  if (typeof update !== "object" || update === null) return null;
+  const row = update as Record<string, unknown>;
+  if (row["sessionUpdate"] !== REWIND_MARKER_TAG) return null;
+  const index = field(row, "target_prompt_index", "targetPromptIndex");
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return null;
+  return {
+    targetPromptIndex: index,
+    createdAt: text(field(row, "created_at", "createdAt")) ?? "",
+  };
+}

@@ -1,4 +1,14 @@
-import { For, Match, Show, Switch, createEffect, createSignal, onMount, type JSX } from "solid-js";
+import {
+  For,
+  Match,
+  Show,
+  Switch,
+  createEffect,
+  createSignal,
+  on,
+  onMount,
+  type JSX,
+} from "solid-js";
 
 import { focusInto, trapFocus } from "../focus.ts";
 import type { Gateway } from "../gateway.ts";
@@ -45,6 +55,28 @@ export function RewindPicker(props: {
   const [selected, setSelected] = createSignal(0);
 
   void props.gateway.rewindPoints().then(setPoints);
+
+  /**
+   * Somebody else rewound the session while this was open, so it steps aside.
+   *
+   * Every row and the confirm behind it are addressed by prompt index, and
+   * those indices now name a timeline the session does not have: the turn under
+   * "Rewind conversation to …?" may be a different turn or no turn at all.
+   * Re-reading the list in place would be worse than closing, because it would
+   * silently swap what a half-finished gesture was pointing at.
+   *
+   * This client's own rewind never lands here — the gateway skips the marker
+   * while it is the one rewinding, and this dialog closes on its answer — so
+   * the only thing that reaches this is a peer. Deferred, so opening is not
+   * itself an event.
+   */
+  createEffect(
+    on(
+      () => props.gateway.rewoundElsewhere(),
+      () => props.onClose(),
+      { defer: true },
+    ),
+  );
 
   const rows = (): RewindPoint[] => points() ?? [];
   const at = (): number => Math.min(selected(), Math.max(rows().length - 1, 0));
@@ -144,18 +176,21 @@ export function RewindPicker(props: {
             {(point) => (
               <div class="rewind-confirm">
                 <p class="rewind-question">{rewindConfirmTitle(point())}</p>
-                {/* The one thing neither client can see from the rows, and the
-                    one this client is in a position to say: a rewind is not
-                    private to the tab that asks for it, and nothing tells the
-                    others. The agent writes its `rewind_marker` to the log
-                    without sending it to anybody
-                    (`acp_session_impl/updates.rs`, `persist_xai_update_only`),
-                    so a terminal on this session keeps the discarded turns on
-                    screen until it loads the session again. */}
+                {/* The two things the rows cannot say, and both are about
+                    reach. Files are the mode this client sends
+                    (`conversation_only`), so a turn's edits outlive the turn.
+                    The other clients used to be a warning: the agent wrote its
+                    `rewind_marker` to the log and sent it to nobody, so a
+                    terminal on this session went on drawing the discarded turns
+                    until it loaded the session again. The marker is now sent as
+                    well as persisted (`acp_session_impl/rewind.rs`), so the
+                    sentence had to change with it — a dialog that still warned
+                    about that would be the one thing on this screen that is
+                    simply false. */}
                 <p class="rewind-warning">
-                  This discards the turn and everything after it. Files are left
-                  alone. Anything else attached to this session — a terminal, another
-                  tab — will go on showing the discarded turns until it reloads.
+                  This discards the turn and everything after it, in every client
+                  attached to this session — a terminal, another tab. Files are
+                  left alone.
                 </p>
                 <div class="rewind-actions">
                   <button
