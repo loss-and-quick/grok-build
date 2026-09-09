@@ -8,6 +8,7 @@ import { render } from "@solidjs/testing-library";
 import { Session } from "../src/components/Session.tsx";
 import { FUZZY_OPEN, createFileSearch } from "../src/filesearch.ts";
 import type { Gateway } from "../src/gateway.ts";
+import { createQueue } from "../src/queue.ts";
 import { createSubagents } from "../src/subagents.ts";
 import { createTranscript } from "../src/transcript.ts";
 import type { RosterEntry } from "../src/wire.ts";
@@ -65,7 +66,7 @@ function mount() {
   });
 
   const gateway = {
-    attached: () => ({ entry: ENTRY, transcript: createTranscript(), subagents: createSubagents(ENTRY.sessionId) }),
+    attached: () => ({ entry: ENTRY, transcript: createTranscript(), subagents: createSubagents(ENTRY.sessionId), queue: createQueue() }),
     permissions: [],
     folderTrusts: [],
     sessionMode: () => null,

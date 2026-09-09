@@ -51,6 +51,7 @@ import { Modes } from "./Modes.tsx";
 import { Panel } from "./Panel.tsx";
 import { Rail } from "./Rail.tsx";
 import { ForkPicker } from "./ForkPicker.tsx";
+import { Queue } from "./Queue.tsx";
 import { RewindPicker } from "./RewindPicker.tsx";
 
 import { Subagents } from "./Subagents.tsx";
@@ -344,6 +345,19 @@ export function Session(props: {
 
           <Show when={props.rail}>
             <Rail gateway={props.gateway} />
+          </Show>
+
+          {/* Where the queue goes when the rail is off, and it is the same place
+              the rail itself goes when the window is too narrow for a third
+              column: the row between the conversation and the prompt. The
+              terminal does not gate its queue pane on `dock_enabled` either —
+              the dock *embeds* the pane, it does not own it — so a browser that
+              showed the queue only with the rail on would be hiding a session's
+              queued prompts from the cohort the dock is off for. */}
+          <Show when={!props.rail && current().queue.rows.length > 0}>
+            <div class="queue-dock">
+              <Queue gateway={props.gateway} />
+            </div>
           </Show>
 
           <form

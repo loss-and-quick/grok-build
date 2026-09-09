@@ -3162,3 +3162,183 @@ button.picker-row:focus-visible {
 .fork-row-whole .fork-row-preview {
   color: var(--grok-accent-user, canvastext);
 }
+
+/* == the shared prompt queue ============================================== */
+
+/* Where the queue goes when the rail is off: the row the rail itself occupies
+ * when the window is too narrow for a third column, which is directly above the
+ * prompt. `dock.rs` puts it in the same place for the same reason — "the Queued
+ * section embeds the queue pane as its body", and the dock sits above the
+ * prompt — and the terminal draws the pane whether or not the dock is on. */
+.queue-dock {
+  grid-area: rail;
+  min-width: 0;
+  /* Capped for the reason `.panels` is: as an `auto` grid row a long queue
+   * would starve the `1fr` conversation to nothing. */
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.queue {
+  min-width: 0;
+}
+
+.queue-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+/* `#N`, the first line, what the row is carrying, and what may be done to it.
+ * The number column is fixed and tabular so a queue of ten does not stagger. */
+.queue-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.queue-number {
+  flex: 0 0 auto;
+  color: var(--grok-gray, canvastext);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The text is the column that gives way; everything to its right is either a
+ * count or a control, and both are unreadable clipped. */
+.queue-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The terminal's four row kinds, in its four colours: a plain prompt takes the
+ * user accent, a slash command the assistant accent, a bash row the command
+ * colour, and a cron row the user accent behind a marker this client has no
+ * glyph for (`queue_pane.rs`, `build_styled`). */
+.queue-prompt,
+.queue-cron {
+  color: var(--grok-accent-user, canvastext);
+}
+
+.queue-command {
+  color: var(--grok-accent-assistant, canvastext);
+}
+
+.queue-bash,
+.queue-mark {
+  color: var(--grok-command, canvastext);
+}
+
+.queue-mark {
+  padding-right: 0.3rem;
+}
+
+.queue-hidden {
+  padding-left: 0.4rem;
+  color: var(--grok-gray, canvastext);
+}
+
+/* A count, not a thumbnail: the bytes never ride the broadcast this row came
+ * from, so there is nothing here to draw even if a column had room for it. */
+.queue-images {
+  flex: 0 0 auto;
+  color: var(--grok-gray-bright, canvastext);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+/* A row the session will not let anyone touch says so instead of showing five
+ * disabled buttons, which would read as this client being broken rather than as
+ * the row being held. */
+.queue-pinned {
+  flex: 0 0 auto;
+  color: var(--grok-gray, canvastext);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.queue-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.25rem;
+}
+
+.queue-actions button {
+  padding: 0.05rem 0.4rem;
+  font-size: 0.85rem;
+  border-color: var(--grok-prompt-border, canvastext);
+}
+
+.queue-actions button:hover:not(:disabled) {
+  border-color: var(--grok-hover-border, canvastext);
+  background: var(--grok-bg-hover, canvas);
+}
+
+/* Send-now is the one that changes the running turn rather than the queue, and
+ * it is marked as such — the terminal reaches it with the same chord it
+ * interjects the composer with. */
+.queue-now {
+  color: var(--grok-accent-running, canvastext);
+}
+
+.queue-withdraw {
+  color: var(--grok-accent-error, canvastext);
+}
+
+.queue-editor {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.queue-draft {
+  width: 100%;
+  resize: vertical;
+}
+
+.queue-note {
+  margin: 0;
+  color: var(--grok-gray, canvastext);
+  font-size: 0.85rem;
+}
+
+.queue-editor-actions {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.queue-foot {
+  padding-top: 0.4rem;
+}
+
+.queue-clear {
+  padding: 0.05rem 0.4rem;
+  font-size: 0.85rem;
+  color: var(--grok-accent-error, canvastext);
+  border-color: var(--grok-prompt-border, canvastext);
+}
+
+/* A queue row in the rail is a queue row in a 300px column, and the five
+ * controls do not fit beside the line they act on: measured at 1440px with the
+ * rail open, the text collapsed to two characters and an ellipsis. So the
+ * column stacks them — the prompt on one line, what may be done to it on the
+ * next — and only the column does. Below 1200px the rail is a full-width strip
+ * above the composer, where the row fits on one line the way the dock's does. */
+@media (min-width: 1200px) {
+  .session-body.railed .rail .queue-row {
+    flex-wrap: wrap;
+  }
+
+  .session-body.railed .rail .queue-actions {
+    flex: 1 0 100%;
+    justify-content: flex-end;
+  }
+}

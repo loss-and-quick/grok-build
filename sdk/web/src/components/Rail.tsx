@@ -28,12 +28,14 @@ import {
   watcherRailRows,
   type BackgroundWork,
 } from "../tasks.ts";
+import type { QueueRow } from "../queue.ts";
 import type { PanelEntry } from "../transcript.ts";
 import type { ContextFacts } from "../wire.ts";
 import { ContextWidget } from "./ContextWidget.tsx";
 import { Overlay } from "./Overlay.tsx";
 import { Panel, createFields, type Fields } from "./Panel.tsx";
 import { BackgroundPane } from "./Background.tsx";
+import { Queue } from "./Queue.tsx";
 import { RailList } from "./RailList.tsx";
 import { StopButton } from "./StopButton.tsx";
 import { Subagents } from "./Subagents.tsx";
@@ -59,6 +61,7 @@ const CONTEXT_KEY = "context";
 const SUBAGENTS_KEY = "subagents";
 const TASKS_KEY = "tasks";
 const WATCHERS_KEY = "watchers";
+const QUEUED_KEY = "queued";
 
 /**
  * The widget rail.
@@ -189,6 +192,15 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
     return held ? taskRailRows(held.tasks.tasks, at) : [];
   };
 
+  /**
+   * The prompts this session is holding but has not started.
+   *
+   * Read for its length only. The queue is drawn by its own component, which is
+   * what "embeds the queue pane as its body" means here — the rail contributes
+   * the header and the count, and nothing about the rows is the rail's business.
+   */
+  const queued = (): readonly QueueRow[] => props.gateway.attached()?.queue.rows ?? [];
+
   /** Running monitors, then scheduled loops. */
   const watcherRows = (): RailRow[] => {
     const at = wallNow();
@@ -219,6 +231,13 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
     all.push({ kind: "list", key: SUBAGENTS_KEY, label: "Subagents", rows: subagentRows() });
     all.push({ kind: "list", key: TASKS_KEY, label: "Tasks", rows: taskRows() });
     all.push({ kind: "list", key: WATCHERS_KEY, label: "Watchers", rows: watcherRows() });
+    // The dock's fourth, and the one that is not shaped like the other three.
+    // It contributes no rows to the walk: `DockData::rows(Queued)` is `&[]`,
+    // the section has no expanded flag, and `visual_rows` pushes its header
+    // alone — "the Queued section embeds the queue pane as its body". So it is
+    // a widget with a count, and the count is what makes it appear and go away
+    // exactly as `dock.rs`'s emptiness rule says a counted section should.
+    all.push({ kind: "widget", key: QUEUED_KEY, label: "Queued", count: queued().length });
     for (const panel of panels()) {
       all.push({
         kind: "panel",
@@ -410,6 +429,21 @@ export function Rail(props: { gateway: Gateway }): JSX.Element {
             onConfirm={() => stopWatcher(row().key)}
           />
         ))}
+        {/* Queued, whose body is the queue itself. No **Open**: unlike the
+            three above it, nothing is being held back for want of room — the
+            column shows every queued row, because a queue you can see two of is
+            one you cannot reorder. */}
+        <Show when={queued().length > 0}>
+          <Widget
+            itemKey={`h:${QUEUED_KEY}`}
+            label="Queued"
+            count={queued().length}
+            open={isOpen(QUEUED_KEY)}
+            onToggle={() => toggle(QUEUED_KEY)}
+          >
+            <Queue gateway={props.gateway} />
+          </Widget>
+        </Show>
         <For each={panels()}>
           {(panel) => (
             <Widget

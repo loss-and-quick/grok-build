@@ -20,6 +20,7 @@ import {
   visualRows,
   type RailSection,
 } from "../src/rail.ts";
+import { createQueue } from "../src/queue.ts";
 import { createSubagents } from "../src/subagents.ts";
 import { createTasks } from "../src/tasks.ts";
 import { createTranscript } from "../src/transcript.ts";
@@ -139,7 +140,7 @@ function mount(published: [string, PanelViewModel][] = [], seed?: (into: Fixture
   seed?.({ subagents, tasks });
   const seen: PanelAction[] = [];
   const gateway = {
-    attached: () => ({ entry: ENTRY, transcript, subagents, tasks }),
+    attached: () => ({ entry: ENTRY, transcript, subagents, tasks, queue: createQueue() }),
     // Nobody has asked for the window here, so the rail holds plugin panels
     // and nothing else — which is what these tests are about. The context
     // section has its own file.

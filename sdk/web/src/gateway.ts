@@ -57,6 +57,7 @@ import {
   type RewindPoint,
   type RewindResult,
 } from "./rewind.ts";
+import { createQueue, reordered, type Queue } from "./queue.ts";
 import { createRoster, type Roster } from "./roster.ts";
 import { createSubagents, type Subagents } from "./subagents.ts";
 import { createTasks, type Tasks } from "./tasks.ts";
@@ -87,6 +88,7 @@ import {
   type NewSessionResponse,
   type PanelActionResponse,
   type PromptResponse,
+  type QueueChanged,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type RosterChanged,
@@ -194,6 +196,16 @@ export interface Attached {
    * `task_completed` and `scheduled_task_*` rows, so the two sections come back
    * from the log rather than being carried between sessions.
    */
+  /**
+   * The prompts this session is holding but has not started.
+   *
+   * Per attach like the three above, and rebuilt differently from all of them:
+   * the queue is not in the event log and `session/load` replays nothing about
+   * it. It arrives as a snapshot on `x.ai/session/info` and is kept current by
+   * the `x.ai/queue/changed` broadcast, which every queue mutation — this
+   * client's, a terminal's, or the session's own drain — fires.
+   */
+  queue: Queue;
   tasks: Tasks;
   /**
    * How much of this session's event log this client has drawn.
@@ -546,6 +558,21 @@ export function createGateway() {
     if (method === "x.ai/settings/update") {
       const flag = (params as SettingsUpdate | undefined)?.dock_enabled;
       if (typeof flag === "boolean") setDockEnabled(flag);
+      return;
+    }
+    // The authoritative queue, restated. Every queue mutation fires this —
+    // including the ones that changed nothing, because a mutation is an
+    // ext-notification with no reply and this broadcast is the only answer it
+    // ever gets. It is also how a terminal's queue edit reaches this page.
+    //
+    // Not a `session/update` and so not behind the resumption gate: it is not
+    // in the session's event log at all and is never replayed, which is the
+    // same reason the queue has to be seeded from `session/info` on attach.
+    if (method === "x.ai/queue/changed") {
+      const changed = (params ?? {}) as QueueChanged;
+      const current = attached();
+      if (!current || changed.sessionId !== current.entry.sessionId) return;
+      current.queue.apply(changed);
       return;
     }
     // One batch of `@`-completion results. The leader routes it by the session
@@ -1089,10 +1116,106 @@ export function createGateway() {
       })) as SessionInfoResponse;
       if (attached()?.entry.sessionId !== asked) return;
       setSessionInfo(response ?? {});
+      // The queue rides this reply so an attaching client does not have to wait
+      // for the next mutation to find out what is already queued. A `null` or
+      // absent key is an agent that could not answer and is left alone: the
+      // queue stays "unknown", which is not "empty".
+      if (response?.queue) current.queue.apply(response.queue);
     } catch (e) {
       if (attached()?.entry.sessionId !== asked) return;
       say(`could not read the context window: ${String(e)}`);
     }
+  };
+
+  // -------------------------------------------------------------------------
+  // The queue, mutated
+  //
+  // All seven are ext-**notifications**: no reply, no error, no result. The
+  // confirming `x.ai/queue/changed` is the whole of the feedback, and every
+  // handler rebroadcasts even on a no-op, so a refusal and an acceptance are
+  // told apart by what comes back rather than by silence. Nothing below writes
+  // to the local queue.
+  //
+  // **No `owner` is sent, on purpose.** The handlers scope `remove` and `clear`
+  // by owner when one is given, and match any row when one is not
+  // (`queue_mutation.rs`, `owner.is_none_or(…)`). The pager sends none
+  // (`app/effects/mod.rs`, every `x.ai/queue/*` payload), so scoping is unused
+  // by the product — and sending one here would be worse than pointless: this
+  // client sends no `clientIdentifier` on `session/prompt`, so its own rows are
+  // unowned and an owner-scoped withdrawal would match none of them.
+  // -------------------------------------------------------------------------
+
+  /** Send one queue mutation, addressed to the attached session. */
+  const queueNotify = (verb: string, params: Record<string, unknown>): void => {
+    const current = attached();
+    if (!client || !current) return;
+    client.notify(`_x.ai/queue/${verb}`, { sessionId: current.entry.sessionId, ...params });
+  };
+
+  /** Replace a queued row's text in place. Its images are untouched. */
+  const queueEdit = (id: string, newText: string): void => {
+    queueNotify("edit", { id, newText });
+  };
+
+  /**
+   * Withdraw a queued row.
+   *
+   * `expectedVersion` is the version this client last saw. A row edited by
+   * someone else in between fails the check, and the resulting rebroadcast is
+   * what shows why — the row is still there, with the other person's text.
+   */
+  const queueRemove = (id: string, expectedVersion: number): void => {
+    queueNotify("remove", { id, expectedVersion });
+  };
+
+  /** Withdraw everything queued. The running turn is never touched. */
+  const queueClear = (): void => {
+    queueNotify("clear", {});
+  };
+
+  /**
+   * Move a queued row one place, among the rows that may be moved.
+   *
+   * The order is computed from what is on screen ({@link reordered}), because
+   * the handler pins every protected row to its slot and reorders only the rest
+   * across what is left. Nothing is sent when the row cannot move that way: an
+   * empty or unchanged order would produce a rebroadcast indistinguishable from
+   * a refusal.
+   */
+  const queueMove = (id: string, direction: "up" | "down"): void => {
+    const current = attached();
+    if (!current) return;
+    const orderedIds = reordered(current.queue.rows, id, direction);
+    if (!orderedIds) return;
+    queueNotify("reorder", { orderedIds });
+  };
+
+  /**
+   * Send a queued row into the running turn now.
+   *
+   * `x.ai/queue/interject`, which is atomic in the session: the row leaves the
+   * queue and its text enters the turn under one lock, so it can never both
+   * interject and later run as its own turn — the race a client doing remove
+   * and prompt separately cannot avoid.
+   */
+  const queueSendNow = (id: string, expectedVersion: number): void => {
+    queueNotify("interject", { id, expectedVersion });
+  };
+
+  /**
+   * Hold a row out of combine-on-promote while it is being edited, and release it.
+   *
+   * Not decoration around the edit box: while a turn runs, the session promotes
+   * the queued prefix into the running turn as interjections, and it stops at a
+   * row under an edit hold (`prompt_queue.rs`,
+   * `promote_queued_as_interjections`). Without the hold, a row being edited in
+   * this browser can be promoted mid-edit and sent with the text it had before.
+   */
+  const queueHoldEdit = (id: string): void => {
+    queueNotify("hold_edit", { id });
+  };
+  const queueReleaseEdit = (id: string): void => {
+    queueNotify("release_edit", { id });
   };
 
   /**
@@ -1134,6 +1257,7 @@ export function createGateway() {
       transcript,
       subagents: createSubagents(entry.sessionId),
       tasks: createTasks(),
+      queue: createQueue(),
       // The transcript's own position, not a second count kept beside it: the
       // mark has to be what the transcript will be rewound to, and two numbers
       // that are supposed to be equal are a thing that can stop being equal.
@@ -1923,6 +2047,13 @@ export function createGateway() {
     rewoundElsewhere,
     refreshRoster,
     refreshSessionInfo,
+    queueEdit,
+    queueRemove,
+    queueClear,
+    queueMove,
+    queueSendNow,
+    queueHoldEdit,
+    queueReleaseEdit,
   };
 }
 

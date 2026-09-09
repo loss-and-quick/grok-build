@@ -1147,6 +1147,118 @@ export interface SessionInfoResponse {
   modelDisplayName?: string | null;
   turns?: number;
   contextFacts?: ContextFacts | null;
+  /**
+   * What this session had queued at the moment it was asked.
+   *
+   * The same shape `x.ai/queue/changed` broadcasts, built by the same function
+   * (`acp_session_impl/prompt_queue.rs`, `build_queue_wire`), so one parser
+   * serves both and an attaching client does not draw an empty queue until the
+   * next mutation happens to fire.
+   *
+   * `null`/absent is an agent that could not answer, and it is **not** an empty
+   * queue: a client that read the two the same way would paint away prompts the
+   * session is still holding (`session/acp_types.rs`, the round-trip test says
+   * so in as many words).
+   */
+  queue?: QueueChanged | null;
+}
+
+// ---------------------------------------------------------------------------
+// The shared prompt queue — crates/codegen/xai-prompt-queue/src/types.rs
+//
+// Two carriers, one shape. `x.ai/queue/changed` is broadcast on every queue
+// mutation — including the ones that changed nothing, because "the agent
+// re-stated the queue" is the only confirmation any mutation gets — and
+// `x.ai/session/info` carries the same struct so an attaching client starts
+// from the truth instead of from nothing.
+//
+// **Every mutation is an ext-notification, not a request.** There is no reply
+// to wait on and no error to catch; the confirming broadcast is the whole of
+// the feedback, and a mutation the session refuses looks exactly like one it
+// accepted except that the queue comes back unchanged. That is why this client
+// never draws an optimistic queue: the one thing it could do wrong is show a
+// row moving that the session did not move.
+// ---------------------------------------------------------------------------
+
+/**
+ * One image a queued prompt is carrying (`types.rs`, `QueueImageWire`).
+ *
+ * A manifest, not a transfer: the encoded bytes stay in the session's own copy
+ * of the prompt blocks and never ride the broadcast, which goes to every
+ * attached client on every mutation. What it buys is the end of a guess — the
+ * row text carries `[Image #N]` placeholders, and this says which of those the
+ * session actually holds, so an edit box does not look like it is throwing the
+ * pictures away.
+ */
+export interface QueueImageWire {
+  /** The `N` of the row text's `[Image #N]` placeholder, not the list index. */
+  displayNumber?: number;
+  /** `image/png` and friends, when the session recorded one. */
+  mimeType?: string | null;
+}
+
+/**
+ * One queued prompt (`types.rs`, `QueueEntryWire`).
+ *
+ * The running turn is never in here: it is drawn from the transcript like any
+ * other turn, and the queue is what has not started.
+ */
+export interface QueueEntryWire {
+  id: string;
+  /**
+   * Bumped on every in-place edit, and sent back on `remove` and `interject`.
+   *
+   * A mutation naming a stale version is a no-op plus a rebroadcast, which is
+   * how two clients editing one row settle without either of them locking it.
+   */
+  version?: number;
+  /** The client that enqueued it; never overwritten by an edit. */
+  owner?: string | null;
+  /** The client that last edited it. */
+  lastEditor?: string | null;
+  /** `prompt`, `bash`, `command`, `cron`, `parent_agent_message`, … */
+  kind?: string;
+  text?: string;
+  /** Per-prompt texts when several follow-ups were combined (length ≥ 2). */
+  combinedTexts?: string[] | null;
+  /** 0-based position among queued, not-yet-running prompts. */
+  position?: number;
+  /**
+   * Whether the session will accept an edit, reorder, remove or send-now here.
+   *
+   * The bit the mutation handlers themselves gate on
+   * (`queue_mutation.rs`, `editable_queue_meta_matches`), put on the wire so a
+   * client stops inferring it from {@link kind}. `undefined` is an agent too old
+   * to say, and the fallback is the rule that guess used to be — a parent
+   * agent's message is protected, everything else is not — which was right only
+   * because exactly one origin is protected and its kind is named after it.
+   */
+  editable?: boolean | null;
+  /**
+   * The images this row carries, in the order the session holds them.
+   *
+   * `undefined` from an agent too old to answer, which is not the same as `[]`:
+   * an agent that answers at all answers for every row, so an empty list means
+   * "this row has none" and absence means nobody asked this agent.
+   */
+  images?: QueueImageWire[] | null;
+}
+
+/**
+ * `x.ai/queue/changed`'s params, and `session/info`'s `queue`
+ * (`types.rs`, `QueueChanged`).
+ *
+ * The running fields are carried explicitly because the running row is *not* in
+ * {@link entries}; they are what lets a client name the turn a send-now would
+ * be interrupting without keeping a mirror of its own.
+ */
+export interface QueueChanged {
+  sessionId?: string;
+  entries?: QueueEntryWire[];
+  runningPromptId?: string | null;
+  runningText?: string | null;
+  runningKind?: string | null;
+  runningCombinedTexts?: string[] | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -34,6 +34,7 @@ import {
   rewindExecuteParams,
   rewindLabel,
 } from "../src/rewind.ts";
+import { createQueue } from "../src/queue.ts";
 import { createSubagents } from "../src/subagents.ts";
 import { createTranscript } from "../src/transcript.ts";
 import type { RosterEntry, SessionUpdate } from "../src/wire.ts";
@@ -551,7 +552,7 @@ describe("the phase a browser cannot offer", () => {
     // phase is not to open the picker at all.
     const transcript = createTranscript();
     const gateway = {
-      attached: () => ({ entry: ENTRY, transcript, subagents: createSubagents(ENTRY.sessionId) }),
+      attached: () => ({ entry: ENTRY, transcript, subagents: createSubagents(ENTRY.sessionId), queue: createQueue() }),
       permissions: [],
       folderTrusts: [],
       sessionMode: () => null,

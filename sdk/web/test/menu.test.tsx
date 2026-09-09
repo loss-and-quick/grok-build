@@ -7,6 +7,7 @@ import { render } from "@solidjs/testing-library";
 
 import { Session } from "../src/components/Session.tsx";
 import type { Gateway } from "../src/gateway.ts";
+import { createQueue } from "../src/queue.ts";
 import { createSubagents } from "../src/subagents.ts";
 import { createTranscript } from "../src/transcript.ts";
 import type { AvailableCommand, RosterEntry } from "../src/wire.ts";
@@ -53,7 +54,7 @@ function stub(over: Partial<Gateway> = {}): { gateway: Gateway; sent: string[] }
   // gateway shape this client never produces.
   const subagents = createSubagents(ENTRY.sessionId);
   const gateway = {
-    attached: () => ({ entry: ENTRY, transcript, subagents }),
+    attached: () => ({ entry: ENTRY, transcript, subagents, queue: createQueue() }),
     permissions: [],
     folderTrusts: [],
     sessionMode: () => null,

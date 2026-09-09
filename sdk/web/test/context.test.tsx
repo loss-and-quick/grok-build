@@ -34,6 +34,7 @@ import {
 } from "../src/context.ts";
 import { createGateway, type Gateway } from "../src/gateway.ts";
 import type { SocketLike } from "../src/client.ts";
+import { createQueue } from "../src/queue.ts";
 import { createSubagents } from "../src/subagents.ts";
 import { createTranscript } from "../src/transcript.ts";
 import type { ContextFacts, RosterEntry, SessionUpdate } from "../src/wire.ts";
@@ -306,7 +307,7 @@ function railWith(info: { contextFacts?: ContextFacts } | null, panels: [string,
     } as SessionUpdate);
   }
   const gateway = {
-    attached: () => ({ entry: ENTRY, transcript, subagents: createSubagents(ENTRY.sessionId) }),
+    attached: () => ({ entry: ENTRY, transcript, subagents: createSubagents(ENTRY.sessionId), queue: createQueue() }),
     sessionInfo: () => info,
     refreshSessionInfo: async () => {},
     panelAction: async () => {},

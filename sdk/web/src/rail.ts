@@ -96,11 +96,40 @@ export function fmtElapsed(seconds: number): string {
  * rail was asked for that is neither: `dock.rs` has only list sections because
  * every one of its four *is* a list, and a client that filed the context
  * breakdown as two capped rows would be inventing a shape neither product has.
+ *
+ * **Queued is a `widget`, and there is no fourth shape.** It reads like a list —
+ * it is a count of queued prompts — but its shape is the context window's: one
+ * header line and one body, with the cursor landing on the header and Tab
+ * reaching what is inside. `dock.rs` says the same thing in its own vocabulary:
+ * `DockData::rows(Queued)` returns `&[]`, the section has no `expanded` flag,
+ * and `visual_rows` pushes its header and nothing else, with "the Queued
+ * section embeds the queue pane as its body". The two things that made it look
+ * like a fourth kind are a count in the header and disappearing when that count
+ * is zero — and a count is a field, not a shape, while disappearing is what
+ * every counted section already does.
  */
 export type RailSection =
   | { kind: "list"; key: string; label: string; rows: readonly RailRow[] }
-  | { kind: "widget"; key: string; label: string; note?: string }
+  | { kind: "widget"; key: string; label: string; note?: string; count?: number }
   | { kind: "panel"; key: string; label: string; source: string };
+
+/**
+ * The number in a section's header, when it has one.
+ *
+ * A list counts its rows. A widget counts whatever its body is a view of, and
+ * usually that is nothing countable — the context window is a bar, not a
+ * quantity of things — so the field is optional. A panel has no count at all;
+ * it has a source, which is a different fact in the same place.
+ *
+ * This exists so {@link sectionShown} has one thing to ask. `dock.rs`'s
+ * emptiness rule is stated over counts, and it was stated over *list* rows here
+ * only because until the queue arrived every counted section was a list.
+ */
+export function countOf(section: RailSection): number | undefined {
+  if (section.kind === "list") return section.rows.length;
+  if (section.kind === "widget") return section.count;
+  return undefined;
+}
 
 /** One painted line of the rail, in order. */
 export type RailVisual =
@@ -116,14 +145,18 @@ export type RailItem = Extract<RailVisual, { kind: "header" | "row" }>;
  * Whether a section is drawn at all.
  *
  * `dock.rs`: a section with a zero count is skipped, and a dock whose sections
- * are all zero renders nothing. A panel section is never empty in that sense —
- * publishing one *is* the plugin asking for the space, which is why it has no
- * count to be zero — and neither is a built-in widget: whoever supplies one has
- * already decided it has something to say, and a widget with nothing is simply
- * not supplied. The emptiness rule is about counts, and only lists have one.
+ * are all zero renders nothing. The rule is about counts and nothing else — a
+ * panel section has none, because publishing a panel *is* the plugin asking for
+ * the space, and an uncounted widget has none because whoever supplies one has
+ * already decided it has something to say.
+ *
+ * So a widget that *does* carry a count obeys the rule, and the queue is the
+ * reason that sentence is here: it is the first section whose body is not rows
+ * and whose presence is still a question the count answers.
  */
 export function sectionShown(section: RailSection): boolean {
-  return section.kind !== "list" || section.rows.length > 0;
+  const count = countOf(section);
+  return count === undefined || count > 0;
 }
 
 /** How many rows a list section draws before the "N more" line. */
