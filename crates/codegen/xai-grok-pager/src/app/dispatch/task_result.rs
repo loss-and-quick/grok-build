@@ -1571,6 +1571,18 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             tracing::warn!(error = %error, "bundle status fetch failed");
             vec![]
         }
+        TaskResult::ResolvedCatalogReady { agent_id, response } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.providers_catalog = std::rc::Rc::new(
+                    crate::acp::resolved_catalog::ResolvedCatalog::from_response(response),
+                );
+            }
+            vec![]
+        }
+        TaskResult::ResolvedCatalogFailed { error } => {
+            tracing::warn!(error = %error, "resolved catalog fetch failed");
+            vec![]
+        }
         TaskResult::PersonasReady {
             agent_id,
             personas,

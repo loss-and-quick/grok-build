@@ -3628,3 +3628,53 @@ fn a_failed_persona_request_only_leaves_a_message() {
     assert!(modal.personas.is_empty());
     assert!(modal.message.is_some());
 }
+
+// ---------------------------------------------------------------------------
+// The resolved catalog over the wire
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolved_catalog_ready_indexes_into_the_providers_panel() {
+    let mut app = test_app_with_agent();
+
+    dispatch(
+        Action::TaskComplete(TaskResult::ResolvedCatalogReady {
+            agent_id: AgentId(0),
+            response: xai_grok_shell::extensions::providers::ResolvedCatalogResponse {
+                entries: vec![xai_grok_shell::extensions::providers::ResolvedModelEntry {
+                    key: "acme/some-model".into(),
+                    provider: Some("acme".into()),
+                    facts: xai_grok_shell::extensions::providers::ResolvedModelFacts {
+                        wire_slug: "some-model-wire".into(),
+                        endpoint: "api.example.test/v1".into(),
+                        ..Default::default()
+                    },
+                }],
+            },
+        }),
+        &mut app,
+    );
+
+    let catalog = &app.agents[&AgentId(0)].providers_catalog;
+    assert_eq!(
+        catalog.get("acme/some-model").expect("entry").wire_slug,
+        "some-model-wire"
+    );
+    assert_eq!(catalog.provider_for("acme/some-model"), Some("acme"));
+}
+
+/// A shell too old to answer leaves the panel on whatever it had; the panel
+/// already knows how to render a row from ACP `_meta` alone.
+#[test]
+fn a_failed_resolved_catalog_leaves_the_panel_alone() {
+    let mut app = test_app_with_agent();
+
+    dispatch(
+        Action::TaskComplete(TaskResult::ResolvedCatalogFailed {
+            error: "method not found".into(),
+        }),
+        &mut app,
+    );
+
+    assert!(app.agents[&AgentId(0)].providers_catalog.is_empty());
+}

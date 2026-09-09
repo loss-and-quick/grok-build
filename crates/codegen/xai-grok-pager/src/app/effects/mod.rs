@@ -4285,6 +4285,48 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::FetchResolvedCatalog { agent_id } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let request = acp::ExtRequest::new(
+                        "x.ai/models/resolved",
+                        serde_json::value::to_raw_value(&serde_json::json!({}))
+                            .expect("serialize models/resolved params")
+                            .into(),
+                    );
+                    match acp_send(request, &tx).await {
+                        Ok(resp) => {
+                            // A shell too old to know the method answers with a
+                            // JSON-RPC error rather than a catalog. That is the
+                            // same nothing an unreadable config produces, and
+                            // the panel already knows how to draw nothing.
+                            match serde_json::from_str::<
+                                crate::acp::resolved_catalog::ResolvedCatalogResponse,
+                            >(resp.0.get()) {
+                                Ok(response) => {
+                                    TaskResult::ResolvedCatalogReady {
+                                        agent_id,
+                                        response,
+                                    }
+                                }
+                                Err(e) => {
+                                    TaskResult::ResolvedCatalogFailed {
+                                        error: format!("couldn't parse resolved catalog: {e}"),
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            TaskResult::ResolvedCatalogFailed {
+                                error: sanitize_user_error(
+                                    &format!("couldn't fetch resolved catalog: {e}"),
+                                ),
+                            }
+                        }
+                    }
+                });
+        }
         Effect::RefreshAvailableCommands { agent_id, session_id } => {
             let tx = acp_tx.clone();
             tasks

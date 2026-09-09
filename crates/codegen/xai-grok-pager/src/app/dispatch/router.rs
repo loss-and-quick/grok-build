@@ -1605,7 +1605,12 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                     agent.open_providers_panel();
                 }
             });
-            vec![]
+            match app.active_view {
+                ActiveView::Agent(agent_id) if opening => {
+                    vec![Effect::FetchResolvedCatalog { agent_id }]
+                }
+                _ => vec![],
+            }
         }
         Action::Rewind => dispatch_rewind(app),
         Action::RewindShowPicker => dispatch_rewind_show_picker(app),

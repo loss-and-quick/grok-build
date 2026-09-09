@@ -566,7 +566,7 @@ pub const PAGER_COMMAND_KEYS: &[(&str, CommandSurface)] = &[
     ("preferences", CommandSurface::Any),
     ("prefs", CommandSurface::Any),
     ("privacy", CommandSurface::Any),
-    ("providers", CommandSurface::WireMissing), // re-reads `config.toml` to resolve per-provider endpoints and slugs
+    ("providers", CommandSurface::Any), // the post-override facts cross as `x.ai/models/resolved`
     ("queue", CommandSurface::Any),
     ("quit", CommandSurface::Any),
     ("recap", CommandSurface::Any),

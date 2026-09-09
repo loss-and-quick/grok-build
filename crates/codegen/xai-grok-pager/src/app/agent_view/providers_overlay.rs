@@ -11,12 +11,15 @@ use crate::views::providers::{ProviderGroup, build_groups, flatten};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 
 impl AgentView {
-    /// Open the panel, resolving the post-override catalog once. The resolve
-    /// reads config files, which is why it happens here (an explicit user
-    /// action) and not per frame.
+    /// Open the panel and ask the shell for the post-override catalog. The
+    /// resolve reads config files, which is why it is one request on an
+    /// explicit user action and not a per-frame call — and why it is the
+    /// shell's read rather than this process's: a client that is not sitting on
+    /// the config's disk has no other way to see it.
+    ///
+    /// The panel opens on whatever it last had; the answer replaces it when it
+    /// arrives.
     pub(crate) fn open_providers_panel(&mut self) {
-        self.providers_catalog =
-            std::rc::Rc::new(crate::acp::resolved_catalog::ResolvedCatalog::load());
         self.providers_view.reset();
         self.show_providers = true;
     }
@@ -199,7 +202,9 @@ mod tests {
         let cfg = xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw)
             .expect("fixture builds a config");
         agent.providers_catalog = std::rc::Rc::new(
-            crate::acp::resolved_catalog::ResolvedCatalog::from_agent_config(&cfg),
+            crate::acp::resolved_catalog::ResolvedCatalog::from_response(
+                xai_grok_shell::extensions::providers::resolve(&cfg),
+            ),
         );
         for key in [
             "acme/some-model",

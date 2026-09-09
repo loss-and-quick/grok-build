@@ -4,7 +4,10 @@
 //! declares. Every row is assembled from the live ACP catalog (the row set and
 //! everything its `_meta` carries) enriched with
 //! [`crate::acp::resolved_catalog::ResolvedCatalog`] (the post-override wire
-//! slug, endpoint, wire format and output ceiling).
+//! slug, endpoint, wire format and output ceiling), which the shell resolves
+//! and answers with over `x.ai/models/resolved`. The resolution used to run in
+//! this process against the pager's own copy of `config.toml`; it does not any
+//! more, so a client that is not sitting on that disk sees the same panel.
 //!
 //! Two disagreements between declared and resolved are called out as badges,
 //! visible without expanding a row, because both have shipped as silent bugs:
@@ -68,7 +71,7 @@ pub struct ProviderModelRow {
     pub supports_effort: bool,
     pub origin: RowOrigin,
     /// Fields a `[model."<key>"]` table set over a `[[provider]]` default.
-    pub overrides: Vec<&'static str>,
+    pub overrides: Vec<String>,
     /// The entry carries its own credential. Presence only, never the value.
     pub own_credentials: bool,
     pub is_current: bool,
@@ -737,7 +740,9 @@ mod tests {
     fn resolved_from(toml_src: &str) -> ResolvedCatalog {
         let raw: toml::Value = toml::from_str(toml_src).expect("fixture parses");
         let cfg = AgentConfig::new_from_toml_cfg(&raw).expect("fixture builds a config");
-        ResolvedCatalog::from_agent_config(&cfg)
+        // Through the wire shape the panel actually receives, so a fixture that
+        // passes here is one the shell can really answer with.
+        ResolvedCatalog::from_response(xai_grok_shell::extensions::providers::resolve(&cfg))
     }
 
     fn model_state(entries: &[(&str, &str, serde_json::Value)]) -> ModelState {

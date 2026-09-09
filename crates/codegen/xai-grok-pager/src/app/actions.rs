@@ -1944,6 +1944,13 @@ pub enum Effect {
     },
     /// Fetch current bundle cache status via `x.ai/bundle/status`.
     FetchBundleStatus,
+    /// Fetch the post-override catalog facts via `x.ai/models/resolved`.
+    ///
+    /// Dispatched when the `/providers` panel opens rather than per frame: the
+    /// shell reads config files to answer it, and the panel is an explicit user
+    /// action. The panel opens on whatever it already had and redraws when this
+    /// lands, so a slow answer is a late panel, never a missing one.
+    FetchResolvedCatalog { agent_id: AgentId },
     /// Fetch the persona catalog via `x.ai/personas/list`.
     ///
     /// Dispatched when the agents modal opens and again after every write, so
@@ -2924,6 +2931,17 @@ pub enum TaskResult {
     },
     /// Bundle status fetch failed.
     BundleStatusFailed {
+        error: String,
+    },
+    /// Post-override catalog facts fetched for the `/providers` panel.
+    ResolvedCatalogReady {
+        agent_id: AgentId,
+        response: crate::acp::resolved_catalog::ResolvedCatalogResponse,
+    },
+    /// The resolved-catalog fetch failed. The panel keeps whatever it had and
+    /// falls back to ACP `_meta`, which is the same thing it shows for a
+    /// prefetch-only entry, so there is nothing to interrupt the user with.
+    ResolvedCatalogFailed {
         error: String,
     },
     /// The persona catalog, as `x.ai/personas/list` answered.
