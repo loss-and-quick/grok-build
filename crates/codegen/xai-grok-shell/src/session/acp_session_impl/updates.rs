@@ -849,7 +849,8 @@ impl SessionActor {
             ));
     }
     /// Persist an xAI extension notification to `updates.jsonl` **without** sending it to the gateway/UI.
-    /// Used for internal bookkeeping updates like `CompactionCheckpoint` and `RewindMarker` that are only relevant during replay.
+    /// Used for internal bookkeeping updates like `CompactionCheckpoint` and `HookAnnotation` that are only relevant during replay.
+    /// A `RewindMarker` is no longer one of them: it records a change to shared state the other clients are rendering, so it goes out live too (`rewind.rs`).
     pub(super) fn persist_xai_update_only(&self, update: XaiSessionUpdate) {
         let notification = XaiSessionNotification {
             session_id: self.session_info.id.clone(),

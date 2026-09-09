@@ -432,10 +432,20 @@ impl SessionActor {
             self.rearm_failed_server_announcements().await;
 
             // Append a RewindMarker to updates.jsonl so replay can handle a branched timeline (updates.jsonl is append-only)
-            self.persist_xai_update_only(XaiSessionUpdate::RewindMarker {
+            //
+            // Sent as well as persisted. A rewind is not a question addressed to the client that asked it — it is a
+            // completed mutation of state every attached client is already rendering, and the ones that did not ask
+            // were left showing turns the session no longer has until they reloaded. This carries a `sessionId`, so
+            // it fans out to that session's subscribers under the same rule as every other turn delta and reaches no
+            // client that is not watching this session (`leader/server.rs`, session_subscribers fan-out).
+            //
+            // Replay is unaffected: `filter_rewind_lines` (`session/storage/mod.rs:1602`) drops markers along with the
+            // branch they cut, so no client ever receives one as history and none can act on it twice.
+            self.send_xai_notification(XaiSessionUpdate::RewindMarker {
                 target_prompt_index: target_index,
                 created_at: chrono::Utc::now().to_rfc3339(),
-            });
+            })
+            .await;
 
             // The turn summary and recap describe turns the rewind just removed
             // Abort in-flight side-calls and clear the persisted copies so session lists don't show stale work

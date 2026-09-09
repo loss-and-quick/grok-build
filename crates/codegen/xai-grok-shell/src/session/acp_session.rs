@@ -1844,6 +1844,9 @@ mod replay_buffer_send_update_tests;
 #[path = "acp_session_tests/reverse_request_session_id_tests.rs"]
 mod reverse_request_session_id_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/rewind_broadcast_tests.rs"]
+mod rewind_broadcast_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/rewind_cross_compaction_tests.rs"]
 mod rewind_cross_compaction_tests;
 #[cfg(test)]

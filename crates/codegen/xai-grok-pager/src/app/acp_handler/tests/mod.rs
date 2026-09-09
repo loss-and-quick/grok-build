@@ -2357,3 +2357,4 @@ mod models;
 mod mcp;
 mod git_head;
 mod version_mismatch;
+mod rewind;

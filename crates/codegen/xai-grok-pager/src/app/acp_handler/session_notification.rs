@@ -275,6 +275,56 @@ fn synthesize_replay_turn_marker(
 ///
 /// Routes by `session_id` so events for an inactive agent still mutate that agent's state.
 /// The redraw decision is gated on whether the matched agent is the currently visible one.
+/// Somebody else rewound this session.
+///
+/// The marker is the agent saying the shared transcript now ends before `target_prompt_index`. Every other attached
+/// client is still rendering the turns past that point, and nothing else on the wire says they are gone: the state is
+/// persisted and shared, so the screen here is simply wrong until the session is read again.
+///
+/// The action is the truncation the client that asked for the rewind already performs on its own response
+/// ([`crate::app::dispatch::rewind::dispatch_rewind_success`]): find the prompt the cut targets and drop it and
+/// everything after it. Nothing is reloaded — the pager trusts this same cut for its own rewinds, and a reload would
+/// throw away a transcript that agrees with the agent everywhere below the cut.
+///
+/// **A rewind this client started is skipped.** The marker goes out before the `x.ai/rewind/execute` response
+/// (`session/acp_session_impl/rewind.rs`), so acting on it here would run the truncation with that response's draft
+/// restoration, inline resubmit and confirmation still to come — and would tell the user someone else did what they
+/// just did themselves. `Executing` is entered at the single site that emits `Effect::RewindExecute`.
+///
+/// An open picker or confirm dialog is closed rather than left listing prompts the session no longer has; its stashed
+/// draft goes back to the composer, which is where every other exit from that flow leaves it.
+fn apply_remote_rewind(agent: &mut AgentView, target_prompt_index: usize) -> bool {
+    use crate::views::rewind::RewindPhase;
+    if matches!(
+        agent.rewind_state.as_ref().map(|s| &s.phase),
+        Some(RewindPhase::Executing { .. })
+    ) {
+        return false;
+    }
+    if let Some(stashed) = agent.rewind_state.take().and_then(|s| s.stashed_draft) {
+        agent.prompt.restore(stashed);
+    }
+    agent.rewind_points = None;
+    // The summary and the cached points both describe turns that are gone; the truncation itself is what may find
+    // nothing to do, and a client whose transcript never reached that prompt is still owed the rest of this.
+    agent.set_last_turn_summary(None);
+    if let Some(anchor) = crate::app::dispatch::find_user_prompt_entry_for_shell_index(
+        &agent.scrollback,
+        target_prompt_index,
+    ) {
+        // Explicit drop before the release, as the local rewind path does: the rewound tail is most of what there is to
+        // return.
+        drop(agent.scrollback.remove_from(anchor));
+        crate::memory_release::release_retained_memory("rewind-truncate-remote");
+    }
+    // A block rather than a toast: minimal mode draws no toasts, and turns leaving the screen is not something to say
+    // only where there is room for it.
+    agent.scrollback.push_block(RenderBlock::system(
+        "Another client reverted this conversation".to_string(),
+    ));
+    agent.scrollback.goto_bottom();
+    true
+}
 pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     handle_session_notification_with_origin(notif, app, LifecycleOrigin::Stream)
 }
@@ -1432,6 +1482,10 @@ pub(super) fn handle_session_notification_with_origin(
             status_snapshot_applied = true;
             false
         }
+        XaiSessionUpdate::RewindMarker {
+            target_prompt_index,
+            ..
+        } => apply_remote_rewind(agent, target_prompt_index),
         _ => {
             tracing::trace!(
                 "Ignoring {}: {:?}",
