@@ -808,6 +808,7 @@ fn cancel_turn_leaves_shared_queue_for_agent_to_drain() {
         agent.session.state = AgentState::TurnRunning;
         agent.shared_queue = vec![
             QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "q1".into(),
                 version: 3,
@@ -819,6 +820,7 @@ fn cancel_turn_leaves_shared_queue_for_agent_to_drain() {
                 combined_texts: None,
             },
             QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "q2".into(),
                 version: 4,

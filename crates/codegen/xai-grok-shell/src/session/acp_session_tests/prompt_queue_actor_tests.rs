@@ -4175,3 +4175,69 @@ async fn queue_rows_carry_whether_the_session_will_take_a_mutation() {
         })
         .await;
 }
+
+/// A queue row that carries images says so, and an edit does not silently detach them.
+///
+/// The bytes deliberately stay off the wire: the broadcast is a listing, and a client has no way
+/// to send an attachment back through it anyway. What the row owes a client is the truth about
+/// what will run — before this it said nothing, so every client drew an image prompt as bare text
+/// and offered an edit that looked like it was throwing the pictures away.
+#[tokio::test]
+async fn queue_wire_lists_a_rows_images_and_an_edit_keeps_them() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                let mut item = user_item("p1", "alice");
+                item.prompt_blocks = vec![
+                    acp::ContentBlock::Text(acp::TextContent::new(
+                        "look at [Image #1]".to_string(),
+                    )),
+                    acp::ContentBlock::Image(
+                        acp::ImageContent::new("Zm9v".to_string(), "image/png".to_string()).meta(
+                            Some(xai_grok_shared::placeholder_images::display_number_meta(1)),
+                        ),
+                    ),
+                ];
+                item.queue_meta.as_mut().unwrap().text = "look at [Image #1]".to_string();
+                state.pending_inputs.push_back(item);
+                state.pending_inputs.push_back(user_item("p2", "alice"));
+            }
+
+            {
+                let state = actor.state.lock().await;
+                let wire = actor.build_queue_wire(&state);
+                let listed = wire[0].images.as_ref().expect("the session always answers");
+                assert_eq!(listed.len(), 1);
+                assert_eq!(listed[0].display_number, 1, "matches the text placeholder");
+                assert_eq!(listed[0].mime_type.as_deref(), Some("image/png"));
+                assert!(
+                    !serde_json::to_string(&wire[0]).unwrap().contains("Zm9v"),
+                    "a listing must not ship the bytes"
+                );
+                assert_eq!(
+                    wire[1].images.as_ref().map(Vec::len),
+                    Some(0),
+                    "a row with none says so rather than saying nothing"
+                );
+            }
+
+            assert!(
+                actor
+                    .handle_edit_queued_prompt("p1", "look again at [Image #1]".into(), Some("bob"))
+                    .await
+            );
+
+            let state = actor.state.lock().await;
+            let wire = actor.build_queue_wire(&state);
+            assert_eq!(wire[0].text, "look again at [Image #1]");
+            assert_eq!(
+                wire[0].images.as_ref().map(Vec::len),
+                Some(1),
+                "an edit replaces what the user wrote, not what the user attached"
+            );
+        })
+        .await;
+}

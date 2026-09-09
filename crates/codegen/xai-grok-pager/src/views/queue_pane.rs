@@ -1122,6 +1122,7 @@ mod tests {
 
     fn wire(id: &str, text: &str, pos: usize) -> QueueEntryWire {
         QueueEntryWire {
+            images: None,
             editable: None,
             id: id.into(),
             version: 0,

@@ -1640,6 +1640,7 @@ fn turn_end_with_shared_queue_does_not_fetch_prompt_suggestion() {
         agent
             .shared_queue
             .push(crate::app::prompt_queue::QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "q1".into(),
                 version: 1,
@@ -2225,6 +2226,7 @@ fn cancel_hands_queue_to_agent_without_reordering() {
         session_id: sid.clone(),
         entries: vec![
             QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "q2".into(),
                 version: 0,
@@ -2236,6 +2238,7 @@ fn cancel_hands_queue_to_agent_without_reordering() {
                 combined_texts: None,
             },
             QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "q3".into(),
                 version: 0,
@@ -2286,6 +2289,7 @@ fn rekeyed_broadcast_reconciles_optimistic_echo_by_text() {
     app.apply_queue_changed(QueueChanged {
         session_id: sid.clone(),
         entries: vec![QueueEntryWire {
+            images: None,
             editable: None,
             id: "shell-id".into(),
             version: 0,
@@ -2319,6 +2323,7 @@ fn rekeyed_broadcast_reconciles_optimistic_echo_by_text() {
     app.apply_queue_changed(QueueChanged {
         session_id: sid.clone(),
         entries: vec![QueueEntryWire {
+            images: None,
             editable: None,
             id: "shell-id-2".into(),
             version: 0,
@@ -2354,6 +2359,7 @@ fn rekeyed_broadcast_reconciles_optimistic_echo_by_text() {
     app.apply_queue_changed(QueueChanged {
         session_id: sid.clone(),
         entries: vec![QueueEntryWire {
+            images: None,
             editable: None,
             id: "shell-id-3".into(),
             version: 0,
@@ -3873,6 +3879,7 @@ fn plain_send_during_pending_subagent_wait_keeps_confirmed_queue_row_reachable()
         assert_eq!(
             agent.shared_queue.as_slice(),
             [QueueEntryWire {
+                images: None,
                 editable: None,
                 id: prompt_id.clone(),
                 version: AUTH_VERSION,
@@ -4327,6 +4334,7 @@ fn local_drain_holds_while_server_row_queued() {
     enqueue_local(&mut app, id, "local follow-up");
     app.agents.get_mut(&id).unwrap().shared_queue =
         vec![crate::app::prompt_queue::QueueEntryWire {
+            images: None,
             editable: None,
             id: "srv-1".into(),
             version: 0,

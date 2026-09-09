@@ -1489,6 +1489,7 @@ mod tests {
     fn seed_shared_row(app: &mut AppView, id: AgentId) {
         app.agents.get_mut(&id).unwrap().shared_queue =
             vec![crate::app::prompt_queue::QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "p1".into(),
                 version: 2,
@@ -1960,6 +1961,7 @@ mod tests {
         agent.start_turn_boundary(Some("p-front"));
         agent.session.current_prompt_id = Some("p-front".into());
         agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+            images: None,
             editable: None,
             id: "p-next".into(),
             version: 1,
@@ -2413,6 +2415,7 @@ mod tests {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.session.state = AgentState::TurnRunning;
             agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "p-ty".into(),
                 version: 1,
@@ -2459,6 +2462,7 @@ mod tests {
         let id = AgentId(0);
         app.agents.get_mut(&id).unwrap().shared_queue =
             vec![crate::app::prompt_queue::QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "p-idle".into(),
                 version: 1,
@@ -2485,6 +2489,7 @@ mod tests {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.session.state = AgentState::TurnRunning;
             agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "p-bash".into(),
                 version: 1,
@@ -2652,6 +2657,7 @@ mod tests {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.session.state = AgentState::TurnRunning;
             agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "p-ed".into(),
                 version: 1,
@@ -2719,6 +2725,7 @@ mod tests {
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+            images: None,
             editable: None,
             id: "p-drop".into(),
             version: 1,
@@ -3273,6 +3280,7 @@ mod tests {
 
         // A server row (renders first in the merge) is always sendable.
         agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+            images: None,
             editable: None,
             id: "srv-1".into(),
             version: 0,
@@ -3307,6 +3315,7 @@ mod tests {
         agent.expect_send_now_cancel = Some("send-now-echo".into());
         agent.shared_queue = vec![
             crate::app::prompt_queue::QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "send-now-echo".into(),
                 version: 0,
@@ -3318,6 +3327,7 @@ mod tests {
                 combined_texts: None,
             },
             crate::app::prompt_queue::QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "held-1".into(),
                 version: 0,
@@ -3359,6 +3369,7 @@ mod tests {
         agent
             .shared_queue
             .push(crate::app::prompt_queue::QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "held-2".into(),
                 version: 0,
@@ -3397,6 +3408,7 @@ mod tests {
 
         agent.expect_send_now_cancel = Some("send-now-echo".into());
         agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+            images: None,
             editable: None,
             id: "send-now-echo".into(),
             version: 0,

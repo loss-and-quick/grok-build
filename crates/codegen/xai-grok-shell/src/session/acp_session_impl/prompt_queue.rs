@@ -382,6 +382,39 @@ impl SessionActor {
         cancel_running_turn
     }
 
+    /// Describe the images a queued prompt carries, for the shared queue listing.
+    ///
+    /// The bytes are deliberately left behind: the queue broadcast goes to every
+    /// attached client on every mutation, and a client has nothing it could send
+    /// an attachment back through anyway (`x.ai/queue/edit` takes text). What a
+    /// client cannot do without this is tell the truth about the row — the text
+    /// says `[Image #1]` and, until now, nothing on the wire said whether this
+    /// session was still holding a picture to go with it.
+    ///
+    /// The display number comes from the block's own `_meta` so it keeps
+    /// matching the placeholder in the text; the positional fallback mirrors
+    /// [`xai_grok_shared::placeholder_images::display_number_from_meta`]'s only
+    /// other reader.
+    fn queue_images_from_blocks(
+        blocks: &[acp::ContentBlock],
+    ) -> Vec<xai_prompt_queue::QueueImageWire> {
+        blocks
+            .iter()
+            .filter_map(|block| match block {
+                acp::ContentBlock::Image(image) => Some(image),
+                _ => None,
+            })
+            .enumerate()
+            .map(|(idx, image)| xai_prompt_queue::QueueImageWire {
+                display_number: xai_grok_shared::placeholder_images::display_number_from_meta(
+                    image.meta.as_ref(),
+                )
+                .unwrap_or(idx + 1),
+                mime_type: Some(image.mime_type.clone()).filter(|m| !m.is_empty()),
+            })
+            .collect()
+    }
+
     /// Extract a plain-text summary of a prompt's content blocks for the shared queue display.
     ///
     /// Prefers a block's `displayText` meta (the compact user-facing form, e.g. `/loop 5s echo "x"`) over the raw wire text.
@@ -452,6 +485,13 @@ impl SessionActor {
                 // renders the controls this session will actually honour
                 // instead of inferring them from the kind label.
                 editable: Some(item.is_queue_editable()),
+                // Read off the blocks rather than mirrored into `queue_meta`:
+                // the blocks are what the turn will actually send, and
+                // `apply_queued_prompt_edit` rewrites them, so a second copy
+                // would be a second thing to keep true. Always `Some` — a
+                // session that can look always knows, and an empty list is the
+                // answer "this row has none", not silence.
+                images: Some(Self::queue_images_from_blocks(&item.prompt_blocks)),
             });
         }
         out
@@ -1044,8 +1084,10 @@ impl SessionActor {
     ///
     /// Last write wins via the actor's serialized mailbox.
     /// Concretely, for an entry whose `queue_meta.id == id`:
-    /// 1. Rebuild the underlying `prompt_blocks` as a single [`acp::TextContent`] block carrying `new_text`.
-    ///    (Any non-text blocks such as pasted images on the original prompt are not preserved: the user has explicitly typed replacement text.)
+    /// 1. Rebuild the text of the underlying `prompt_blocks` as a single [`acp::TextContent`] block carrying `new_text`,
+    ///    keeping the prompt's image blocks (see [`Self::apply_queued_prompt_edit`]).
+    ///    An edit replaces what the user wrote, not what the user attached: `x.ai/queue/edit` carries text and nothing else,
+    ///    so dropping the images would make every edit a silent detach no caller asked for and none could undo.
     /// 2. Update `queue_meta.text`, bump `queue_meta.version`, and record `last_editor` (the original `owner` attribution is preserved).
     /// 3. Re-broadcast `x.ai/queue/changed` so every subscriber renders the new text and version.
     ///

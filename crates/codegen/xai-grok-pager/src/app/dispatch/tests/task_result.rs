@@ -3107,6 +3107,7 @@ fn writeback_notice_does_not_restate_the_status_line() {
 
 fn queue_row(id: &str, text: &str, position: usize) -> crate::app::prompt_queue::QueueEntryWire {
     crate::app::prompt_queue::QueueEntryWire {
+        images: None,
         id: id.into(),
         version: 0,
         owner: None,

@@ -20,6 +20,7 @@ mod tests {
         let payload = QueueChanged {
             session_id: "sess-1".to_string(),
             entries: vec![QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "p1".to_string(),
                 version: 0,
@@ -66,6 +67,7 @@ mod tests {
     #[test]
     fn queue_entry_wire_round_trips_last_editor() {
         let entry = QueueEntryWire {
+            images: None,
             editable: None,
             id: "p1".to_string(),
             version: 3,

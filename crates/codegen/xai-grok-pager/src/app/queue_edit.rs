@@ -828,6 +828,7 @@ mod tests {
         agent.session.state = AgentState::Idle;
         agent.shared_queue = vec![
             crate::app::prompt_queue::QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "p1".into(),
                 version: 1,
@@ -839,6 +840,7 @@ mod tests {
                 combined_texts: None,
             },
             crate::app::prompt_queue::QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "p2".into(),
                 version: 1,

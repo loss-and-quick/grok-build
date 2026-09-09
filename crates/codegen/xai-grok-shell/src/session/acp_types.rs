@@ -1078,6 +1078,7 @@ mod tests {
         with_queue.queue = Some(xai_prompt_queue::QueueChanged {
             session_id: "s1".to_string(),
             entries: vec![xai_prompt_queue::QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "p1".to_string(),
                 version: 2,

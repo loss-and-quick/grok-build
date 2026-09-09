@@ -805,6 +805,7 @@ mod queue_edit_routing_tests {
 
     fn server_wire(id: &str, position: usize) -> QueueEntryWire {
         QueueEntryWire {
+            images: None,
             editable: None,
             id: id.into(),
             version: 1,
@@ -821,6 +822,7 @@ mod queue_edit_routing_tests {
         let mut agent = make_running_agent();
         agent.session.pending_prompts.clear();
         agent.shared_queue = vec![QueueEntryWire {
+            images: None,
             editable: None,
             id: "parent-message-msg-1".into(),
             version: 7,
@@ -1414,6 +1416,7 @@ mod queue_edit_routing_tests {
         // Two server rows so a swap is possible.
         agent.shared_queue = vec![
             QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "p1".into(),
                 version: 0,
@@ -1425,6 +1428,7 @@ mod queue_edit_routing_tests {
                 combined_texts: None,
             },
             QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "p2".into(),
                 version: 0,

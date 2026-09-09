@@ -25,6 +25,33 @@ pub struct QueueEntryMeta {
     pub combined_texts: Option<Vec<String>>,
 }
 
+/// One image the session is holding on a queued prompt, as the queue lists it.
+///
+/// A listing, not a transfer. The encoded bytes stay where they already are —
+/// in the session's own copy of the prompt blocks — and never ride this
+/// notification. `x.ai/queue/changed` goes out on every queue mutation to every
+/// attached client, so carrying base64 attachments in it would multiply a
+/// message whose whole job is to say what is queued and in what order by the
+/// size of the pictures.
+///
+/// What it buys a client is the ability to stop guessing. The row text carries
+/// `[Image #N]` placeholders; this says which of those the session actually
+/// holds. Without it a client renders an image prompt as bare text and offers
+/// an edit that looks like it is throwing the pictures away.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueImageWire {
+    /// The `N` of the row text's `[Image #N]` placeholder.
+    ///
+    /// Not the list position: the placeholder is what a reader has to match
+    /// against, and the numbers need not be dense.
+    #[serde(default)]
+    pub display_number: usize,
+    /// Encoded type (`"image/png"` and friends), when the session recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
 /// One queue row on the wire.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -64,6 +91,21 @@ pub struct QueueEntryWire {
     /// takes away every control on the queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editable: Option<bool>,
+    /// The images this row carries, in the order the session holds them.
+    ///
+    /// The session owns them for the row's whole life: `session/prompt` delivers
+    /// them as `ContentBlock::Image`, and an in-place queue edit rebuilds only
+    /// the text block and keeps them. So this is the session re-describing what
+    /// it is already holding, not a client shipping anything back — no queue
+    /// mutation carries attachments, and none needs to.
+    ///
+    /// `None` from an agent too old to say, which is not `Some(vec![])`: an
+    /// agent that answers at all answers for every row, so an empty list means
+    /// "this row has none" and absence means "nobody asked this agent". A client
+    /// that read absence as emptiness would keep drawing image prompts as bare
+    /// text and never find out it was wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<QueueImageWire>>,
 }
 
 /// Broadcast payload for the `x.ai/queue/changed` notification.
@@ -101,6 +143,7 @@ mod tests {
             session_id: "sess-42".into(),
             entries: vec![
                 QueueEntryWire {
+                    images: None,
                     editable: None,
                     id: "p1".into(),
                     version: 3,
@@ -112,6 +155,7 @@ mod tests {
                     combined_texts: None,
                 },
                 QueueEntryWire {
+                    images: None,
                     editable: None,
                     id: "p2".into(),
                     version: 0,
@@ -145,6 +189,7 @@ mod tests {
         let payload = QueueChanged {
             session_id: "s1".into(),
             entries: vec![QueueEntryWire {
+                images: None,
                 editable: None,
                 id: "p1".into(),
                 version: 2,
@@ -246,6 +291,7 @@ mod tests {
         );
 
         let protected = QueueEntryWire {
+            images: None,
             editable: Some(false),
             // Deliberately the ordinary kind: the point of the field is that a
             // row can be protected without the kind label giving it away.
@@ -260,6 +306,7 @@ mod tests {
         );
 
         let open = QueueEntryWire {
+            images: None,
             editable: Some(true),
             ..unsaid
         };
@@ -267,5 +314,60 @@ mod tests {
             serde_json::to_value(&open).unwrap()["editable"],
             serde_json::json!(true)
         );
+    }
+
+    /// A row says which images the session is holding on it.
+    ///
+    /// Absent is "the agent did not say", and an empty list is "this row has
+    /// none". A client that collapsed the two would keep rendering an image
+    /// prompt as bare text against every agent, old or new, and never notice.
+    #[test]
+    fn images_survive_the_wire_and_absence_is_not_emptiness() {
+        let unsaid: QueueEntryWire =
+            serde_json::from_value(serde_json::json!({ "id": "p1" })).unwrap();
+        assert_eq!(unsaid.images, None);
+        assert!(
+            serde_json::to_value(&unsaid)
+                .unwrap()
+                .get("images")
+                .is_none(),
+            "an unanswered row must not look like an answered empty one"
+        );
+
+        let none_on_this_row = QueueEntryWire {
+            images: Some(Vec::new()),
+            ..unsaid.clone()
+        };
+        assert_eq!(
+            serde_json::to_value(&none_on_this_row).unwrap()["images"],
+            serde_json::json!([])
+        );
+
+        let two = QueueEntryWire {
+            // Deliberately not 1 and 2: an edit that dropped `[Image #2]` leaves
+            // the placeholders it did not drop alone, so the numbers have gaps
+            // and a reader must match on them rather than on list position.
+            images: Some(vec![
+                QueueImageWire {
+                    display_number: 1,
+                    mime_type: Some("image/png".into()),
+                },
+                QueueImageWire {
+                    display_number: 3,
+                    mime_type: None,
+                },
+            ]),
+            text: "look at [Image #1] and [Image #3]".into(),
+            ..unsaid
+        };
+        let json = serde_json::to_value(&two).unwrap();
+        assert_eq!(json["images"][0]["displayNumber"], 1);
+        assert_eq!(json["images"][0]["mimeType"], "image/png");
+        assert_eq!(json["images"][1]["displayNumber"], 3);
+        assert!(
+            json["images"][1].get("mimeType").is_none(),
+            "an unrecorded type must not appear as one"
+        );
+        assert_eq!(serde_json::from_value::<QueueEntryWire>(json).unwrap(), two);
     }
 }
