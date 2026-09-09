@@ -73,6 +73,13 @@ pub struct QueuedPrompt {
     pub chip_elements: Vec<ChipElement>,
     /// Combined-turn display segments (always at least two); drain paints one bubble each.
     pub combined_texts: Vec<String>,
+    /// This row is a prompt a hook denied, put back by [`AgentSession::enqueue_in_flight_prompt_front`].
+    ///
+    /// It was the running turn when it was blocked, so it is older than every prompt still queued
+    /// anywhere, and the fix the user sends must run ahead of the followers it was holding up.
+    /// That is the one case where a local row outranks the server queue, and the drain path reads
+    /// this to tell it apart from a row that must wait its turn behind the shell.
+    pub hook_resubmission: bool,
 }
 impl QueuedPrompt {
     /// Base row with every optional field at its default.
@@ -91,6 +98,7 @@ impl QueuedPrompt {
             human_schedule: None,
             chip_elements: Vec::new(),
             combined_texts: Vec::new(),
+            hook_resubmission: false,
         }
     }
     /// Whether the wire payload is exactly the display text.
@@ -956,6 +964,7 @@ impl AgentSession {
         self.pending_prompts.push_front(QueuedPrompt {
             images: prompt.images,
             chip_elements: prompt.chip_elements,
+            hook_resubmission: true,
             ..QueuedPrompt::plain(id, prompt.text, QueueEntryKind::Prompt)
         });
         id

@@ -180,3 +180,101 @@ fn an_ordinary_local_row_still_waits_while_the_server_owns_the_next_turn() {
     );
     assert_eq!(local_texts(&app), vec!["typed while starting"]);
 }
+
+/// The wedge: with the followers on the server queue, both sides park and neither can move.
+///
+/// The blocked prompt sits at the local front, so the local drain is barred by
+/// `server_queue_owns_next_turn`; the shell's own hook-block hold
+/// (`acp_session_impl/notification_drain.rs:178-194`) bars its promote, and only a prompt or a
+/// queue mutation lifts it. Resend released the pager's hold and asked the barred local queue to
+/// drain, which sends nothing — so nothing ever lifts the shell's hold either.
+#[test]
+fn resend_reaches_the_shell_when_the_followers_are_server_rows() {
+    let (mut app, row_id) = blocked_with_server_followers();
+
+    let effects = dispatch(
+        Action::PromptBlockAnswered {
+            row_id,
+            choice: PromptBlockChoice::Resend,
+        },
+        &mut app,
+    );
+
+    let sent = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::SendPromptNow { blocks, .. } => Some(blocks.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("Resend must reach the shell, got {effects:?}"));
+    assert!(
+        sent.iter().any(|b| matches!(
+            b,
+            agent_client_protocol::ContentBlock::Text(t) if t.text == BLOCKED_TEXT
+        )),
+        "the send carries the blocked prompt, got {sent:?}"
+    );
+    assert!(
+        local_texts(&app).is_empty(),
+        "the row leaves the local queue with the send, got {:?}",
+        local_texts(&app)
+    );
+    assert!(
+        !app.agents[&AgentId(0)].session.state.is_turn_running(),
+        "the shell owns the turn start; this client must not promote it locally"
+    );
+}
+
+/// Saving the card's Edit lands in the same place as Resend and must reach the shell too.
+#[test]
+fn saving_the_edited_blocked_row_reaches_the_shell_when_the_followers_are_server_rows() {
+    let (mut app, row_id) = blocked_with_server_followers();
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.enter_queue_edit(row_id, false, None);
+        agent.prompt.set_text("deploy nice to prod");
+        assert!(matches!(
+            agent.save_edited_queued_row(row_id, None, true),
+            crate::app::app_view::InputOutcome::Action(Action::DrainQueue)
+        ));
+    }
+
+    let effects = dispatch(Action::DrainQueue, &mut app);
+
+    let sent = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::SendPromptNow { blocks, .. } => Some(blocks.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the saved edit must reach the shell, got {effects:?}"));
+    assert!(
+        sent.iter().any(|b| matches!(
+            b,
+            agent_client_protocol::ContentBlock::Text(t) if t.text == "deploy nice to prod"
+        )),
+        "the send carries the edited text, got {sent:?}"
+    );
+    assert!(local_texts(&app).is_empty());
+}
+
+/// The reroute is the card's resubmission, not a way around it: while the card is still open the
+/// hold is armed, and an unrelated drain must not put the blocked prompt on the wire behind the
+/// user's back.
+#[test]
+fn an_unanswered_card_keeps_the_blocked_prompt_off_the_wire() {
+    let (mut app, _row_id) = blocked_with_server_followers();
+    assert!(app.agents[&AgentId(0)].session.hook_block_hold);
+
+    let effects = dispatch(Action::DrainQueue, &mut app);
+
+    assert!(
+        effects.is_empty(),
+        "the card is unanswered; nothing may send, got {effects:?}"
+    );
+    assert_eq!(local_texts(&app), vec![BLOCKED_TEXT], "the row stays put");
+    assert!(
+        app.agents[&AgentId(0)].session.hook_block_hold,
+        "the hold survives an unrelated drain"
+    );
+}

@@ -191,6 +191,63 @@ impl QueueDrain {
     }
 }
 
+/// Why the local drip-feed queue may not start a turn right now, as the telemetry reason of the
+/// first guard that refuses; `None` when none of them do.
+///
+/// These are the guards that hold regardless of which queue the next turn belongs to, so both
+/// readers share them: [`maybe_drain_queue`], and the resubmission reroute in
+/// [`dispatch_drain_queue`], which must never fire in a state where a plain drain was refused.
+fn local_turn_start_blocked_on(agent: &AgentView) -> Option<&'static str> {
+    if !agent.session.state.is_idle() {
+        return Some("turn_running");
+    }
+    // The pane stays Idle around a non-adopted wake; draining here would
+    // `start_turn` a fake local turn that the shell will only queue.
+    if agent.running_wake_turn.is_some() {
+        return Some("wake_turn_running");
+    }
+    // Hold the drain during an in-flight model switch
+    // See the `model_switch_pending` field doc for why a reconnect must clear it
+    if agent.session.model_switch_pending {
+        return Some("model_switch_pending");
+    }
+    if agent.session.loading_replay {
+        return Some("loading_replay");
+    }
+    // A hook blocked the previous prompt: park the local drip-feed queue until the user re-engages (see `hook_block_hold`)
+    if agent.session.hook_block_hold {
+        return Some("hook_block_hold");
+    }
+    None
+}
+
+/// Whether the row the user has open for editing is the one the queue would send next.
+fn user_is_editing_front_row(agent: &AgentView) -> bool {
+    matches!(&agent.prompt_mode, PromptMode::EditingQueued { id, .. }
+        if agent
+            .session
+            .pending_prompts
+            .front()
+            .is_some_and(|p| p.id == *id))
+}
+
+/// Whether a non-running server row is waiting, so the shell — not this client — starts the next turn.
+///
+/// The `queue/changed(running_prompt_id)` adoption starts that row.
+/// Draining a local row now would optimistically promote it as the running turn while the shell runs the server row.
+/// The server row's deltas then fail the prompt-id gate and render nothing (the FIFO invariant documented on [`immediate_server_send_eligible`]).
+/// This client's own in-flight send-now echo counts: it is a server row that has not come back yet.
+///
+/// One predicate for both readers, so the drain barrier and the resubmission reroute in
+/// [`dispatch_drain_queue`] cannot end up disagreeing about who owns the next turn.
+fn server_queue_owns_next_turn(agent: &AgentView) -> bool {
+    let running = agent.session.current_prompt_id.as_deref();
+    agent
+        .shared_queue
+        .iter()
+        .any(|e| Some(e.id.as_str()) != running)
+}
+
 /// Release a locally-queued prompt into a running turn that is parked on a sendable wait (subagent / task output).
 ///
 /// The local drip-feed queue otherwise holds every queued prompt until the turn ends, so a message sent while waiting never reaches the shell.
@@ -278,41 +335,11 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         }
     };
 
-    if !agent.session.state.is_idle() {
-        log_blocked("turn_running", sid);
+    if let Some(reason) = local_turn_start_blocked_on(agent) {
+        log_blocked(reason, sid);
         return QueueDrain::blocked();
     }
-    // The pane stays Idle around a non-adopted wake; draining here would
-    // `start_turn` a fake local turn that the shell will only queue.
-    if agent.running_wake_turn.is_some() {
-        log_blocked("wake_turn_running", sid);
-        return QueueDrain::blocked();
-    }
-    // Hold the drain during an in-flight model switch
-    // See the `model_switch_pending` field doc for why a reconnect must clear it
-    if agent.session.model_switch_pending {
-        log_blocked("model_switch_pending", sid);
-        return QueueDrain::blocked();
-    }
-    if agent.session.loading_replay {
-        log_blocked("loading_replay", sid);
-        return QueueDrain::blocked();
-    }
-    // A hook blocked the previous prompt: park the local drip-feed queue until the user re-engages (see `hook_block_hold`)
-    if agent.session.hook_block_hold {
-        log_blocked("hook_block_hold", sid);
-        return QueueDrain::blocked();
-    }
-    // Server-owned next turn: a non-running server row (including this client's own in-flight send-now echo) drains shell-side
-    // The `queue/changed(running_prompt_id)` adoption starts it
-    // Draining a local row now would optimistically promote it as the running turn while the shell runs the server row
-    // The server row's deltas then fail the prompt-id gate and render nothing (the FIFO invariant documented on `immediate_server_send_eligible`)
-    let running = agent.session.current_prompt_id.as_deref();
-    if agent
-        .shared_queue
-        .iter()
-        .any(|e| Some(e.id.as_str()) != running)
-    {
+    if server_queue_owns_next_turn(agent) {
         log_blocked("server_queue_owns_next_turn", sid);
         return QueueDrain::blocked();
     }
@@ -322,13 +349,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
     };
 
     // Block drain if the user is editing the front prompt.
-    if let PromptMode::EditingQueued { id, .. } = &agent.prompt_mode
-        && agent
-            .session
-            .pending_prompts
-            .front()
-            .is_some_and(|p| p.id == *id)
-    {
+    if user_is_editing_front_row(agent) {
         // The prompt being edited is next to send; don't drain it from under the user
         // The turn status line will show a "waiting on your edit" indicator
         log_blocked("user_editing_front", Some(&session_id.0));
@@ -1077,7 +1098,52 @@ pub(super) fn dispatch_drain_queue(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    if let Some(effects) = resend_hook_blocked_front_via_server(app, id) {
+        return effects;
+    }
     maybe_drain_queue_and_note_peek(app, id)
+}
+
+/// Send a hook-blocked prompt back out through the shell when its followers are server rows.
+///
+/// Both answers that resubmit the blocked prompt — the card's "Resend", and saving its "Edit" —
+/// release the pager's `hook_block_hold` and then ask the local queue to drain.
+/// That queue cannot drain while [`server_queue_owns_next_turn`], and the shell will not promote
+/// the followers either: its own hook-block hold parks them until a prompt or a queue mutation
+/// arrives, and neither of those is anything the card sends. Both sides then wait for the other.
+///
+/// The two holds are armed by the same hook denial but only one of them is the pager's to drop,
+/// so the resubmission has to travel to the actor that is holding the followers. It goes as a
+/// send-now `session/prompt`, which does both halves of that in one round trip: it is user intake,
+/// so the shell drops its hold, and `send_now` puts the row at the head of `pending_inputs` — the
+/// order the requeue asked for, a fixed resubmission ahead of the followers it was holding up.
+///
+/// `None` when this does not apply, and the caller drains locally as before.
+/// A blocked prompt whose followers are local is still the local queue's to send: routing it
+/// through the wire would cost it the images and chips no queue row on the wire can carry.
+fn resend_hook_blocked_front_via_server(app: &mut AppView, id: AgentId) -> Option<Vec<Effect>> {
+    let agent = app.agents.get_mut(&id)?;
+    let row_id = agent
+        .session
+        .pending_prompts
+        .front()
+        .filter(|front| front.hook_resubmission)?
+        .id;
+    // Everything the local drain would refuse to send under, this refuses to send under too:
+    // the hold is still armed until the user answers the card, and the row may be open for editing.
+    if local_turn_start_blocked_on(agent).is_some()
+        || user_is_editing_front_row(agent)
+        || agent.session.session_id.is_none()
+        || !server_queue_owns_next_turn(agent)
+    {
+        return None;
+    }
+    let prompt = agent.remove_local_queue_row(row_id)?;
+    Some(super::interject::dispatch_send_prompt_now(
+        app,
+        prompt.text,
+        prompt.images,
+    ))
 }
 
 /// `Action::QueueInterjectShared` arm: map the (possibly edited) queue interject to a fire-and-forget effect scoped to the active agent's session.
