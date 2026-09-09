@@ -2649,6 +2649,7 @@ fn make_session_info(
         session_id: "test-session-id".into(),
         cwd: "/tmp/test".into(),
         syncs_to_backend: false,
+        queue: None,
         data: SessionInfoData {
             agent_name: None,
             model: Some(model.into()),
