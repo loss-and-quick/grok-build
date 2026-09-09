@@ -50,6 +50,7 @@ import { ModelPicker } from "./ModelPicker.tsx";
 import { Modes } from "./Modes.tsx";
 import { Panel } from "./Panel.tsx";
 import { Rail } from "./Rail.tsx";
+import { ForkPicker } from "./ForkPicker.tsx";
 import { RewindPicker } from "./RewindPicker.tsx";
 
 import { Subagents } from "./Subagents.tsx";
@@ -100,27 +101,6 @@ export function Session(props: {
   const [rewinding, setRewinding] = createSignal(false);
   const [forking, setForking] = createSignal(false);
   let picker: HTMLInputElement | undefined;
-
-  /**
-   * Fork, then go to the child.
-   *
-   * The terminal switches to the fork the instant it dispatches, before the
-   * session exists — it builds a placeholder agent and calls
-   * `switch_to_agent(app, new_id, SwitchCause::Fork)`
-   * (`app/dispatch/session/fork.rs:230`). This waits, because the two clients
-   * disagree about what a placeholder is: the pager keeps both agents alive and
-   * can show a spinner in the new one while the old one goes on streaming,
-   * while a browser has one attached session per socket and a route that is the
-   * address of it. There is no honest URL for a session that does not exist
-   * yet, so the wait is one round trip and then a real address.
-   */
-  const branch = async (): Promise<void> => {
-    if (forking()) return;
-    setForking(true);
-    const forked = await props.gateway.fork();
-    setForking(false);
-    if (forked !== null) props.onForked?.(forked);
-  };
   const menu = createCommandMenu(() => props.gateway.commands());
   const files = createFileMenu(props.gateway.fileSearch);
   // The composer's text as state, not only as a DOM value: the menu reads it on
@@ -271,15 +251,20 @@ export function Session(props: {
                   (`app/dispatch/session/fork.rs:48-51`). A fork copies the
                   session's files as they stand, which is a coherent thing to do
                   mid-turn — the child simply starts from what had been written
-                  by then. */}
+                  by then.
+
+                  It opens a list now rather than forking outright. The whole
+                  conversation is still one row and still the first, so the act
+                  this button used to perform is one keystroke away; what the
+                  list adds is the branch point, which the agent has always been
+                  able to take and no client has ever offered. */}
               <button
                 class="session-fork"
                 type="button"
-                disabled={forking()}
-                title="Start a new session from a copy of this conversation"
-                onClick={() => void branch()}
+                title="Start a new session from this conversation, whole or up to an earlier turn"
+                onClick={() => setForking(true)}
               >
-                {forking() ? "Forking…" : "Fork"}
+                Fork…
               </button>
             </div>
           </header>
@@ -299,6 +284,24 @@ export function Session(props: {
                 reread();
                 composer.focus();
               }}
+            />
+          </Show>
+
+          {/* The child is opened only once the agent has named it.
+              The terminal switches to a fork the instant it dispatches, before
+              the session exists — it builds a placeholder agent and calls
+              `switch_to_agent(app, new_id, SwitchCause::Fork)`
+              (`app/dispatch/session/fork.rs:230`). The two clients disagree
+              about what a placeholder is: the pager keeps both agents alive and
+              can spin in the new one while the old one streams, while a browser
+              has one attached session per socket and a route that is the
+              address of it. There is no honest URL for a session that does not
+              exist yet, so this waits one round trip and then has a real one. */}
+          <Show when={forking()}>
+            <ForkPicker
+              gateway={props.gateway}
+              onClose={() => setForking(false)}
+              onForked={(sessionId) => props.onForked?.(sessionId)}
             />
           </Show>
 

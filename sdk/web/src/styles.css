@@ -3084,3 +3084,81 @@ button.picker-row:focus-visible {
 .rewind-go:hover {
   background: var(--grok-bg-hover, canvas);
 }
+
+/* -- fork picker ---------------------------------------------------------- */
+
+/* The same card as the rewind picker, because it is the same list of turns
+ * asked a different question; the third row is the note that says which way the
+ * cut falls, which is the one thing the rows cannot say for themselves. */
+.fork-picker {
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: min(28rem, 100%);
+  width: min(38rem, 100%);
+}
+
+.fork-note {
+  margin: 0;
+  padding: 0 0.3rem 0.4rem;
+  color: var(--grok-text-secondary, canvastext);
+}
+
+/* One line of chrome for each state that is not a list, sitting where the list
+ * would, so the card does not resize as it moves between them. */
+.fork-state {
+  margin: 0;
+  padding: 0.5rem 0.3rem;
+  color: var(--grok-gray, canvastext);
+  opacity: var(--grok-muted-opacity, 1);
+}
+
+.fork-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  gap: 0.4rem;
+  opacity: 1;
+}
+
+.fork-failed-title {
+  margin: 0;
+  color: var(--grok-accent-error, canvastext);
+}
+
+.fork-failed-message {
+  margin: 0;
+  color: var(--grok-text-primary, canvastext);
+  overflow-wrap: anywhere;
+}
+
+/* Two columns rather than the rewind list's three: a fork does not touch files,
+ * so there is no `edited files` remark to leave room for. */
+.fork-picker .picker-list {
+  display: grid;
+  scrollbar-gutter: stable;
+  grid-template-columns: 1.25rem minmax(0, 1fr);
+  align-content: start;
+}
+
+.fork-row {
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  gap: 0 0.75rem;
+  align-items: baseline;
+  cursor: pointer;
+}
+
+.fork-row.selected {
+  background: var(--grok-bg-visual, canvas);
+}
+
+.fork-row-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The whole conversation is not a turn, and reads as the heading of the list
+ * rather than as one of its rows. */
+.fork-row-whole .fork-row-preview {
+  color: var(--grok-accent-user, canvastext);
+}

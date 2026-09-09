@@ -46,13 +46,29 @@
 // `router.rs:1308-1316`). A browser that reproduced them would have to write a
 // setting, and this client does not write settings.
 //
-// **`targetPromptIndex`.** `ForkSessionRequest` carries it, `copy_session_data`
-// implements it — including clearing the child's summary, since a partial fork
-// may not contain the turn it described (`storage/jsonl/copy.rs:573-586`) — and
-// it is covered by tests (`storage/jsonl/copy_tests.rs`). No client in this tree
-// sends it: `fork_session_params` never sets it. So "fork from an earlier turn"
-// is a capability the agent has and neither client offers, and adding it here
-// would be this browser inventing a feature rather than reaching one.
+// ## Where to branch from, which is not what the neighbouring call means by it
+//
+// `targetPromptIndex` is the one field here that no client has ever sent —
+// `fork_session_params` never sets it, and the pager answers `/fork --at` with
+// "not supported in this version" — while the agent has implemented it all
+// along, in `copy_session_data` and under test (`storage/jsonl/copy_tests.rs`).
+//
+// **Its cut is inclusive, and the identically named field on
+// `x.ai/rewind/execute` is not.** `truncate_for_prompt_by` stops at the first
+// line of the turn *after* the target — it cuts when `user_turn_count >
+// target_prompt_index + 1` (`session/storage/mod.rs:1023-1046`) — so a fork at
+// N leaves the child holding prompts `0..=N`. A rewind to N discards prompt N
+// and hands its text back for the composer. One list of turns, two opposite
+// meanings for the row that is picked, which is why the two dialogs are two
+// dialogs rather than one with a flag.
+//
+// A partial fork also clears three things a full one keeps: the child's
+// `last_turn_summary`, that summary's prompt id, and `last_recap`
+// (`storage/jsonl/copy.rs:573-589`), because the work they describe may not be
+// in the child. The title carries over either way, so the roster still has
+// something to call the child; what it loses is the row's second line. That is
+// also why "the whole conversation" is sent as an **absent** index rather than
+// as the highest one — the same picture, a different call.
 
 import type { RosterEntry } from "./wire.ts";
 
@@ -65,9 +81,18 @@ export interface ForkParams {
   sessionKind: string;
   /** Only for a worktree parent, which is the terminal's own condition. */
   sourceWorkspaceDir?: string;
+  /** The last prompt the child keeps. Absent copies the whole conversation. */
+  targetPromptIndex?: number;
 }
 
-export function forkParams(entry: RosterEntry): ForkParams {
+/**
+ * @param targetPromptIndex the last prompt to keep, **inclusive**. Omitted
+ * rather than sent as null for the whole conversation: the agent reads an
+ * absent key and a null one identically (`Option<usize>` behind
+ * `#[serde(default)]`), but only one of them is what the terminal sends, and
+ * only one of them says "no cut" rather than "a cut of nothing".
+ */
+export function forkParams(entry: RosterEntry, targetPromptIndex?: number): ForkParams {
   const params: ForkParams = {
     sourceSessionId: entry.sessionId,
     sourceCwd: entry.cwd,
@@ -75,6 +100,7 @@ export function forkParams(entry: RosterEntry): ForkParams {
     sessionKind: "fork",
   };
   if (entry.isWorktree) params.sourceWorkspaceDir = entry.cwd;
+  if (targetPromptIndex !== undefined) params.targetPromptIndex = targetPromptIndex;
   return params;
 }
 

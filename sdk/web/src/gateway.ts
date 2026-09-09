@@ -1555,14 +1555,21 @@ export function createGateway() {
    * new row: the child has no resident actor yet, so it arrives as `Dormant`
    * out of `merge_roster` (`shell/src/agent/roster.rs:137-140`), and the route
    * for a session the roster has never heard of shows an empty screen.
+   *
+   * @param targetPromptIndex the last prompt the child keeps, inclusive; absent
+   * copies the whole conversation. Read {@link "./fork.ts"} before passing one:
+   * the field of that name on `x.ai/rewind/execute` cuts on the other side of
+   * the turn it names.
    */
-  const fork = async (): Promise<string | null> => {
+  const fork = async (targetPromptIndex?: number): Promise<string | null> => {
     const current = attached();
     if (!client || !current) return null;
     const entry = current.entry;
     say(`forking ${entry.sessionId}…`);
     try {
-      const forked = readForkedSessionId(await client.ext("x.ai/session/fork", forkParams(entry)));
+      const forked = readForkedSessionId(
+        await client.ext("x.ai/session/fork", forkParams(entry, targetPromptIndex)),
+      );
       if (forked === null) {
         say("fork failed: the agent named no new session");
         return null;
