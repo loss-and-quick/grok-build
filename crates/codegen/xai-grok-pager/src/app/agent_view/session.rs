@@ -4,7 +4,7 @@ use super::test_agent_view;
 use super::{
     ActivePane, AgentView, InlineMediaHitAreas, InputMode, PaneAreas, PluginCtaState,
     PromptInputMode, PromptMode, REWOUND_PROMPT_ID_CAP, ReplayRebuiltState,
-    SELF_ORIGINATED_PROMPT_CAP, SessionReload,
+    SELF_ORIGINATED_PROMPT_CAP, SENT_PROMPT_ATTACHMENTS_CAP, SentPromptAttachments, SessionReload,
 };
 use crate::app::agent::AgentSession;
 use crate::app::app_view::InputOutcome;
@@ -89,6 +89,44 @@ impl AgentView {
             .iter()
             .any(|p| p == prompt_id)
     }
+    /// Keep the images and chips `prompt_id` left this composer with, so the
+    /// turn-start shim can hand them back on a Ctrl+C rewind.
+    ///
+    /// A no-op for an attachment-free prompt: the wire text restores those
+    /// exactly, and an entry that adds nothing would only evict one that does.
+    pub(crate) fn note_sent_prompt_attachments(
+        &mut self,
+        prompt_id: &str,
+        attachments: SentPromptAttachments,
+    ) {
+        if attachments.is_empty() {
+            return;
+        }
+        self.sent_prompt_attachments
+            .retain(|(id, _)| id != prompt_id);
+        self.sent_prompt_attachments
+            .push_back((prompt_id.to_string(), attachments));
+        while self.sent_prompt_attachments.len() > SENT_PROMPT_ATTACHMENTS_CAP {
+            self.sent_prompt_attachments.pop_front();
+        }
+    }
+
+    /// Reclaim what `prompt_id` left with, if this client is the one that sent it.
+    ///
+    /// Taking rather than reading: the shim moves them into `in_flight_prompt`,
+    /// which then owns them, and a second turn under the same id is a turn this
+    /// client did not compose.
+    pub(crate) fn take_sent_prompt_attachments(
+        &mut self,
+        prompt_id: &str,
+    ) -> Option<SentPromptAttachments> {
+        let at = self
+            .sent_prompt_attachments
+            .iter()
+            .position(|(id, _)| id == prompt_id)?;
+        self.sent_prompt_attachments.remove(at).map(|(_, a)| a)
+    }
+
     pub(crate) fn note_rewound_prompt(&mut self, prompt_id: &str) {
         if self.rewound_prompt_ids.iter().any(|p| p == prompt_id) {
             return;
@@ -120,6 +158,7 @@ impl AgentView {
             attached_as_viewer: false,
             self_originated_prompt_ids: VecDeque::new(),
             rewound_prompt_ids: VecDeque::new(),
+            sent_prompt_attachments: VecDeque::new(),
             last_applied_event_seq: None,
             last_applied_xai_event_seq: None,
             last_seen_event_id: None,

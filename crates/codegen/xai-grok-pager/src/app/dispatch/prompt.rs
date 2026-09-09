@@ -831,13 +831,15 @@ pub(super) fn dispatch_send_prompt_inner(
             && !hold_behind_existing_queue
         {
             let images = agent.prompt.drain_images();
+            // Read before `set_text("")` drops the textarea elements.
+            let chip_elements = agent.prompt.chip_elements();
             if consume_input {
                 agent.prompt.set_text("");
                 agent.note_draft_consumed();
             }
             // A new prompt is taking over (same contract as the immediate-send branch below)
             agent.clear_follow_ups();
-            return interject::dispatch_send_prompt_now(app, text, images);
+            return interject::dispatch_send_prompt_now(app, text, images, chip_elements);
         }
 
         if immediate_server_send {
@@ -852,6 +854,19 @@ pub(super) fn dispatch_send_prompt_inner(
             // Adoption happens via the `running_prompt_id` broadcast and the turn-start shim
             agent.note_self_originated_prompt(&prompt_id);
             // Plain image-free sends set no send-now cancel expectation: shell queue state and cancelTrigger decide the outcome
+
+            // Image-free by the gate above, but not chip-free: a collapsed paste
+            // is text to the wire and a chip only here. Read before the
+            // `set_text("")` below drops the elements, so a rewind of this turn
+            // gets the paste back collapsed instead of blown open.
+            agent.note_sent_prompt_attachments(
+                &prompt_id,
+                crate::app::agent_view::SentPromptAttachments {
+                    text: text.clone(),
+                    images: Vec::new(),
+                    chip_elements: agent.prompt.chip_elements(),
+                },
+            );
 
             if consume_input {
                 // Plain prompt: no images to drain

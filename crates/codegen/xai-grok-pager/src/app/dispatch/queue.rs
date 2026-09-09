@@ -942,14 +942,27 @@ pub(crate) fn apply_turn_start_shim(
                 xai_prompt_queue::join_texts(segments.iter().map(String::as_str))
             });
             let earlier = all_ids.into_iter().filter(|id| *id != last_id).collect();
-            // An adopted turn arrives with text only, never the original attachments, so a Ctrl+C rewind restores just the joined text
-            // The local drain path, which owns the data, restores images/chips.
+            // The adoption arrives as text; the attachments come from this client's
+            // own record of what it sent, and only when it is the client that sent it.
+            //
+            // A combined turn keeps the FRONT prompt's id, and combine refuses a
+            // follower carrying images, so the front's images are the whole set.
+            // Its chips are dropped by `chips_for`: the joined text is not the
+            // text those ranges were measured against, and a range replayed
+            // against different bytes collapses the wrong ones.
+            let attachments = agent.take_sent_prompt_attachments(&prompt_id);
             agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
-                text: restore,
-                images: Vec::new(),
+                text: restore.clone(),
+                images: attachments
+                    .as_ref()
+                    .map(|a| a.images.clone())
+                    .unwrap_or_default(),
                 scrollback_entry: last_id,
                 combined_scrollback_entries: earlier,
-                chip_elements: Vec::new(),
+                chip_elements: attachments
+                    .as_ref()
+                    .map(|a| a.chips_for(&restore))
+                    .unwrap_or_default(),
             });
         }
         if skip_entry_top {
@@ -1017,12 +1030,23 @@ pub(crate) fn apply_turn_start_shim(
                 Some(RenderBlock::UserPrompt(ub)) if ub.text != text => ub.text.clone(),
                 _ => text,
             };
+            // Same rule as the combined arm above: the attachments are this
+            // client's own record of the prompt it sent, keyed by the id the
+            // adoption reports. A turn another pane drove has no entry and
+            // rewinds to text, which is all this client ever had of it.
+            let attachments = agent.take_sent_prompt_attachments(&prompt_id);
             agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
-                text: restore_text,
-                images: Vec::new(),
+                text: restore_text.clone(),
+                images: attachments
+                    .as_ref()
+                    .map(|a| a.images.clone())
+                    .unwrap_or_default(),
                 scrollback_entry: prompt_entry_id,
                 combined_scrollback_entries: Vec::new(),
-                chip_elements: Vec::new(),
+                chip_elements: attachments
+                    .as_ref()
+                    .map(|a| a.chips_for(&restore_text))
+                    .unwrap_or_default(),
             });
         }
         if skip_entry_top {
@@ -1119,8 +1143,13 @@ pub(super) fn dispatch_drain_queue(app: &mut AppView) -> Vec<Effect> {
 /// order the requeue asked for, a fixed resubmission ahead of the followers it was holding up.
 ///
 /// `None` when this does not apply, and the caller drains locally as before.
-/// A blocked prompt whose followers are local is still the local queue's to send: routing it
-/// through the wire would cost it the images and chips no queue row on the wire can carry.
+/// A blocked prompt whose followers are local is still the local queue's to send: only the
+/// deadlock justifies handing a prompt to the shell early, and there is no deadlock here.
+///
+/// The reroute no longer costs the prompt its attachments. `dispatch_send_prompt_now` records
+/// them under the id it mints, and the turn-start shim puts them back, so a Ctrl+C right after
+/// this reaches the composer with its images and chips intact — see
+/// [`AgentView::sent_prompt_attachments`](crate::app::agent_view::AgentView).
 fn resend_hook_blocked_front_via_server(app: &mut AppView, id: AgentId) -> Option<Vec<Effect>> {
     let agent = app.agents.get_mut(&id)?;
     let row_id = agent
@@ -1143,6 +1172,7 @@ fn resend_hook_blocked_front_via_server(app: &mut AppView, id: AgentId) -> Optio
         app,
         prompt.text,
         prompt.images,
+        prompt.chip_elements,
     ))
 }
 
@@ -1984,6 +2014,121 @@ mod tests {
         assert!(agent.send_now_painted_blocks.contains_key("p-next"));
     }
 
+    fn paste_chip(range: std::ops::Range<usize>) -> crate::app::agent::ChipElement {
+        crate::app::agent::ChipElement {
+            range,
+            kind: crate::views::prompt_widget::KIND_PASTE,
+            display: None,
+        }
+    }
+
+    /// A prompt this client sent rewinds with everything it left with.
+    ///
+    /// The adoption carries text; the images and the collapsed paste have no wire form on a queue
+    /// row, so before this the shim rebuilt the rewind stash from the text alone and Ctrl+C gave
+    /// back a stripped prompt.
+    #[test]
+    fn shim_restores_the_attachments_this_client_sent() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.note_self_originated_prompt("p1");
+        agent.note_sent_prompt_attachments(
+            "p1",
+            crate::app::agent_view::SentPromptAttachments {
+                text: "look at this".into(),
+                images: vec![crate::app::agent_view::test_fixtures::test_pasted_image()],
+                chip_elements: vec![paste_chip(0..4)],
+            },
+        );
+
+        apply_turn_start_shim(
+            agent,
+            "p1".to_string(),
+            Some("look at this".to_string()),
+            "prompt",
+            None,
+        );
+
+        let stashed = agent.session.in_flight_prompt.as_ref().expect("rewindable");
+        assert_eq!(stashed.images.len(), 1);
+        assert_eq!(stashed.chip_elements.len(), 1);
+        assert!(
+            agent.sent_prompt_attachments.is_empty(),
+            "the record is consumed by the turn it belongs to"
+        );
+    }
+
+    /// A turn another pane drove rewinds to text, because text is all this client ever had of it.
+    ///
+    /// The attachments live only in the composer that made them; nothing entitles this pane to
+    /// invent them, and the record is keyed by the id so it cannot be claimed by the wrong turn.
+    #[test]
+    fn shim_rewinds_another_clients_turn_to_text_alone() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.note_sent_prompt_attachments(
+            "mine",
+            crate::app::agent_view::SentPromptAttachments {
+                text: "mine".into(),
+                images: vec![crate::app::agent_view::test_fixtures::test_pasted_image()],
+                chip_elements: vec![paste_chip(0..4)],
+            },
+        );
+
+        apply_turn_start_shim(
+            agent,
+            "theirs".to_string(),
+            Some("theirs".to_string()),
+            "prompt",
+            None,
+        );
+
+        let stashed = agent.session.in_flight_prompt.as_ref().expect("rewindable");
+        assert!(stashed.images.is_empty());
+        assert!(stashed.chip_elements.is_empty());
+        assert_eq!(
+            agent.sent_prompt_attachments.len(),
+            1,
+            "another turn's adoption must not consume this one's record"
+        );
+    }
+
+    /// An edited row keeps its images and loses its chips.
+    ///
+    /// A chip is a byte range into the text it was measured against. Anyone attached can edit a
+    /// queued row, so replaying those ranges against the edited text would collapse whatever now
+    /// sits at those offsets. Images survive because they are bound to the `[Image #N]`
+    /// placeholders by number, not by offset.
+    #[test]
+    fn shim_drops_chips_whose_text_was_edited_but_keeps_the_images() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.note_self_originated_prompt("p1");
+        agent.note_sent_prompt_attachments(
+            "p1",
+            crate::app::agent_view::SentPromptAttachments {
+                text: "look at this".into(),
+                images: vec![crate::app::agent_view::test_fixtures::test_pasted_image()],
+                chip_elements: vec![paste_chip(0..4)],
+            },
+        );
+
+        apply_turn_start_shim(
+            agent,
+            "p1".to_string(),
+            Some("look at that instead".to_string()),
+            "prompt",
+            None,
+        );
+
+        let stashed = agent.session.in_flight_prompt.as_ref().expect("rewindable");
+        assert_eq!(stashed.images.len(), 1);
+        assert!(
+            stashed.chip_elements.is_empty(),
+            "ranges measured against other text must not be replayed"
+        );
+    }
+
     /// The turn-start shim sets `bash_turn` and pushes no user block for an adopted `bash` entry.
     #[test]
     fn shim_bash_kind_sets_bash_turn_and_no_user_block() {
@@ -2522,6 +2667,7 @@ mod tests {
             Action::SendPromptNow {
                 text: "hurry".into(),
                 images: vec![],
+                chip_elements: vec![],
             },
             &mut app,
         );

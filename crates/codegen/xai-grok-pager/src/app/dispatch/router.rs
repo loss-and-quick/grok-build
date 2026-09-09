@@ -416,9 +416,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_send_prompt_inner(app, text, false, false, false)
         }
         Action::Interject { text, images } => dispatch_interject(app, text, images),
-        Action::SendPromptNow { text, images } => {
-            super::interject::dispatch_send_prompt_now(app, text, images)
-        }
+        Action::SendPromptNow {
+            text,
+            images,
+            chip_elements,
+        } => super::interject::dispatch_send_prompt_now(app, text, images, chip_elements),
         Action::EnableVoiceMode => dispatch_enable_voice_mode(app, true),
         Action::VoiceToggle => dispatch_voice_toggle(app),
         Action::VoiceStop => dispatch_voice_stop(app),

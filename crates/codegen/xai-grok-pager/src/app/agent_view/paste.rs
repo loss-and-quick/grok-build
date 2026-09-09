@@ -268,9 +268,14 @@ impl AgentView {
                     return None;
                 }
                 let images = self.prompt.drain_images();
+                let chip_elements = self.prompt.chip_elements();
                 self.prompt.set_text("");
                 self.note_draft_consumed();
-                Some(Action::SendPromptNow { text, images })
+                Some(Action::SendPromptNow {
+                    text,
+                    images,
+                    chip_elements,
+                })
             }
             AgentDeferredSend::SubmitFeedback => {
                 if !self

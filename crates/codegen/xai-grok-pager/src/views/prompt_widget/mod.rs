@@ -944,10 +944,13 @@ impl PromptWidget {
         self.textarea.set_cursor(pos);
     }
 
-    /// Move the current prompt state into a snapshot for later restoration.
-    pub fn stash(&mut self) -> StashedPrompt {
-        let chip_elements = self
-            .textarea
+    /// Snapshot the live textarea chips without disturbing the composer.
+    ///
+    /// [`Self::stash`] takes the whole draft (and its images with it); a sender
+    /// that is only recording what a submission is carrying away needs the chips
+    /// alone, and must read them BEFORE `set_text("")` drops the elements.
+    pub fn chip_elements(&self) -> Vec<crate::app::agent::ChipElement> {
+        self.textarea
             .elements()
             .iter()
             .map(|element| crate::app::agent::ChipElement {
@@ -955,7 +958,12 @@ impl PromptWidget {
                 kind: element.kind,
                 display: element.display.clone(),
             })
-            .collect();
+            .collect()
+    }
+
+    /// Move the current prompt state into a snapshot for later restoration.
+    pub fn stash(&mut self) -> StashedPrompt {
+        let chip_elements = self.chip_elements();
         let images = self.drain_images();
         StashedPrompt {
             text: self.text().to_owned(),

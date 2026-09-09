@@ -278,3 +278,87 @@ fn an_unanswered_card_keeps_the_blocked_prompt_off_the_wire() {
         "the hold survives an unrelated drain"
     );
 }
+
+/// The reroute must not cost the prompt what the composer put on it.
+///
+/// The send-now that unwedges the queue is a wire send, and a queue row on the wire is text: the
+/// row lists the images the session holds but never their bytes, and a collapsed paste has no
+/// wire form at all. So the turn-start shim used to rebuild the rewind stash out of the adopted
+/// text alone, and Ctrl+C right after Resend handed back a prompt stripped of its picture with
+/// its paste blown open. The sender keeps its own copy instead
+/// (`AgentView::sent_prompt_attachments`) and the shim claims it by the id it minted.
+#[test]
+fn a_rerouted_resend_still_rewinds_with_its_images_and_chips() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.leader_mode = true;
+    app.push_optimistic_prompt_echo("test-session", "q-follower", "follower", "prompt");
+    let snapshot = app.shared_prompt_queue("test-session").cloned().unwrap();
+    let row_id = {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.shared_queue = snapshot;
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("p1".into());
+        agent.note_self_originated_prompt("p1");
+        let entry = agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt(BLOCKED_TEXT));
+        agent.session.in_flight_prompt = Some(InFlightPrompt {
+            text: BLOCKED_TEXT.into(),
+            images: vec![crate::app::agent_view::test_fixtures::test_pasted_image()],
+            scrollback_entry: entry,
+            combined_scrollback_entries: vec![],
+            chip_elements: vec![crate::app::agent::ChipElement {
+                range: 0..6,
+                kind: crate::views::prompt_widget::KIND_PASTE,
+                display: None,
+            }],
+        });
+        note_hook_blocked_turn(agent, Some("p1"), Some(HOOK_DENIED_CATEGORY), None);
+        agent.session.state = AgentState::Idle;
+        agent.session.current_prompt_id = None;
+        agent.session.pending_prompts.front().unwrap().id
+    };
+
+    let effects = dispatch(
+        Action::PromptBlockAnswered {
+            row_id,
+            choice: PromptBlockChoice::Resend,
+        },
+        &mut app,
+    );
+    let prompt_id = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::SendPromptNow { prompt_id, .. } => Some(prompt_id.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("Resend must reach the shell, got {effects:?}"));
+
+    // The shell promotes it and broadcasts; this is the adoption that follows.
+    let agent = app.agents.get_mut(&id).unwrap();
+    crate::app::dispatch::queue::apply_turn_start_shim(
+        agent,
+        prompt_id,
+        Some(BLOCKED_TEXT.to_string()),
+        "prompt",
+        None,
+    );
+
+    let stashed = agent
+        .session
+        .in_flight_prompt
+        .as_ref()
+        .expect("the adopted turn is rewindable");
+    assert_eq!(stashed.text, BLOCKED_TEXT);
+    assert_eq!(
+        stashed.images.len(),
+        1,
+        "the image the composer attached comes back"
+    );
+    assert_eq!(
+        stashed.chip_elements.len(),
+        1,
+        "the collapsed paste comes back collapsed"
+    );
+}

@@ -392,6 +392,7 @@ impl AgentView {
             return InputOutcome::Action(Action::SendPromptNow {
                 text: prompt.text,
                 images: prompt.images,
+                chip_elements: prompt.chip_elements,
             });
         }
         InputOutcome::Changed
@@ -1102,7 +1103,7 @@ mod queue_edit_routing_tests {
         agent.queue.list_state.select_by_id(ids[1]);
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, images }) => {
+            InputOutcome::Action(Action::SendPromptNow { text, images, .. }) => {
                 assert_eq!(text, "local one");
                 assert_eq!(images.len(), 1, "row image must ride the interject");
             }

@@ -606,11 +606,16 @@ impl AgentView {
                                 self.deferred_send = Some(AgentDeferredSend::Interject);
                                 return InputOutcome::Changed;
                             }
-                            // Drain images BEFORE set_text("") wipes the chip elements.
+                            // Drain images and chips BEFORE set_text("") wipes the chip elements.
                             let images = self.prompt.drain_images();
+                            let chip_elements = self.prompt.chip_elements();
                             self.prompt.set_text("");
                             self.note_draft_consumed();
-                            return InputOutcome::Action(Action::SendPromptNow { text, images });
+                            return InputOutcome::Action(Action::SendPromptNow {
+                                text,
+                                images,
+                                chip_elements,
+                            });
                         }
                     } else if turn_running
                         && let Some(outcome) = self.try_send_now_queued_from_prompt()

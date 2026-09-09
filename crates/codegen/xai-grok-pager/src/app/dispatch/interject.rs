@@ -96,6 +96,7 @@ pub(super) fn dispatch_send_prompt_now(
     app: &mut AppView,
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
+    chip_elements: Vec<crate::app::agent::ChipElement>,
 ) -> Vec<Effect> {
     // Hard-reset only; `text` may be a queue row, not the composer
     let _ = voice_stop_on_submit(app);
@@ -122,6 +123,7 @@ pub(super) fn dispatch_send_prompt_now(
             .pending_prompts
             .push_front(crate::app::agent::QueuedPrompt {
                 images,
+                chip_elements,
                 ..crate::app::agent::QueuedPrompt::plain(
                     queue_id,
                     &text,
@@ -147,6 +149,18 @@ pub(super) fn dispatch_send_prompt_now(
     agent.note_self_originated_prompt(&prompt_id);
     // Expect the shell's send-now cancel so the turn-end handling suppresses its marker
     super::queue::arm_send_now_and_paint_dispatched(agent, &prompt_id, &text);
+
+    // The prompt is leaving as blocks and will come back as a queue row, which is
+    // text; keep what the row cannot carry so the turn-start shim can hand it
+    // back if the user rewinds. See `AgentView::sent_prompt_attachments`.
+    agent.note_sent_prompt_attachments(
+        &prompt_id,
+        crate::app::agent_view::SentPromptAttachments {
+            text: text.clone(),
+            images: images.clone(),
+            chip_elements,
+        },
+    );
 
     let blocks = crate::prompt_images::build_content_blocks_with_workspace(
         text.clone(),

@@ -858,6 +858,25 @@ pub struct AgentView {
     /// right after its turn ends).
     pub self_originated_prompt_ids: VecDeque<String>,
     pub rewound_prompt_ids: VecDeque<String>,
+    /// Images and chips this client handed to the shell, kept until the turn
+    /// they belong to starts here.
+    ///
+    /// A prompt that goes out through the shell comes back as a queue row, and
+    /// a queue row is text: the wire lists the images the session holds
+    /// ([`crate::app::prompt_queue::QueueEntryWire::images`]) but never carries
+    /// the bytes, and a collapsed paste has no wire form at all. So the
+    /// turn-start shim used to rebuild the Ctrl+C rewind stash out of the text
+    /// alone, and a rewind handed back a prompt stripped of its pictures and
+    /// with every chip un-collapsed.
+    ///
+    /// The data was never gone; it was in this process the whole time. This is
+    /// the sender keeping its own copy until the shim can put it back, which
+    /// also settles who may: only the client that composed a prompt has its
+    /// attachments, so only that client restores them. A turn another pane
+    /// drove has no entry here and rewinds to text, as it must.
+    ///
+    /// Bounded FIFO — see [`SENT_PROMPT_ATTACHMENTS_CAP`].
+    pub(crate) sent_prompt_attachments: VecDeque<(String, SentPromptAttachments)>,
     /// Highwater of the largest `eventId` counter applied to this session's
     /// scrollback (see `acp::meta::NotificationMeta::event_seq`). Incoming
     /// `session/update`s with a counter `<=` this are duplicates (replay/live
@@ -1837,6 +1856,51 @@ pub struct AgentView {
 /// without bound.
 const SELF_ORIGINATED_PROMPT_CAP: usize = 64;
 const REWOUND_PROMPT_ID_CAP: usize = 64;
+/// Cap on [`AgentView::sent_prompt_attachments`].
+///
+/// Much smaller than the id rings beside it, because an entry is not an id: it
+/// can hold the encoded bytes of every image on a prompt. Only prompts still
+/// waiting to start their turn can ever be claimed, and the shell runs them one
+/// at a time, so a handful covers every real queue depth; overflow drops the
+/// oldest, whose rewind window has long since passed.
+const SENT_PROMPT_ATTACHMENTS_CAP: usize = 8;
+
+/// What a prompt carried out of this composer that no queue row can carry back.
+///
+/// See [`AgentView::sent_prompt_attachments`] for why the sender keeps it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SentPromptAttachments {
+    /// The text the chip ranges were measured against.
+    ///
+    /// A queue row is editable by anyone attached, so the text that comes back
+    /// at turn start is not always the text that went out. Chips are byte
+    /// ranges into it: replayed against edited text they collapse whatever now
+    /// sits at those offsets, which is worse than not collapsing anything.
+    pub(crate) text: String,
+    pub(crate) images: Vec<crate::prompt_images::PastedImage>,
+    pub(crate) chip_elements: Vec<crate::app::agent::ChipElement>,
+}
+
+impl SentPromptAttachments {
+    /// Nothing worth keeping: a plain typed prompt, which the wire text already
+    /// restores in full.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.images.is_empty() && self.chip_elements.is_empty()
+    }
+
+    /// The chips, if `restore_text` is still the text they were measured against.
+    ///
+    /// Images need no such guard: they are bound to the `[Image #N]`
+    /// placeholders by display number, not by offset, and an edit that removed a
+    /// placeholder simply leaves its image unclaimed.
+    pub(crate) fn chips_for(&self, restore_text: &str) -> Vec<crate::app::agent::ChipElement> {
+        if restore_text == self.text {
+            self.chip_elements.clone()
+        } else {
+            Vec::new()
+        }
+    }
+}
 /// Cap on [`AgentView::follow_up_pending`]. Only a handful of turns can ever be
 /// "buffered but not-yet-adopted" at once (the ext/`session/update` race window
 /// is tiny), so a small bounded map is plenty; an overflow evicts the oldest

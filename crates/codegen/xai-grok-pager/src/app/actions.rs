@@ -160,6 +160,14 @@ pub enum Action {
         text: String,
         /// Pasted images riding along with the prompt.
         images: Vec<crate::prompt_images::PastedImage>,
+        /// Composer chips (collapsed pastes, `@file` refs, image chips) the text
+        /// was carrying, for the Ctrl+C rewind stash.
+        ///
+        /// They never leave this process — the wire has no chip — so a producer
+        /// that clears the composer must hand them over here or the rewind gives
+        /// the prompt back with every paste blown open. Empty for producers with
+        /// no composer behind them.
+        chip_elements: Vec<crate::app::agent::ChipElement>,
     },
     /// Enable session voice mode and start recording (the Ctrl+Space hold-to-talk key-press, on terminals that report key releases).
     /// Start-only, never stops; use [`Self::VoiceStop`], [`Self::VoiceToggle`], or Esc to stop.
