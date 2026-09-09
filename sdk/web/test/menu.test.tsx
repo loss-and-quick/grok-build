@@ -56,6 +56,9 @@ function stub(over: Partial<Gateway> = {}): { gateway: Gateway; sent: string[] }
     attached: () => ({ entry: ENTRY, transcript, subagents }),
     permissions: [],
     folderTrusts: [],
+    sessionMode: () => null,
+    setSessionMode: async () => {},
+    setPermissionMode: () => {},
     status: () => "connected",
     commands: () => catalog(),
     // No catalog on the wire is a real state (a session whose reply carried

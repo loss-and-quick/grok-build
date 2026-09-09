@@ -47,6 +47,7 @@ import { CommandMenu, createCommandMenu } from "./CommandMenu.tsx";
 import { FileMenu, createFileMenu } from "./FileMenu.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
+import { Modes } from "./Modes.tsx";
 import { Panel } from "./Panel.tsx";
 import { Rail } from "./Rail.tsx";
 
@@ -329,6 +330,7 @@ export function Session(props: {
             {/* Above the input, in the row the blocked banner uses: what is
                 going with this message belongs beside the message, not under
                 the button that sends it. */}
+            <Modes gateway={props.gateway} />
             <Show when={attachments().length > 0 || refusals().length > 0}>
               <div class="attachments">
                 <For each={attachments()}>

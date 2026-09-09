@@ -2888,3 +2888,70 @@ button.picker-row:focus-visible {
   color: var(--grok-accent-user, canvastext);
   border-color: var(--grok-prompt-border-active, canvastext);
 }
+
+/* == how this session runs ================================================= */
+
+/* Its own full-width row above the line being typed, ordered ahead of the
+ * prompt arrow for the reason spelled out at `.attachments`: a spanning item
+ * that is flowed rather than ordered pushes the textarea into the arrow
+ * column. */
+.modes {
+  order: -3;
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.35rem;
+}
+
+.modes-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.mode {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: baseline;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--grok-gray, canvastext);
+}
+
+.mode[aria-pressed="true"] {
+  border-color: var(--grok-prompt-border-active, canvastext);
+  color: var(--grok-text-primary, canvastext);
+}
+
+.mode-marker {
+  color: var(--grok-accent-user, canvastext);
+}
+
+/* The mode that stops the asking is marked before it is chosen, not only after.
+ * It is the same role the permission card and the blocked banner already use,
+ * which is the point: this is the switch that turns those off. */
+.mode-unasking[aria-pressed="true"] {
+  border-color: var(--grok-warning, canvastext);
+  color: var(--grok-warning, canvastext);
+}
+
+.mode-consequence {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  margin: 0 0 0.75rem;
+  color: var(--grok-warning, canvastext);
+}
+
+.mode-confirm-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.mode-confirm {
+  border-color: var(--grok-warning, canvastext);
+  color: var(--grok-warning, canvastext);
+}

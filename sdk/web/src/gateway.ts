@@ -45,6 +45,7 @@ import {
   type Arrival,
   type Resumption,
 } from "./resume.ts";
+import { permissionModeParams, readModeUpdate, type PermissionMode } from "./modes.ts";
 import { createRoster, type Roster } from "./roster.ts";
 import { createSubagents, type Subagents } from "./subagents.ts";
 import { createTasks, type Tasks } from "./tasks.ts";
@@ -336,6 +337,9 @@ export function createGateway() {
     error: null,
     blocked: null,
   });
+  // The mode the agent has *confirmed*, never the one that was asked for. Null
+  // until a `current_mode_update` arrives, because until then nothing is known.
+  const [sessionMode, setSessionMode] = createSignal<string | null>(null);
   const [permissions, setPermissions] = createStore<PendingPermission[]>([]);
   const [folderTrusts, setFolderTrusts] = createStore<PendingFolderTrust[]>([]);
   const roster: Roster = createRoster();
@@ -575,6 +579,16 @@ export function createGateway() {
       // second tab — moves this picker too.
       const state = models();
       if (state) setModels(applyModelChanged(state, update as Record<string, unknown>));
+      return;
+    }
+    // The mode is taken from here and *only* here. `session/set_mode` answers
+    // `{}` for an id it does not implement as readily as for one it does, so a
+    // control that moved on its own request would show a mode the agent is not
+    // in. This broadcast is the agent saying it changed — and it reaches every
+    // subscriber, so a terminal switching to plan mode moves this too.
+    if (update.sessionUpdate === "current_mode_update") {
+      const id = readModeUpdate(update as Record<string, unknown>);
+      if (id !== null) setSessionMode(id);
       return;
     }
     if (update.sessionUpdate === "interaction_resolved") {
@@ -1381,6 +1395,39 @@ export function createGateway() {
     }
   };
 
+  /**
+   * Ask the agent to enter a session mode.
+   *
+   * Nothing local changes here on purpose. `session/set_mode` answers `{}`
+   * whether or not the id means anything to the agent — `ask`, `acceptEdits`
+   * and a nonsense string were all accepted with no effect — so the only
+   * trustworthy signal that a mode was entered is the `current_mode_update` the
+   * agent broadcasts back. See `modes.ts`.
+   */
+  const setSessionModeRequest = async (modeId: string): Promise<void> => {
+    const current = attached();
+    if (!client || !current) return;
+    try {
+      await client.request("session/set_mode", { sessionId: current.entry.sessionId, modeId });
+    } catch (e) {
+      say(`mode change failed: ${String(e)}`);
+    }
+  };
+
+  /**
+   * Set how much the agent decides for itself.
+   *
+   * A notification rather than a request, because that is what the pager sends:
+   * the leader fans it out to the matching sessions and there is nothing to
+   * answer. It is a different axis from the session mode above and rides a
+   * different method — `modes.ts` says why that distinction is load-bearing.
+   */
+  const setPermissionMode = (mode: PermissionMode): void => {
+    if (!client) return;
+    client.notify("_x.ai/yolo_mode_changed", permissionModeParams(mode));
+    say(`permission mode: ${mode}`);
+  };
+
   const prompt = async (
     text: string,
     /**
@@ -1573,6 +1620,9 @@ export function createGateway() {
     cancelScheduledLoop,
     panelAction,
     setModel,
+    sessionMode,
+    setSessionMode: setSessionModeRequest,
+    setPermissionMode,
     refreshRoster,
     refreshSessionInfo,
   };
