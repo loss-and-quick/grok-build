@@ -2562,6 +2562,13 @@ pub enum TaskResult {
         /// `false` both when the session is local and when the fetch failed —
         /// the notice must never be shown on a guess.
         syncs_to_backend: bool,
+        /// Starting shared-queue snapshot, in the shape `x.ai/queue/changed`
+        /// broadcasts. `x.ai/queue/changed` only fires on a change, so a client
+        /// attaching to a session that is already several prompts deep has no
+        /// other way to learn what is queued. `None` from a shell too old to
+        /// answer (and on a failed fetch), which is not an empty queue: the
+        /// mirror is then left alone rather than cleared.
+        queue: Option<crate::app::prompt_queue::QueueChanged>,
     },
     /// Authentication completed successfully.
     AuthComplete {

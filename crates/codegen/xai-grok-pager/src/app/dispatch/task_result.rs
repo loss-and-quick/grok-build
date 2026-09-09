@@ -271,6 +271,56 @@ fn push_transcript_sync_notice(agent: &mut crate::app::agent_view::AgentView, sy
         .push_block(RenderBlock::system(TRANSCRIPT_SYNC_NOTICE.to_string()));
 }
 
+/// Seed the shared prompt-queue mirror from the `x.ai/session/info` snapshot.
+///
+/// `x.ai/queue/changed` fires only on a change and is never written to the
+/// session log, so a pane attaching to a session that already has prompts
+/// queued behind the running turn has no other way to learn about them: it
+/// would show an empty queue until something happened to move it. The snapshot
+/// is built by the same function as the broadcast
+/// (`shell/src/session/acp_session_impl/prompt_queue.rs:491` and `:554`), so it
+/// reconciles through the same path, [`AppView::apply_queue_changed`].
+///
+/// Seeding only, never overwriting: a broadcast that arrived while the fetch
+/// was in flight is newer than the snapshot, and replacing it wholesale would
+/// resurrect rows that have since drained. Adding rows we did not know about is
+/// the one direction a stale snapshot cannot corrupt.
+fn seed_shared_queue_from_snapshot(
+    app: &mut AppView,
+    agent_id: AgentId,
+    queue: Option<crate::app::prompt_queue::QueueChanged>,
+) {
+    // `None` is "this shell is too old to say", which is not an empty queue.
+    let Some(queue) = queue else {
+        return;
+    };
+    // The pane may have moved to another session between request and response.
+    let bound = app
+        .agents
+        .get(&agent_id)
+        .and_then(|agent| agent.session.session_id.as_ref())
+        .is_some_and(|sid| sid.0.as_ref() == queue.session_id);
+    if !bound {
+        return;
+    }
+    if app.shared_prompt_queue(&queue.session_id).is_some() {
+        return;
+    }
+    let session_id = queue.session_id.clone();
+    // Attaching means no send of ours is in flight, so no optimistic echo can be
+    // re-keyed here; the reconcile returns an empty list.
+    app.apply_queue_changed(queue);
+    let snapshot = app
+        .shared_prompt_queue(&session_id)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        // Same mirror the broadcast handler keeps, so the queue pane can render
+        // the union of local and server rows without reaching into `AppView`.
+        agent.shared_queue = snapshot;
+    }
+}
+
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
     if result.ends_startup() {
         app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Ok);
@@ -1124,6 +1174,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             agent_name,
             syncs_to_backend,
+            queue,
         } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent.session_agent_name = agent_name.clone();
@@ -1132,6 +1183,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 }
                 push_transcript_sync_notice(agent, syncs_to_backend);
             }
+            seed_shared_queue_from_snapshot(app, agent_id, queue);
             vec![]
         }
         TaskResult::SessionInfoComplete {

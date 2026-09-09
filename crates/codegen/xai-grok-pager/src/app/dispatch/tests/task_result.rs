@@ -3013,6 +3013,7 @@ fn resolve_snapshot(app: &mut AppView, id: AgentId, syncs_to_backend: bool) {
             agent_id: id,
             agent_name: None,
             syncs_to_backend,
+            queue: None,
         },
         app,
     );
@@ -3102,6 +3103,142 @@ fn writeback_notice_does_not_restate_the_status_line() {
         TRANSCRIPT_SYNC_NOTICE.contains("grok.com account"),
         "the notice must name the destination: {TRANSCRIPT_SYNC_NOTICE}"
     );
+}
+
+fn queue_row(id: &str, text: &str, position: usize) -> crate::app::prompt_queue::QueueEntryWire {
+    crate::app::prompt_queue::QueueEntryWire {
+        id: id.into(),
+        version: 0,
+        owner: None,
+        last_editor: None,
+        kind: "prompt".into(),
+        text: text.into(),
+        combined_texts: None,
+        position,
+        editable: Some(true),
+    }
+}
+
+fn resolve_snapshot_with_queue(
+    app: &mut AppView,
+    id: AgentId,
+    queue: Option<crate::app::prompt_queue::QueueChanged>,
+) {
+    dispatch_task_result(
+        TaskResult::SessionSnapshotResolved {
+            agent_id: id,
+            agent_name: None,
+            syncs_to_backend: false,
+            queue,
+        },
+        app,
+    );
+}
+
+/// `x.ai/queue/changed` fires only on a change, so a pane attaching to a
+/// session that is already three prompts deep learns about them from the
+/// `session/info` snapshot or not at all.
+#[test]
+fn attaching_adopts_the_prompts_already_queued_on_the_agent() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    resolve_snapshot_with_queue(
+        &mut app,
+        id,
+        Some(crate::app::prompt_queue::QueueChanged {
+            session_id: "test-session".into(),
+            entries: vec![queue_row("p1", "first", 0), queue_row("p2", "second", 1)],
+            running_prompt_id: Some("p0".into()),
+            running_text: Some("running".into()),
+            running_kind: Some("prompt".into()),
+            running_combined_texts: None,
+        }),
+    );
+
+    let texts: Vec<&str> = app.agents[&id]
+        .shared_queue
+        .iter()
+        .map(|e| e.text.as_str())
+        .collect();
+    assert_eq!(texts, vec!["first", "second"]);
+    assert_eq!(
+        app.shared_prompt_queue("test-session").map(Vec::len),
+        Some(2)
+    );
+}
+
+/// A shell too old to answer sends no `queue` at all. That is "did not say",
+/// not "the queue is empty": clearing the mirror on it would hide rows a
+/// broadcast had already delivered.
+#[test]
+fn a_snapshot_without_a_queue_leaves_the_mirror_alone() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.shared_prompt_queues
+        .insert("test-session".into(), vec![queue_row("p1", "first", 0)]);
+    app.agents.get_mut(&id).unwrap().shared_queue = vec![queue_row("p1", "first", 0)];
+
+    resolve_snapshot_with_queue(&mut app, id, None);
+
+    assert_eq!(app.agents[&id].shared_queue.len(), 1);
+}
+
+/// The fetch and the broadcast race. A broadcast that landed first is newer
+/// than the snapshot, so the snapshot must not replace it — a row that drained
+/// in between would come back from the dead.
+#[test]
+fn a_snapshot_never_overwrites_rows_a_broadcast_already_delivered() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.shared_prompt_queues
+        .insert("test-session".into(), vec![queue_row("fresh", "newer", 0)]);
+    app.agents.get_mut(&id).unwrap().shared_queue = vec![queue_row("fresh", "newer", 0)];
+
+    resolve_snapshot_with_queue(
+        &mut app,
+        id,
+        Some(crate::app::prompt_queue::QueueChanged {
+            session_id: "test-session".into(),
+            entries: vec![queue_row("stale", "older", 0)],
+            running_prompt_id: None,
+            running_text: None,
+            running_kind: None,
+            running_combined_texts: None,
+        }),
+    );
+
+    let texts: Vec<&str> = app.agents[&id]
+        .shared_queue
+        .iter()
+        .map(|e| e.text.as_str())
+        .collect();
+    assert_eq!(texts, vec!["newer"]);
+}
+
+/// The pane can be resumed onto another session while the fetch is in flight.
+/// Keying the snapshot by the agent alone would then file another session's
+/// queue under this one.
+#[test]
+fn a_snapshot_for_a_session_the_pane_has_left_is_dropped() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    resolve_snapshot_with_queue(
+        &mut app,
+        id,
+        Some(crate::app::prompt_queue::QueueChanged {
+            session_id: "some-other-session".into(),
+            entries: vec![queue_row("p1", "first", 0)],
+            running_prompt_id: None,
+            running_text: None,
+            running_kind: None,
+            running_combined_texts: None,
+        }),
+    );
+
+    assert!(app.agents[&id].shared_queue.is_empty());
+    assert!(app.shared_prompt_queue("some-other-session").is_none());
 }
 
 /// Drive `CompactComplete` with a wire error mapped exactly as the `Effect::Compact` arm maps it, and return the resulting session events.

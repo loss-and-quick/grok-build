@@ -3422,6 +3422,7 @@ pub(crate) fn execute(
                                 agent_id,
                                 agent_name: info.data.agent_name,
                                 syncs_to_backend: info.syncs_to_backend,
+                                queue: info.queue,
                             }
                         }
                         Err(e) => {
@@ -3430,6 +3431,7 @@ pub(crate) fn execute(
                                 agent_id,
                                 agent_name: None,
                                 syncs_to_backend: false,
+                                queue: None,
                             }
                         }
                     }
