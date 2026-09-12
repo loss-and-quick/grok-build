@@ -1941,6 +1941,15 @@ impl SessionActor {
                     }
                     PlanApprovalOutcome::Approved => {
                         tracing::info!("[exit_plan_mode] user approved — executing tool");
+                        // Arm the durable post-approval agent switch: record the configured
+                        // `[plan] agent` so the completed turn (or a restore) runs the handoff
+                        // without re-asking. Skipped when the feature is disarmed.
+                        if let Some(agent) = Self::plan_config().resolve_approval_agent() {
+                            let mut tracker = self.plan_mode.lock();
+                            tracker.set_post_approval_agent_pending(&agent);
+                            drop(tracker);
+                            self.persist_plan_mode_state();
+                        }
                     }
                 },
                 Err(err) => {

@@ -184,9 +184,16 @@ impl SessionActor {
     /// Triggered from `MvpAgent::set_session_model` only when the new model's `agent_type` differs from the session's `active_agent_type`.
     /// The trigger also requires `turn_count == 0` (no user message has been sent yet).
     /// Defense-in-depth: rejects if a turn is in flight.
+    ///
+    /// `rewrite_prefix` controls whether the leading user-message slot is rewritten.
+    /// A zero-turn harness switch owns the whole conversation, so it rewrites the prefix
+    /// (cwd/user-template) and injects the startup reminders. A mid-session harness switch
+    /// (the plan-approval agent handoff) preserves the existing user/assistant history, so it
+    /// rewrites only the system head and leaves the prefix untouched.
     pub(super) async fn handle_rebuild_agent_for_definition(
         self: &Arc<Self>,
         definition: xai_grok_agent::AgentDefinition,
+        rewrite_prefix: bool,
     ) -> Result<(), acp::Error> {
         {
             let state = self.state.lock().await;
@@ -314,30 +321,32 @@ impl SessionActor {
         if let Some(old_handle) = self.deferred_prefix.take() {
             old_handle.abort();
         }
-        let new_user_prefix = self
-            .with_memory_index(
-                self.with_session_start_context(self.build_user_message_prefix().await),
-            )
-            .await;
         {
             let mut conversation = self.chat_state_handle.get_conversation().await;
             let _ = replace_or_insert_system_head(&mut conversation, &new_system_prompt);
-            let drop_startup_skill_reminder = false;
-            Self::rewrite_zero_turn_prefix(
-                &mut conversation,
-                new_user_prefix,
-                drop_startup_skill_reminder,
-            );
-            if !conversation_has_project_instructions(&conversation)
-                && let Some(agents_md_reminder) = self.agent.borrow().agents_md_user_reminder()
-            {
-                let agents_md_at = conversation.len().min(2);
-                conversation.insert(
-                    agents_md_at,
-                    ConversationItem::project_instructions(agents_md_reminder),
+            if rewrite_prefix {
+                let new_user_prefix = self
+                    .with_memory_index(
+                        self.with_session_start_context(self.build_user_message_prefix().await),
+                    )
+                    .await;
+                let drop_startup_skill_reminder = false;
+                Self::rewrite_zero_turn_prefix(
+                    &mut conversation,
+                    new_user_prefix,
+                    drop_startup_skill_reminder,
                 );
+                if !conversation_has_project_instructions(&conversation)
+                    && let Some(agents_md_reminder) = self.agent.borrow().agents_md_user_reminder()
+                {
+                    let agents_md_at = conversation.len().min(2);
+                    conversation.insert(
+                        agents_md_at,
+                        ConversationItem::project_instructions(agents_md_reminder),
+                    );
+                }
+                self.inject_baseline_skill_reminder(&mut conversation).await;
             }
-            self.inject_baseline_skill_reminder(&mut conversation).await;
             self.chat_state_handle.replace_conversation(conversation);
         }
         save_prompt_context(&self.session_info, &new_prompt_context);

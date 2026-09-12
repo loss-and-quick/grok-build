@@ -91,9 +91,16 @@ impl MvpAgent {
         let parent_sid = acp::SessionId::new(parent_session_id);
         let parent_handle = self.resident_handle(&parent_sid);
         let ps = parent_handle.as_ref();
-        let parent_model_id = ps
-            .map(|h| h.model_id.clone())
-            .unwrap_or_else(|| self.models_manager.current_model_id());
+        // A post-approval agent switch repoints the parent session at a new model before the
+        // resident handle reloads it; surface that here so a subagent inherits the switched model
+        // (and the agent_type derived from it) instead of the pre-switch default.
+        let parent_model_id = match ps {
+            Some(h) => h
+                .post_approval_switch_info()
+                .map(|info| info.model_id.clone())
+                .unwrap_or_else(|| h.model_id.clone()),
+            None => self.models_manager.current_model_id(),
+        };
         let parent_chat_state = ps.map(|h| h.chat_state_handle.clone());
         let parent_cmd_tx = ps.map(|h| h.cmd_tx.clone());
         let parent_cwd = ps

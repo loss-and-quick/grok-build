@@ -3473,9 +3473,22 @@ impl MvpAgent {
         &self,
         session_id: Option<&acp::SessionId>,
     ) -> acp::SessionModelState {
+        // A post-approval agent switch repoints the session at a new model/effort before the
+        // resident handle reloads it; surface the switched values so `session/model` reports them
+        // instead of the stale handle fields. The cell is empty outside a handoff, so this is a
+        // no-op for the normal path.
+        let switch_info = session_id.and_then(|sid| {
+            self.resident_handle(sid).and_then(|h| h.post_approval_switch_info())
+        });
         let model_id = lookup_session_model(
-            session_id
-                .and_then(|sid| self.resident_handle(sid).map(|h| h.model_id.clone())),
+            session_id.and_then(|sid| {
+                self.resident_handle(sid).and_then(|h| {
+                    switch_info
+                        .as_ref()
+                        .map(|info| info.model_id.clone())
+                        .or_else(|| Some(h.model_id.clone()))
+                })
+            }),
             &self.models_manager.current_model_id(),
         );
         let mut available_models: Vec<acp::ModelInfo> = self
@@ -3484,10 +3497,15 @@ impl MvpAgent {
             .values()
             .cloned()
             .collect();
-        let override_effort = session_id
-            .and_then(|sid| self.resident_handle(sid).map(|h| h.reasoning_effort))
-            .flatten()
-            .or_else(|| self.models_manager.current_reasoning_effort());
+        let override_effort = session_id.and_then(|sid| {
+            self.resident_handle(sid).and_then(|h| {
+                switch_info
+                    .as_ref()
+                    .and_then(|info| info.reasoning_effort)
+                    .or(h.reasoning_effort)
+            })
+        })
+        .or_else(|| self.models_manager.current_reasoning_effort());
         if let Some(override_effort) = override_effort
             && let Some(info) = available_models
                 .iter_mut()

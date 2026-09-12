@@ -250,6 +250,7 @@ fn wedged_child_handle() -> (
                 crate::session::plan_mode::PlanModeTracker::new(PathBuf::from("/tmp")),
             ),
         ),
+        post_approval_switch: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: xai_grok_workspace::permission::PermissionHandle::allow_all(),
         attribution_callback: None,

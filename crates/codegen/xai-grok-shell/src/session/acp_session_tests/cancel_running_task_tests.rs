@@ -102,7 +102,8 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                     hook_block_hold: Default::default(),
                     nudges_used_this_session: 0,
                     prompt_delivery_watermark: None,
-                    prompt_delivered_work: Vec::new(),                }),
+                    prompt_delivered_work: Vec::new(),
+                }),
                 notifications: NotificationSender {
                     gateway: GatewaySender::new(gateway_tx),
                     gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -296,6 +297,7 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                 sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
                 sampling_gate: None,
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
+                post_approval_switch: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
@@ -619,7 +621,8 @@ fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
                     hook_block_hold: Default::default(),
                     nudges_used_this_session: 0,
                     prompt_delivery_watermark: None,
-                    prompt_delivered_work: Vec::new(),                }),
+                    prompt_delivered_work: Vec::new(),
+                }),
                 notifications: NotificationSender {
                     gateway: GatewaySender::new(gateway_tx),
                     gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -816,6 +819,7 @@ fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
                 sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
                 sampling_gate: None,
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
+                post_approval_switch: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
@@ -1167,6 +1171,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
                 sampling_gate: None,
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
+                post_approval_switch: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
@@ -2769,6 +2774,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 sampler_handle: sampler_handle.clone(),
                 sampling_gate: None,
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
+                post_approval_switch: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),

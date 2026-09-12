@@ -695,6 +695,12 @@ pub(crate) async fn spawn_session_actor(
         };
         Arc::new(parking_lot::Mutex::new(tracker))
     };
+    // Shared post-approval agent-switch cell. Written by the session actor after a
+    // plan-approval handoff (the switch runs here, not on the `!Send` MvpAgent) and
+    // read back through the resident `SessionHandle` so agent-side lookups see the
+    // switched model/agent/effort without waiting for the next reload.
+    let post_approval_switch = Arc::new(arc_swap::ArcSwapOption::empty());
+    let post_approval_switch_for_handle = post_approval_switch.clone();
     let goal_was_restored = persisted_goal_mode.is_some();
     let goal_tracker = {
         let session_dir = crate::session::persistence::session_dir(&session_info);
@@ -1992,6 +1998,7 @@ pub(crate) async fn spawn_session_actor(
         turn_start_prompt_mode: parking_lot::Mutex::new(restored_prompt_mode),
         turn_prompt_mode: turn_prompt_mode.clone(),
         plan_mode: plan_mode.clone(),
+        post_approval_switch,
         goal_enabled,
         background_workflows_enabled,
         goal_harness_enabled: std::sync::atomic::AtomicBool::new(if background_workflows_enabled {
@@ -2461,6 +2468,7 @@ pub(crate) async fn spawn_session_actor(
             ask_user_question_enabled,
             non_interactive: session_non_interactive,
             plan_mode: plan_mode.clone(),
+            post_approval_switch: post_approval_switch_for_handle,
             force_compact,
             permission_handle: permissions_for_handle,
             attribution_callback: attribution_callback_for_handle,

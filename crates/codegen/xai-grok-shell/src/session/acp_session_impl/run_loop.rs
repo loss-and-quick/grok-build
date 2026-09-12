@@ -628,6 +628,11 @@ pub(super) async fn run_session(
                     match cmd {
                         SessionCommand::Initialize { system_prompt } => {
                             session.initialize(system_prompt).await;
+                            // A session restored with a durable post-approval switch lives on the
+                            // spawn's default harness; `initialize` just installed that. Rebuild it
+                            // from the applied agent (or complete a Pending approval) so the restored
+                            // session starts on the right harness — before the prefix task runs.
+                            session.restore_plan_agent_switch().await;
                             let s = session.clone();
                             let handle = tokio::task::spawn_local(instrument_task!(
                                 "session.prefix_task",
@@ -790,7 +795,9 @@ pub(super) async fn run_session(
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
-                            let outcome = session.handle_rebuild_agent_for_definition(definition).await;
+                            let outcome = session
+                                .handle_rebuild_agent_for_definition(definition, true)
+                                .await;
                             let _ = responds_to.send(outcome);
                         }
                         SessionCommand::OverrideModelName { model_name, extra_headers, context_window } => {
@@ -2407,6 +2414,21 @@ pub(super) async fn run_session(
                     #[cfg(test)]
                     if let Some(processed) = processed {
                         let _ = processed.send(());
+                    }
+                    // The turn finalized and `running_task` is now clear. Run the durable
+                    // post-approval agent switch when the plan was approved this session and the
+                    // switch has not applied yet (`Pending`). Detached on the session `LocalSet`,
+                    // so it is cancelled when the session ends. Self-healing: a rejected rebuild
+                    // leaves `Pending` set, so the next completion retries rather than re-asking.
+                    let switch_pending = matches!(
+                        session.plan_mode.lock().post_approval_agent(),
+                        Some(crate::session::plan_mode::PostApprovalAgent::Pending { .. })
+                    );
+                    if switch_pending {
+                        let actor = session.clone();
+                        tokio::task::spawn_local(async move {
+                            actor.apply_plan_agent_switch(None).await;
+                        });
                     }
                     // Drain monitor events that were routed to the mid-turn buffer but arrived after the turn ended
                     // The is_turn_active check races the buffer push

@@ -56,6 +56,31 @@ impl Drop for WorkGuard {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
     }
 }
+/// What [`SessionHandle::post_approval_switch`] carries after a plan-approval agent switch.
+#[derive(Debug, Clone)]
+pub struct PostApprovalSwitchInfo {
+    pub model_id: acp::ModelId,
+    pub agent_name: String,
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+impl SessionHandle {
+    /// Publish the post-approval agent-switch result so agent-side lookups (model state,
+    /// subagent harness selection) observe the switched model/agent/effort before reload.
+    pub(crate) fn store_post_approval_switch(&self, info: PostApprovalSwitchInfo) {
+        self.post_approval_switch
+            .store(Some(std::sync::Arc::new(info)));
+    }
+    /// Drop the switch override so the handle's own `model_id` / `agent_name` / `reasoning_effort`
+    /// fields are the single source of truth again (an explicit `session/set_model`).
+    pub(crate) fn clear_post_approval_switch(&self) {
+        self.post_approval_switch.store(None);
+    }
+    /// The live post-approval switch result, if the switch has run and not been cleared.
+    pub(crate) fn post_approval_switch_info(&self) -> Option<PostApprovalSwitchInfo> {
+        self.post_approval_switch.load_full().map(|o| (*o).clone())
+    }
+}
 #[derive(Clone)]
 pub struct SessionHandle {
     pub cmd_tx: mpsc::UnboundedSender<SessionCommand>,
@@ -131,6 +156,15 @@ pub struct SessionHandle {
     /// Plan mode tracker, shared with the session actor via Arc.
     /// Exposed so the `x.ai/toggle_plan_mode` handler can toggle plan mode without going through the session command channel.
     pub plan_mode: std::sync::Arc<parking_lot::Mutex<crate::session::plan_mode::PlanModeTracker>>,
+    /// Live post-approval agent-switch result, shared with the session actor.
+    ///
+    /// The plan-approval agent switch runs entirely in the session actor: the agent object
+    /// is `!Send` and cannot be reached from a session thread, so the resident handle's
+    /// `model_id` / `agent_name` / `reasoning_effort` fields would stay stale until the
+    /// next reload. Agent-side lookups (`model_state`, future model switches, prompt
+    /// telemetry) consult this cell while it is set; an explicit `session/set_model`
+    /// clears it so the handle fields become the single source of truth again.
+    pub post_approval_switch: std::sync::Arc<arc_swap::ArcSwapOption<PostApprovalSwitchInfo>>,
     /// Debug flag: when set to `true`, the next turn unconditionally triggers auto-compaction regardless of context window usage.
     /// Consumed (reset to `false`) atomically on use via `compare_exchange`.
     /// Set via `x.ai/debug/arm_auto_compact`.

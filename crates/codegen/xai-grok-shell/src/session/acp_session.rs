@@ -11,7 +11,7 @@ use super::commands::{
     ParsedPromptInfo, PromptCompletionKind, PromptTurnOk, PromptTurnResult, SessionCommand,
     TaskWakeAdmission, TaskWakeFallback, ok_end_turn,
 };
-use super::handle::SessionHandle;
+use super::handle::{PostApprovalSwitchInfo, SessionHandle};
 use super::notifications::NotificationSender;
 use crate::agent::update_chunk_merge::{BufferingSettings, ReplayBuffer};
 use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
@@ -151,6 +151,8 @@ mod mcp_failed_reminder;
 mod model_switch;
 #[path = "acp_session_impl/parent_message.rs"]
 mod parent_message;
+#[path = "acp_session_impl/plan_agent_switch.rs"]
+mod plan_agent_switch;
 #[path = "acp_session_impl/slash_exec.rs"]
 mod slash_exec;
 use super::PromptOrigin;
@@ -401,9 +403,8 @@ pub(crate) struct State {
     /// Work drained at committed response boundaries but not yet injected into the conversation.
     /// Restored from the session side-file on resume; entries already present in the conversation
     /// are delivered, the rest are re-injected so committed work is never lost or double-fired.
-    pub(crate) prompt_delivered_work: Vec<
-        crate::session::helpers::session_prompt_delivery::PromptDeliveryEntry,
-    >,
+    pub(crate) prompt_delivered_work:
+        Vec<crate::session::helpers::session_prompt_delivery::PromptDeliveryEntry>,
 }
 /// Queue hold after a prompt-gate block; see [`State::hook_block_hold`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -938,6 +939,9 @@ pub(crate) struct SessionActor {
     /// All plan mode logic lives in `plan_mode.rs`; the session actor just calls into the tracker at the appropriate points.
     /// `Arc`-shared with the notification bridge so `PlanModeEntered` / `PlanModeExited` tool notifications can transition state directly.
     pub(crate) plan_mode: Arc<parking_lot::Mutex<crate::session::plan_mode::PlanModeTracker>>,
+    /// Shared with the `SessionHandle` so a post-plan-approval agent switch — which runs
+    /// entirely in this actor — can update the model/agent the agent-side lookups see.
+    pub(crate) post_approval_switch: Arc<arc_swap::ArcSwapOption<PostApprovalSwitchInfo>>,
     /// Whether goal mode (`/goal`) is enabled for this session (feature flag).
     pub(crate) goal_enabled: bool,
     pub(crate) background_workflows_enabled: bool,

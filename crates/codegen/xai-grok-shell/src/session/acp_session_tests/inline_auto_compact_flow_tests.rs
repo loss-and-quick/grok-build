@@ -47,7 +47,8 @@ async fn create_test_actor(
         hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
         prompt_delivery_watermark: None,
-        prompt_delivered_work: Vec::new(),    });
+        prompt_delivered_work: Vec::new(),
+    });
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
         vec![],
@@ -84,6 +85,7 @@ async fn create_test_actor(
             cwd: cwd.as_str().to_string(),
         },
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
+        post_approval_switch: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
         auth_method_id: test_auth_method_id("test-auth"),
         model_auth_memo: std::cell::RefCell::new(None),
         attribution_callback: None,
@@ -465,7 +467,8 @@ async fn create_test_actor_with_memory(
         hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
         prompt_delivery_watermark: None,
-        prompt_delivered_work: Vec::new(),    });
+        prompt_delivered_work: Vec::new(),
+    });
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
         vec![],
@@ -506,6 +509,7 @@ async fn create_test_actor_with_memory(
             cwd: cwd.as_str().to_string(),
         },
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
+        post_approval_switch: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
         auth_method_id: test_auth_method_id("test-auth"),
         model_auth_memo: std::cell::RefCell::new(None),
         attribution_callback: None,

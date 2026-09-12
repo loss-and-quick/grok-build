@@ -246,6 +246,10 @@ pub(crate) async fn apply(
         handle.reasoning_effort = applied_effort;
         handle.agent_name =
             agent_name_after_model_switch(did_rebuild, &required_agent_type, &handle.agent_name);
+        // A manual model switch supersedes the post-approval handoff: drop the override so the
+        // handle's own model_id / agent_name / reasoning_effort fields are the single source of
+        // truth again (and model_state/subagent reads stop consulting the switch cell).
+        handle.clear_post_approval_switch();
     });
     notify_model_changed(
         agent,

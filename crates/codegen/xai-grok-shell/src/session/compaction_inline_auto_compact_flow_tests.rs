@@ -50,7 +50,8 @@ async fn create_test_actor(
         hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
         prompt_delivery_watermark: None,
-        prompt_delivered_work: Vec::new(),    });
+        prompt_delivered_work: Vec::new(),
+    });
     let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, _event_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::session::replay_events::SessionEvent>();
@@ -280,6 +281,7 @@ async fn create_test_actor(
         sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
         sampling_gate: None,
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
+        post_approval_switch: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(std::collections::HashMap::new()),

@@ -76,12 +76,8 @@ struct PendingActivation {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum PostApprovalAgent {
-    Pending {
-        agent: String,
-    },
-    Applied {
-        agent: String,
-    },
+    Pending { agent: String },
+    Applied { agent: String },
 }
 impl PostApprovalAgent {
     pub fn agent(&self) -> &str {

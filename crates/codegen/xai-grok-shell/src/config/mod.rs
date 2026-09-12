@@ -110,7 +110,7 @@ impl Default for SubagentsConfig {
 /// from the named definition so a different model/toolset/prompt runs the
 /// implementation turn (e.g. a large model plans, a small focused model builds).
 /// Disabled by default; the switch never runs when either key is missing.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct PlanConfig {
     /// Whether the post-approval switch is armed. `true` without [`Self::agent`] is a
@@ -119,14 +119,6 @@ pub struct PlanConfig {
     /// Agent definition name (discovery order: project, user, bundled, plugins) to
     /// switch the session to after the plan is approved.
     pub agent: Option<String>,
-}
-impl Default for PlanConfig {
-    fn default() -> Self {
-        Self {
-            switch_agent_on_approval: false,
-            agent: None,
-        }
-    }
 }
 impl PlanConfig {
     /// Resolve the effective post-approval agent: `Some(name)` only when the toggle is on

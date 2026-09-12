@@ -75,7 +75,8 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
         prompt_delivery_watermark: None,
-        prompt_delivered_work: Vec::new(),    });
+        prompt_delivered_work: Vec::new(),
+    });
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let actor = SessionActor {
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
@@ -283,6 +284,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
         sampling_gate: None,
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
+        post_approval_switch: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
