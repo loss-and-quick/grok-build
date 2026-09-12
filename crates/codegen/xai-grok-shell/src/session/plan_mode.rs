@@ -46,6 +46,9 @@ pub struct PlanModeTracker {
     /// `exit_plan_mode` approval UI is outstanding (client has not answered).
     /// Persisted so resume can restore approval chrome.
     awaiting_plan_approval: bool,
+    /// Approved post-approval agent switch target (`[plan] agent`), see [`PostApprovalAgent`].
+    /// Persisted via the snapshot so the handoff survives restarts and crashes.
+    post_approval_agent: Option<PostApprovalAgent>,
     /// Rendered activation reminder buffered by a mid-turn toggle ([`Self::activate_mid_turn`]).
     /// It awaits delivery at the running turn's next safe drain point.
     /// While set, the model has NOT seen plan mode yet.
@@ -63,6 +66,30 @@ struct PendingActivation {
     /// `was_previously_active` before this activation, restored on withdrawal so a rolled-back activation doesn't fake a reentry.
     prior_was_previously_active: bool,
 }
+/// The agent a session switches to once its plan is approved (`[plan] agent`).
+///
+/// Durable across restarts so an approved handoff is never lost:
+/// `Pending` means the approval landed but the switch has not run yet — a restore
+/// completes it without re-asking the user; `Applied` means the session runs on this
+/// agent and a restore must rebuild the harness from it. Sticky by design: it is
+/// rewritten only by a new approval.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum PostApprovalAgent {
+    Pending {
+        agent: String,
+    },
+    Applied {
+        agent: String,
+    },
+}
+impl PostApprovalAgent {
+    pub fn agent(&self) -> &str {
+        match self {
+            Self::Pending { agent } | Self::Applied { agent } => agent,
+        }
+    }
+}
 /// Persisted to `plan_mode.json` in the session directory and restored on session reload/resume so plan mode survives process restarts.
 /// The `plan_file_path` is NOT persisted; it is recomputed from session metadata.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -75,6 +102,9 @@ pub struct PlanModeSnapshot {
     /// Survives process restart so the pager can restore approval chrome without treating every Active session that has a plan.md as pending.
     #[serde(default)]
     pub awaiting_plan_approval: bool,
+    /// Approved post-approval agent switch target (`[plan] agent`), see [`PostApprovalAgent`].
+    #[serde(default)]
+    pub post_approval_agent: Option<PostApprovalAgent>,
 }
 impl PlanModeTracker {
     /// Create a new tracker. `session_dir` is the session's storage
@@ -86,6 +116,7 @@ impl PlanModeTracker {
             reminder_count: 0,
             pending_exit_reminder: false,
             awaiting_plan_approval: false,
+            post_approval_agent: None,
             pending_activation: None,
             plan_file_path: session_dir.join("plan.md"),
         }
@@ -110,6 +141,7 @@ impl PlanModeTracker {
             reminder_count: snapshot.reminder_count,
             pending_exit_reminder: snapshot.pending_exit_reminder,
             awaiting_plan_approval: snapshot.awaiting_plan_approval,
+            post_approval_agent: snapshot.post_approval_agent,
             pending_activation: None,
             plan_file_path: session_dir.join("plan.md"),
         }
@@ -127,9 +159,26 @@ impl PlanModeTracker {
             state: self.state,
             was_previously_active: self.was_previously_active,
             awaiting_plan_approval: self.awaiting_plan_approval,
+            post_approval_agent: self.post_approval_agent.clone(),
             reminder_count: self.reminder_count,
             pending_exit_reminder: self.pending_exit_reminder,
         }
+    }
+    /// Record the approved post-approval agent switch target as `Pending` (approval landed, switch not yet run).
+    pub(crate) fn set_post_approval_agent_pending(&mut self, agent: &str) {
+        self.post_approval_agent = Some(PostApprovalAgent::Pending {
+            agent: agent.to_owned(),
+        });
+    }
+    /// Promote the post-approval switch to `Applied` (switch ran, the session lives on this agent).
+    pub(crate) fn set_post_approval_agent_applied(&mut self, agent: &str) {
+        self.post_approval_agent = Some(PostApprovalAgent::Applied {
+            agent: agent.to_owned(),
+        });
+    }
+    /// The durable post-approval switch state, if any.
+    pub(crate) fn post_approval_agent(&self) -> Option<&PostApprovalAgent> {
+        self.post_approval_agent.as_ref()
     }
     pub fn state(&self) -> PlanModeState {
         self.state
@@ -999,6 +1048,86 @@ mod tests {
         let restored = PlanModeTracker::from_snapshot(PathBuf::from("/tmp/test-session"), snap);
         assert_eq!(restored.state(), PlanModeState::Inactive);
         assert!(!restored.has_pending_exit_reminder());
+    }
+    #[test]
+    fn post_approval_agent_pending_survives_snapshot_round_trip() {
+        let mut t = test_tracker();
+        t.enter_pending();
+        t.activate();
+        t.set_post_approval_agent_pending("build");
+        let snap = t.snapshot();
+        let restored = PlanModeTracker::from_snapshot(PathBuf::from("/tmp/test-session"), snap);
+        assert_eq!(
+            restored.post_approval_agent(),
+            Some(&PostApprovalAgent::Pending {
+                agent: "build".to_owned()
+            })
+        );
+    }
+    #[test]
+    fn post_approval_agent_applied_transition() {
+        let mut t = test_tracker();
+        t.set_post_approval_agent_pending("build");
+        t.set_post_approval_agent_applied("build");
+        let snap = t.snapshot();
+        let restored = PlanModeTracker::from_snapshot(PathBuf::from("/tmp/test-session"), snap);
+        assert_eq!(
+            restored.post_approval_agent(),
+            Some(&PostApprovalAgent::Applied {
+                agent: "build".to_owned()
+            })
+        );
+        assert_eq!(restored.post_approval_agent().unwrap().agent(), "build");
+    }
+    /// Deactivation must not drop the sticky approved-agent record: the switch state
+    /// outlives plan mode itself so restores keep the session on the implementer agent.
+    #[test]
+    fn post_approval_agent_survives_deactivate_approved() {
+        let mut t = test_tracker();
+        t.enter_pending();
+        t.activate();
+        t.set_post_approval_agent_pending("build");
+        assert!(t.deactivate_approved());
+        assert_eq!(
+            t.post_approval_agent(),
+            Some(&PostApprovalAgent::Pending {
+                agent: "build".to_owned()
+            })
+        );
+    }
+    #[test]
+    fn snapshot_json_without_post_approval_agent_field_deserializes() {
+        // plan_mode.json written by an older build lacks the field entirely.
+        let json = r#"{
+            "state": "Inactive",
+            "was_previously_active": false,
+            "reminder_count": 0,
+            "pending_exit_reminder": false,
+            "awaiting_plan_approval": false
+        }"#;
+        let snap: PlanModeSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snap.post_approval_agent, None);
+    }
+    #[test]
+    fn snapshot_json_post_approval_agent_pending_round_trip() {
+        let json = r#"{
+            "state": "Inactive",
+            "was_previously_active": false,
+            "reminder_count": 0,
+            "pending_exit_reminder": false,
+            "awaiting_plan_approval": false,
+            "post_approval_agent": {"phase": "pending", "agent": "build"}
+        }"#;
+        let snap: PlanModeSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            snap.post_approval_agent,
+            Some(PostApprovalAgent::Pending {
+                agent: "build".to_owned()
+            })
+        );
+        let back = serde_json::to_string(&snap).unwrap();
+        assert!(back.contains("\"phase\":\"pending\""));
+        assert!(back.contains("\"agent\":\"build\""));
     }
     #[test]
     fn reenter_from_exit_pending_cancels_deferred_exit() {
