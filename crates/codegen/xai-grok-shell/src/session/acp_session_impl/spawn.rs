@@ -719,12 +719,7 @@ pub(crate) async fn spawn_session_actor(
         tool_context.gateway.is_some(),
         cursor_harness,
     );
-    let effective_cfg = matches!(
-        terminal_backend_kind,
-        TerminalBackendKind::LocalPersistent | TerminalBackendKind::LocalNonPersistent
-    )
-    .then(crate::config::load_effective_config)
-    .and_then(Result::ok);
+    let effective_cfg = crate::config::load_effective_config().ok();
     let resolve_search_shadows = || {
         let requirements = crate::config::load_merged_requirements();
         let (find_bfs, grep_ugrep) = crate::util::config::resolve_search_tools_enabled(
@@ -794,6 +789,12 @@ pub(crate) async fn spawn_session_actor(
         compact_model: None,
         memory_flush_enabled: memory_config.as_ref().is_some_and(|mc| mc.flush.enabled),
         wall_clock_budget_secs: crate::util::config::resolve_compaction_wall_clock_budget_secs(
+            effective_cfg.as_ref().and_then(|cfg| {
+                cfg.get("session")
+                    .and_then(|v| v.get("compaction_wall_clock_budget_secs"))
+                    .and_then(|v| v.as_integer())
+                    .and_then(|v| u64::try_from(v).ok())
+            }),
             remote_settings
                 .as_ref()
                 .and_then(|r| r.compaction_wall_clock_budget_secs),

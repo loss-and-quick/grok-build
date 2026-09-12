@@ -2447,6 +2447,23 @@ fn parses_auto_compact_threshold_percent() {
     assert_eq!(cfg.session.auto_compact_threshold_percent, Some(75));
 }
 #[test]
+fn default_compaction_wall_clock_budget_is_none() {
+    let cfg = Config::default();
+    assert_eq!(cfg.session.compaction_wall_clock_budget_secs, None);
+}
+#[test]
+fn parses_compaction_wall_clock_budget_secs() {
+    let raw_config: toml::Value = toml::from_str(
+        r#"
+            [session]
+            compaction_wall_clock_budget_secs = 900
+            "#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+    assert_eq!(cfg.session.compaction_wall_clock_budget_secs, Some(900));
+}
+#[test]
 fn compaction_mode_precedence_env_over_config_over_remote_over_default() {
     use xai_chat_state::CompactionMode;
     assert_eq!(

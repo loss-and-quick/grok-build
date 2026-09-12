@@ -363,6 +363,10 @@ fn merge_section_session_default_does_not_leak_load_envrc() {
             session.get("auto_compact_threshold_percent").is_none(),
             "default auto_compact_threshold_percent must not be serialized either"
         );
+        assert!(
+            session.get("compaction_wall_clock_budget_secs").is_none(),
+            "default compaction_wall_clock_budget_secs must not be serialized either"
+        );
     }
 }
 /// Companion to the above: the user explicitly commits a non-default `auto_compact_threshold_percent`.
@@ -376,6 +380,7 @@ fn merge_section_session_explicit_value_does_not_drag_load_envrc() {
     table.insert("session".into(), TomlValue::Table(session));
     let cfg = crate::agent::config::SessionConfig {
         auto_compact_threshold_percent: Some(70),
+        compaction_wall_clock_budget_secs: None,
         load_envrc: None,
     };
     merge_section(&mut table, "session", &cfg);
@@ -418,6 +423,32 @@ fn session_load_envrc_explicit_false_round_trips() {
         session.get("load_envrc").and_then(|v| v.as_bool()),
         Some(false),
         "explicit load_envrc = false must survive a save"
+    );
+}
+#[test]
+fn session_compaction_wall_clock_budget_round_trips() {
+    let raw_config: TomlValue = toml::from_str(
+        r#"
+            [session]
+            compaction_wall_clock_budget_secs = 900
+            "#,
+    )
+    .unwrap();
+    let cfg = load_config_from_toml(&raw_config);
+    assert_eq!(
+        cfg.session.compaction_wall_clock_budget_secs,
+        Some(900),
+        "explicit compaction_wall_clock_budget_secs on disk must load as Some(900)"
+    );
+    let mut table = TomlMap::new();
+    merge_section(&mut table, "session", &cfg.session);
+    let session = table.get("session").unwrap().as_table().unwrap();
+    assert_eq!(
+        session
+            .get("compaction_wall_clock_budget_secs")
+            .and_then(|v| v.as_integer()),
+        Some(900),
+        "explicit compaction_wall_clock_budget_secs must survive a save"
     );
 }
 #[test]
@@ -854,6 +885,7 @@ fn merge_section_session_load_envrc_does_not_drag_auto_compact() {
     let cfg = crate::agent::config::SessionConfig {
         load_envrc: Some(true),
         auto_compact_threshold_percent: None,
+        compaction_wall_clock_budget_secs: None,
     };
     merge_section(&mut table, "session", &cfg);
     let s = table.get("session").unwrap().as_table().unwrap();
@@ -862,6 +894,53 @@ fn merge_section_session_load_envrc_does_not_drag_auto_compact() {
         s.get("auto_compact_threshold_percent").is_none(),
         "default auto_compact_threshold_percent: None must not serialize \
          when only load_envrc is being committed"
+    );
+    assert!(
+        s.get("compaction_wall_clock_budget_secs").is_none(),
+        "default compaction_wall_clock_budget_secs: None must not serialize \
+         when only load_envrc is being committed"
+    );
+}
+#[test]
+fn merge_section_session_compaction_wall_clock_budget_writes_under_session_section() {
+    let mut table = TomlMap::new();
+    let cfg = crate::agent::config::SessionConfig {
+        compaction_wall_clock_budget_secs: Some(900),
+        ..Default::default()
+    };
+    merge_section(&mut table, "session", &cfg);
+    let s = table.get("session").unwrap().as_table().unwrap();
+    assert_eq!(
+        s.get("compaction_wall_clock_budget_secs")
+            .and_then(|v| v.as_integer()),
+        Some(900),
+        "Some(900) must round-trip to `[session].compaction_wall_clock_budget_secs`"
+    );
+}
+#[test]
+fn merge_section_session_compaction_wall_clock_budget_does_not_drag_neighbors() {
+    let mut table = TomlMap::new();
+    let cfg = crate::agent::config::SessionConfig {
+        compaction_wall_clock_budget_secs: Some(900),
+        auto_compact_threshold_percent: None,
+        load_envrc: None,
+    };
+    merge_section(&mut table, "session", &cfg);
+    let s = table.get("session").unwrap().as_table().unwrap();
+    assert_eq!(
+        s.get("compaction_wall_clock_budget_secs")
+            .and_then(|v| v.as_integer()),
+        Some(900)
+    );
+    assert!(
+        s.get("auto_compact_threshold_percent").is_none(),
+        "default auto_compact_threshold_percent: None must not serialize \
+         when only compaction_wall_clock_budget_secs is being committed"
+    );
+    assert!(
+        s.get("load_envrc").is_none(),
+        "default load_envrc: None must not serialize when only \
+         compaction_wall_clock_budget_secs is being committed"
     );
 }
 mod resolve_auto_compact {

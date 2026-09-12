@@ -98,6 +98,7 @@ remote_fetch = true                    # allow optional online model-catalog fet
 
 [session]
 auto_compact_threshold_percent = 85    # auto-compact at this % of context window (default: 85)
+compaction_wall_clock_budget_secs = 300 # compaction wall-clock budget in seconds; 0 disables it
 load_envrc = true                      # load .envrc environment variables
 
 [tools]

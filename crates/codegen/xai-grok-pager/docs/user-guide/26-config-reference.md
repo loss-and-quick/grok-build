@@ -467,6 +467,7 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
 | `session.auto_compact_threshold_percent` | `integer` | `yes` | `user` | Auto-compact when context usage reaches this percent (0–100). |
+| `session.compaction_wall_clock_budget_secs` | `integer` | `yes` | `user` | Wall-clock budget in seconds for compaction requests. `0` disables the limit. Also `GROK_COMPACTION_WALL_CLOCK_SECS`. |
 | `session.load_envrc` | `boolean` | `yes` | `user` | Inject `.envrc` variables into bash. |
 
 ### `shell_environment_policy`

@@ -1738,6 +1738,10 @@ pub struct SessionConfig {
     /// Read this field via the resolver, not directly, to honor the full precedence chain (env, per-model, remote, default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_threshold_percent: Option<u8>,
+    /// Wall-clock budget in seconds for compaction requests.
+    /// `0` disables the budget and `None` leaves resolution to env, remote settings, and the built-in default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_wall_clock_budget_secs: Option<u64>,
     /// When enabled, the session will parse .envrc in the workspace directory and inject the environment variables into bash commands.
     /// Defaults to `true` when unset.
     /// `Option<bool>` so `None` round-trips as absent on disk (managed config wins over default).

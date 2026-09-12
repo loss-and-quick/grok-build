@@ -104,15 +104,19 @@ const COMPACTION_WALL_CLOCK_BUDGET_WARN_SECS: u64 = 120;
 
 const ENV_COMPACTION_WALL_CLOCK_BUDGET_SECS: &str = "GROK_COMPACTION_WALL_CLOCK_SECS";
 
-/// Precedence: env `GROK_COMPACTION_WALL_CLOCK_SECS`, then remote `RemoteSettings.compaction_wall_clock_budget_secs`, then the client default.
+/// Precedence: env `GROK_COMPACTION_WALL_CLOCK_SECS`, then user TOML `[session].compaction_wall_clock_budget_secs`, then remote `RemoteSettings.compaction_wall_clock_budget_secs`, then the client default.
 /// `0` **disables** it.
 /// Low values are warned, not clamped: any "safe" clamp (e.g. 30s) would itself cut legit compactions, trading one silent failure for another.
 /// Ops own the value.
-pub(crate) fn resolve_compaction_wall_clock_budget_secs(gb_global: Option<u64>) -> u64 {
+pub(crate) fn resolve_compaction_wall_clock_budget_secs(
+    user_session: Option<u64>,
+    gb_global: Option<u64>,
+) -> u64 {
     let from_env = std::env::var(ENV_COMPACTION_WALL_CLOCK_BUDGET_SECS)
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok());
     let resolved = from_env
+        .or(user_session)
         .or(gb_global)
         .unwrap_or(DEFAULT_COMPACTION_WALL_CLOCK_BUDGET_SECS);
     if resolved > 0 && resolved < COMPACTION_WALL_CLOCK_BUDGET_WARN_SECS {
@@ -127,15 +131,91 @@ pub(crate) fn resolve_compaction_wall_clock_budget_secs(gb_global: Option<u64>) 
 
 #[cfg(test)]
 mod compaction_wall_clock_budget_tests {
-    use super::resolve_compaction_wall_clock_budget_secs as resolve;
+    use super::{
+        DEFAULT_COMPACTION_WALL_CLOCK_BUDGET_SECS, ENV_COMPACTION_WALL_CLOCK_BUDGET_SECS,
+        resolve_compaction_wall_clock_budget_secs as resolve,
+    };
+    use std::sync::Mutex;
 
-    // Assumes GROK_COMPACTION_WALL_CLOCK_SECS is unset in the test env.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(value: &str) -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let prev = std::env::var(ENV_COMPACTION_WALL_CLOCK_BUDGET_SECS).ok();
+            unsafe { std::env::set_var(ENV_COMPACTION_WALL_CLOCK_BUDGET_SECS, value) };
+            Self { _lock: lock, prev }
+        }
+
+        fn unset() -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let prev = std::env::var(ENV_COMPACTION_WALL_CLOCK_BUDGET_SECS).ok();
+            unsafe { std::env::remove_var(ENV_COMPACTION_WALL_CLOCK_BUDGET_SECS) };
+            Self { _lock: lock, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => unsafe { std::env::set_var(ENV_COMPACTION_WALL_CLOCK_BUDGET_SECS, v) },
+                None => unsafe { std::env::remove_var(ENV_COMPACTION_WALL_CLOCK_BUDGET_SECS) },
+            }
+        }
+    }
+
     #[test]
-    fn default_global_disable_and_no_clamp() {
-        assert_eq!(resolve(None), 300); // client default
-        assert_eq!(resolve(Some(450)), 450); // server global wins
-        assert_eq!(resolve(Some(0)), 0); // 0 explicitly disables (no clamp)
-        assert_eq!(resolve(Some(5)), 5); // low values pass through (warned, not clamped)
+    fn defaults_to_client_budget_when_all_sources_unset() {
+        let _g = EnvVarGuard::unset();
+        assert_eq!(
+            resolve(None, None),
+            DEFAULT_COMPACTION_WALL_CLOCK_BUDGET_SECS
+        );
+    }
+
+    #[test]
+    fn user_session_beats_remote() {
+        let _g = EnvVarGuard::unset();
+        assert_eq!(resolve(Some(450), Some(300)), 450);
+    }
+
+    #[test]
+    fn remote_beats_default() {
+        let _g = EnvVarGuard::unset();
+        assert_eq!(resolve(None, Some(450)), 450);
+    }
+
+    #[test]
+    fn zero_disables_budget_from_user_config() {
+        let _g = EnvVarGuard::unset();
+        assert_eq!(resolve(Some(0), Some(450)), 0);
+    }
+
+    #[test]
+    fn low_values_are_not_clamped() {
+        let _g = EnvVarGuard::unset();
+        assert_eq!(resolve(Some(5), Some(450)), 5);
+    }
+
+    #[test]
+    fn env_beats_user_config_and_remote() {
+        let _g = EnvVarGuard::set("900");
+        assert_eq!(resolve(Some(450), Some(300)), 900);
+    }
+
+    #[test]
+    fn invalid_env_falls_through_to_user_config() {
+        let _g = EnvVarGuard::set("not-a-number");
+        assert_eq!(resolve(Some(450), Some(300)), 450);
     }
 }
 
