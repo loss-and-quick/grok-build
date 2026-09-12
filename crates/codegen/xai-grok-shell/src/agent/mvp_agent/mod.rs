@@ -1416,6 +1416,9 @@ mod session_setup;
 mod subagent_spawn;
 use session_registry::SessionRegistry;
 pub(crate) use agent_ops::PluginSignInOutcome;
+/// Shared sampling-config builder; re-exported for `ModelsManager::sampling_config_for_entry`
+/// (session-side post-plan-approval agent switch callers cannot reach the agent object).
+pub(crate) use agent_ops::prepare_model_sampling_config;
 pub(crate) use session_lifecycle::RegistrySnapshot;
 pub(super) use super::ext_parsers;
 /// Named `auth.lifecycle` (not `auth`) to avoid colliding with the pre-existing per-request `AuthManager::auth()` `#[instrument]` span.

@@ -42,6 +42,125 @@ fn should_warn_missing_session(ctx: MissingSessionCtx) -> bool {
         None => ctx.is_session_based_auth,
     }
 }
+/// Shared sampling-config builder for a model entry.
+///
+/// The body is the auth-hygiene chain of [`MvpAgent::prepare_sampling_config_for_model`],
+/// extracted so callers that cannot reach the `!Send` agent object — the session-side
+/// post-plan-approval agent switch, via [`crate::agent::models::ModelsManager`]
+/// (whose config and auth manager stay synced with the agent's) — build the exact
+/// same config the agent-side model switch does.
+pub(crate) fn prepare_model_sampling_config(
+    cfg: &AgentConfig,
+    auth_manager: &crate::auth::manager::AuthManager,
+    is_session_based_auth: bool,
+    model: &ModelEntry,
+    origin_client: Option<crate::http::OriginClientInfo>,
+) -> SamplingConfig {
+    let preferred = cfg.grok_com_config.preferred_method;
+    let prefers_oidc = preferred == Some(PreferredAuthMethod::Oidc);
+    let session = match preferred {
+        Some(PreferredAuthMethod::ApiKey) => None,
+        _ if is_session_based_auth => auth_manager.current_or_expired(),
+        _ => None,
+    };
+    let has_session_key = session.is_some();
+    let mut credentials = resolve_credentials(model, session.as_ref().map(|a| a.key.as_str()));
+    if prefers_oidc && !model.has_own_credentials()
+        && credentials.auth_type == xai_chat_state::AuthType::ApiKey
+    {
+        credentials.api_key = None;
+        credentials.auth_type = xai_chat_state::AuthType::SessionToken;
+    }
+    crate::agent::config::enforce_disable_api_key_auth(
+        &mut credentials,
+        cfg.grok_com_config.api_key_auth_disabled(),
+        session.as_ref().map(|a| a.key.as_str()),
+    );
+    if !has_session_key
+        && credentials.auth_type == xai_chat_state::AuthType::ApiKey
+        && !model.has_own_credentials()
+        && is_session_based_auth
+    {
+        tracing::info!(
+            model = model.info().model.as_str(),
+            "auth: overriding auth_type to SessionToken (session-based auth method)",
+        );
+        xai_grok_telemetry::unified_log::info(
+            "auth auth_type override to SessionToken",
+            None,
+            Some(serde_json::json!({ "model": model.info().model.as_str() })),
+        );
+        credentials.auth_type = xai_chat_state::AuthType::SessionToken;
+    }
+    if should_warn_missing_session(MissingSessionCtx {
+        has_session_key,
+        has_own_credentials: model.has_own_credentials(),
+        is_session_based_auth,
+        preferred,
+    }) {
+        tracing::warn!(
+            model = model.info().model.as_str(),
+            is_expired = auth_manager.is_expired(),
+            auth_type = ?credentials.auth_type,
+            "auth: prepare_sampling_config has no session key",
+        );
+        xai_grok_telemetry::unified_log::warn(
+            "auth: prepare_sampling_config has no session key",
+            None,
+            Some(
+                serde_json::json!({
+                    "model": model.info().model.as_str(),
+                    "is_expired": auth_manager.is_expired(),
+                    "auth_type": format!("{:?}", credentials.auth_type),
+                }),
+            ),
+        );
+    }
+    // `resolve_credentials` falls through to the session token, and then to
+    // `XAI_API_KEY`, for any entry carrying neither its own key nor an auth
+    // provider — its doc comment says callers must guard that. A
+    // `[[provider]]` whose bearer a credential plugin mints, or a
+    // `[model.*]` table whose `env_key` is unset, is exactly such an entry
+    // on a third-party host, so the fall-through would put a first-party
+    // credential on the wire to it. Drop it instead: the endpoint's own
+    // bearer is attached later, by the custom-provider resolver.
+    if !model.has_own_credentials()
+        && !crate::agent::config::endpoint_takes_session_credential(
+            &cfg.endpoints,
+            &credentials.base_url,
+        )
+    {
+        if credentials.api_key.is_some() {
+            tracing::warn!(
+                model = model.info().model.as_str(),
+                base_url = credentials.base_url.as_str(),
+                "auth: model carries no credential of its own and its endpoint is not one \
+                 the session credential was minted for; sending no first-party credential",
+            );
+        }
+        credentials.api_key = None;
+        credentials.auth_type = xai_chat_state::AuthType::ApiKey;
+    }
+    let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
+    let client_version = cfg.client_version.clone();
+    let deployment_id = crate::managed_config::resolve_deployment_id(
+        cfg.endpoints.deployment_key.as_deref(),
+    );
+    let user_id = auth_manager
+        .current_or_expired()
+        .filter(|a| a.is_xai_auth())
+        .map(|a| a.user_id);
+    let mut config = crate::agent::config::sampling_config_for_model(
+        model,
+        credentials,
+        alpha_test_key,
+        client_version,
+        deployment_id,
+        user_id,
+    );
+    config.origin_client = origin_client;
+    config
+}
 /// How a plugin's interactive sign-in ended. Distinguishes "no plugin host
 /// could run it" from "one ran it and it did not complete", so `/login` reports
 /// something the user can act on.
@@ -2126,115 +2245,14 @@ impl MvpAgent {
         model: &ModelEntry,
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> SamplingConfig {
-        let preferred = self.cfg.borrow().grok_com_config.preferred_method;
-        let prefers_oidc = preferred == Some(PreferredAuthMethod::Oidc);
         let is_session_based_auth = self.is_session_based_auth();
-        let session = match preferred {
-            Some(PreferredAuthMethod::ApiKey) => None,
-            _ if is_session_based_auth => self.auth_manager.current_or_expired(),
-            _ => None,
-        };
-        let has_session_key = session.is_some();
-        let mut credentials = resolve_credentials(
-            model,
-            session.as_ref().map(|a| a.key.as_str()),
-        );
-        if prefers_oidc && !model.has_own_credentials()
-            && credentials.auth_type == xai_chat_state::AuthType::ApiKey
-        {
-            credentials.api_key = None;
-            credentials.auth_type = xai_chat_state::AuthType::SessionToken;
-        }
-        crate::agent::config::enforce_disable_api_key_auth(
-            &mut credentials,
-            self.cfg.borrow().grok_com_config.api_key_auth_disabled(),
-            session.as_ref().map(|a| a.key.as_str()),
-        );
-        if !has_session_key && credentials.auth_type == xai_chat_state::AuthType::ApiKey
-            && !model.has_own_credentials() && is_session_based_auth
-        {
-            tracing::info!(
-                model = model.info().model.as_str(),
-                "auth: overriding auth_type to SessionToken (session-based auth method)",
-            );
-            xai_grok_telemetry::unified_log::info(
-                "auth auth_type override to SessionToken",
-                None,
-                Some(serde_json::json!({ "model": model.info().model.as_str() })),
-            );
-            credentials.auth_type = xai_chat_state::AuthType::SessionToken;
-        }
-        if should_warn_missing_session(MissingSessionCtx {
-            has_session_key,
-            has_own_credentials: model.has_own_credentials(),
+        prepare_model_sampling_config(
+            &self.cfg.borrow(),
+            self.auth_manager.as_ref(),
             is_session_based_auth,
-            preferred,
-        }) {
-            tracing::warn!(
-                model = model.info().model.as_str(),
-                is_expired = self.auth_manager.is_expired(),
-                auth_type = ?credentials.auth_type,
-                "auth: prepare_sampling_config has no session key",
-            );
-            xai_grok_telemetry::unified_log::warn(
-                "auth: prepare_sampling_config has no session key",
-                None,
-                Some(
-                    serde_json::json!({
-                    "model": model.info().model.as_str(),
-                    "is_expired": self.auth_manager.is_expired(),
-                    "auth_type": format!("{:?}", credentials.auth_type),
-                }),
-                ),
-            );
-        }
-        // `resolve_credentials` falls through to the session token, and then to
-        // `XAI_API_KEY`, for any entry carrying neither its own key nor an auth
-        // provider — its doc comment says callers must guard that. A
-        // `[[provider]]` whose bearer a credential plugin mints, or a
-        // `[model.*]` table whose `env_key` is unset, is exactly such an entry
-        // on a third-party host, so the fall-through would put a first-party
-        // credential on the wire to it. Drop it instead: the endpoint's own
-        // bearer is attached later, by the custom-provider resolver.
-        if !model.has_own_credentials()
-            && !crate::agent::config::endpoint_takes_session_credential(
-                &self.cfg.borrow().endpoints,
-                &credentials.base_url,
-            )
-        {
-            if credentials.api_key.is_some() {
-                tracing::warn!(
-                    model = model.info().model.as_str(),
-                    base_url = credentials.base_url.as_str(),
-                    "auth: model carries no credential of its own and its endpoint is not one \
-                     the session credential was minted for; sending no first-party credential",
-                );
-            }
-            credentials.api_key = None;
-            credentials.auth_type = xai_chat_state::AuthType::ApiKey;
-        }
-        let cfg = self.cfg.borrow();
-        let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
-        let client_version = cfg.client_version.clone();
-        let deployment_id = crate::managed_config::resolve_deployment_id(
-            cfg.endpoints.deployment_key.as_deref(),
-        );
-        drop(cfg);
-        let user_id = self
-            .auth_manager
-            .current_or_expired()
-            .filter(|a| a.is_xai_auth())
-            .map(|a| a.user_id);
-        let mut config = crate::agent::config::sampling_config_for_model(
             model,
-            credentials,
-            alpha_test_key,
-            client_version,
-            deployment_id,
-            user_id,
-        );
-        config.origin_client = origin_client;
-        config
+            origin_client,
+        )
     }
     /// Resolve sampling config for a model by ID, falling back to the global default on resolution failure.
     /// API-key auth then routes to the public API (via resolve_credentials) instead of the global config's cli-chat-proxy base_url.

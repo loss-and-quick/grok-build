@@ -1179,6 +1179,38 @@ impl ModelsManager {
             .store(false, Ordering::Relaxed);
     }
 
+    /// Build a `SamplingConfig` for an explicit model entry, using the agent-side auth-hygiene chain.
+    ///
+    /// Reads the manager's synced config and auth manager so session-actor callers (the
+    /// post-plan-approval agent switch) build the same config a `session/set_model` would,
+    /// without reaching the `!Send` agent object.
+    pub(crate) fn sampling_config_for_entry(
+        &self,
+        is_session_based_auth: bool,
+        model: &ModelEntry,
+        origin_client: Option<crate::http::OriginClientInfo>,
+    ) -> SamplingConfig {
+        let cfg = self.inner.cfg.read().clone();
+        crate::agent::mvp_agent::prepare_model_sampling_config(
+            &cfg,
+            self.inner.auth_manager.as_ref(),
+            is_session_based_auth,
+            model,
+            origin_client,
+        )
+    }
+
+    /// [`crate::util::config::resolve_auto_compact_threshold_percent`] against the
+    /// manager's synced config, for session-actor callers without an agent `Config` handle.
+    pub(crate) fn auto_compact_threshold_percent_for(
+        &self,
+        model_id: &str,
+        model: Option<&crate::agent::config::ModelInfo>,
+    ) -> u8 {
+        let cfg = self.inner.cfg.read().clone();
+        crate::util::config::resolve_auto_compact_threshold_percent(&cfg, model_id, model)
+    }
+
     /// Build a `SamplingConfig` from the current model and auth state.
     pub fn sampling_config(&self) -> SamplingConfig {
         let config = self.inner.cfg.read().clone();
