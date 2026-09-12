@@ -1084,3 +1084,57 @@ async fn response_boundary_drain_advances_sequence_on_every_response() {
     }))
     .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn response_boundary_drain_reinjects_restored_work_exactly_once() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        set_running(&actor, "running").await;
+        // Simulate work restored from the durable record on resume: a /loop fire that was
+        // committed at boundary 1 but never injected (the process crashed before the
+        // loop-top drain landed it in the conversation).
+        {
+            let mut state = actor.state.lock().await;
+            state
+                .prompt_delivered_work
+                .push(crate::session::helpers::session_prompt_delivery::PromptDeliveryEntry {
+                    prompt_id: "running".to_string(),
+                    response_seq: 1,
+                    work_prompt_id: "loop-1".to_string(),
+                    origin: "scheduler_fire".to_string(),
+                    text: "restored loop text".to_string(),
+                });
+        }
+
+        // No fresh runtime wake is queued, so the drain promotes nothing new; the restored
+        // work still rides this boundary's loop-top drain into the next request.
+        assert!(!actor.drain_response_boundary_work().await);
+        assert!(actor.drain_pending_interjections().await);
+        let conversation = actor.chat_state_handle.get_conversation().await;
+        let occurrences = conversation
+            .iter()
+            .filter(|item| item.text_content().contains("restored loop text"))
+            .count();
+        assert_eq!(occurrences, 1, "restored work is injected exactly once");
+
+        // The restored-work buffer was taken, not copied: a second boundary cycle cannot
+        // re-deliver the same text.
+        assert!(!actor.drain_response_boundary_work().await);
+        assert!(!actor.drain_pending_interjections().await);
+        let conversation2 = actor.chat_state_handle.get_conversation().await;
+        let occurrences2 = conversation2
+            .iter()
+            .filter(|item| item.text_content().contains("restored loop text"))
+            .count();
+        assert_eq!(
+            occurrences2, 1,
+            "the work is still delivered exactly once after a second cycle"
+        );
+        assert!(
+            actor.state.lock().await.prompt_delivered_work.is_empty(),
+            "the restored-work buffer is drained so a later resume cannot re-fire it"
+        );
+    }))
+    .await;
+}
