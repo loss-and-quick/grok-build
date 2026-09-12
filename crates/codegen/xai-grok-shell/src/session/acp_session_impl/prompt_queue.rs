@@ -755,6 +755,84 @@ impl SessionActor {
         );
     }
 
+    /// Response-boundary drain: advance the per-response orchestration boundary and
+    /// promote the queued runtime prompts that arrived during the running prompt into
+    /// mid-turn interjections, so the model sees them at the *next* response instead of
+    /// only after the prompt stops.
+    ///
+    /// Two prompt kinds are response-bound rather than prompt-end-bound:
+    /// - [`crate::session::PromptOrigin::SchedulerFired`] — a `/loop` fire. The idle-only
+    ///   promotion waits for the whole prompt to finish, which is what breaks the loop
+    ///   notification cadence.
+    /// - [`crate::session::PromptOrigin::ParentAgentMessage`] — a `queue=true` subagent
+    ///   message. `Steer` already injects at the next safe point; `Queue` must instead land
+    ///   after the next committed response, not after final stop.
+    ///
+    /// The interjections are pushed to `pending_interjections`; the loop-top drain
+    /// (`drain_interjections_at_safe_point`) injects them into the next request.
+    /// Returns `true` when at least one runtime prompt was promoted.
+    pub(super) async fn drain_response_boundary_work(&self) -> bool {
+        let mut to_promote: Vec<InputItem> = Vec::new();
+        {
+            let mut state = self.state.lock().await;
+            // Every committed response advances the boundary, work or not, so a resumed
+            // session can key exactly-once delivery off `(prompt_id, response_seq)`.
+            if let Some(task) = state.running_task.as_mut() {
+                task.advance_response_boundary();
+            }
+            let running_id = state.running_prompt_id().map(str::to_string);
+            // Do not interrupt an auto-wake turn (a task/monitor completion that woke
+            // itself): its own producer still owns the next step.
+            let running_origin = running_id
+                .as_deref()
+                .map(crate::session::PromptOrigin::from_prompt_id);
+            if running_origin.map(|origin| origin.is_auto_wake()).unwrap_or(false) {
+                return false;
+            }
+            // Partition the queue into the runtime wakes to promote and everything else,
+            // moving items out (InputItem is not Clone) so the promoted ones can be
+            // enqueued as interjections and the rest re-queued in order.
+            let mut keep: std::collections::VecDeque<InputItem> = VecDeque::new();
+            for item in std::mem::take(&mut state.pending_inputs) {
+                if Self::is_response_bound_wake(&item, running_id.as_deref()) {
+                    to_promote.push(item);
+                } else {
+                    keep.push_back(item);
+                }
+            }
+            state.pending_inputs = keep;
+            if to_promote.is_empty() {
+                return false;
+            }
+        }
+        let count = to_promote.len();
+        for item in to_promote {
+            self.enqueue_prompt_as_interjection(
+                item,
+                crate::session::events::InterjectionSource::Queue,
+            );
+        }
+        tracing::info!(
+            count,
+            "Promoted runtime prompts at the response boundary"
+        );
+        true
+    }
+
+    /// Whether a queued row is a runtime wake that belongs at the next response
+    /// boundary rather than held for the end of the prompt: a `/loop` fire
+    /// ([`crate::session::PromptOrigin::SchedulerFired`]) or a `queue=true` parent
+    /// message ([`crate::session::PromptOrigin::ParentAgentMessage`]). The running
+    /// front is excluded so the in-flight turn is never promoted into itself.
+    fn is_response_bound_wake(item: &InputItem, running_id: Option<&str>) -> bool {
+        Some(item.prompt_id.as_str()) != running_id
+            && matches!(
+                item.input_origin.as_prompt_origin(),
+                crate::session::PromptOrigin::SchedulerFired
+                    | crate::session::PromptOrigin::ParentAgentMessage { .. }
+            )
+    }
+
     /// Move held user prompts into `pending_interjections` so the next drain injects them.
     /// Stops (does not skip over) at:
     /// - a non-editable or protected row (its queue mutation policy pins it);

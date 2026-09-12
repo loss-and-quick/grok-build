@@ -917,3 +917,170 @@ async fn steer_slots_reject_past_named_cap() {
     }))
     .await;
 }
+
+/// Pending-queue prompt ids, in order, for a quick assertion on what stays queued.
+async fn queued_prompt_ids(actor: &Arc<SessionActor>) -> Vec<String> {
+    actor
+        .state
+        .lock()
+        .await
+        .pending_inputs
+        .iter()
+        .map(|item| item.prompt_id.clone())
+        .collect()
+}
+
+/// A synthetic queued prompt with a non-empty text block and an explicit origin.
+/// Mirrors [`super::super::support::user_item`] but lets the test pick a runtime origin.
+fn synthetic_item(id: &str, origin: PromptOrigin, text: &str) -> InputItem {
+    let (respond_to, _) = oneshot::channel();
+    InputItem {
+        prompt_id: id.to_string(),
+        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(text.to_string()))],
+        prompt_mode: PromptMode::Agent,
+        trace_gcs_config: None,
+        artifact_tracker: None,
+        client_identifier: None,
+        screen_mode: None,
+        verbatim: origin.is_synthetic(),
+        json_schema: None,
+        input_origin: InputOrigin::new(origin),
+        task_wake_fallback: None,
+        tool_overrides_update: None,
+        respond_to,
+        persist_ack: None,
+        parsed_prompt_tx: None,
+        initial_child_prompt_ready: None,
+        queue_meta: None,
+        queue_mutation_policy: QueueMutationPolicy::hidden(),
+        send_now: false,
+        traceparent: None,
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn response_boundary_drain_promotes_loop_fire_and_parent_message() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        set_running(&actor, "running").await;
+
+        // A `queue=true` parent message and a `/loop` fire both arrive while the prompt
+        // is running; a normal user prompt also waits but must not be promoted.
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+        let (receipt_sink, _receipt_rx) = mpsc::channel(1);
+        let (respond_to, response_rx) = oneshot::channel();
+        await_with_timeout(actor.admit_parent_agent_message_for_test(
+            message("loop-parent"),
+            ActiveAgentMessageOperation::Queue,
+            receipt_sink,
+            respond_to,
+            completion_tx,
+        ))
+        .await;
+        {
+            let mut state = actor.state.lock().await;
+            state
+                .pending_inputs
+                .push_back(synthetic_item("loop-1", PromptOrigin::SchedulerFired, "loop text"));
+            state
+                .pending_inputs
+                .push_back(super::super::support::user_item("user-q", "owner"));
+        }
+
+        assert!(
+            actor.drain_response_boundary_work().await,
+            "a runtime wake was promoted"
+        );
+
+        assert_eq!(
+            queued_prompt_ids(&actor).await,
+            vec!["running".to_string(), "user-q".to_string()],
+            "the /loop fire and queued parent message are promoted out of the queue; the user prompt stays queued"
+        );
+        let task_guard = actor.state.lock().await;
+        let task = task_guard
+            .running_task
+            .as_ref()
+            .expect("running task");
+        assert_eq!(task.response_seq, 1, "the response boundary advanced once");
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn response_boundary_drain_injects_promoted_text_into_chat_state() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        set_running(&actor, "running").await;
+        {
+            let mut state = actor.state.lock().await;
+            state
+                .pending_inputs
+                .push_back(synthetic_item("loop-1", PromptOrigin::SchedulerFired, "loop text"));
+        }
+
+        assert!(actor.drain_response_boundary_work().await);
+        // The loop-top drain is what actually injects `pending_interjections` into chat state.
+        assert!(actor.drain_pending_interjections().await);
+
+        let conversation = actor.chat_state_handle.get_conversation().await;
+        assert!(
+            conversation
+                .iter()
+                .any(|item| item.text_content().contains("loop text")),
+            "the /loop fire must reach chat state as a mid-turn interjection"
+        );
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn response_boundary_drain_leaves_user_prompt_queued() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        set_running(&actor, "running").await;
+        {
+            let mut state = actor.state.lock().await;
+            state
+                .pending_inputs
+                .push_back(super::super::support::user_item("user-q", "owner"));
+        }
+
+        assert!(
+            !actor.drain_response_boundary_work().await,
+            "a plain user prompt is not a response-bound wake"
+        );
+        assert_eq!(
+            queued_prompt_ids(&actor).await,
+            vec!["running".to_string(), "user-q".to_string()],
+            "the user prompt stays queued untouched"
+        );
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn response_boundary_drain_advances_sequence_on_every_response() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        set_running(&actor, "running").await;
+
+        // No work queued, but the boundary still advances on every committed response.
+        assert!(!actor.drain_response_boundary_work().await);
+        assert_eq!(
+            actor.state.lock().await.running_task.as_ref().unwrap().response_seq,
+            1
+        );
+
+        assert!(!actor.drain_response_boundary_work().await);
+        assert_eq!(
+            actor.state.lock().await.running_task.as_ref().unwrap().response_seq,
+            2
+        );
+    }))
+    .await;
+}

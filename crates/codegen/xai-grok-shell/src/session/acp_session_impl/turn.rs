@@ -3595,6 +3595,12 @@ impl SessionActor {
                 }
                 _ => {}
             }
+            // Response-boundary drain: a committed model response (and its tool batch)
+            // has finished, so promote queued runtime prompts that arrived during this
+            // prompt — `/loop` fires and `queue=true` subagent messages — into mid-turn
+            // interjections. The loop-top drain injects them into the next request, so
+            // they run after the next response boundary instead of only after final stop.
+            self.drain_response_boundary_work().await;
             let next_turn = tool_turn_count + 1;
             if let Some(limit) = self.max_turns
                 && next_turn > limit

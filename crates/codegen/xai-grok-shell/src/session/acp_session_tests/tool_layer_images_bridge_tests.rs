@@ -1,4 +1,7 @@
 //! Wiring tests for MCP tool-layer images through `handle_bridge_tool_success`.
+// `base64::Engine` must be in scope for `STANDARD.encode` (base64 0.22 exposes
+// `encode` as a trait method). Pre-existing import this test file was missing.
+use base64::Engine;
 use super::support::*;
 use super::*;
 use base64::Engine as _;

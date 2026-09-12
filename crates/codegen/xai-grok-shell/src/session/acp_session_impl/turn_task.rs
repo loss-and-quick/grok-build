@@ -249,6 +249,13 @@ pub(crate) struct AgentTask {
     pub(crate) handle: tokio::task::AbortHandle,
     /// Monotonic start of this running turn; complete and cancel both read it.
     pub(crate) started_at: std::time::Instant,
+    /// Committed model-response count within this prompt-bound turn.
+    /// Distinct from `epoch` (the prompt-bound identity): `epoch` changes per
+    /// queued prompt, while `response_seq` advances once per committed model
+    /// response inside the currently running prompt. It backs the per-response
+    /// orchestration boundary that releases `/loop` fires and queued subagent
+    /// messages after the next response instead of only after the prompt stops.
+    pub(super) response_seq: u64,
 }
 
 /// Saturating `Instant` delta in ms. No panic on overflow.
@@ -372,6 +379,7 @@ impl AgentTask {
             identity: TaskIdentity::new(()),
             handle,
             started_at: std::time::Instant::now(),
+            response_seq: 0,
         }
     }
 
@@ -397,7 +405,19 @@ impl AgentTask {
             ))
             .abort_handle(),
             started_at,
+            response_seq: 0,
         }
+    }
+
+    /// Advance the per-response orchestration boundary by one and return the new sequence.
+    ///
+    /// Only a *fully committed* model response advances this counter. The caller
+    /// invokes it at the `response_completed` boundary (after the response and its
+    /// tool batch are recorded); partial or aborted streams must not call it, so a
+    /// resumed session can key exactly-once delivery off `(prompt_id, response_seq)`.
+    pub(super) fn advance_response_boundary(&mut self) -> u64 {
+        self.response_seq = self.response_seq.saturating_add(1);
+        self.response_seq
     }
 
     pub(super) fn abort(&self) {
