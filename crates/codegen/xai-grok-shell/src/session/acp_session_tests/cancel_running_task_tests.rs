@@ -101,7 +101,8 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                     front_message_committed: false,
                     hook_block_hold: Default::default(),
                     nudges_used_this_session: 0,
-                }),
+                    prompt_delivery_watermark: None,
+                    prompt_delivered_work: Vec::new(),                }),
                 notifications: NotificationSender {
                     gateway: GatewaySender::new(gateway_tx),
                     gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -617,7 +618,8 @@ fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
                     front_message_committed: false,
                     hook_block_hold: Default::default(),
                     nudges_used_this_session: 0,
-                }),
+                    prompt_delivery_watermark: None,
+                    prompt_delivered_work: Vec::new(),                }),
                 notifications: NotificationSender {
                     gateway: GatewaySender::new(gateway_tx),
                     gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -907,7 +909,8 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 front_message_committed: false,
                 hook_block_hold: Default::default(),
                 nudges_used_this_session: 0,
-            });
+                prompt_delivery_watermark: None,
+                prompt_delivered_work: Vec::new(),            });
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<
                 SessionEvent,
             >();
@@ -2508,7 +2511,8 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 front_message_committed: false,
                 hook_block_hold: Default::default(),
                 nudges_used_this_session: 0,
-            });
+                prompt_delivery_watermark: None,
+                prompt_delivered_work: Vec::new(),            });
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<
                 SessionEvent,
             >();

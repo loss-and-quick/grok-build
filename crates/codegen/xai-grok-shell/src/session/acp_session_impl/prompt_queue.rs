@@ -772,37 +772,96 @@ impl SessionActor {
     /// (`drain_interjections_at_safe_point`) injects them into the next request.
     /// Returns `true` when at least one runtime prompt was promoted.
     pub(super) async fn drain_response_boundary_work(&self) -> bool {
+        // Re-inject work committed at a boundary of a prompt that crashed before the
+        // interjection landed (restored from the durable record on resume). Done first so it
+        // rides this boundary's loop-top drain into the next request — exactly-once delivery.
+        self.reinject_restored_delivered_work().await;
         let mut to_promote: Vec<InputItem> = Vec::new();
-        {
+        // `(prompt_id, response_seq)` of the durable record to write-ahead, plus the boundary
+        // value we commit against. `None` means the counter already advanced inside the lock
+        // below (auto-wake turn, no runtime wake, or a promoted set with no running prompt) and
+        // there is nothing to key exactly-once delivery off.
+        let persist_context: Option<(String, u64)> = {
             let mut state = self.state.lock().await;
-            // Every committed response advances the boundary, work or not, so a resumed
-            // session can key exactly-once delivery off `(prompt_id, response_seq)`.
-            if let Some(task) = state.running_task.as_mut() {
-                task.advance_response_boundary();
-            }
-            let running_id = state.running_prompt_id().map(str::to_string);
+            // Every committed response advances the boundary, work or not. Read the current
+            // boundary first so `new_seq` is the value we are committing against.
+            let new_seq = state
+                .running_task
+                .as_ref()
+                .map(|task| task.response_seq.saturating_add(1))
+                .unwrap_or_default();
             // Do not interrupt an auto-wake turn (a task/monitor completion that woke
-            // itself): its own producer still owns the next step.
+            // itself): its own producer still owns the next step. The boundary still advances.
+            let running_id = state.running_prompt_id().map(str::to_string);
             let running_origin = running_id
                 .as_deref()
                 .map(crate::session::PromptOrigin::from_prompt_id);
             if running_origin.map(|origin| origin.is_auto_wake()).unwrap_or(false) {
+                if let Some(task) = state.running_task.as_mut() {
+                    task.advance_response_boundary();
+                }
                 return false;
             }
             // Partition the queue into the runtime wakes to promote and everything else,
             // moving items out (InputItem is not Clone) so the promoted ones can be
             // enqueued as interjections and the rest re-queued in order.
-            let mut keep: std::collections::VecDeque<InputItem> = VecDeque::new();
-            for item in std::mem::take(&mut state.pending_inputs) {
+            let keep = std::mem::take(&mut state.pending_inputs);
+            let mut keep_out: std::collections::VecDeque<InputItem> = VecDeque::new();
+            for item in keep {
                 if Self::is_response_bound_wake(&item, running_id.as_deref()) {
                     to_promote.push(item);
                 } else {
-                    keep.push_back(item);
+                    keep_out.push_back(item);
                 }
             }
-            state.pending_inputs = keep;
+            state.pending_inputs = keep_out;
+            // No runtime wake to promote, but the boundary still advances on every committed
+            // response (see `response_boundary_drain_advances_sequence_on_every_response`).
             if to_promote.is_empty() {
+                if let Some(task) = state.running_task.as_mut() {
+                    task.advance_response_boundary();
+                }
                 return false;
+            }
+            // Key the durable record against the running prompt. A promoted set with no running
+            // prompt still advances (below) and enqueues, but has nothing to key exactly-once
+            // delivery off, so persist_context stays None.
+            match running_id {
+                Some(running_id) => Some((running_id, new_seq)),
+                None => {
+                    if let Some(task) = state.running_task.as_mut() {
+                        task.advance_response_boundary();
+                    }
+                    None
+                }
+            }
+        };
+        // Write-ahead: record the committed boundary + the drained work BEFORE advancing the
+        // in-memory counter, so a crash after the commit cannot lose the work (the record
+        // survives on disk) nor double-fire it (the watermark makes the counter continuous).
+        // Only the work+running-prompt path reaches here (auto-wake/empty returned above); the
+        // no-running-prompt path already advanced inside the lock and has no record to write.
+        if let Some((running_id, new_seq)) = persist_context {
+            let entries = to_promote
+                .iter()
+                .map(|item| Self::prompt_delivery_entry(&running_id, item, new_seq))
+                .collect();
+            let session_dir = crate::session::persistence::session_dir(&self.session_info);
+            let mut delivery =
+                crate::session::helpers::session_prompt_delivery::load_prompt_delivery_state(
+                    &session_dir,
+                );
+            delivery.commit(&running_id, new_seq, entries);
+            crate::session::helpers::session_prompt_delivery::save_prompt_delivery_state(
+                &session_dir,
+                &delivery,
+            );
+            // Advance the in-memory boundary only after the durable record lands on disk.
+            {
+                let mut state = self.state.lock().await;
+                if let Some(task) = state.running_task.as_mut() {
+                    task.advance_response_boundary();
+                }
             }
         }
         let count = to_promote.len();
@@ -812,11 +871,80 @@ impl SessionActor {
                 crate::session::events::InterjectionSource::Queue,
             );
         }
+        if count > 0 {
+            tracing::info!(count, "Promoted runtime prompts at the response boundary");
+        }
+        count > 0
+    }
+
+    /// Re-inject work restored from the durable record on resume into the pending-interjection
+    /// buffer so the next loop-top drain injects it into the following request. Clears the field
+    /// so the work rides exactly one boundary (exactly-once).
+    async fn reinject_restored_delivered_work(&self) {
+        let entries = {
+            let mut state = self.state.lock().await;
+            std::mem::take(&mut state.prompt_delivered_work)
+        };
+        if entries.is_empty() {
+            return;
+        }
+        let count = entries.len();
+        for entry in entries {
+            self.pending_interjections.push(PendingInterjection {
+                text: entry.text,
+                attachments: Vec::new(),
+            });
+        }
         tracing::info!(
             count,
-            "Promoted runtime prompts at the response boundary"
+            "Re-injected restored response-boundary work into pending interjections"
         );
-        true
+    }
+
+    /// Build the durable record for one drained work item: enough to re-inject its text as an
+    /// interjection on resume and to identify it (via `work_prompt_id`) for the delivered check.
+    /// Images are recorded by count only; their bytes are dropped (see `PromptDeliveryEntry`).
+    fn prompt_delivery_entry(
+        running_id: &str,
+        item: &InputItem,
+        response_seq: u64,
+    ) -> crate::session::helpers::session_prompt_delivery::PromptDeliveryEntry {
+        let mut text_parts = Vec::new();
+        for block in &item.prompt_blocks {
+            if let acp::ContentBlock::Text(text) = block {
+                let trimmed = text.text.trim();
+                if !trimmed.is_empty() {
+                    text_parts.push(trimmed.to_string());
+                }
+            }
+        }
+        crate::session::helpers::session_prompt_delivery::PromptDeliveryEntry {
+            prompt_id: running_id.to_string(),
+            response_seq,
+            work_prompt_id: item.prompt_id.clone(),
+            origin: Self::origin_tag(item.input_origin.as_prompt_origin()).to_string(),
+            text: text_parts.join("\n\n"),
+        }
+    }
+
+    /// Stable string tag for a [`crate::session::PromptOrigin`], used only as provenance on the
+    /// durable entry (the `work_prompt_id` is the delivery key).
+    fn origin_tag(origin: &crate::session::PromptOrigin) -> &'static str {
+        match origin {
+            crate::session::PromptOrigin::SchedulerFired => "scheduler_fire",
+            crate::session::PromptOrigin::ParentAgentMessage { .. } => "parent_message",
+            crate::session::PromptOrigin::NotificationDrain => "notification_drain",
+            crate::session::PromptOrigin::TaskCompleted { .. } => "task_completed",
+            crate::session::PromptOrigin::SubagentCompleted { .. } => "subagent_completed",
+            crate::session::PromptOrigin::WorkflowCompleted { .. } => "workflow_completed",
+            crate::session::PromptOrigin::GoalSummary | crate::session::PromptOrigin::GoalClassifierNudge => {
+                "goal"
+            }
+            crate::session::PromptOrigin::User => "user",
+            // PlanResume and any future auto-wake origin are bound the same way: at the next
+            // response boundary rather than held for the end of the prompt.
+            _ => "response_bound",
+        }
     }
 
     /// Whether a queued row is a runtime wake that belongs at the next response

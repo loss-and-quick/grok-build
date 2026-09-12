@@ -393,6 +393,17 @@ pub(crate) struct State {
     /// See the `model_switch_rx.changed()` arm in `run_session`.
     /// The cap is therefore per-(session, model): switching models is a deliberate user action that resets expectations.
     pub(crate) nudges_used_this_session: u32,
+    /// Durable watermark for exactly-once response-boundary delivery: the highest committed
+    /// response boundary for the running prompt. Restored from the session side-file on resume so
+    /// the per-response orchestration boundary stays continuous across a crash instead of 0.
+    pub(crate) prompt_delivery_watermark:
+        Option<crate::session::helpers::session_prompt_delivery::PromptDeliveryWatermark>,
+    /// Work drained at committed response boundaries but not yet injected into the conversation.
+    /// Restored from the session side-file on resume; entries already present in the conversation
+    /// are delivered, the rest are re-injected so committed work is never lost or double-fired.
+    pub(crate) prompt_delivered_work: Vec<
+        crate::session::helpers::session_prompt_delivery::PromptDeliveryEntry,
+    >,
 }
 /// Queue hold after a prompt-gate block; see [`State::hook_block_hold`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

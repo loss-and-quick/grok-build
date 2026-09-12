@@ -618,6 +618,30 @@ pub(crate) async fn spawn_session_actor(
         chat_state_handle.restore_snapshot(snap);
     }
     chat_state_handle.update_credentials(credentials);
+    // Restore the durable response-boundary watermark + not-yet-delivered work. Reconcile against
+    // the loaded conversation so work delivered before a crash is not re-injected (exactly-once).
+    let session_dir = crate::session::persistence::session_dir(&session_info);
+    let prompt_delivery =
+        crate::session::helpers::session_prompt_delivery::load_prompt_delivery_state(&session_dir);
+    let (delivered, pending) = prompt_delivery.reconcile(|entry| {
+        crate::session::helpers::session_prompt_delivery::conversation_contains_text(
+            &conversation,
+            &entry.text,
+        )
+    });
+    if !delivered.is_empty() {
+        // Drop the delivered entries from the durable record so it does not grow unbounded.
+        let mut reconciled = prompt_delivery.clone();
+        reconciled.retain_pending(|entry| {
+            !delivered
+                .iter()
+                .any(|d| d.work_prompt_id == entry.work_prompt_id)
+        });
+        crate::session::helpers::session_prompt_delivery::save_prompt_delivery_state(
+            &session_dir,
+            &reconciled,
+        );
+    }
     let state = TokioMutex::new(State {
         running_task: None,
         finalization_gate: Default::default(),
@@ -630,6 +654,8 @@ pub(crate) async fn spawn_session_actor(
         front_message_committed: false,
         hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
+        prompt_delivery_watermark: prompt_delivery.watermark,
+        prompt_delivered_work: pending,
     });
     let mcp_strategy = startup_hints.resolve_mcp_strategy();
     let file_state_tracker = Arc::new(match rewind_points_path {

@@ -311,7 +311,8 @@ async fn create_test_actor_inner(
         front_message_committed: false,
         hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
-    });
+        prompt_delivery_watermark: None,
+        prompt_delivered_work: Vec::new(),    });
     let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
     let chat_state_handle = xai_chat_state::ChatStateActor::spawn(

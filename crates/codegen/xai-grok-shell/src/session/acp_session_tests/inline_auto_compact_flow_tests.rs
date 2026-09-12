@@ -46,7 +46,8 @@ async fn create_test_actor(
         front_message_committed: false,
         hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
-    });
+        prompt_delivery_watermark: None,
+        prompt_delivered_work: Vec::new(),    });
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
         vec![],
@@ -463,7 +464,8 @@ async fn create_test_actor_with_memory(
         front_message_committed: false,
         hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
-    });
+        prompt_delivery_watermark: None,
+        prompt_delivered_work: Vec::new(),    });
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
         vec![],
