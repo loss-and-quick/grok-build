@@ -103,6 +103,50 @@ impl Default for SubagentsConfig {
         }
     }
 }
+/// Configuration for the plan-mode post-approval agent switch.
+///
+/// Parsed from the `[plan]` section of `~/.grok/config.toml` or `.grok/config.toml`.
+/// When enabled, approving a plan (`exit_plan_mode`) rebuilds the session's agent
+/// from the named definition so a different model/toolset/prompt runs the
+/// implementation turn (e.g. a large model plans, a small focused model builds).
+/// Disabled by default; the switch never runs when either key is missing.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PlanConfig {
+    /// Whether the post-approval switch is armed. `true` without [`Self::agent`] is a
+    /// configuration error: the feature stays off and a warning is logged at session spawn.
+    pub switch_agent_on_approval: bool,
+    /// Agent definition name (discovery order: project, user, bundled, plugins) to
+    /// switch the session to after the plan is approved.
+    pub agent: Option<String>,
+}
+impl Default for PlanConfig {
+    fn default() -> Self {
+        Self {
+            switch_agent_on_approval: false,
+            agent: None,
+        }
+    }
+}
+impl PlanConfig {
+    /// Resolve the effective post-approval agent: `Some(name)` only when the toggle is on
+    /// and a target agent is configured. A toggle without an agent is logged and disarms the feature.
+    pub fn resolve_approval_agent(&self) -> Option<String> {
+        if !self.switch_agent_on_approval {
+            return None;
+        }
+        match &self.agent {
+            Some(name) => Some(name.clone()),
+            None => {
+                tracing::warn!(
+                    "[plan] switch_agent_on_approval is enabled but [plan] agent is not set; \
+                     the post-approval agent switch stays disabled"
+                );
+                None
+            }
+        }
+    }
+}
 impl SubagentsConfig {
     fn discover_personas_in_dir(&mut self, dir: &std::path::Path) {
         if !dir.is_dir() {

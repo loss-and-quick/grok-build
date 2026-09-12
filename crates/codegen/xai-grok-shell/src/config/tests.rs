@@ -4323,3 +4323,42 @@ fn optional_bwrap_routes_can_degrade() {
         BwrapStartup::Continue
     );
 }
+
+#[test]
+fn plan_config_defaults_to_disabled() {
+    let plan = PlanConfig::default();
+    assert!(!plan.switch_agent_on_approval);
+    assert_eq!(plan.agent, None);
+    assert_eq!(plan.resolve_approval_agent(), None);
+}
+
+#[test]
+fn plan_config_parses_toml_section() {
+    let plan: PlanConfig = toml::from_str(
+        r#"
+switch_agent_on_approval = true
+agent = "build"
+"#,
+    )
+    .unwrap();
+    assert_eq!(plan.resolve_approval_agent().as_deref(), Some("build"));
+}
+
+#[test]
+fn plan_config_empty_section_stays_off() {
+    let plan: PlanConfig = toml::from_str("").unwrap();
+    assert_eq!(plan.resolve_approval_agent(), None);
+}
+
+#[test]
+fn plan_config_enabled_without_agent_disarms() {
+    let plan: PlanConfig = toml::from_str("switch_agent_on_approval = true").unwrap();
+    // A toggle with no target agent is a config error; the feature stays off.
+    assert_eq!(plan.resolve_approval_agent(), None);
+}
+
+#[test]
+fn plan_config_agent_without_toggle_stays_off() {
+    let plan: PlanConfig = toml::from_str("agent = \"build\"").unwrap();
+    assert_eq!(plan.resolve_approval_agent(), None);
+}

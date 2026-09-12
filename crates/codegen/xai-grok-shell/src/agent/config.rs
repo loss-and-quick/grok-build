@@ -1437,6 +1437,9 @@ pub struct Config {
     pub disabled_mcp_tools: std::collections::HashMap<String, Vec<String>>,
     #[serde(default, skip_serializing)]
     pub subagents: crate::config::SubagentsConfig,
+    /// `[plan]` section: post-plan-approval agent switch.
+    #[serde(default, skip_serializing)]
+    pub plan: crate::config::PlanConfig,
     #[serde(default, skip_serializing)]
     pub memory: crate::config::MemorySettings,
     #[serde(default, skip_serializing)]
@@ -1819,6 +1822,7 @@ impl Default for Config {
             disabled_mcp_servers: Vec::new(),
             disabled_mcp_tools: std::collections::HashMap::new(),
             subagents: crate::config::SubagentsConfig::default(),
+            plan: crate::config::PlanConfig::default(),
             memory: crate::config::MemorySettings::default(),
             compaction: CompactionConfig::default(),
             managed_mcps: crate::config::ManagedMcpsConfig::default(),
