@@ -159,7 +159,7 @@ When you run a subagent in the background, retrieve its result later with `get_c
 The `send_subagent_message` tool is currently available only to the root session and can target only an active subagent owned by that session. Its optional `queue` parameter controls delivery:
 
 - Omitted or `false` uses **Steer**. If the subagent is idle, the message becomes one protected queued turn. If it is running, the message is delivered into the current turn at the next safe point.
-- `true` uses **Queue**, preserving the queued-turn behavior: the message waits as a protected turn instead of entering the active turn.
+- `true` uses **Queue**: the message lands in the subagent's queue. If the subagent is running, it is delivered into the current turn at its next response boundary (after the subagent's next model response); if the subagent is idle, it waits as a protected queued turn instead.
 
 ---
 

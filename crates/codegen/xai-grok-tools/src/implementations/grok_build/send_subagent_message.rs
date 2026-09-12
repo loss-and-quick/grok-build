@@ -15,7 +15,9 @@ pub struct SendSubagentMessageInput {
     pub subagent_id: String,
     /// Text to send to the subagent.
     pub text: String,
-    /// Queue for a later turn instead of steering the active turn.
+    /// Hold the message in the subagent's queue instead of steering its active
+    /// turn: it is delivered into the subagent's current turn at its next
+    /// response boundary, or as its next turn if the current one ends.
     #[serde(default)]
     #[schemars(default)]
     pub queue: bool,
@@ -149,7 +151,7 @@ impl crate::types::tool_metadata::ToolMetadata for SendSubagentMessageTool {
     }
 
     fn description_template(&self) -> &str {
-        "Send a follow-up message to an active subagent owned by this session. By default it steers the current turn at its next safe point; set queue to true to wait for a later turn."
+        "Send a follow-up message to an active subagent owned by this session. By default it steers the current turn at its next safe point; set queue to true to hold it in the subagent's queue, where it is delivered into its current turn at the next response boundary (or as its next turn if the current one ends)."
     }
 }
 
