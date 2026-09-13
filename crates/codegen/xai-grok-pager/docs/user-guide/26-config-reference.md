@@ -435,6 +435,13 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | `permission.deny` | `string[]` | `yes` | `user` | Compact deny rules. Project files may set this. |
 | `permission.rules` | `array of tables` | `yes` | `user` | Verbose action/tool/pattern object rules. Project files may set this. |
 
+### `plan`
+
+| Key | Type / Values | Requirements | Managed | Details |
+| --- | --- | --- | --- | --- |
+| `plan.switch_agent_on_approval` | `boolean` | `yes` | `user` | Arm the post-plan-approval agent switch. Off by default; when set together with `plan.agent`, approving a plan rebuilds the session on the named agent for the implementation turn. |
+| `plan.agent` | `string` | `yes` | `user` | Agent definition name (project, user, bundled, plugins) to switch to after a plan is approved. Read from `~/.grok/config.toml` or `.grok/config.toml`. Ignored unless `plan.switch_agent_on_approval` is true. |
+
 ### `plugins`
 
 | Key | Type / Values | Requirements | Managed | Details |

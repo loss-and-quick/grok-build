@@ -100,6 +100,23 @@ Press `Esc` to return focus from the prompt to the plan preview. To dismiss the 
 
 ---
 
+## Switching Agents After Approval
+
+Plan mode can hand the implementation turn to a different agent. This is useful when a large model plans and a smaller, focused model should build the work. Arm it in your config:
+
+```toml
+[plan]
+switch_agent_on_approval = true
+agent = "build"
+```
+
+- `switch_agent_on_approval` — arms the feature. Off by default.
+- `agent` — the agent definition to switch to after the plan is approved (discovery order: project, user, bundled, plugins). The switch never runs unless this is set.
+
+When you approve a plan (`a`), the session rebuilds itself on the named agent before the implementation turn runs instead of continuing on the planning model. The new agent, its model, and reasoning effort take effect before the next turn reloads. The setting is read from `~/.grok/config.toml` or `.grok/config.toml` in a project. If the named agent cannot be resolved, the session continues on the current agent and logs a warning. The choice is durable: it survives a restart, so a session restored after a crash still lands on the switched agent rather than re-asking.
+
+---
+
 ## Plan Mode Lifecycle
 
 The plan mode state machine has four states:
