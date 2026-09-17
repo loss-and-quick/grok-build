@@ -29,9 +29,9 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use tokio_util::sync::CancellationToken;
 use xai_grok_pager::app::{
-    AgentCmd, Command, EARLY_PREFETCH_WAIT, HeadlessArgs, LeaderMgmtArgs, LeaderMgmtCommand,
-    LeaderMode, LeaderTargetArgs, PagerArgs, resolve_leader_mode, resolve_use_leader,
-    warn_leader_disabled_by_sandbox,
+    AgentArgs, AgentCmd, Command, EARLY_PREFETCH_WAIT, HeadlessArgs, LeaderMgmtArgs,
+    LeaderMgmtCommand, LeaderMode, LeaderTargetArgs, PagerArgs, resolve_leader_mode,
+    resolve_use_leader, warn_leader_disabled_by_sandbox,
 };
 use xai_grok_pager::app::{WorkspaceMgmtArgs, WorkspaceMgmtCommand, WorkspaceStartArgs};
 use xai_grok_pager::client_identity::PAGER_CLIENT_VERSION;
@@ -50,7 +50,8 @@ use xai_grok_telemetry::process_info::{
 fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<ProcessIdentity> {
     use xai_grok_telemetry::process_info::LeaderMode::Standalone;
     let (entrypoint, interactivity) = match command {
-        Some(Command::Agent(_)) => return None,
+        // `Web` is the `agent gateway` path under another name, so it identifies itself there.
+        Some(Command::Agent(_) | Command::Web(_)) => return None,
         Some(Command::Dashboard) => return None,
         Some(Command::Login { .. }) => (Entrypoint::Cli, Interactivity::Interactive),
         Some(
@@ -90,6 +91,7 @@ fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
     match command {
         None
         | Some(Command::Agent(_))
+        | Some(Command::Web(_))
         | Some(Command::Dashboard)
         | Some(Command::Models)
         | Some(Command::Worktree(_)) => true,
@@ -172,19 +174,48 @@ fn print_serve_startup_info(bind_addr: SocketAddr, secret: &str) {
     );
     eprintln!();
 }
+/// The gateway's banner, whose first line is a URL that already works.
+///
+/// The secret rides in the query string because the alternative is asking someone to copy a
+/// 32-character credential out of a terminal and paste it into a form — for a page that is being
+/// opened from the very terminal that minted it. `?server-key=` is not a new door: it is the same
+/// one `/ws` has always accepted (`validate_auth`), constant-time on both paths.
+///
+/// Where that URL ends up was weighed rather than ignored. In this terminal's scrollback it changes
+/// nothing — the line above it already prints the secret, and has since `agent serve` existed. It
+/// is not logged: this is `eprintln!`, not `tracing`, so no log sink and no OTel exporter sees it.
+/// It does not enter shell history, because nobody types it. What it would otherwise reach is the
+/// browser's own history and the `Referer` of anything the page links to, and the client closes
+/// both: it strips the key from the address bar on load (`sdk/web/src/origin.ts`) and the page
+/// carries `referrer: no-referrer`.
 fn print_gateway_startup_info(bind_addr: SocketAddr, secret: &str) {
     eprintln!();
     eprintln!("   Grok web gateway starting...");
     eprintln!();
+    eprintln!("   Open:     http://{}/?server-key={}", bind_addr, secret);
+    eprintln!();
     eprintln!("   Address:  {}:{}", bind_addr.ip(), bind_addr.port());
     eprintln!("   Secret:   {}", secret);
-    eprintln!();
-    eprintln!(
-        "   WebSocket URL: ws://{}/ws?server-key={}",
-        bind_addr, secret
-    );
+    eprintln!("   Socket:   ws://{}/ws?server-key={}", bind_addr, secret);
     eprintln!();
     eprintln!("   Each connection registers with the shared leader as its own client.");
+    if let Some(root) = xai_grok_shell::agent::web_root_override() {
+        eprintln!(
+            "   Serving the page from {} ({} is set), not the copy built into this binary.",
+            root.display(),
+            xai_grok_shell::agent::WEB_ROOT_ENV
+        );
+    } else if !xai_grok_shell::agent::web_ui_is_built_in() {
+        // Said here as well as on the page itself: someone watching this terminal should not have
+        // to open a browser to find out that there is nothing to open.
+        eprintln!();
+        eprintln!("   No browser client is built into this binary, so the page above will say so.");
+        eprintln!("   Build one with `cd sdk/web && bun install && bun run build`, then rebuild");
+        eprintln!(
+            "   grok — or point this process at an existing bundle with {}=<dir>.",
+            xai_grok_shell::agent::WEB_ROOT_ENV
+        );
+    }
     eprintln!();
 }
 /// Entrypoint tag for `grok -p`; keys the quiet stderr default in `init_tracing_simple`.
@@ -2170,6 +2201,25 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                     )?;
                 }
                 return Ok(());
+            }
+            // `grok web` is `grok agent gateway`, reached by the same code with the same setup:
+            // rewriting the parse rather than duplicating the dispatch is what keeps the two from
+            // drifting into two commands that only look alike.
+            Command::Web(gateway_args) => {
+                enforce_version_policy_or_exit();
+                return run_agent_command(
+                    Box::new(AgentArgs {
+                        headless: gateway_args.headless.clone(),
+                        mode: Some(AgentCmd::Gateway(gateway_args)),
+                        ..AgentArgs::default()
+                    }),
+                    args.permission_mode_flag.clone(),
+                    args.trust,
+                    args.no_auto_update,
+                    args.disable_web_search,
+                    &update_config,
+                )
+                .await;
             }
             Command::Agent(agent_args) => {
                 if args.leader || args.no_leader {

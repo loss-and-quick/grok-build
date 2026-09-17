@@ -8,6 +8,16 @@ use std::path::PathBuf;
 pub enum Command {
     /// Run Grok without the interactive UI
     Agent(Box<AgentArgs>),
+    /// Serve the browser client, and the socket it talks to, from this process
+    ///
+    /// The page and its WebSocket answer on one address, so nothing else has to be started and no
+    /// address has to be typed into the page. Exactly `grok agent gateway` with a name worth
+    /// remembering: every browser connection registers with the shared leader as its own client, so
+    /// a tab sits beside a running terminal on the same session rather than replacing it.
+    ///
+    /// Not a spelling of `grok agent serve`, which is a different thing and is left alone: that one
+    /// owns its own agent and serves one client at a time.
+    Web(GatewayArgs),
     /// Show the configuration Grok discovers for this directory
     Inspect {
         /// Emit machine-readable JSON output.
@@ -255,7 +265,10 @@ pub struct WorkspaceStartArgs {
     pub json: bool,
 }
 /// Arguments for the `agent` subcommand.
-#[derive(Debug, clap::Args, Clone)]
+///
+/// `Default` so `grok web` can express itself as the `agent gateway` it is, without restating every
+/// unrelated agent flag at the one call site that builds it.
+#[derive(Debug, clap::Args, Clone, Default)]
 pub struct AgentArgs {
     /// Run authentication before starting the agent
     #[arg(
@@ -1619,5 +1632,29 @@ mod tests {
             panic!("expected gateway subcommand");
         };
         assert_eq!(gateway.get_secret(), "hunter2");
+    }
+
+    /// `grok web` is the gateway, and the distinction is not cosmetic: `agent serve` owns its own
+    /// agent and keeps one relay slot that each connection overwrites, while the gateway opens a
+    /// leader registration per browser — which is what lets a tab and a terminal share a session.
+    /// Taking the same arguments is how that stays one command rather than two that drift.
+    #[test]
+    fn web_is_the_gateway_under_a_shorter_name() {
+        let web =
+            PagerArgs::try_parse_from(["grok", "web", "--secret", "hunter2"]).expect("web parses");
+        let Some(Command::Web(web)) = web.command else {
+            panic!("expected the web subcommand");
+        };
+        let gateway =
+            PagerArgs::try_parse_from(["grok", "agent", "gateway"]).expect("gateway parses");
+        let Some(Command::Agent(gateway)) = gateway.command else {
+            panic!("expected agent subcommand");
+        };
+        let Some(AgentCmd::Gateway(gateway)) = gateway.mode else {
+            panic!("expected gateway subcommand");
+        };
+        assert_eq!(web.bind, gateway.bind);
+        assert!(web.bind.ip().is_loopback());
+        assert_eq!(web.get_secret(), "hunter2");
     }
 }
