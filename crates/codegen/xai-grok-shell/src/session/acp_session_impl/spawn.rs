@@ -623,12 +623,11 @@ pub(crate) async fn spawn_session_actor(
     let session_dir = crate::session::persistence::session_dir(&session_info);
     let prompt_delivery =
         crate::session::helpers::session_prompt_delivery::load_prompt_delivery_state(&session_dir);
-    let (delivered, pending) = prompt_delivery.reconcile(|entry| {
-        crate::session::helpers::session_prompt_delivery::conversation_contains_text(
+    let (delivered, pending) = prompt_delivery.reconcile(
+        crate::session::helpers::session_prompt_delivery::conversation_delivery_budget(
             &conversation,
-            &entry.text,
-        )
-    });
+        ),
+    );
     if !delivered.is_empty() {
         // Drop the delivered entries from the durable record so it does not grow unbounded.
         let mut reconciled = prompt_delivery.clone();

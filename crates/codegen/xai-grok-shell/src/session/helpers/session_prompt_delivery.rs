@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::sampling::{ConversationItem, ContentPart};
+use crate::sampling::{ContentPart, ConversationItem};
 
 /// Side-file name in the session dir holding the [`PromptDeliveryState`].
 pub(crate) const PROMPT_DELIVERY_FILE: &str = "prompt_delivery_state.json";
@@ -94,9 +94,16 @@ impl PromptDeliveryState {
     }
 
     /// Split pending into `(delivered, pending)` using `is_delivered`. Pure; side-effect free.
+    ///
+    /// `is_delivered` takes `&mut` so a caller can key its answer on more than the entry's text
+    /// alone: `/loop` re-fires the identical prompt on every tick, so several entries can share
+    /// one `text` while only some of them were actually delivered. A stateless per-entry check
+    /// can't tell those apart — see [`conversation_delivery_budget`], which builds a closure that
+    /// spends one conversation occurrence per `work_prompt_id` instead of answering the same
+    /// "does this text appear" question for every entry that shares it.
     pub(crate) fn reconcile(
         &self,
-        is_delivered: impl Fn(&PromptDeliveryEntry) -> bool,
+        mut is_delivered: impl FnMut(&PromptDeliveryEntry) -> bool,
     ) -> (Vec<PromptDeliveryEntry>, Vec<PromptDeliveryEntry>) {
         let mut delivered = Vec::new();
         let mut pending = Vec::new();
@@ -114,23 +121,68 @@ impl PromptDeliveryState {
 /// Whether the conversation already contains `needle` (used on resume to skip re-injecting work
 /// that was delivered before a crash). Interjections land as user messages, so only user content
 /// is scanned; a substring match tolerates the whitespace the render layer may normalize.
-pub(crate) fn conversation_contains_text(
-    conversation: &[ConversationItem],
-    needle: &str,
-) -> bool {
+pub(crate) fn conversation_contains_text(conversation: &[ConversationItem], needle: &str) -> bool {
+    conversation_text_occurrences(conversation, needle) > 0
+}
+
+/// Count the user messages in `conversation` whose text contains `needle` (see
+/// [`conversation_contains_text`] for the match rule). Used to give each
+/// [`PromptDeliveryEntry`] that shares `needle` with others its own share of the occurrences
+/// instead of letting one occurrence mark all of them delivered.
+fn conversation_text_occurrences(conversation: &[ConversationItem], needle: &str) -> usize {
     if needle.is_empty() {
-        return false;
+        return 0;
     }
-    conversation.iter().any(|item| match item {
-        ConversationItem::User(user) => user
-            .content
-            .iter()
-            .any(|part| match part {
+    conversation
+        .iter()
+        .filter(|item| match item {
+            ConversationItem::User(user) => user.content.iter().any(|part| match part {
                 ContentPart::Text { text } => text.as_ref().contains(needle),
                 _ => false,
             }),
-        _ => false,
-    })
+            _ => false,
+        })
+        .count()
+}
+
+/// Build an `is_delivered` predicate for [`PromptDeliveryState::reconcile`] that keys delivery on
+/// each entry's identity (`work_prompt_id`), not on a shared text match.
+///
+/// The conversation carries no `work_prompt_id`, only rendered text, so this still can't name
+/// *which* delivery produced which occurrence of a repeated `/loop` prompt. What it fixes is the
+/// two failure modes a plain "does this text occur anywhere" check has when several pending
+/// entries share one `text` (true for every recurring `/loop`, which re-fires the identical
+/// prompt on every tick):
+///
+/// - **Under-count → drops genuine work.** A boolean match marks *every* same-text entry
+///   delivered off a single occurrence, so a fire that was committed to the durable record but
+///   never actually made it into the conversation before a crash is thrown away as a duplicate
+///   of one that did.
+/// - **Erased text → redelivers stale work.** After compaction replaces the literal history with
+///   a summary, the occurrence count drops to zero and every same-text entry — including ones
+///   genuinely delivered long ago — is re-injected.
+///
+/// Counting occurrences and spending one per entry, oldest (`response_seq`) first — the order
+/// `reconcile` walks `pending` in — fixes the first failure mode outright: a text seen twice
+/// marks exactly two same-text entries delivered, not all of them. It narrows the second: a
+/// conversation that still holds *some* occurrences (not fully compacted away) now consumes them
+/// against the oldest entries first, the ones most likely compacted out, rather than smearing one
+/// hit across the whole group.
+pub(crate) fn conversation_delivery_budget<'a>(
+    conversation: &'a [ConversationItem],
+) -> impl FnMut(&PromptDeliveryEntry) -> bool + 'a {
+    let mut remaining: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    move |entry: &PromptDeliveryEntry| {
+        let budget = remaining
+            .entry(entry.text.clone())
+            .or_insert_with(|| conversation_text_occurrences(conversation, &entry.text));
+        if *budget > 0 {
+            *budget -= 1;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Absolute path of the [`PromptDeliveryState`] side-file for a session dir.
@@ -226,7 +278,10 @@ mod tests {
         state.commit(
             "P",
             1,
-            vec![entry("P", 1, "L1", "loop one"), entry("P", 1, "M1", "parent")],
+            vec![
+                entry("P", 1, "L1", "loop one"),
+                entry("P", 1, "M1", "parent"),
+            ],
         );
         // "loop one" was injected (delivered); "parent" was not yet injected (pending).
         state.retain_pending(|e| e.text == "loop one");
@@ -255,6 +310,64 @@ mod tests {
         assert_eq!(state.pending.len(), 2);
     }
 
+    /// `/loop` re-fires the identical prompt text every tick, so two entries can share `text`
+    /// while only the older one was actually injected before a crash. A plain "does this text
+    /// occur anywhere" check (the pre-fix `conversation_contains_text`) marks *both* delivered
+    /// off the single occurrence, silently dropping the genuinely pending fire. This is that
+    /// exact shape: two entries, one occurrence, and only the older (already-delivered) one may
+    /// be reconciled away.
+    #[test]
+    fn reconcile_with_repeated_text_drops_only_the_delivered_occurrence() {
+        let state = PromptDeliveryState {
+            watermark: Some(PromptDeliveryWatermark {
+                prompt_id: "P".to_string(),
+                response_seq: 8,
+            }),
+            pending: vec![
+                entry("P", 5, "L1", "check on the deploy"),
+                entry("P", 8, "L2", "check on the deploy"),
+            ],
+        };
+        let conversation = vec![ConversationItem::user("check on the deploy")];
+        let (delivered, pending) = state.reconcile(conversation_delivery_budget(&conversation));
+        assert_eq!(delivered.len(), 1, "only the one occurrence was delivered");
+        assert_eq!(delivered[0].work_prompt_id, "L1", "oldest fire first");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].work_prompt_id, "L2",
+            "the fire with no matching occurrence must stay pending, not be dropped"
+        );
+    }
+
+    /// Two occurrences of the same text deliver exactly two same-text entries, not the whole
+    /// group -- the direct counter-example to a boolean "contains" check, which cannot tell two
+    /// occurrences from twenty.
+    #[test]
+    fn reconcile_with_repeated_text_consumes_one_occurrence_per_entry() {
+        let state = PromptDeliveryState {
+            pending: vec![
+                entry("P", 3, "L1", "check on the deploy"),
+                entry("P", 5, "L2", "check on the deploy"),
+                entry("P", 8, "L3", "check on the deploy"),
+            ],
+            ..Default::default()
+        };
+        let conversation = vec![
+            ConversationItem::user("check on the deploy"),
+            ConversationItem::user("check on the deploy"),
+        ];
+        let (delivered, pending) = state.reconcile(conversation_delivery_budget(&conversation));
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|e| e.work_prompt_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["L1", "L2"],
+        );
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].work_prompt_id, "L3");
+    }
+
     #[test]
     fn round_trip_survives_persist_and_load() {
         let dir = tempfile::tempdir().unwrap();
@@ -262,7 +375,10 @@ mod tests {
         state.commit(
             "P",
             4,
-            vec![entry("P", 4, "L1", "loop one"), entry("P", 4, "M1", "parent")],
+            vec![
+                entry("P", 4, "L1", "loop one"),
+                entry("P", 4, "M1", "parent"),
+            ],
         );
         save_prompt_delivery_state(dir.path(), &state);
 
@@ -282,11 +398,7 @@ mod tests {
     #[test]
     fn load_corrupt_file_is_empty_state() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            prompt_delivery_state_path(dir.path()),
-            "{ not valid json",
-        )
-        .unwrap();
+        std::fs::write(prompt_delivery_state_path(dir.path()), "{ not valid json").unwrap();
         let loaded = load_prompt_delivery_state(dir.path());
         assert_eq!(loaded, PromptDeliveryState::default());
     }
@@ -294,7 +406,10 @@ mod tests {
     #[test]
     fn save_is_noop_without_session_dir() {
         // Writing outside an existing dir must not panic and must be a harmless best-effort.
-        save_prompt_delivery_state(Path::new("/nonexistent/path/here"), &PromptDeliveryState::default());
+        save_prompt_delivery_state(
+            Path::new("/nonexistent/path/here"),
+            &PromptDeliveryState::default(),
+        );
     }
 
     #[test]
