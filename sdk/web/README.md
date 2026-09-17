@@ -1,12 +1,13 @@
 # @grok-build/web
 
-A browser client for `grok agent gateway`. It lists the leader's sessions
+The browser client `grok web` serves. It lists the leader's sessions
 **grouped by working directory**, attaches to one, streams its transcript, sends
 prompts, answers permission prompts, and renders plugin panels.
 
-It is a proof that the seam works, not a product. The TUI is still the complete
-client; what this shows is that a second one needs no privileged path — every
-byte it moves is a frame the pager also moves.
+The TUI is still the complete client; what this one shows is that a second
+client needs no privileged path — every byte it moves is a frame the pager also
+moves. It ships inside the binary, so "the web UI" is not a second thing to
+start.
 
 Why it lives in `sdk/`: it is the third consumer of the generated artifacts that
 already live here. `sdk/theme` gives it every colour, `sdk/plugin` gives it the
@@ -14,47 +15,57 @@ panel types, `sdk/settings` gives it the settings catalog. Putting it anywhere
 else would mean copying one of those, and copying is the failure this whole
 arrangement exists to prevent.
 
-## Running it against a live gateway
+## Running it
 
-You need a `grok` built from this tree — `agent gateway` landed recently and a
-released binary will reject the subcommand.
+This page is part of `grok`. One command serves it and the socket it talks to,
+and prints a URL that already works:
 
 ```sh
-cargo build -p xai-grok-pager-bin       # produces target/debug/xai-grok-pager
+cd sdk/web && bun install && bun run build   # once, and after changing this package
+cargo build -p xai-grok-pager-bin            # bakes dist/ into the binary
+./target/debug/xai-grok-pager web
+#   Open:     http://127.0.0.1:2420/?server-key=<secret>
 ```
 
-**1. Start the gateway.** It prints its own secret and URL.
+`grok web` is `grok agent gateway` under a name worth remembering — the same
+loopback bind, the same secret, the same one-leader-registration-per-connection
+— with the browser client served beside `/ws`. So a running TUI and this page
+share sessions, and nothing else has to be started.
+
+Open the printed URL and the page is already connected: it takes the socket from
+its own origin and the secret from the query string, then **removes the secret
+from the address bar** so it is not left in history or in a link anyone copies.
+A reload reconnects from the remembered credential.
+
+The bundle is read from `sdk/web/dist` at compile time, never built by
+`build.rs`: a Rust build that shelled out to `bun` would put a JavaScript
+toolchain on the critical path of `cargo check` and of the network-free nix
+build. Two consequences worth knowing:
+
+* a binary built with no `dist/` present serves a page that says so, naming both
+  fixes, rather than a blank screen — `/ws` still works meanwhile;
+* `GROK_WEB_DIST=<dir>` names the bundle at build time (for packagers who build
+  the client in a separate derivation), and `GROK_WEB_ROOT=<dir>` overrides it at
+  run time, so `bun run build` alone is enough to see a change.
+
+### Developing this package
 
 ```sh
-./target/debug/xai-grok-pager agent gateway
-#   WebSocket URL: ws://127.0.0.1:2420/ws?server-key=<secret>
-```
-
-It binds loopback and attaches each browser connection to the leader the TUI is
-already talking to, so a running `grok` and this page share sessions. Pass
-`--secret` (or `GROK_AGENT_SECRET`) to pin the secret instead of generating one.
-
-**2. Build and serve the page.**
-
-```sh
-cd sdk/web
-bun install
 bun run dev        # http://127.0.0.1:2421, with hot reload
-# or
-bun run build && bun run preview
 ```
 
-The dev server never talks to the leader: the page opens its own WebSocket, so
-the secret goes from the browser to the gateway and through nothing else. Both
-servers are pinned to `127.0.0.1`.
+The dev server proxies `/ws` to the gateway on `127.0.0.1:2420`, so a page from
+`vite` reaches its socket the same way a served one does — from its own origin.
+Development is then not the one case that takes a code path nothing else takes.
+Both servers are pinned to `127.0.0.1`.
 
-**3. Connect.** The page opens on a form: paste the gateway URL
-(`ws://127.0.0.1:2420/ws`, without the query string) and the secret, and press
-Connect. Once it is up the form collapses to one line — a dot, the machine's
-name, and **Disconnect** — because the roster is what the column is for;
-pressing the name opens the instance menu. The address and the secret are
-remembered, so a reload reconnects on its own and the secret is never rendered
-back into the page.
+The connect form is still there, under the machine name in the sidebar, and it is
+what adds a *second* machine: paste that gateway's URL
+(`ws://<host>:2420/ws`, without the query string) and its secret. Once a link is
+up the form collapses to one line — a dot, the machine's name, and **Disconnect**
+— because the roster is what the column is for; pressing the name opens the
+instance menu. Addresses and secrets are remembered per machine, and a secret is
+never rendered back into the page.
 
 The sidebar fills with directories; each holds its sessions. Click one to attach
 — history replays, live updates follow — or press **+ session here** to start a
