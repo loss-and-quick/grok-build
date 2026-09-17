@@ -129,6 +129,41 @@ export function newInstance(address: string, id: string = crypto.randomUUID()): 
 }
 
 /**
+ * The record that carries one address, created if no remembered one does.
+ *
+ * Used where an address arrives without anybody typing it: the page served by a
+ * gateway knows that gateway's address from its own origin, and that address is
+ * a machine like any other. Which machine is still not this function's answer —
+ * `agentId` settles that on `initialize`, and `rememberConnection` folds two
+ * records into one there. This only keeps a known address from forking the list
+ * before the merge has a chance to unfork it.
+ *
+ * The address moves to the front on the way out, because it is the one about to
+ * be dialled and a record is connected through `addresses[0]`. That is the same
+ * ordering rule {@link rememberConnection} applies after a successful connect:
+ * the address that worked leads.
+ */
+export function instanceForAddress(
+  list: readonly Instance[],
+  address: string,
+): { instances: Instance[]; instance: Instance } {
+  const existing = list.find((instance) => instance.addresses.includes(address));
+  if (!existing) {
+    const instance = newInstance(address);
+    return { instances: [...list, instance], instance };
+  }
+  if (existing.addresses[0] === address) return { instances: [...list], instance: existing };
+  const instance: Instance = {
+    ...existing,
+    addresses: [address, ...existing.addresses.filter((known) => known !== address)],
+  };
+  return {
+    instances: list.map((candidate) => (candidate.id === instance.id ? instance : candidate)),
+    instance,
+  };
+}
+
+/**
  * The route for one session, naming the instance it is on.
  *
  * Session ids are unique on a leader and not between leaders, so a bare

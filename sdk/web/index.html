@@ -3,6 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The gateway prints a URL carrying its secret, so this page can be loaded
+         with a credential in its own address. The client takes it out of the bar
+         on load (`src/origin.ts`); this closes the other way out — a `Referer`
+         header on anything the page ever links to. -->
+    <meta name="referrer" content="no-referrer" />
     <title>grok — sessions</title>
   </head>
   <body>

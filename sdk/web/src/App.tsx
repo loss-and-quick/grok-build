@@ -34,6 +34,7 @@ import {
   forgetInstance,
   forgetSecret,
   hostOf,
+  instanceForAddress,
   instanceState,
   loadInstances,
   newInstance,
@@ -48,6 +49,7 @@ import {
   type Instance,
   type InstanceState,
 } from "./instances.ts";
+import { servedFrom } from "./origin.ts";
 import { railEnabled } from "./rail.ts";
 import { shortSessionName } from "./roster.ts";
 import { applyTheme, cssVarName, themeByName } from "./theme.ts";
@@ -56,6 +58,27 @@ const gateway: Gateway = createGateway();
 
 /** The address a gateway answers on unless it was told otherwise. */
 const DEFAULT_GATEWAY = "ws://127.0.0.1:2420/ws";
+
+/**
+ * The gateway that served this page, if one did, and the key it was handed.
+ *
+ * Read once at load, because reading it is also what takes the key out of the
+ * address bar (`origin.ts`). `null` when this page came from somewhere that is
+ * not an http origin, and then everything below behaves exactly as it did when
+ * a dev server was the only way to load this client.
+ */
+const SERVED = servedFrom();
+
+/**
+ * The address to offer when no remembered record supplies one.
+ *
+ * Served by a gateway, that is the gateway that served this page: the socket
+ * lives on this very origin, so there is nothing for anyone to look up and
+ * nothing to mistype. The constant below it remains for the page that was not.
+ */
+function defaultEndpoint(): string {
+  return SERVED?.endpoint ?? DEFAULT_GATEWAY;
+}
 
 /**
  * The width below which the navigator stops being a column.
@@ -80,7 +103,7 @@ function startingEndpoint(): string {
   const list = loadInstances();
   const preferred = defaultInstanceId() ?? currentInstanceId();
   const instance = list.find((candidate) => candidate.id === preferred) ?? list[0];
-  return instance?.addresses[0] ?? DEFAULT_GATEWAY;
+  return instance?.addresses[0] ?? defaultEndpoint();
 }
 
 /**
@@ -328,6 +351,30 @@ async function openInstance(instance: Instance, secret?: string): Promise<boolea
   return link.open(address, secret ?? secretFor(instance.id));
 }
 
+/**
+ * The record for the gateway that served this page, and its key if one came.
+ *
+ * A machine that serves this page is a machine worth remembering, so it enters
+ * the list the same way a typed address does — before any connection, since a
+ * record is a place and not a session. Which machine it *is* remains
+ * `agentId`'s answer on `initialize`: a gateway reached here as
+ * `127.0.0.1:2420` and remembered from a laptop as `10.0.0.4:2420` collapses
+ * into one record with two addresses at that point, and this function is only
+ * careful not to fork the list before then.
+ *
+ * The key, when the launcher put one in the URL, is filed under that record —
+ * which is what makes the printed URL work exactly once and the reload after it
+ * work forever.
+ */
+function adoptServedGateway(): Instance | undefined {
+  if (!SERVED) return undefined;
+  const folded = instanceForAddress(instances(), SERVED.endpoint);
+  setInstances(folded.instances);
+  saveInstances(folded.instances);
+  if (SERVED.secret) rememberSecret(folded.instance.id, SERVED.secret);
+  return folded.instance;
+}
+
 /** The state the instance line and the menu draw. */
 const currentState = (): InstanceState =>
   instanceState(link.phase(), gateway.auth.status === "settled", currentInstance()?.agentId !== undefined);
@@ -490,10 +537,20 @@ export function App(props: { children?: JSX.Element }): JSX.Element {
     // address was migrated into a list — the only instance there is, is the one
     // meant. With several and no answer, none: connecting is signing in, and
     // guessing which machine to sign in to is not a guess this page may make.
+    //
+    // Served by a gateway, that gateway joins the list first, and a key in the
+    // URL puts it at the head of the queue: a URL carrying a credential is the
+    // launcher of that gateway saying which machine is meant, which is exactly
+    // the answer the paragraph above says this page may not guess. Without a
+    // key it is only an address — the remembered choice still outranks it, and
+    // it is what is left when there is no remembered choice at all.
+    const served = adoptServedGateway();
     const list = instances();
     const opening =
+      (SERVED?.secret ? served : undefined) ??
       instanceById(defaultId() ?? currentId() ?? undefined) ??
-      (list.length === 1 ? list[0] : undefined);
+      (list.length === 1 ? list[0] : undefined) ??
+      served;
     if (opening && secretFor(opening.id)) void openInstance(opening);
 
     // A drawer that is open when the window grows past the breakpoint would
@@ -814,8 +871,8 @@ function ConnectForm(props: { onDone: () => void }): JSX.Element {
         class="connect-url"
         type="text"
         ref={urlField}
-        placeholder={DEFAULT_GATEWAY}
-        value={known()?.addresses[0] ?? DEFAULT_GATEWAY}
+        placeholder={defaultEndpoint()}
+        value={known()?.addresses[0] ?? defaultEndpoint()}
       />
       <input
         class="connect-secret"
