@@ -644,7 +644,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             description: "What to do with messages you send while a turn is \
                           running. Queue waits for the turn to finish; Steer \
                           injects them mid-turn at the next tool batch or \
-                          model step. Default: Queue.",
+                          model step. Default: Steer.",
             keywords: &[
                 "queue",
                 "steer",

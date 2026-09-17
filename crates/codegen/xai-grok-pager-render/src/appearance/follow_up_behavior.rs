@@ -1,16 +1,19 @@
 //! The `follow_up_behavior` user setting (`queue` | `steer`).
 //!
 //! Controls mid-turn follow-ups after they land on the server queue.
-//! **queue** (default) waits for the current turn to finish.
-//! **steer** promotes them into a mid-turn interjection at the next safe gap (after a tool batch, at the next model step, or before turn complete).
+//! **queue** waits for the current turn to finish.
+//! **steer** (default) promotes them into a mid-turn interjection at the next safe gap (after a tool batch, at the next model step, or before turn complete).
+//! A follow-up typed while the agent is working is the common case this decides; queue makes the
+//! user wait for a full stop before it is ever seen, so steer is the default a user who never
+//! touched this setting gets. `[ui].follow_up_behavior = "queue"` still opts back into strict FIFO.
 
 /// How mid-turn follow-ups join the running session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum FollowUpBehavior {
     /// Wait for turn end (classic queue).
-    #[default]
     Queue,
     /// Interject at the next tool/model safe point (Codex "Steer").
+    #[default]
     Steer,
 }
 
@@ -53,9 +56,9 @@ mod tests {
     }
 
     #[test]
-    fn default_is_queue() {
-        assert_eq!(FollowUpBehavior::default(), FollowUpBehavior::Queue);
-        assert_eq!(FollowUpBehavior::default().as_canonical(), "queue");
+    fn default_is_steer() {
+        assert_eq!(FollowUpBehavior::default(), FollowUpBehavior::Steer);
+        assert_eq!(FollowUpBehavior::default().as_canonical(), "steer");
     }
 
     #[test]

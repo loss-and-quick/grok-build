@@ -436,8 +436,8 @@ fn enter_on_follow_up_behavior_row_enters_picking_enum() {
             assert_eq!(*key, "follow_up_behavior");
             assert_eq!(
                 original_value,
-                &SettingValue::Enum("queue"),
-                "default follow_up_behavior is queue"
+                &SettingValue::Enum("steer"),
+                "default follow_up_behavior is steer"
             );
         }
         other => panic!("expected PickingEnum mode, got {other:?}"),
@@ -449,7 +449,7 @@ fn follow_up_behavior_picker_enter_dispatches_set_commit() {
     let mut s = make_state();
     navigate_to(&mut s, "follow_up_behavior");
     let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    // Default is queue (index 0); Down moves to steer
+    // Default is steer (last choice); Down stays clamped on steer
     let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
     match outcome {
@@ -2001,7 +2001,7 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_page_flip_on_send(true);
     xai_grok_pager::appearance::cache::set_combine_queued_prompts(false);
     xai_grok_pager::appearance::cache::set_follow_up_behavior(
-        xai_grok_pager::appearance::FollowUpBehavior::Queue,
+        xai_grok_pager::appearance::FollowUpBehavior::Steer,
     );
     xai_grok_pager::appearance::cache::set_scroll_mode(
         xai_grok_pager::appearance::ScrollMode::Auto,
@@ -2020,7 +2020,7 @@ fn defaults_round_trip_through_registry() {
             "page_flip_on_send" => SettingValue::Bool(true),
             "confirm_before_rewind" => SettingValue::Bool(true),
             "combine_queued_prompts" => SettingValue::Bool(false),
-            "follow_up_behavior" => SettingValue::Enum("queue"),
+            "follow_up_behavior" => SettingValue::Enum("steer"),
             "simple_mode" => SettingValue::Bool(true),
             "vim_mode" => SettingValue::Bool(false),
             "remember_tool_approvals" => SettingValue::Bool(true),

@@ -163,7 +163,7 @@ pub struct UiConfig {
     /// Combine consecutive queued follow-ups into one turn. `None` means off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combine_queued_prompts: Option<bool>,
-    /// Mid-turn follow-up routing: `"queue"` (default) or `"steer"`. `None` behaves as queue.
+    /// Mid-turn follow-up routing: `"queue"` or `"steer"` (default). `None` behaves as steer.
     /// Steer promotes server-queued follow-ups as interjections at the next tool or model safe point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up_behavior: Option<String>,
@@ -329,12 +329,19 @@ impl UiConfig {
     }
 
     /// Canonical default for `[ui].follow_up_behavior`.
-    pub const FOLLOW_UP_BEHAVIOR_DEFAULT: &'static str = "queue";
+    ///
+    /// A follow-up typed while a turn runs otherwise waits for a full stop before the model ever
+    /// sees it (queue's only behavior); Steer promotes it into the running turn at the next safe
+    /// point instead. Defaulting to Steer is the fix, not `[ui].follow_up_behavior = "steer"` in
+    /// a config file the user never opened — the setting is unmoved for anyone who explicitly
+    /// wants strict FIFO queueing.
+    pub const FOLLOW_UP_BEHAVIOR_DEFAULT: &'static str = "steer";
 
     /// Resolved follow-up behavior: `"queue"` or `"steer"`.
-    /// Unknown values fall back to queue.
+    /// Unknown values fall back to the default.
     pub fn follow_up_behavior(&self) -> &'static str {
         match self.follow_up_behavior.as_deref() {
+            Some("queue") => "queue",
             Some("steer") => "steer",
             _ => Self::FOLLOW_UP_BEHAVIOR_DEFAULT,
         }
