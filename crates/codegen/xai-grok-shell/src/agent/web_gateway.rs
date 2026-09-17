@@ -16,6 +16,20 @@
 //! agent server uses, then opens **one leader registration per browser connection**. Each tab is
 //! an ordinary leader client, which is what buys the whole tested session model for free: nothing
 //! here re-implements replay, fan-out or permission arbitration.
+//!
+//! It also serves the browser client itself (`crate::agent::web_assets`), which is what makes this
+//! one process rather than two: the page and the socket it talks to answer on one origin, so the
+//! page needs no address typed into it.
+//!
+//! **The page is served without authentication, and `/ws` is not.** Said out loud because it is a
+//! decision and not an oversight. The static bundle holds no session data, no roster and no
+//! credential — it is the same bytes for every user of every build — and it asks for the secret
+//! itself. Guarding it would buy nothing: a browser cannot put an `Authorization` header on a
+//! navigation, so the guard would have to be the same `?server-key=` the socket already takes,
+//! which means the first request for the page would carry the secret whether or not anyone had one
+//! to give. Meanwhile the thing worth guarding is unchanged — `/ws` still terminates on
+//! [`validate_auth`], constant-time on both the header and the query, and the listener still binds
+//! loopback by default. That pair is the security boundary, and nothing here moves it.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -243,10 +257,8 @@ struct GatewayState {
 /// Bind and serve the gateway until the listener fails.
 pub async fn run_web_gateway(config: GatewayConfig, attach: LeaderAttach) -> anyhow::Result<()> {
     let listener = TcpListener::bind(config.bind_addr).await?;
-    info!(
-        "Web gateway listening on ws://{}{WS_ROUTE}",
-        listener.local_addr().unwrap_or(config.bind_addr)
-    );
+    let addr = listener.local_addr().unwrap_or(config.bind_addr);
+    info!("Web gateway listening on ws://{addr}{WS_ROUTE} and http://{addr}/");
     serve_web_gateway(listener, config.secret, attach).await
 }
 
@@ -261,7 +273,11 @@ pub async fn serve_web_gateway(
     let state = Arc::new(GatewayState { secret, attach });
     let app = Router::new()
         .route(WS_ROUTE, get(ws_handler))
-        .with_state(state);
+        .with_state(state)
+        // Everything that is not `/ws` is the browser client. The fallback, rather than a route per
+        // file, is what makes a reloaded `/s/<id>` reach the app: those are the client's own routes,
+        // not files, and only `/ws` is spoken for on this listener.
+        .fallback(get(crate::agent::web_assets::serve));
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

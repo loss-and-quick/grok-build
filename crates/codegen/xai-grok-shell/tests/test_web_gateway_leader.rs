@@ -175,6 +175,153 @@ where
     }
 }
 
+/// One plain HTTP GET on the gateway's listener, answered as (status line, headers, body).
+///
+/// Written by hand rather than with an HTTP client: the point of these cases is that the page and
+/// the socket share one listener, and a raw request is the shortest way to ask that listener a
+/// non-WebSocket question.
+async fn http_get(addr: std::net::SocketAddr, path: &str) -> (String, String, String) {
+    http_get_with(addr, path, "Connection: close\r\n").await
+}
+
+/// [`http_get`] with extra request headers, for asking `/ws` a question it will answer.
+async fn http_get_with(
+    addr: std::net::SocketAddr,
+    path: &str,
+    extra: &str,
+) -> (String, String, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n{extra}\r\n").as_bytes())
+        .await
+        .unwrap();
+    // Read to the end of the *message*, not the end of the socket. A refused upgrade is answered
+    // on a connection the server keeps open — the request said `Connection: Upgrade`, not `close` —
+    // so `read_to_end` there waits for a close that is not coming.
+    let mut raw = Vec::new();
+    let deadline = tokio::time::Instant::now() + STEP;
+    loop {
+        if let Some(end) = message_end(&raw) {
+            raw.truncate(end);
+            break;
+        }
+        let mut chunk = [0u8; 4096];
+        let read = tokio::time::timeout_at(deadline, stream.read(&mut chunk))
+            .await
+            .expect("timeout reading the gateway's HTTP answer")
+            .unwrap();
+        if read == 0 {
+            break;
+        }
+        raw.extend_from_slice(&chunk[..read]);
+    }
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+    let (status, headers) = head.split_once("\r\n").unwrap_or((head, ""));
+    (
+        status.to_string(),
+        headers.to_ascii_lowercase(),
+        body.to_string(),
+    )
+}
+
+/// How many bytes of `raw` are one complete HTTP response, or `None` while more is needed.
+///
+/// Only as much HTTP/1.1 as these cases produce: the gateway answers every page request with a
+/// `Content-Length`, so the header block plus that many bytes is the whole message.
+fn message_end(raw: &[u8]) -> Option<usize> {
+    let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    let head = String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase();
+    let length: usize = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0);
+    (raw.len() >= head_end + length).then_some(head_end + length)
+}
+
+/// The requirement in one test: the page comes from the same process, on the same address, as the
+/// socket it talks to. Nothing else has to be running for a browser to have something to open.
+#[tokio::test]
+async fn the_page_is_served_beside_the_socket() {
+    let harness = Harness::start().await;
+
+    let (status, headers, body) = http_get(harness.gateway_addr, "/").await;
+    // 200 with a bundle baked in, 503 without — and the 503 is a page that says so, not a blank
+    // response. Either way this is HTML from the gateway, not a 404 from a listener that only
+    // speaks WebSocket.
+    assert!(
+        status.contains("200") || status.contains("503"),
+        "unexpected status for the page: {status}"
+    );
+    assert!(
+        headers.contains("content-type: text/html"),
+        "the page is not HTML: {headers}"
+    );
+    assert!(!body.is_empty(), "the page has no body");
+
+    harness.leader.cancel.cancel();
+}
+
+/// The decision this pairing exists to pin: the static page is open and the socket is not.
+///
+/// The page is the same bytes for every user of every build — no roster, no transcript, no
+/// credential — and it asks for the secret itself. The thing worth guarding is `/ws`, and it is
+/// still guarded on exactly the terms it always was.
+#[tokio::test]
+async fn the_page_is_open_and_the_socket_is_not() {
+    let harness = Harness::start().await;
+
+    let (page, _, _) = http_get(harness.gateway_addr, "/").await;
+    assert!(
+        !page.contains("401"),
+        "the page asked for a credential it does not need: {page}"
+    );
+
+    // A real upgrade request, because `WebSocketUpgrade` is extracted before the handler runs: a
+    // bare GET on `/ws` is turned away as a malformed upgrade (400) and never reaches the secret
+    // check at all, which would make a passing assertion here prove nothing.
+    let (socket, _, _) = http_get_with(
+        harness.gateway_addr,
+        "/ws",
+        "Connection: Upgrade\r\n\
+         Upgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
+    )
+    .await;
+    assert!(
+        socket.contains("401"),
+        "the socket answered an unauthenticated request: {socket}"
+    );
+
+    harness.leader.cancel.cancel();
+}
+
+/// A page route that reaches the filesystem when `GROK_WEB_ROOT` is set must not be steerable out
+/// of the bundle, and the escaped spelling is the one a raw URI hides: `%2f` is not a separator to
+/// a URI parser, so `..%2f..` arrives looking like a single ordinary segment.
+#[tokio::test]
+async fn a_page_request_cannot_climb_out_of_the_bundle() {
+    let harness = Harness::start().await;
+
+    for path in [
+        "/../../../../etc/passwd",
+        "/..%2f..%2f..%2f..%2fetc%2fpasswd",
+        "/assets/../../../../etc/passwd",
+    ] {
+        let (status, _, body) = http_get(harness.gateway_addr, path).await;
+        assert!(
+            !body.contains("root:"),
+            "the gateway served a file outside the bundle for {path}: {status}"
+        );
+    }
+
+    harness.leader.cancel.cancel();
+}
+
 /// The leader has no authentication of its own, so the gateway is the only thing standing between a
 /// browser and the machine's agent. A wrong or missing key must be refused at the HTTP upgrade,
 /// before any leader registration exists.
