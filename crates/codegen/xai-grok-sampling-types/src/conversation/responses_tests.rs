@@ -2028,6 +2028,30 @@ fn drop_unverifiable_reasoning_drops_the_named_item_without_a_blob() {
     assert_eq!(drop_unverifiable_reasoning(&mut items, Some("rs_named")), 0);
 }
 
+/// The same repair for the Messages API's rejection: `Invalid signature in
+/// thinking block` names no `rs_*` item (that id prefix is a Responses-API
+/// spelling), so the caller passes `named_id: None`. The item still has to
+/// go — it carries the same `encrypted_content` field the Messages stream
+/// consumer minted the signature into ([`crate::messages`]'s `Thinking`
+/// block round-trip) — and an empty `id` (the Messages protocol carries no
+/// item id) must not stop it from being dropped.
+#[test]
+fn drop_unverifiable_reasoning_drops_an_unnamed_messages_signature() {
+    let mut items = vec![
+        ConversationItem::user("question"),
+        reasoning_sibling("", "weighing it up", Some("stale-anthropic-signature")),
+        ConversationItem::assistant("answer"),
+    ];
+
+    let dropped = drop_unverifiable_reasoning(&mut items, None);
+
+    assert_eq!(dropped, 1);
+    assert_eq!(
+        summarise_items(&items),
+        vec!["user: question", "assistant: answer"]
+    );
+}
+
 /// `role: text` for messages, `reasoning: <id>` for reasoning siblings.
 fn summarise_items(items: &[ConversationItem]) -> Vec<String> {
     items

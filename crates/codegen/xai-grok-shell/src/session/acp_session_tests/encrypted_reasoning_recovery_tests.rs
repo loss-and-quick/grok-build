@@ -29,6 +29,30 @@ fn encrypted_content_error() -> xai_grok_sampler::SamplingErrorInfo {
     }
 }
 
+/// The Messages API's own wording for the same failure: no
+/// "encrypted content" phrase at all, so this used to bypass the detector
+/// entirely — a switch (or a `[[model_fallbacks]]` hop) that lands on a
+/// `messages`-backed model while history still carries a `thinking` block
+/// signed by a different backend.
+fn invalid_thinking_signature_error() -> xai_grok_sampler::SamplingErrorInfo {
+    xai_grok_sampler::SamplingErrorInfo {
+        kind: xai_grok_sampler::SamplingErrorKind::Api,
+        message: "API error (status 400): invalid_request_error: messages.1.content.2: Invalid \
+                  signature in thinking block"
+            .to_string(),
+        status_code: Some(400),
+        is_retryable: false,
+        retry_after_secs: None,
+        should_retry: None,
+        error_code: None,
+        model_metadata: None,
+        empty_response_context: None,
+        doom_loop_triggers: None,
+        doom_loop_aborted_at_chunk: None,
+        credential: xai_grok_sampling_types::SentCredential::Unknown,
+    }
+}
+
 fn reasoning(id: &str, encrypted: Option<&str>) -> ConversationItem {
     ConversationItem::Reasoning(rs::ReasoningItem {
         id: id.to_string(),
@@ -89,6 +113,57 @@ async fn encrypted_content_rejection_strips_the_reasoning_and_resubmits() {
                     .iter()
                     .any(|i| matches!(i, ConversationItem::Reasoning(_))),
                 "the unverifiable reasoning must be gone: {items:?}"
+            );
+            assert_eq!(
+                items.len(),
+                3,
+                "user turns and assistant answers are untouched: {items:?}"
+            );
+        })
+        .await;
+}
+
+/// Same recovery, the Messages-shaped block: empty `id` (the protocol
+/// carries no item id) and the signature riding in `encrypted_content`
+/// (`crate::messages`'s stream consumer mints it there). The reported
+/// reproduction is a switch from a `responses`- or `chat_completions`-backed
+/// model to a `messages`-backed one (or a fallback hop crossing the same
+/// boundary) with this exact block still in history.
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_thinking_signature_rejection_strips_the_reasoning_and_resubmits() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = actor_with_conversation(vec![
+                ConversationItem::user("explain the borrow checker"),
+                reasoning("", Some("stale-signature-from-a-different-backend")),
+                ConversationItem::assistant("it enforces shared-xor-mutable"),
+                ConversationItem::user("and lifetimes?"),
+            ])
+            .await;
+
+            let recovery = actor
+                .handle_sampling_failure(
+                    invalid_thinking_signature_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                )
+                .await;
+
+            assert!(
+                matches!(
+                    recovery,
+                    Ok(SamplerFailureRecovery::ResubmitWithoutReasoning)
+                ),
+                "the turn must be resubmitted, not failed: {recovery:?}"
+            );
+            let items = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                !items
+                    .iter()
+                    .any(|i| matches!(i, ConversationItem::Reasoning(_))),
+                "the unverifiable thinking block must be gone: {items:?}"
             );
             assert_eq!(
                 items.len(),

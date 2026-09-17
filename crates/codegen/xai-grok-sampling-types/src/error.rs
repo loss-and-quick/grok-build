@@ -771,20 +771,29 @@ pub fn try_parse_stream_error(data: &str) -> Option<SamplingError> {
 /// Shared size-overflow text detector: a single definition (in the compaction engine) so the turn path and compaction loops can't drift.
 pub use xai_grok_compaction::is_context_length_error;
 
-/// True when a 400's message reports that replayed encrypted reasoning
-/// content could not be verified.
+/// True when a 400's message reports that replayed reasoning content could
+/// not be verified — the Responses API's encrypted-content wording, or the
+/// Messages API's rejected `thinking` signature.
 ///
-/// There is no error code for this: providers report it in prose, and the
-/// wording differs between them — one names the request field
-/// (`Could not decrypt the provided encrypted_content`), another writes
-/// English about the item (`The encrypted content for item rs_... could not
-/// be verified`). Matching one spelling of the phrase missed the other
-/// entirely, so the recovery never ran and the turn died as a generic
-/// failure. Both spellings of the noun are matched, case-insensitively, and
-/// the caller still gates on the 400.
+/// There is no error code for either: providers report it in prose, and the
+/// wording differs between them — the Responses API names the request field
+/// (`Could not decrypt the provided encrypted_content`) or writes English
+/// about the item (`The encrypted content for item rs_... could not be
+/// verified`); the Messages API instead rejects the block outright
+/// (`messages.1.content.2: Invalid signature in thinking block`). Both are
+/// the same failure by cause — a `thinking`/`reasoning` block replayed to an
+/// endpoint that did not mint it — and both have the same fix: drop the
+/// block ([`crate::drop_unverifiable_reasoning`], which reads the same
+/// `encrypted_content` field regardless of which backend populated it) and
+/// resubmit once. Matching only one wording missed the other entirely, so
+/// the recovery never ran and the turn died as a generic failure. Every
+/// spelling is matched case-insensitively, and the caller still gates on the
+/// 400.
 pub fn is_encrypted_content_message(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
-    m.contains("encrypted_content") || m.contains("encrypted content")
+    m.contains("encrypted_content")
+        || m.contains("encrypted content")
+        || (m.contains("signature") && m.contains("thinking"))
 }
 
 /// Whether an HTTP status is worth retrying: the rule CCP publishes in `x-should-retry` (429 and any 5xx), minus Cloudflare's origin-TLS 525/526.
@@ -1554,6 +1563,32 @@ mod tests {
         };
         assert!(err.is_encrypted_content_error());
         assert!(!err.is_retryable(), "the same payload fails the same way");
+    }
+
+    /// The Messages API's rejection of a replayed `thinking` block: no
+    /// `encrypted_content` wording at all, so the old detector missed it and
+    /// the turn died as a generic failure instead of dropping the block and
+    /// resubmitting — the reported reproduction for a switch (or a
+    /// `[[model_fallbacks]]` hop) that lands on a `messages`-backed model
+    /// with a still-signed `thinking` block from a different backend in
+    /// history.
+    #[test]
+    fn invalid_thinking_signature_400_is_detected() {
+        let err = SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "invalid_request_error: messages.1.content.2: Invalid signature in \
+                      thinking block"
+                .into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        };
+        assert!(err.is_encrypted_content_error());
+        assert!(
+            !err.is_retryable(),
+            "an invalid thinking signature must not be retried as-is"
+        );
     }
 
     #[test]
