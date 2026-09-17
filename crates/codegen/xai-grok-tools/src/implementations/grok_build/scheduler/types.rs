@@ -178,10 +178,10 @@ pub enum SchedulerError {
     #[error("scheduler removal for {0} is pending")]
     RemovalPending(String),
 
-    #[error("scheduler removal cancelled")]
+    #[error("scheduler operation cancelled")]
     Cancelled,
 
-    #[error("scheduler removal timed out")]
+    #[error("scheduler operation timed out")]
     Timeout,
 }
 

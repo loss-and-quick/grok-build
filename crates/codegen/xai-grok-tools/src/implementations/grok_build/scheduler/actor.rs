@@ -818,14 +818,31 @@ impl SchedulerActor {
                         reply.send(Err(SchedulerError::RemovalPending(pending.task_id.clone())));
                     return;
                 }
-                let mut res = self.resources.lock().await;
-                let state = res.get_or_default::<State<SchedulerState>>();
-                if state.tasks.len() >= MAX_SCHEDULED_TASKS {
-                    let _ = reply.send(Err(SchedulerError::TaskLimitReached(MAX_SCHEDULED_TASKS)));
-                    return;
+                {
+                    let mut res = self.resources.lock().await;
+                    let state = res.get_or_default::<State<SchedulerState>>();
+                    if state.tasks.len() >= MAX_SCHEDULED_TASKS {
+                        let _ =
+                            reply.send(Err(SchedulerError::TaskLimitReached(MAX_SCHEDULED_TASKS)));
+                        return;
+                    }
+                    state.tasks.push(task.clone());
                 }
                 let mut reservation = self.clock.prepare_transition(1);
-                state.tasks.push(task.clone());
+                // A fresh `Resources` rebuild (a post-plan-approval agent switch, a session
+                // resume, any zero-turn harness rebuild) loads scheduler state from disk, not
+                // from this actor's memory, and the write to disk is otherwise a debounced
+                // background save issued after the tool call already returned. Persisting
+                // durably before the notify and the reply below closes that window: the same
+                // "announced before the state it describes existed" shape `d4034e61` closed for
+                // the roster upsert, here for a rebuild reading the scheduler table instead of a
+                // roster read. On failure the task stays in memory (this actor's only copy) and
+                // the caller is told so it can retry, rather than reporting success for a task a
+                // rebuild would silently drop.
+                if let Err(error) = self.persist_resources().await {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
                 let commit = reservation.commit_next(&mut self.clock);
                 log_rollover("create", Some(&task.id), commit.rollover);
                 self.notification_handle
@@ -1115,6 +1132,56 @@ mod tests {
         assert_eq!(snapshot.tasks[0].prompt, "check deploy");
 
         cancel.cancel();
+    }
+
+    /// A rebuilt actor (post-plan-approval agent switch, session resume, any zero-turn harness
+    /// rebuild) loads scheduler state by reading `resources_persistence` from disk, never from
+    /// this actor's memory. Before the fix, `Create` pushed the task, announced it, and replied
+    /// success all from in-memory state alone, leaving the disk write to a debounced background
+    /// save issued only after the tool call had already returned "created" -- a rebuild racing
+    /// that window sees an empty scheduler table for a task the caller was just told exists,
+    /// exactly the shape `d4034e61` fixed for the roster upsert. This asserts the create waits
+    /// for the durable write before the notify and the reply, so a rebuild can never observe
+    /// "created" before the create is visible to it.
+    #[tokio::test]
+    async fn create_persists_before_notify_and_reply() {
+        let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        let (mut actor, mut notifications) = make_boundary_actor(vec![], 0);
+        actor.resources_persistence = Arc::new(persistence);
+
+        let task = ScheduledTask::new(300, "check deploy".into(), true, false);
+        let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+        {
+            let create = actor.handle_command(SchedulerCommand::Create {
+                task: task.clone(),
+                reply: reply_tx,
+            });
+            tokio::pin!(create);
+            let (snapshot, persisted) = tokio::select! {
+                _ = create.as_mut() => panic!(
+                    "create must wait for resource persistence before announcing or replying"
+                ),
+                save = next_event(&mut saves) => save,
+            };
+            assert_eq!(
+                snapshot["state"]["grok_build.Scheduler"]["tasks"][0]["id"],
+                serde_json::json!(task.id)
+            );
+            // Not durable yet: neither the notification nor the reply may have fired.
+            assert!(notifications.try_recv().is_err());
+            assert!(matches!(
+                reply_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            persisted.send(Ok(())).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), create.as_mut())
+                .await
+                .expect("create must complete once persistence acknowledges");
+        }
+        let created = notification!(notifications.try_recv().unwrap(), ScheduledTaskCreated);
+        assert_eq!(created.task_id, task.id);
+        let result = reply_rx.await.unwrap();
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -2628,6 +2695,10 @@ mod tests {
             .await;
         assert!(!response.await.unwrap().unwrap());
 
+        // `Create` now persists durably too (see `create_persists_before_notify_and_reply`), so
+        // the directory the delete-failure path above deliberately left missing must exist
+        // before a create can succeed.
+        std::fs::create_dir(&parent).unwrap();
         let mut replacement = ScheduledTask::new(300, "replacement".into(), true, true);
         replacement.id = "replacement".into();
         let (reply, response) = tokio::sync::oneshot::channel();
