@@ -936,7 +936,9 @@ fn synthetic_item(id: &str, origin: PromptOrigin, text: &str) -> InputItem {
     let (respond_to, _) = oneshot::channel();
     InputItem {
         prompt_id: id.to_string(),
-        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(text.to_string()))],
+        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+            text.to_string(),
+        ))],
         prompt_mode: PromptMode::Agent,
         trace_gcs_config: None,
         artifact_tracker: None,
@@ -1016,9 +1018,11 @@ async fn response_boundary_drain_injects_promoted_text_into_chat_state() {
         set_running(&actor, "running").await;
         {
             let mut state = actor.state.lock().await;
-            state
-                .pending_inputs
-                .push_back(synthetic_item("loop-1", PromptOrigin::SchedulerFired, "loop text"));
+            state.pending_inputs.push_back(synthetic_item(
+                "loop-1",
+                PromptOrigin::SchedulerFired,
+                "loop text",
+            ));
         }
 
         assert!(actor.drain_response_boundary_work().await);
@@ -1072,13 +1076,27 @@ async fn response_boundary_drain_advances_sequence_on_every_response() {
         // No work queued, but the boundary still advances on every committed response.
         assert!(!actor.drain_response_boundary_work().await);
         assert_eq!(
-            actor.state.lock().await.running_task.as_ref().unwrap().response_seq,
+            actor
+                .state
+                .lock()
+                .await
+                .running_task
+                .as_ref()
+                .unwrap()
+                .response_seq,
             1
         );
 
         assert!(!actor.drain_response_boundary_work().await);
         assert_eq!(
-            actor.state.lock().await.running_task.as_ref().unwrap().response_seq,
+            actor
+                .state
+                .lock()
+                .await
+                .running_task
+                .as_ref()
+                .unwrap()
+                .response_seq,
             2
         );
     }))
@@ -1096,15 +1114,15 @@ async fn response_boundary_drain_reinjects_restored_work_exactly_once() {
         // loop-top drain landed it in the conversation).
         {
             let mut state = actor.state.lock().await;
-            state
-                .prompt_delivered_work
-                .push(crate::session::helpers::session_prompt_delivery::PromptDeliveryEntry {
+            state.prompt_delivered_work.push(
+                crate::session::helpers::session_prompt_delivery::PromptDeliveryEntry {
                     prompt_id: "running".to_string(),
                     response_seq: 1,
                     work_prompt_id: "loop-1".to_string(),
                     origin: "scheduler_fire".to_string(),
                     text: "restored loop text".to_string(),
-                });
+                },
+            );
         }
 
         // No fresh runtime wake is queued, so the drain promotes nothing new; the restored

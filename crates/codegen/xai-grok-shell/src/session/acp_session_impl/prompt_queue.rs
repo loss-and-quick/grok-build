@@ -796,7 +796,10 @@ impl SessionActor {
             let running_origin = running_id
                 .as_deref()
                 .map(crate::session::PromptOrigin::from_prompt_id);
-            if running_origin.map(|origin| origin.is_auto_wake()).unwrap_or(false) {
+            if running_origin
+                .map(|origin| origin.is_auto_wake())
+                .unwrap_or(false)
+            {
                 if let Some(task) = state.running_task.as_mut() {
                     task.advance_response_boundary();
                 }
@@ -937,9 +940,8 @@ impl SessionActor {
             crate::session::PromptOrigin::TaskCompleted { .. } => "task_completed",
             crate::session::PromptOrigin::SubagentCompleted { .. } => "subagent_completed",
             crate::session::PromptOrigin::WorkflowCompleted { .. } => "workflow_completed",
-            crate::session::PromptOrigin::GoalSummary | crate::session::PromptOrigin::GoalClassifierNudge => {
-                "goal"
-            }
+            crate::session::PromptOrigin::GoalSummary
+            | crate::session::PromptOrigin::GoalClassifierNudge => "goal",
             crate::session::PromptOrigin::User => "user",
             // PlanResume and any future auto-wake origin are bound the same way: at the next
             // response boundary rather than held for the end of the prompt.
