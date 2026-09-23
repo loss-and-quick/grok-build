@@ -124,6 +124,22 @@ impl SessionActor {
         let target_effort = self.resolve_target_effort(&target_model).await;
         let current_agent = self.active_agent_type.lock().clone();
         let need_rebuild = need_agent_switch_rebuild(current_agent.as_deref(), &def.name);
+        // Both branches below mutate session state a running turn depends on: a rebuild replaces
+        // `self.agent` (tools/system prompt) and `handle_set_session_model` swaps the live model,
+        // effort, context window and compaction threshold. This switch is queued from the actor
+        // loop right after the previous turn finalizes but runs detached (`spawn_local`), racing
+        // the loop's own `handle_turn_end` goal continuation and the next queued prompt — so a new
+        // turn can already be running by the time this task is actually polled. Back off rather
+        // than mutate underneath it; the durable state stays `Pending` so the next completion
+        // retries (self-healing, same as a rejected rebuild below).
+        if self.state.lock().await.running_task.is_some() {
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                agent = %def.name,
+                "post-approval agent switch: turn in flight, deferring to next completion"
+            );
+            return false;
+        }
         if need_rebuild {
             if let Err(e) = self
                 .handle_rebuild_agent_for_definition(def.clone(), false)

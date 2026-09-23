@@ -1,4 +1,5 @@
-//! Regression coverage for the post-plan-approval agent switch's rebuild decision.
+//! Regression coverage for the post-plan-approval agent switch's rebuild decision and its
+//! interaction with an already-running turn.
 //!
 //! `harnesses_are_compatible` is a *wire-format* compatibility check for zero-turn/mid-turn
 //! *model* switching between stock harnesses that share the default template. The plan-approval
@@ -9,6 +10,14 @@
 //! silently skipped the harness rebuild entirely.
 use super::support::*;
 use super::*;
+
+/// Park a fake running turn on the actor, mirroring `plan_mode_midturn_tests::fake_running_turn`.
+async fn fake_running_turn(actor: &SessionActor) {
+    actor.state.lock().await.running_task = Some(AgentTask::new(
+        "running-turn",
+        tokio::task::spawn_local(std::future::pending::<()>()).abort_handle(),
+    ));
+}
 
 /// A switch between two stock (non-strict) built-in agents must still rebuild the harness: the
 /// target has its own system prompt/toolset, even though `harnesses_are_compatible` — designed
@@ -52,6 +61,50 @@ async fn switch_to_the_already_active_agent_skips_the_rebuild() {
             assert_eq!(
                 actor.active_agent_type.lock().as_deref(),
                 Some("grok-build"),
+            );
+        })
+        .await;
+}
+
+/// The switch is queued from the actor loop right after a turn finalizes but runs detached
+/// (`spawn_local`), racing `handle_turn_end`'s goal continuation and the next queued prompt. If a
+/// new turn has already started by the time the switch actually runs, it must back off instead of
+/// mutating session state (sampling config, context window, compaction threshold) out from under
+/// that turn.
+#[tokio::test]
+async fn switch_backs_off_when_a_turn_is_already_running() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+            *actor.active_agent_type.lock() = Some("grok-build-plan".to_string());
+            fake_running_turn(&actor).await;
+
+            let model_before = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .map(|c| c.model);
+
+            let switched = actor.apply_plan_agent_switch(Some("grok-build")).await;
+
+            assert!(
+                !switched,
+                "must not report success while a turn is in flight"
+            );
+            assert_eq!(
+                actor.active_agent_type.lock().as_deref(),
+                Some("grok-build-plan"),
+                "must not rebuild the harness underneath a running turn",
+            );
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .map(|c| c.model),
+                model_before,
+                "must not swap the sampling config underneath a running turn",
             );
         })
         .await;
