@@ -1816,6 +1816,10 @@ mod permission_auto_mode_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/permission_prompt_notification_tests.rs"]
 mod permission_prompt_notification_tests;
+/// Post-plan-approval agent switch: rebuild decision, the running-turn race, and client notification.
+#[cfg(test)]
+#[path = "acp_session_tests/plan_agent_switch_rebuild_tests.rs"]
+mod plan_agent_switch_rebuild_tests;
 /// Tests that a resume re-parks the parked `exit_plan_mode` approval.
 #[cfg(test)]
 #[path = "acp_session_tests/plan_approval_resume_tests.rs"]

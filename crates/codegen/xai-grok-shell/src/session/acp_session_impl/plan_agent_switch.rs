@@ -12,6 +12,20 @@
 use super::*;
 use xai_grok_agent::config::ModelOverride;
 
+/// Whether the post-approval switch needs to rebuild the harness onto `target`, or whether the
+/// session is already running that exact agent.
+///
+/// This is an *identity* check, not the wire-format compatibility check
+/// [`crate::agent::mvp_agent::harnesses_are_compatible`] performs for zero-turn/mid-turn model
+/// switching. That check treats any two non-strict (stock) harnesses as interchangeable, because
+/// there both sides share the same generic template and the "switch" is really just routing to a
+/// different pinned model. Here `target` is a specific, possibly custom `AgentDefinition` (its
+/// own system prompt/tools/MCP servers) resolved from `[plan] agent` or an explicit approval
+/// name, so any name change — strict or not — must rebuild to actually install it.
+fn need_agent_switch_rebuild(current: Option<&str>, target: &str) -> bool {
+    current != Some(target)
+}
+
 impl SessionActor {
     /// Resolve the target agent definition by name (discovery order: project, user, bundled, plugins).
     fn resolve_target_agent(&self, name: &str) -> Option<xai_grok_agent::AgentDefinition> {
@@ -109,10 +123,7 @@ impl SessionActor {
         let target_model = self.resolve_target_model(&def);
         let target_effort = self.resolve_target_effort(&target_model).await;
         let current_agent = self.active_agent_type.lock().clone();
-        let need_rebuild = match current_agent.as_deref() {
-            Some(active) => !crate::agent::mvp_agent::harnesses_are_compatible(active, &def.name),
-            None => true,
-        };
+        let need_rebuild = need_agent_switch_rebuild(current_agent.as_deref(), &def.name);
         if need_rebuild {
             if let Err(e) = self
                 .handle_rebuild_agent_for_definition(def.clone(), false)
@@ -207,12 +218,7 @@ impl SessionActor {
             crate::session::plan_mode::PostApprovalAgent::Applied { agent } => {
                 if let Some(def) = self.resolve_target_agent(&agent) {
                     let current_agent = self.active_agent_type.lock().clone();
-                    let need_rebuild = match current_agent.as_deref() {
-                        Some(active) => {
-                            !crate::agent::mvp_agent::harnesses_are_compatible(active, &agent)
-                        }
-                        None => true,
-                    };
+                    let need_rebuild = need_agent_switch_rebuild(current_agent.as_deref(), &agent);
                     if need_rebuild
                         && let Err(e) = self.handle_rebuild_agent_for_definition(def, false).await
                     {
