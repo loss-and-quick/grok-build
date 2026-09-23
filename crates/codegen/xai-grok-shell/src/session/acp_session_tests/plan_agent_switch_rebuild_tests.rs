@@ -1,5 +1,5 @@
-//! Regression coverage for the post-plan-approval agent switch's rebuild decision and its
-//! interaction with an already-running turn.
+//! Regression coverage for the post-plan-approval agent switch's rebuild decision, its
+//! interaction with an already-running turn, and the client notification it sends.
 //!
 //! `harnesses_are_compatible` is a *wire-format* compatibility check for zero-turn/mid-turn
 //! *model* switching between stock harnesses that share the default template. The plan-approval
@@ -106,6 +106,62 @@ async fn switch_backs_off_when_a_turn_is_already_running() {
                 model_before,
                 "must not swap the sampling config underneath a running turn",
             );
+        })
+        .await;
+}
+
+/// The switch is entirely session-initiated: no client sent a `session/setModel` request whose
+/// response would tell it the model changed. Without an explicit broadcast, every client (not
+/// just a "follower") keeps showing the old model/agent while the next prompt is served by the
+/// new one — the owner's report was "the request just goes on a different model, but nothing is
+/// written in the UI".
+#[tokio::test]
+async fn switch_notifies_clients_of_the_new_model() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, gateway_rx) = build_actor().await;
+            let (_acp_updates, xai_updates) = spawn_capturing_gateway_loop(gateway_rx);
+            *actor.active_agent_type.lock() = Some("grok-build-plan".to_string());
+
+            let switched = actor.apply_plan_agent_switch(Some("grok-build")).await;
+            assert!(switched);
+
+            // The notification is forwarded on the same task before `apply_plan_agent_switch`
+            // returns, but the capturing loop is a separate spawned task; give it a turn.
+            tokio::task::yield_now().await;
+            let updates = xai_updates.lock().unwrap();
+            assert!(
+                updates
+                    .iter()
+                    .any(|u| u["sessionUpdate"] == "model_changed"),
+                "post-approval switch must broadcast `ModelChanged` to the client, not just \
+                 apply it silently: {updates:?}",
+            );
+        })
+        .await;
+}
+
+/// The published post-approval info must name the agent that was actually installed
+/// (`def.name`), not whatever `self.agent`'s definition happened to hold — the two only agree
+/// because the rebuild decision above keeps them in sync, an invariant this asserts directly
+/// rather than relying on incidentally.
+#[tokio::test]
+async fn published_switch_info_names_the_target_agent() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+            *actor.active_agent_type.lock() = Some("grok-build-plan".to_string());
+
+            let switched = actor.apply_plan_agent_switch(Some("grok-build")).await;
+            assert!(switched);
+
+            let info = actor
+                .post_approval_switch
+                .load_full()
+                .expect("switch must publish post-approval info");
+            assert_eq!(info.agent_name, "grok-build");
         })
         .await;
 }

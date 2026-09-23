@@ -182,7 +182,7 @@ impl SessionActor {
         let threshold = self
             .models_manager
             .auto_compact_threshold_percent_for(&target_model.0, None);
-        let _ = self
+        let set_model_result = self
             .handle_set_session_model(
                 sampler_cfg,
                 false, // use_concise
@@ -192,11 +192,26 @@ impl SessionActor {
                 threshold,
             )
             .await;
-        // Publish the switched values so agent-side reads see them before reload.
+        if set_model_result.is_ok() {
+            // `ModelChanged`'s usual sender skips notifying the client that made the
+            // `session/setModel` request, because that client's own RPC response is already its
+            // authority for the new model. This switch has no such request — it is entirely
+            // session-initiated — so there is no "originating" client to skip: every client must
+            // be told, or it keeps showing the old model/agent while its next prompt is served by
+            // the new one.
+            self.send_xai_notification(XaiSessionUpdate::ModelChanged {
+                model_id: target_model.0.to_string(),
+                reasoning_effort: target_effort.map(|e| e.to_string()),
+            })
+            .await;
+        }
+        // Publish the switched values so agent-side reads see them before reload. `def.name` is
+        // the name we just decided to install (rebuilt onto, or already running); reading it back
+        // from `self.agent` would depend on `need_rebuild` having actually run for it to agree.
         self.post_approval_switch.store(Some(std::sync::Arc::new(
             crate::session::handle::PostApprovalSwitchInfo {
                 model_id: target_model,
-                agent_name: self.agent.borrow().definition().name.clone(),
+                agent_name: def.name.clone(),
                 reasoning_effort: target_effort,
             },
         )));
