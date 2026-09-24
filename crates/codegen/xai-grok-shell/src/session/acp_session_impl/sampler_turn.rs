@@ -2213,11 +2213,11 @@ impl SessionActor {
             };
         }
 
-        // Snapshot the active config so failover can build model-substituted
-        // variants that keep the session's auth/interceptor wiring.
-        let mut active_config = self.reconstruct_full_config().await;
-        active_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
-        let mut current_model = active_config.model.clone();
+        // The active config, snapshotted on the first failover attempt so it can build
+        // model-substituted variants that keep the session's auth/interceptor wiring.
+        // Built lazily: building it resolves credentials, and a turn that never fails
+        // over (every parked resubmit among them) must not drive a refresh here.
+        let mut active: Option<(SamplingConfig, String)> = None;
         // Counts model/provider switches only; the sampler owns its own
         // transport retry budget independently.
         let mut fallback_attempt: u32 = 0;
@@ -2235,16 +2235,39 @@ impl SessionActor {
             if fallback_attempt + 1 < max_attempts {
                 fallback_attempt += 1;
                 let error_class = failover_error_class(&info);
-                if let Some(new_config) = self
-                    .try_provider_failover(
-                        error_class,
-                        &active_config,
-                        &current_model,
-                        fallback_attempt,
-                        max_attempts,
-                    )
-                    .await
-                {
+                // The failing model and endpoint are all the lookup needs; before the
+                // first hop they are the session's own.
+                let (current_model, base_url) = match active.as_ref() {
+                    Some((config, model)) => (model.clone(), config.base_url.clone()),
+                    None => self
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .map(|c| (c.model, c.base_url))
+                        .unwrap_or_default(),
+                };
+                let target = self
+                    .failover_target(error_class, &current_model, &base_url, fallback_attempt)
+                    .await;
+                if let Some(target) = target {
+                    if active.is_none() {
+                        let mut config = self.reconstruct_full_config().await;
+                        config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
+                        let model = config.model.clone();
+                        active = Some((config, model));
+                    }
+                    let Some((active_config, _)) = active.as_ref() else {
+                        unreachable!("snapshotted just above");
+                    };
+                    let new_config = self
+                        .apply_failover(
+                            active_config,
+                            &target,
+                            error_class,
+                            fallback_attempt,
+                            max_attempts,
+                        )
+                        .await;
                     // The hop's target may declare a narrower
                     // `reasoning_efforts` menu than the entry the request was
                     // built for, or no effort dial at all — carrying the
@@ -2252,7 +2275,7 @@ impl SessionActor {
                     // failure into a second, different one on the new
                     // endpoint. `catalog_key` re-derives the entry these
                     // capability lookups key on from the wire slug
-                    // `try_provider_failover` just resolved to; a target this
+                    // `failover_target` just resolved to; a target this
                     // shell cannot place in the catalog (the same-provider
                     // swap fallback) falls through to the raw model string,
                     // which none of the lookups below match, so the effort is
@@ -2269,8 +2292,8 @@ impl SessionActor {
                         self.models_manager
                             .model_default_reasoning_effort(&target_key),
                     );
-                    current_model = new_config.model.clone();
-                    active_config = new_config;
+                    let model = new_config.model.clone();
+                    active = Some((new_config, model));
                     continue;
                 }
             }

@@ -612,6 +612,7 @@ impl SessionActor {
     /// and returns the installed config so the caller can re-issue and keep it
     /// as the new failover base. Returns `None` when nothing applies (the caller
     /// then runs its normal error path).
+    #[cfg(test)]
     pub(super) async fn try_provider_failover(
         &self,
         error_class: &str,
@@ -620,18 +621,34 @@ impl SessionActor {
         attempt: u32,
         max_attempts: u32,
     ) -> Option<SamplerConfig> {
+        let target = self
+            .failover_target(error_class, current_model, &active_config.base_url, attempt)
+            .await?;
+        Some(
+            self.apply_failover(active_config, &target, error_class, attempt, max_attempts)
+                .await,
+        )
+    }
+
+    /// The model a failed request should be re-issued against, if any: the
+    /// `provider_error` hook decides first, then the built-in chains.
+    ///
+    /// Needs only the failing model and its endpoint, so a caller can ask it before
+    /// building the full config a switch needs — building that resolves credentials.
+    pub(super) async fn failover_target(
+        &self,
+        error_class: &str,
+        current_model: &str,
+        base_url: &str,
+        attempt: u32,
+    ) -> Option<String> {
         // 1) Programmable layer: the plugin hook decides first.
         let directive = self
-            .consult_provider_error_hook(
-                error_class,
-                current_model,
-                &active_config.base_url,
-                attempt,
-            )
+            .consult_provider_error_hook(error_class, current_model, base_url, attempt)
             .await;
-        let target = match failover_outcome_for_directive(directive, current_model) {
-            FailoverDirectiveOutcome::Fail => return None,
-            FailoverDirectiveOutcome::UseModel(model) => model,
+        match failover_outcome_for_directive(directive, current_model) {
+            FailoverDirectiveOutcome::Fail => None,
+            FailoverDirectiveOutcome::UseModel(model) => Some(model),
             FailoverDirectiveOutcome::UseChain => {
                 // 2) Built-in chain.
                 let (target, cooldown) =
@@ -639,11 +656,21 @@ impl SessionActor {
                 if cooldown > std::time::Duration::ZERO {
                     self.arm_fallback_cooldown(current_model, &target);
                 }
-                target
+                Some(target)
             }
-        };
+        }
+    }
 
-        let config = self.build_failover_config(active_config, &target).await;
+    /// Switch the sampler to `target` on a copy of `active_config` and tell clients.
+    pub(super) async fn apply_failover(
+        &self,
+        active_config: &SamplerConfig,
+        target: &str,
+        error_class: &str,
+        attempt: u32,
+        max_attempts: u32,
+    ) -> SamplerConfig {
+        let config = self.build_failover_config(active_config, target).await;
         let switched_model = config.model.clone();
         self.sampler_handle.update_config(config.clone());
         self.send_xai_notification(XaiSessionUpdate::RetryState(
@@ -663,7 +690,7 @@ impl SessionActor {
             },
         ))
         .await;
-        Some(config)
+        config
     }
 }
 
