@@ -3529,6 +3529,10 @@ mod tests {
                 ("application/json", EMPTY_CHAT_COMPLETION_JSON)
             }
             (false, ApiBackend::Messages) => ("application/json", EMPTY_MESSAGE_JSON),
+            // Gemini bodies are never compressed; its requests are not captured here.
+            (false, ApiBackend::Gemini) => {
+                unreachable!("capture_request covers compressible backends")
+            }
         };
         let (tx, rx) = oneshot::channel();
         let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
@@ -3555,6 +3559,8 @@ mod tests {
             base_url: format!("http://{addr}/v1"),
             api_backend: backend.clone(),
             request_compression,
+            // The Messages backend refuses to guess an output ceiling (20209ba8).
+            max_completion_tokens: Some(1024),
             ..minimal_config()
         })
         .unwrap();
@@ -3583,6 +3589,7 @@ mod tests {
             (true, ApiBackend::Messages) => {
                 client.conversation_stream_messages(request).await.map(drop)
             }
+            (_, ApiBackend::Gemini) => unreachable!("capture_request covers compressible backends"),
         };
         sent.unwrap_or_else(|e| panic!("{backend:?} streaming={streaming}: {e}"));
         let captured = rx.await.unwrap();

@@ -314,7 +314,7 @@ mod tests {
             ]
         );
         assert_eq!(p.reasoning_efforts[2].id, "xhigh");
-        assert_eq!(p.reasoning_efforts[2].label, "Xhigh");
+        assert_eq!(p.reasoning_efforts[2].label, "X-High");
         // Derivation happens at catalog build; the raw config keeps the two
         // legacy fields absent so "unset" stays distinguishable from "false".
         assert!(p.reasoning_effort.is_none());
