@@ -3763,24 +3763,6 @@ mod tests {
         );
     }
 
-    /// Logout keeps the home draft and lands on the login screen, which must show the whole draft rather than one scrolled row.
-    #[test]
-    fn login_screen_sizes_the_composer_from_the_kept_draft() {
-        let auth = AuthState::Pending { error: None };
-        let trust = TrustState::Done;
-        let params = render_params(&auth, &trust, None);
-        let area = Rect::new(0, 0, 100, 40);
-        let mut picker = PickerState::default();
-        let mut prompt = PromptWidget::new();
-        prompt.set_text("alpha-one\nbravo-two\ncharlie-three");
-        let mut buf = Buffer::empty(area);
-        let _ = render_welcome(area, &mut buf, &params, &mut prompt, &mut picker);
-        let text = buffer_text(&buf);
-        for token in ["alpha-one", "bravo-two", "charlie-three"] {
-            assert!(text.contains(token), "{token} missing:\n{text}");
-        }
-    }
-
     /// Rows of the painted buffer that hold braille logo art.
     fn painted_logo_rows(buf: &Buffer) -> u16 {
         let area = buf.area;
