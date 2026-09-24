@@ -574,7 +574,10 @@ impl MvpAgent {
                 session_id,
                 workspace_root.clone(),
                 workspace_root,
-            ),
+            )
+            .with_disabled_hooks(std::sync::Arc::new(
+                crate::util::hooks::disabled_hooks_snapshot(),
+            )),
         ))
     }
 

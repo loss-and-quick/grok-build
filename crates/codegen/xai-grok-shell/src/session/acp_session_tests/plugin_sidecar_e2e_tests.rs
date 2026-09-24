@@ -324,6 +324,7 @@ async fn demo_plugin_and_command_hook_reach_identical_outcomes() {
         workspace_root: "/tmp",
         process_scope: None,
         plugin_invoker: Some(invoker.clone()),
+        disabled: Default::default(),
     };
     let denied_input = serde_json::json!({ "command": format!("echo {DENY_MARKER}") });
     let plugin_deny = xai_grok_hooks::dispatcher::dispatch_pre_tool_use(
@@ -354,6 +355,7 @@ async fn demo_plugin_and_command_hook_reach_identical_outcomes() {
         workspace_root: "/tmp",
         process_scope: None,
         plugin_invoker: None,
+        disabled: Default::default(),
     };
     let cmd_deny = xai_grok_hooks::dispatcher::dispatch_pre_tool_use(
         &cmd_pre_reg,

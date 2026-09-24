@@ -421,6 +421,7 @@ mod tests {
             workspace_root: "/tmp",
             process_scope: None,
             plugin_invoker: invoker,
+            disabled: Default::default(),
         }
     }
 

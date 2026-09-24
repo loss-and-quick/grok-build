@@ -25,7 +25,8 @@ impl SessionActor {
                 self.session_id_string(),
                 self.session_info.cwd.clone(),
                 self.hook_workspace_root(),
-            ),
+            )
+            .with_disabled_hooks(self.hook_disabled.borrow().clone()),
         ))
     }
     /// `true` for session-based ACP auth methods.

@@ -409,7 +409,8 @@ async fn apply_subagent_resolve_hook(
 ) -> Option<String> {
     use xai_grok_hooks::event::{HookEventEnvelope, HookEventName, HookPayload, clip_text};
     let registry = ctx.hook_registry.clone()?;
-    if !registry.has_enabled_hooks_for_canonical(HookEventName::SubagentResolve) {
+    let disabled = std::sync::Arc::new(crate::util::hooks::disabled_hooks_snapshot());
+    if !registry.has_enabled_hooks_for_canonical(HookEventName::SubagentResolve, &disabled) {
         return None;
     }
     let cwd = ctx.parent_cwd.display().to_string();
@@ -443,6 +444,7 @@ async fn apply_subagent_resolve_hook(
             .parent_plugin_host
             .clone()
             .map(|h| h as std::sync::Arc<dyn xai_grok_hooks::invoker::PluginHookInvoker>),
+        disabled,
     };
     let replaced = xai_grok_hooks::dispatcher::dispatch_replace(
         &registry,

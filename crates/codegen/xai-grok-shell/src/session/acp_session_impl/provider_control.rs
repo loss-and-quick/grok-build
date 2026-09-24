@@ -204,6 +204,8 @@ pub(crate) struct HookRequestInterceptor {
     /// time for the same reason `agent`/`tools` are.
     process_scope: Option<xai_grok_tools::util::ProcessScope>,
     plugin_invoker: Option<Arc<dyn PluginHookInvoker>>,
+    /// The session's disabled-hooks snapshot, captured at build time like `agent`.
+    disabled: Arc<xai_grok_hooks::trust::DisabledHooks>,
 }
 
 impl std::fmt::Debug for HookRequestInterceptor {
@@ -248,6 +250,7 @@ impl RequestInterceptor for HookRequestInterceptor {
                 workspace_root: &self.workspace_root,
                 process_scope: self.process_scope.clone(),
                 plugin_invoker: self.plugin_invoker.clone(),
+                disabled: self.disabled.clone(),
             };
             let replaced = xai_grok_hooks::dispatcher::dispatch_replace(
                 &self.registry,
@@ -286,7 +289,10 @@ impl SessionActor {
     /// replaced on every turn by this rebuild.
     pub(super) async fn build_hook_request_interceptor(&self) -> Option<SharedRequestInterceptor> {
         let registry = self.hook_registry.borrow().clone()?;
-        if !registry.has_enabled_hooks_for_canonical(HookEventName::ProviderRequest) {
+        if !registry.has_enabled_hooks_for_canonical(
+            HookEventName::ProviderRequest,
+            &self.hook_disabled.borrow(),
+        ) {
             return None;
         }
         Some(Arc::new(self.assemble_request_interceptor(registry).await))
@@ -332,6 +338,7 @@ impl SessionActor {
             registry,
             process_scope: self.tool_context.process_scope.clone(),
             plugin_invoker,
+            disabled: self.hook_disabled.borrow().clone(),
         }
     }
 
@@ -360,7 +367,10 @@ impl SessionActor {
             return None;
         }
         let registry = self.hook_registry.borrow().clone()?;
-        if !registry.has_enabled_hooks_for_canonical(HookEventName::ProviderResponse) {
+        if !registry.has_enabled_hooks_for_canonical(
+            HookEventName::ProviderResponse,
+            &self.hook_disabled.borrow(),
+        ) {
             return None;
         }
         let tool_calls: Vec<xai_grok_hooks::event::ProviderResponseToolCall> = response
@@ -431,7 +441,10 @@ impl SessionActor {
         let Some(registry) = self.hook_registry.borrow().clone() else {
             return ErrorDirective::Passthrough;
         };
-        if !registry.has_enabled_hooks_for_canonical(HookEventName::ProviderError) {
+        if !registry.has_enabled_hooks_for_canonical(
+            HookEventName::ProviderError,
+            &self.hook_disabled.borrow(),
+        ) {
             return ErrorDirective::Passthrough;
         }
         let envelope = self.make_hook_envelope(

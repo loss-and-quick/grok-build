@@ -1088,10 +1088,13 @@ pub async fn dispatch_replace(
     // envelope; once a hook substitutes, later hooks see the substitute.
     let mut current: Option<serde_json::Value> = None;
     let mut run_results = Vec::new();
-    let disabled = crate::trust::DisabledHooks::load();
-
     for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut run_results, &disabled) {
+        if !eligible_or_record_skip(
+            spec,
+            match_value.as_deref(),
+            &mut run_results,
+            ctx.disabled(),
+        ) {
             continue;
         }
 
@@ -1203,10 +1206,13 @@ pub async fn dispatch_intercept(
     let match_value = envelope.payload.match_value().map(str::to_string);
     let mut outcome: Option<serde_json::Value> = None;
     let mut run_results = Vec::new();
-    let disabled = crate::trust::DisabledHooks::load();
-
     for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut run_results, &disabled) {
+        if !eligible_or_record_skip(
+            spec,
+            match_value.as_deref(),
+            &mut run_results,
+            ctx.disabled(),
+        ) {
             continue;
         }
 
@@ -2478,6 +2484,7 @@ mod tests {
             workspace_root: "/tmp",
             process_scope: None,
             plugin_invoker: Some(Arc::new(MockInvoker(response))),
+            disabled: Default::default(),
         }
     }
 
@@ -2765,6 +2772,7 @@ mod tests {
             plugin_invoker: Some(Arc::new(ChainInvoker {
                 seen: Arc::clone(&seen),
             })),
+            disabled: Default::default(),
         };
         let registry = registry_from_specs(vec![
             plugin_spec("first", HookEventName::ProviderRequest),
@@ -2813,6 +2821,7 @@ mod tests {
             workspace_root: "/tmp",
             process_scope: None,
             plugin_invoker: Some(Arc::new(OnlyFirstInvoker)),
+            disabled: Default::default(),
         };
         let mut first = plugin_spec("first-hook", HookEventName::ProviderRequest);
         first.plugin = Some("first".into());
@@ -2930,6 +2939,7 @@ mod tests {
             plugin_invoker: Some(Arc::new(CountingInvoker {
                 calls: Arc::clone(&calls),
             })),
+            disabled: Default::default(),
         };
         let mut first = plugin_spec("first-hook", HookEventName::StartOauthFlow);
         first.plugin = Some("first".into());
@@ -3232,7 +3242,8 @@ mod tests {
             assert_eq!(count, expected, "{source}");
             let results =
                 dispatch_non_blocking(&registry, HookEventName::PreCompact, &envelope, &run_ctx())
-                    .await;
+                    .await
+                    .results;
             assert_eq!(count, ran(&results), "{source}");
         }
     }

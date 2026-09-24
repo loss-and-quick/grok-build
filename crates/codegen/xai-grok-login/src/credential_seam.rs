@@ -141,6 +141,10 @@ pub struct HookCredentialSeam {
     session_id: String,
     cwd: String,
     workspace_root: String,
+    /// The user's disabled-hooks list and the managed-only pin, snapshotted by the
+    /// host (this crate cannot read managed settings). Empty unless set with
+    /// [`Self::with_disabled_hooks`].
+    disabled: Arc<xai_grok_hooks::trust::DisabledHooks>,
 }
 
 impl std::fmt::Debug for HookCredentialSeam {
@@ -165,7 +169,18 @@ impl HookCredentialSeam {
             session_id,
             cwd,
             workspace_root,
+            disabled: Arc::default(),
         }
+    }
+
+    /// Apply the host's disabled-hooks snapshot, so a plugin hook the user switched
+    /// off (or the managed-only pin excludes) never serves a credential.
+    pub fn with_disabled_hooks(
+        mut self,
+        disabled: Arc<xai_grok_hooks::trust::DisabledHooks>,
+    ) -> Self {
+        self.disabled = disabled;
+        self
     }
 
     fn envelope(&self, event: HookEventName, payload: HookPayload) -> HookEventEnvelope {
@@ -192,13 +207,15 @@ impl HookCredentialSeam {
             // hook's process group could honestly be tied to.
             process_scope: None,
             plugin_invoker: Some(self.invoker.clone()),
+            disabled: self.disabled.clone(),
         }
     }
 
     /// Whether any plugin subscribes to `event`; lets a caller skip the seam
     /// entirely when nothing would fire.
     pub fn has_subscriber(&self, event: HookEventName) -> bool {
-        self.registry.has_enabled_hooks_for_canonical(event)
+        self.registry
+            .has_enabled_hooks_for_canonical(event, &self.disabled)
     }
 
     /// A registry containing only `plugin`'s hooks for `event`. Used to target a
