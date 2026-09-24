@@ -13,7 +13,7 @@ fn allow_policy(rule: &str) -> CompiledPolicy {
 fn standalone_floor(rule: &str, cmd: &str, cwd: &std::path::Path) -> bool {
     let policy = allow_policy(rule);
     let access = AccessKind::Bash(cmd.to_owned());
-    let preflight = GatePreflight::evaluate(Some(&policy), &access, cwd, false);
+    let preflight = GatePreflight::evaluate(Some(&policy), &access, cwd, false, None);
     assert!(
         matches!(preflight.policy_decision(), Some(Decision::Allow)),
         "{rule} + {cmd} must be a policy Allow"

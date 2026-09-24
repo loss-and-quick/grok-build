@@ -235,6 +235,7 @@ fn access_kind_payload(access: &AccessKind) -> serde_json::Value {
         AccessKind::AgentMessage { subagent_id } => {
             serde_json::json!({ "kind": "agent_message", "subagent_id": subagent_id })
         }
+        AccessKind::Tool(name) => serde_json::json!({ "kind": "tool", "name": name }),
     }
 }
 
