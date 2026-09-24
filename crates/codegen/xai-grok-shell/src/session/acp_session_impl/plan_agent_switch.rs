@@ -121,6 +121,15 @@ impl SessionActor {
             }
         };
         let target_model = self.resolve_target_model(&def);
+        let target_label = {
+            let entry = self
+                .models_manager
+                .models()
+                .get(target_model.0.as_ref())
+                .cloned();
+            self.models_manager
+                .system_prompt_label_for(&target_model.0, entry.as_ref().map(|e| e.info()))
+        };
         let target_effort = self.resolve_target_effort(&target_model).await;
         let current_agent = self.active_agent_type.lock().clone();
         let need_rebuild = need_agent_switch_rebuild(current_agent.as_deref(), &def.name);
@@ -142,7 +151,7 @@ impl SessionActor {
         }
         if need_rebuild {
             if let Err(e) = self
-                .handle_rebuild_agent_for_definition(def.clone(), false)
+                .handle_rebuild_agent_for_definition(def.clone(), false, target_label.clone())
                 .await
             {
                 tracing::error!(
@@ -183,14 +192,17 @@ impl SessionActor {
             .models_manager
             .auto_compact_threshold_percent_for(&target_model.0, None);
         let set_model_result = self
-            .handle_set_session_model(
-                sampler_cfg,
-                false, // use_concise
-                false, // is_family_switch — no inline compaction for a handoff
-                false, // apply_prompt_override — the rebuild already installed the new system head
-                true,  // skip_prompt_rewrite
-                threshold,
-            )
+            .handle_set_session_model(crate::session::SessionModelSwitch {
+                sampling_config: sampler_cfg,
+                use_concise: false,
+                // No inline compaction for a handoff.
+                is_family_switch: false,
+                // The rebuild already installed the new system head.
+                apply_prompt_override: false,
+                skip_prompt_rewrite: true,
+                auto_compact_threshold_percent: threshold,
+                system_prompt_label: target_label,
+            })
             .await;
         if set_model_result.is_ok() {
             // `ModelChanged`'s usual sender skips notifying the client that made the
@@ -250,8 +262,17 @@ impl SessionActor {
                 if let Some(def) = self.resolve_target_agent(&agent) {
                     let current_agent = self.active_agent_type.lock().clone();
                     let need_rebuild = need_agent_switch_rebuild(current_agent.as_deref(), &agent);
+                    // The restored session already runs the switched model, so its current label stands.
+                    let label = self
+                        .agent
+                        .borrow()
+                        .prompt_context()
+                        .system_prompt_label
+                        .clone();
                     if need_rebuild
-                        && let Err(e) = self.handle_rebuild_agent_for_definition(def, false).await
+                        && let Err(e) = self
+                            .handle_rebuild_agent_for_definition(def, false, label)
+                            .await
                     {
                         tracing::warn!(
                             session_id = %self.session_info.id.0,

@@ -1143,6 +1143,18 @@ impl ModelsManager {
         crate::util::config::resolve_auto_compact_threshold_percent(&cfg, model_id, model)
     }
 
+    /// [`crate::util::config::resolve_system_prompt_label`] against the manager's synced
+    /// config, for session-actor callers (the post-approval agent switch) without an agent
+    /// `Config` handle.
+    pub(crate) fn system_prompt_label_for(
+        &self,
+        model_id: &str,
+        model: Option<&crate::agent::config::ModelInfo>,
+    ) -> String {
+        let cfg = self.inner.cfg.read().clone();
+        crate::util::config::resolve_system_prompt_label(&cfg, model_id, model)
+    }
+
     /// Build a `SamplingConfig` from the current model and auth state.
     pub fn sampling_config(&self) -> SamplingConfig {
         let config = self.inner.cfg.read().clone();
