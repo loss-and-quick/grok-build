@@ -2,6 +2,7 @@
 use agent_client_protocol as acp;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
+use xai_grok_tools::implementations::grok_build::LoopFireMode;
 use xai_grok_tools::implementations::skills::skill::format_skill_name;
 use xai_grok_tools::implementations::skills::types::{SkillInfo, SkillScope};
 pub(crate) struct BuiltinCommand {
@@ -1801,7 +1802,7 @@ pub(super) fn resolve_human_intent(
         && availability.allows(prompt_cmd.gate)
     {
         let mut blocks = match prompt_cmd.name {
-            "loop" => build_loop_prompt_blocks(args),
+            "loop" => build_loop_prompt_blocks(args, loop_fire_mode),
             other => {
                 unreachable!("prompt-only command /{other} has no resolver wired in resolve()")
             }
@@ -1886,14 +1887,14 @@ pub(super) fn resolve_human_intent(
 /// The wording (usage hint and scheduling instruction) is sourced from `xai-grok-tools`.
 /// It stays identical to the pager's `LoopCommand`, so the two front-ends can't drift.
 /// Like the pager, there is no host-side interval default: the model derives the cadence from the request and asks when none is given.
-fn build_loop_prompt_blocks(args: &str) -> Vec<acp::ContentBlock> {
+fn build_loop_prompt_blocks(args: &str, mode: LoopFireMode) -> Vec<acp::ContentBlock> {
     use xai_grok_tools::implementations::grok_build::{
         loop_schedule_instruction, loop_usage_message,
     };
     let text = if args.trim().is_empty() {
         loop_usage_message(mode).to_string()
     } else {
-        loop_schedule_instruction(args)
+        loop_schedule_instruction(args, mode)
     };
     vec![acp::ContentBlock::Text(acp::TextContent::new(text))]
 }

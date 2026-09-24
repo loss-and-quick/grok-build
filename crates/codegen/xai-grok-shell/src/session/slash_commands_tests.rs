@@ -823,8 +823,8 @@ fn loop_does_not_resolve_when_scheduler_unavailable() {
     );
 }
 
-fn loop_text(args: &str) -> String {
-    match build_loop_prompt_blocks(args).into_iter().next() {
+fn loop_text(args: &str, mode: LoopFireMode) -> String {
+    match build_loop_prompt_blocks(args, mode).into_iter().next() {
         Some(acp::ContentBlock::Text(t)) => t.text,
         other => panic!("expected a text block, got {other:?}"),
     }
@@ -832,7 +832,7 @@ fn loop_text(args: &str) -> String {
 
 #[test]
 fn loop_usage_has_no_10m_default() {
-    let usage = loop_text("");
+    let usage = loop_text("", LoopFireMode::Detached);
     assert!(usage.contains("Usage: /loop"), "got: {usage}");
     assert!(
         !usage.contains("10m"),
@@ -842,7 +842,7 @@ fn loop_usage_has_no_10m_default() {
 
 #[test]
 fn loop_instruction_derives_interval_without_default_or_inline_execute() {
-    let instr = loop_text("every 30 minutes do x");
+    let instr = loop_text("every 30 minutes do x", LoopFireMode::Detached);
     assert!(
         !instr.contains("10m"),
         "instruction must not default: {instr}"

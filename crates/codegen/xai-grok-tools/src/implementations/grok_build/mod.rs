@@ -61,7 +61,8 @@ pub use message_parent::{MESSAGE_PARENT_TOOL_NAME, MessageParentTool};
 pub use monitor::tool::MonitorTool;
 pub use read_file::ReadFileTool;
 pub use scheduler::create::{
-    SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction, loop_usage_message,
+    LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction,
+    loop_usage_message,
 };
 pub use scheduler::delete::{SCHEDULER_DELETE_TOOL_NAME, SchedulerDeleteTool};
 pub use scheduler::list::SchedulerListTool;
