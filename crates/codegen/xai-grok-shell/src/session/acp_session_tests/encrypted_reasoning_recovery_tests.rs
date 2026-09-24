@@ -97,6 +97,7 @@ async fn encrypted_content_rejection_strips_the_reasoning_and_resubmits() {
                     0,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await;
 
@@ -148,6 +149,7 @@ async fn invalid_thinking_signature_rejection_strips_the_reasoning_and_resubmits
                     0,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await;
 
@@ -195,6 +197,7 @@ async fn encrypted_content_rejection_is_terminal_with_nothing_left_to_drop() {
                     0,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await;
 

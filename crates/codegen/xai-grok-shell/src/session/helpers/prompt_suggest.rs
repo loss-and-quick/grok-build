@@ -298,7 +298,9 @@ pub(crate) fn is_repeat_of_user_message(
     }
     let needle = normalize_for_repeat(suggestion);
     conversation.iter().any(|item| match item {
-        ConversationItem::User(u) if u.synthetic_reason.is_none() => {
+        ConversationItem::User(u)
+            if u.synthetic_reason == xai_grok_sampling_types::SyntheticReason::Human =>
+        {
             normalize_for_repeat(&item.text_content()) == needle
         }
         _ => false,
@@ -592,7 +594,7 @@ mod tests {
     fn repeat_filter_ignores_synthetic_user_messages() {
         let mut synthetic = user("please review the changes now");
         if let ConversationItem::User(u) = &mut synthetic {
-            u.synthetic_reason = Some(crate::sampling::SyntheticReason::SystemReminder);
+            u.synthetic_reason = crate::sampling::SyntheticReason::SystemReminder;
         }
         let conv = vec![synthetic, assistant("done")];
         assert!(!is_repeat_of_user_message(

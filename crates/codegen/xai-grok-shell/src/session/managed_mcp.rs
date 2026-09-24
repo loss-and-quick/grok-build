@@ -1477,6 +1477,7 @@ headers = { "X-A" = "1", "X-B" = "2", "X-C" = "3" }
                 server_name: { "type": "http", "url": url }
             }))),
             lsp_servers: None,
+            ..Default::default()
         };
         let id = PluginId::new(PluginScope::User, plugin_root, "native-plugin");
         let dp = DiscoveredPlugin {
@@ -1494,6 +1495,7 @@ headers = { "X-A" = "1", "X-B" = "2", "X-C" = "3" }
             mcp_config_path: None,
             lsp_config_path: None,
             conflict: None,
+            load_error: None,
         };
         PluginRegistry::from_discovered(vec![dp], &[], &["native-plugin".to_string()])
     }

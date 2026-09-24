@@ -33,6 +33,8 @@ fn spawned(
         context_normalized: false,
         capability_mode: None,
         persona: None,
+        tool_call_id: None,
+        child_cwd: None,
         role: None,
         model: Some("test-model".to_owned()),
         resumed_from: resumed_from.map(str::to_owned),
@@ -160,7 +162,6 @@ async fn orphan_finish_without_token_record_persists_once_and_stops_reheal() {
                 &info,
                 session_dir.path().to_path_buf(),
                 acp::ModelId::new("test-model"),
-                test_persistence_sampling_client(),
                 "test-model".to_owned(),
                 crate::session::persistence::ExplicitSessionOpen::New {
                     identity: None,
@@ -258,7 +259,6 @@ async fn duplicate_spawn_after_finish_is_not_persisted_or_rehealed() {
                 &info,
                 session_dir.path().to_path_buf(),
                 acp::ModelId::new("test-model"),
-                test_persistence_sampling_client(),
                 "test-model".to_owned(),
                 crate::session::persistence::ExplicitSessionOpen::New {
                     identity: None,

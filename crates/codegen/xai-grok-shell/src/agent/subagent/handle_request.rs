@@ -382,14 +382,14 @@ pub(super) fn gate_reasoning_effort(
     }
     let levels = offered
         .iter()
-        .map(|e| e.as_str())
+        .map(|e| e.to_string())
         .collect::<Vec<_>>()
         .join(", ");
     ReasoningEffortGate::Reject(format!(
         "Model '{model_id}' does not offer reasoning effort '{}'. \
          Available levels: {levels}. Set a level the model offers in the subagent's role, \
          persona, or agent definition, or drop it there to use the model's default.",
-        requested.as_str(),
+        requested,
     ))
 }
 
@@ -482,7 +482,9 @@ async fn apply_subagent_resolve_hook(
         request.runtime_overrides.model = Some(model);
         // Tool provenance so the catalog validation below applies to the
         // plugin-supplied slug just as it does to a model-emitted `Task.model`.
-        request.runtime_overrides.model_override_provenance = ModelOverrideProvenance::Tool;
+        request.runtime_overrides.model_override_provenance = ModelOverrideProvenance::Tool {
+            selection: xai_grok_tools::implementations::grok_build::task::model_policy::TaskModelSelection::Selectable,
+        };
     }
     directive
         .extra_system_prompt
@@ -1179,9 +1181,7 @@ pub(crate) async fn run_shell_child(
         upload_method: ctx.gcs_upload_method.clone(),
         model_id: Some(effective_model_id.0.to_string()),
         cwd: Some(child_session_info.cwd.clone()),
-        reasoning_effort: effective_runtime
-            .reasoning_effort
-            .map(|e| e.as_str().to_string()),
+        reasoning_effort: effective_runtime.reasoning_effort.map(|e| e.to_string()),
         role_name: effective_runtime.role_name.clone(),
         parent_prompt_id: request.parent_prompt_id.clone(),
         auth_manager: ctx.auth_manager.clone(),
@@ -1234,9 +1234,7 @@ pub(crate) async fn run_shell_child(
             meta: subagent_meta,
             spawned,
             advertised_address,
-            reasoning_effort: effective_runtime
-                .reasoning_effort
-                .map(|e| e.as_str().to_string()),
+            reasoning_effort: effective_runtime.reasoning_effort.map(|e| e.to_string()),
             role_name: effective_runtime.role_name.clone(),
             parent_prompt_id: request.parent_prompt_id.clone(),
         },
@@ -1255,9 +1253,7 @@ pub(crate) async fn run_shell_child(
         cwd: None,
         isolation_mode: None,
         capability_mode: None,
-        reasoning_effort: effective_runtime
-            .reasoning_effort
-            .map(|e| e.as_str().to_string()),
+        reasoning_effort: effective_runtime.reasoning_effort.map(|e| e.to_string()),
         role_name: effective_runtime.role_name.clone(),
         parent_prompt_id: request.parent_prompt_id.clone(),
         depth: 0,

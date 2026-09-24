@@ -551,4 +551,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "memory_tests.rs"]
-mod tests;
+mod note_tests;

@@ -53,7 +53,7 @@ use xai_grok_tools::implementations::grok_build::web_fetch::{
 };
 
 use super::{AUX_HOPS_WEB_FETCH_DISTILL, AuxRoute, SessionActor};
-use crate::agent::models::ModelsManager;
+use crate::agent::remote_config::ModelsManager;
 
 /// One distillation request, handed from a `web_fetch` call to the session's
 /// `LocalSet`.

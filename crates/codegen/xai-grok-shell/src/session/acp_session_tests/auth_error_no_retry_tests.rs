@@ -2084,7 +2084,7 @@ async fn sampler_error_lists_catalog_keys_for_a_shared_slug() {
             );
             let dir = tempfile::tempdir().expect("tempdir");
             let auth_manager = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-            actor.models_manager = crate::agent::models::ModelsManager::new(
+            actor.models_manager = crate::agent::remote_config::ModelsManager::new(
                 None,
                 models,
                 acp::ModelId::new("acme/shared"),
@@ -2107,6 +2107,7 @@ async fn sampler_error_lists_catalog_keys_for_a_shared_slug() {
                     0,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await;
             let err = match result {

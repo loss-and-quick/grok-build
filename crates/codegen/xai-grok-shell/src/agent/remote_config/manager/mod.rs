@@ -10,9 +10,9 @@ use agent_client_protocol as acp;
 
 use super::{
     HttpModelsEndpoint, ModelFetchAuth, ModelsCacheManager, ModelsCacheScope, ModelsEndpoint,
-    allowlist_matches_nothing, available_models, is_campaign_only_flip, resolve_catalog_key,
-    resolve_default_model, resolve_model_catalog, task_model_error_for_catalog,
-    validate_selectable,
+    allowlist_matches_nothing, available_models, is_campaign_only_flip, offered_reasoning_efforts,
+    resolve_catalog_key, resolve_default_model, resolve_model_catalog,
+    task_model_error_for_catalog, validate_selectable,
 };
 use crate::agent::config::{self, ModelEntry, resolve_credentials, sampling_config_for_model};
 use crate::agent::remote_config::task_model_policy::{

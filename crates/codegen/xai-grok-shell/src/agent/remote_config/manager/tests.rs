@@ -1024,9 +1024,9 @@ fn config_menu_only_model_derives_support_and_default() {
 fn model_offered_reasoning_efforts_follows_the_declared_menu() {
     fn option(value: ReasoningEffort) -> ReasoningEffortOption {
         ReasoningEffortOption {
-            id: value.as_str().to_string(),
+            id: value.to_string(),
             value,
-            label: value.as_str().to_string(),
+            label: value.to_string(),
             description: None,
             default: false,
         }

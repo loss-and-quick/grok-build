@@ -22,6 +22,8 @@ fn summary(
     } else {
         SubagentSnapshotStatus::Failed {
             error: "context window exhausted".into(),
+            tool_calls: 0,
+            turns: 0,
         }
     };
     SubagentCompletionSummary {

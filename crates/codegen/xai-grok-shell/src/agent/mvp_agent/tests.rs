@@ -2171,7 +2171,7 @@ async fn skills_list_refreshes_session_skill_baseline() {
     crate::extensions::skills::handle(
         &agent,
         &req,
-        None,
+        &agent.plugin_registry_handle,
         xai_grok_agent::prompt::skills::CompatConfig::default(),
     )
     .await
@@ -2483,7 +2483,7 @@ fn agent_with_plugin_dir(dir: &tempfile::TempDir) -> MvpAgent {
     let gateway = GatewaySender::new(tx);
     let mut cfg = AgentConfig::default();
     cfg.plugins.cli_plugin_dirs = vec![dir.path().to_path_buf()];
-    MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config")
+    MvpAgent::new(gateway, &cfg, auth_manager, None, None).expect("valid test config")
 }
 
 /// The bug this fixes: with no session at all, the sign-in seam must still
@@ -2551,7 +2551,7 @@ async fn a_live_session_drives_the_sign_in_through_its_own_host() {
     handle.cmd_tx = cmd_tx;
     agent
         .session_registry
-        .put_resident(&acp::SessionId::new("sess-1"), handle);
+        .put_resident(&acp::SessionId::new("sess-1"), handle, None);
 
     // The command is sent before the first await, so the drive future is still
     // parked on the actor's reply when the timeout wins.
@@ -4045,6 +4045,7 @@ fn build_agent_in_home(home: &std::path::Path) -> MvpAgent {
         &AgentConfig::default(),
         auth_manager,
         None,
+        None,
     )
     .expect("valid test config")
 }
@@ -4125,7 +4126,7 @@ async fn logging_out_ends_a_restorable_plugin_sign_in() {
         &acp::AuthMethodId::new(plugin_oauth_method_id("example-auth", Some("work"))),
     );
 
-    crate::auth::perform_logout(&agent.auth_manager, None).expect("logout");
+    crate::auth::perform_logout(&agent.auth_manager, None, || {}).expect("logout");
 
     assert_eq!(
         agent.restore_plugin_sign_in(None, &advertised_plugin_account()),
@@ -9191,6 +9192,7 @@ async fn provider_model_without_own_key_takes_no_session_credential() {
         GatewaySender::new(tx),
         &AgentConfig::default(),
         auth_manager,
+        None,
         None,
     )
     .expect("valid test config");

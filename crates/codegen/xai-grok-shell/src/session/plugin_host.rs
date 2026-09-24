@@ -676,7 +676,9 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
                 model: spec.model,
                 // Tool provenance: a plugin-supplied slug gets the same
                 // catalog validation as a model-emitted `Task.model`.
-                model_override_provenance: ModelOverrideProvenance::Tool,
+                model_override_provenance: ModelOverrideProvenance::Tool {
+                    selection: xai_grok_tools::implementations::grok_build::task::model_policy::TaskModelSelection::Selectable,
+                },
                 ..Default::default()
             },
             // Background: never block the parent's turn, survive turn ends.
@@ -692,6 +694,7 @@ impl xai_grok_plugin_host::AgentOrchestrator for SessionAgentOrchestrator {
             // Session-owned, not turn-owned: a fresh token so turn cancellation
             // can't reap it (per-spawn timeout and agent_cancel still apply).
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            spawn_root: Default::default(),
         };
         // The terminal reply channel rides beside the request in the spawn
         // envelope (upstream split it out of `SubagentRequest`).
@@ -1466,7 +1469,12 @@ mod tests {
 
         // Looked up the way the dispatcher looks it up, not merely counted:
         // `start_oauth_flow` is the seam whose silent death exposed the gap.
-        assert!(registry.has_enabled_hooks_for_canonical(HookEventName::StartOauthFlow));
+        assert!(
+            registry.has_enabled_hooks_for_canonical(
+                HookEventName::StartOauthFlow,
+                &Default::default()
+            )
+        );
         let oauth = registry.hooks_for_canonical(HookEventName::StartOauthFlow);
         assert_eq!(oauth.len(), 1);
         assert_eq!(oauth[0].handler_type, HandlerType::Plugin);
@@ -1477,7 +1485,7 @@ mod tests {
         // left dead by an append that only half-populated the registry.
         for &event in SIDECAR_HOOK_EVENTS {
             assert!(
-                registry.has_enabled_hooks_for_canonical(event),
+                registry.has_enabled_hooks_for_canonical(event, &Default::default()),
                 "sidecar event {event} is unreachable"
             );
         }
@@ -1535,7 +1543,12 @@ mod tests {
         assert!(pre.iter().any(
             |s| s.plugin.as_deref() == Some("council") && s.handler_type == HandlerType::Plugin
         ));
-        assert!(merged.has_enabled_hooks_for_canonical(HookEventName::StartOauthFlow));
+        assert!(
+            merged.has_enabled_hooks_for_canonical(
+                HookEventName::StartOauthFlow,
+                &Default::default()
+            )
+        );
     }
 
     /// A subagent session spawns with its parent's registry as the hook
@@ -2211,6 +2224,8 @@ mod plugin_steering_tests {
 
     impl ChildRunner for ParkingRunner {
         type Control = RecordingControl;
+        type RootControl =
+            xai_grok_tools::implementations::grok_build::task::root_control::NoRootControl;
         type CompletionData = ();
         type RunFuture = SendBoxFuture<ChildRunOutput<()>>;
         type ValidateFuture = SendBoxFuture<SubagentValidateTypeOutcome>;
@@ -2251,7 +2266,17 @@ mod plugin_steering_tests {
             Box::pin(std::future::ready(Vec::new()))
         }
 
-        fn on_completed(&self, _: ChildCompletion<()>) {}
+        fn supports_wake(&self) -> bool {
+            true
+        }
+
+        fn on_completed(
+            &self,
+            _: ChildCompletion<()>,
+            terminal_published: Box<dyn FnOnce() + Send>,
+        ) {
+            terminal_published();
+        }
     }
 
     fn spawn_request(id: &str, parent_session_id: &str) -> SubagentRequest {
@@ -2266,7 +2291,9 @@ mod plugin_steering_tests {
             resume_from: None,
             cwd: None,
             runtime_overrides: SubagentRuntimeOverrides {
-                model_override_provenance: ModelOverrideProvenance::Tool,
+                model_override_provenance: ModelOverrideProvenance::Tool {
+                    selection: xai_grok_tools::implementations::grok_build::task::model_policy::TaskModelSelection::Selectable,
+                },
                 ..Default::default()
             },
             run_in_background: true,
@@ -2275,6 +2302,7 @@ mod plugin_steering_tests {
             fork_context: false,
             owner: SubagentOwner::Task,
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            spawn_root: Default::default(),
         }
     }
 

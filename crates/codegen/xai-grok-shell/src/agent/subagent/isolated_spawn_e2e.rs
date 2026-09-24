@@ -58,6 +58,7 @@ fn spawn_ctx(parent_cwd: PathBuf) -> SubagentSpawnContext {
         yolo_mode: false,
         subagent_event_tx: tx,
         hunk_tracker_handle: xai_hunk_tracker::HunkTrackerHandle::noop(),
+        parent_plugin_host: None,
         hunk_tracking_enabled: false,
         fs: Arc::new(xai_grok_workspace::file_system::LocalFs::new(
             PathBuf::from("/tmp"),
@@ -168,6 +169,9 @@ impl ChildRunner for Runner {
     type RunFuture = LocalBoxFuture<ChildRunOutput<ShellCompletionData>>;
     type ValidateFuture = LocalBoxFuture<SubagentValidateTypeOutcome>;
     type DescribeFuture = LocalBoxFuture<SubagentDescribeOutcome>;
+    type ListTypesFuture = LocalBoxFuture<
+        Vec<xai_grok_tools::implementations::grok_build::task::types::SubagentTypeDescriptor>,
+    >;
     fn run(
         &self,
         run: xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunRequest<
@@ -193,6 +197,9 @@ impl ChildRunner for Runner {
         _parent_session_id: String,
     ) -> Self::DescribeFuture {
         Box::pin(std::future::ready(SubagentDescribeOutcome::Unavailable))
+    }
+    fn list_types(&self, _parent_session_id: String) -> Self::ListTypesFuture {
+        Box::pin(std::future::ready(Vec::new()))
     }
     fn supports_wake(&self) -> bool {
         true

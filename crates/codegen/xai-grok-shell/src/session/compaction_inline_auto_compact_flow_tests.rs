@@ -2016,10 +2016,20 @@ async fn create_test_actor_with_memory(
     )
     .await;
     actor.memory = crate::session::memory_state::SessionMemory {
+        configured_mode: None,
+        v2_config: Default::default(),
+        configured_storage: None,
+        process_disabled: false,
+        config_opt_out: false,
+        v2_legacy_carryover: false,
+        prompt_sync_pending: std::sync::atomic::AtomicBool::new(false),
         flush_config: memory_config
             .as_ref()
             .map_or_else(Default::default, |mc| mc.flush.clone()),
-        is_flushing: std::sync::atomic::AtomicBool::new(false),
+        is_flushing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        capture_worker: std::cell::RefCell::new(None),
+        dream_workers: crate::session::memory_state::V2DreamWorkers::default(),
+        last_capture_failure: std::cell::RefCell::new(None),
         last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
         storage: std::cell::RefCell::new(memory_storage),
         save_on_end: true,
@@ -2040,6 +2050,7 @@ async fn create_test_actor_with_memory(
         dream_count: std::sync::atomic::AtomicU64::new(0),
         dream_success_count: std::sync::atomic::AtomicU64::new(0),
         dream_error_count: std::sync::atomic::AtomicU64::new(0),
+        token_totals: Default::default(),
     };
     actor.idle_flush_timeout = memory_config
         .as_ref()

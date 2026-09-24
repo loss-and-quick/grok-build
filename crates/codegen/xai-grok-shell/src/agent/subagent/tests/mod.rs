@@ -751,7 +751,6 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         owner: SubagentOwner::Task,
         cancel_token: CancellationToken::new(),
         spawn_root: Default::default(),
-        tool_call_id: None,
     }
 }
 fn prompt_text(blocks: &[acp::ContentBlock]) -> String {
@@ -1708,7 +1707,6 @@ fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
         owner: SubagentOwner::Task,
         cancel_token: CancellationToken::new(),
         spawn_root: Default::default(),
-        tool_call_id: None,
     }
 }
 #[tokio::test]

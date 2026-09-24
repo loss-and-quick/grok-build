@@ -701,9 +701,9 @@ mod tests {
 
     fn opt(value: ReasoningEffort, default: bool) -> ReasoningEffortOption {
         ReasoningEffortOption {
-            id: value.as_str().to_owned(),
+            id: value.to_string(),
             value,
-            label: value.as_str().to_owned(),
+            label: value.to_string(),
             description: None,
             default,
         }
@@ -850,7 +850,9 @@ mod tests {
         }
     }
 
-    fn models_manager_with(chains: Vec<ModelFallback>) -> crate::agent::models::ModelsManager {
+    fn models_manager_with(
+        chains: Vec<ModelFallback>,
+    ) -> crate::agent::remote_config::ModelsManager {
         let cfg = Config {
             model_fallbacks: chains,
             ..Config::default()
@@ -860,7 +862,7 @@ mod tests {
             tmp.path(),
             crate::auth::GrokComConfig::default(),
         ));
-        crate::agent::models::ModelsManager::new(
+        crate::agent::remote_config::ModelsManager::new(
             None,
             indexmap::IndexMap::new(),
             agent_client_protocol::ModelId::new("primary"),
@@ -871,14 +873,14 @@ mod tests {
 
     /// A manager whose catalog is the one `cfg` resolves to, so chain lookups
     /// see real `<provider>/<model>` keys and the wire slugs they serve.
-    fn models_manager_for(cfg: Config) -> crate::agent::models::ModelsManager {
+    fn models_manager_for(cfg: Config) -> crate::agent::remote_config::ModelsManager {
         let catalog = crate::agent::config::resolve_model_list(&cfg, None);
         let tmp = tempfile::TempDir::new().unwrap();
         let auth_manager = std::sync::Arc::new(crate::auth::AuthManager::new(
             tmp.path(),
             crate::auth::GrokComConfig::default(),
         ));
-        crate::agent::models::ModelsManager::new(
+        crate::agent::remote_config::ModelsManager::new(
             None,
             catalog,
             agent_client_protocol::ModelId::new("primary"),
@@ -892,7 +894,7 @@ mod tests {
         Config::new_from_toml_cfg(&raw).expect("fixture config should build")
     }
 
-    async fn make_actor(mm: crate::agent::models::ModelsManager) -> SessionActor {
+    async fn make_actor(mm: crate::agent::remote_config::ModelsManager) -> SessionActor {
         let (gateway_tx, _g) = tokio::sync::mpsc::unbounded_channel();
         let (persistence_tx, _p) = tokio::sync::mpsc::unbounded_channel();
         let mut actor = crate::session::acp_session::support::create_test_actor(

@@ -1792,11 +1792,11 @@ pub(crate) async fn spawn_session_actor(
             &session_info.cwd,
         ) {
             let name = reg.qualified_name.clone();
-            if let Err(e) = agent
-                .tool_bridge()
-                .register_mcp_tools(reg.qualified_name, reg.tool, Some(reg.input_schema))
-                .await
-            {
+            if let Err(e) = agent.tool_bridge().register_mcp_tools(
+                reg.qualified_name,
+                reg.tool,
+                Some(reg.input_schema),
+            ) {
                 tracing::warn!(tool = %name, "failed to register plugin sidecar tool: {e}");
             } else {
                 tracing::info!(tool = %name, "registered plugin sidecar tool");
@@ -3067,6 +3067,7 @@ pub(crate) async fn spawn_session_on_thread(
                     api_key_provider,
                     image_description_model,
                     hook_registry_override,
+                    inherited_plugin_host,
                     workspace_ops,
                     cli_permission_rules,
                     todo_gate,

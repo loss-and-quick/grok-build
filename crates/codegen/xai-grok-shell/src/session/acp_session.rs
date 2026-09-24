@@ -280,11 +280,11 @@ mod turn_end;
 mod turn_summary;
 #[path = "acp_session_impl/updates.rs"]
 mod updates;
-#[path = "acp_session_impl/web_fetch_distill.rs"]
-mod web_fetch_distill;
 #[cfg(test)]
 #[path = "acp_session_impl/updates_tests.rs"]
 mod updates_tests;
+#[path = "acp_session_impl/web_fetch_distill.rs"]
+mod web_fetch_distill;
 pub use recap::SIDE_QUESTION_INSTRUCTION;
 #[path = "acp_session_impl/background_tasks.rs"]
 mod background_tasks;
@@ -1573,10 +1573,11 @@ mod client_hooks_tests;
 #[path = "acp_session_tests/managed_hooks_tests.rs"]
 mod managed_hooks_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/plugin_sidecar_e2e_tests.rs"]
-mod plugin_sidecar_e2e_tests;
 #[path = "acp_session_tests/model_switch_label_tests.rs"]
 mod model_switch_label_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/plugin_sidecar_e2e_tests.rs"]
+mod plugin_sidecar_e2e_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;
@@ -2361,6 +2362,7 @@ mod managed_gateway_tool_tests {
 #[cfg(test)]
 #[path = "acp_session_tests/gemini_side_calls_tests.rs"]
 mod gemini_side_calls_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/goal/goal_compaction_reseed_tests.rs"]
 mod goal_compaction_reseed_tests;
 #[cfg(test)]

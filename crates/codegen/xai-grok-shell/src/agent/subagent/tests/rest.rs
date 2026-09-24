@@ -2104,6 +2104,8 @@ fn notification_subagent_spawned_carries_the_calling_tool_call_id() {
         model: None,
         resumed_from: None,
         workflow_run_id: None,
+        attempt_id: None,
+        agent_address: None,
     };
     let json = serde_json::to_value(&spawned).unwrap();
     assert_eq!(json["tool_call_id"], "call-7");
@@ -2129,6 +2131,8 @@ fn notification_subagent_spawned_carries_the_calling_tool_call_id() {
         model: None,
         resumed_from: None,
         workflow_run_id: None,
+        attempt_id: None,
+        agent_address: None,
     };
     let json = serde_json::to_value(&harness_spawn).unwrap();
     assert!(
@@ -2171,6 +2175,8 @@ fn notification_subagent_spawned_carries_the_child_cwd() {
         model: None,
         resumed_from: None,
         workflow_run_id: None,
+        attempt_id: None,
+        agent_address: None,
     };
     let json = serde_json::to_value(&spawned).unwrap();
     assert_eq!(json["child_cwd"], "/tmp/worktrees/child-wt");

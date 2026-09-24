@@ -74,7 +74,6 @@ impl SessionActor {
                 xai_grok_tools::implementations::memory::write_tool::MemoryWriteImpl,
                 None,
             )
-            .await
             .map_err(|e| format!("failed to register memory_write: {e}"))?;
         bridge
             .register_mcp_tools(
@@ -82,7 +81,6 @@ impl SessionActor {
                 xai_grok_tools::implementations::memory::delete_tool::MemoryDeleteImpl,
                 None,
             )
-            .await
             .map_err(|e| format!("failed to register memory_delete: {e}"))?;
         Ok(())
     }

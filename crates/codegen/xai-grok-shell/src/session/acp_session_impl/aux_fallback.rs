@@ -486,7 +486,7 @@ mod tests {
             tmp.path(),
             crate::auth::GrokComConfig::default(),
         ));
-        let models_manager = crate::agent::models::ModelsManager::new(
+        let models_manager = crate::agent::remote_config::ModelsManager::new(
             None,
             catalog,
             agent_client_protocol::ModelId::new("origin/origin-model"),
@@ -527,6 +527,12 @@ mod tests {
                 extra_headers: Default::default(),
                 query_params: Default::default(),
                 env_http_headers: Default::default(),
+                mtls_cert_dir: None,
+                max_retries: None,
+                rate_limit_retry_threshold: None,
+                conversation_group_id: None,
+                max_request_bytes: None,
+                reasoning_summary: None,
                 context_window: std::num::NonZeroU64::new(256_000).unwrap(),
                 reasoning_effort: None,
                 stream_tool_calls: None,

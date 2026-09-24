@@ -39,6 +39,10 @@ impl xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunner
         xai_grok_tools::implementations::grok_build::task::coordinator::LocalBoxFuture<
             SubagentDescribeOutcome,
         >;
+    type ListTypesFuture =
+        xai_grok_tools::implementations::grok_build::task::coordinator::LocalBoxFuture<
+            Vec<xai_grok_tools::implementations::grok_build::task::types::SubagentTypeDescriptor>,
+        >;
 
     fn run(
         &self,
@@ -86,6 +90,10 @@ impl xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunner
         _parent_session_id: String,
     ) -> Self::DescribeFuture {
         Box::pin(std::future::ready(SubagentDescribeOutcome::Unavailable))
+    }
+
+    fn list_types(&self, _: String) -> Self::ListTypesFuture {
+        Box::pin(std::future::ready(Vec::new()))
     }
 
     fn supports_wake(&self) -> bool {

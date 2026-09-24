@@ -1413,7 +1413,7 @@ fn subagents_config_requirement_pin_beats_cli_flag_and_env_var() {
             let config: toml::Value = toml::from_str("[subagents]\nenabled = true").unwrap();
             let bundled = std::path::Path::new("/nonexistent/bundled");
             let sa = SubagentsConfig::resolve_base_with_sources(
-                true,
+                Some(true),
                 &config,
                 Some(false),
                 None,
@@ -1424,7 +1424,7 @@ fn subagents_config_requirement_pin_beats_cli_flag_and_env_var() {
                 "a requirements.toml pin must outrank --subagents and GROK_SUBAGENTS=1"
             );
             let unpinned = SubagentsConfig::resolve_base_with_sources(
-                false,
+                None,
                 &config,
                 None,
                 None,
@@ -1505,7 +1505,7 @@ fn subagents_config_models_without_enabled_keeps_default_enabled() {
 fn subagents_config_tuning_key_alone_stays_enabled() {
     without_grok_subagents(|| {
         let config: toml::Value = toml::from_str("[subagents]\nmax_depth = 3").unwrap();
-        let sa = SubagentsConfig::resolve(false, &config);
+        let sa = SubagentsConfig::resolve(None, &config);
         assert!(
                 sa.enabled,
                 "[subagents] max_depth alone must leave subagents enabled"
@@ -1519,7 +1519,7 @@ fn subagents_config_tuning_key_with_explicit_disable() {
     without_grok_subagents(|| {
         let config: toml::Value = toml::from_str("[subagents]\nmax_depth = 3\nenabled = false")
             .unwrap();
-        let sa = SubagentsConfig::resolve(false, &config);
+        let sa = SubagentsConfig::resolve(None, &config);
         assert!(!sa.enabled, "explicit enabled = false must still disable");
     });
 }
@@ -1531,11 +1531,11 @@ fn subagents_config_tuning_key_yields_to_env_and_cli() {
         || {
             let config: toml::Value = toml::from_str("[subagents]\nmax_depth = 3").unwrap();
             assert!(
-                    !SubagentsConfig::resolve(false, &config).enabled,
+                    !SubagentsConfig::resolve(None, &config).enabled,
                     "GROK_SUBAGENTS=0 must still win over the default"
                 );
             assert!(
-                    SubagentsConfig::resolve(true, &config).enabled,
+                    SubagentsConfig::resolve(Some(true), &config).enabled,
                     "--subagents must still win over GROK_SUBAGENTS=0"
                 );
         },

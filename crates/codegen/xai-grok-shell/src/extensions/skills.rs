@@ -811,9 +811,11 @@ mod tests {
         let _userprofile = EnvGuard::set("USERPROFILE", &home);
         let _grok = EnvGuard::set("GROK_HOME", &home);
 
-        // Each root carries a project plugin of its own, contributing one skill.
+        // Each root carries a plugin of its own, contributing one skill. The roots sit
+        // under the test home: listing now takes only trusted plugins, and a
+        // config-path plugin is auto-trusted when it lives under the user's home.
         let plant = |root_name: &str, plugin: &str, skill: &str| -> std::path::PathBuf {
-            let plugin_dir = tmp.path().join(root_name).join("plugins").join(plugin);
+            let plugin_dir = home.join(root_name).join("plugins").join(plugin);
             std::fs::create_dir_all(plugin_dir.join("skills").join(skill)).unwrap();
             std::fs::write(
                 plugin_dir.join("plugin.json"),
@@ -825,7 +827,7 @@ mod tests {
                 "body",
             )
             .unwrap();
-            dunce::canonicalize(tmp.path().join(root_name)).unwrap()
+            dunce::canonicalize(home.join(root_name)).unwrap()
         };
         let root_a = plant("a", "alpha", "alpha-skill");
         let root_b = plant("b", "beta", "beta-skill");

@@ -20,9 +20,9 @@ use crate::agent::config::{Config, ModelEntry, ModelFallback, resolve_model_list
 
 fn opt(value: ReasoningEffort, default: bool) -> ReasoningEffortOption {
     ReasoningEffortOption {
-        id: value.as_str().to_owned(),
+        id: value.to_string(),
         value,
-        label: value.as_str().to_owned(),
+        label: value.to_string(),
         description: None,
         default,
     }
@@ -100,7 +100,7 @@ async fn actor_with(
         tmp.path(),
         crate::auth::GrokComConfig::default(),
     ));
-    let models_manager = crate::agent::models::ModelsManager::new(
+    let models_manager = crate::agent::remote_config::ModelsManager::new(
         None,
         catalog,
         agent_client_protocol::ModelId::new("origin/origin-model"),
@@ -143,6 +143,12 @@ fn point_session_at(actor: &SessionActor, model: &str, base_url: &str) {
             extra_headers: Default::default(),
             query_params: Default::default(),
             env_http_headers: Default::default(),
+            mtls_cert_dir: None,
+            max_retries: None,
+            rate_limit_retry_threshold: None,
+            conversation_group_id: None,
+            max_request_bytes: None,
+            reasoning_summary: None,
             context_window: std::num::NonZeroU64::new(256_000).unwrap(),
             reasoning_effort: None,
             stream_tool_calls: None,
@@ -187,13 +193,14 @@ async fn hop_to_a_narrower_menu_sends_the_targets_default_not_the_origins_level(
             .await;
             point_session_at(&actor, "origin-model", &dead_url());
 
-            let mut budget = actor.rate_limit_wait_budget();
+            let mut budget = actor.rate_limit_wait_budget(None);
             let outcome = actor
                 .run_turn_via_sampler(
                     probe_request(Some(ReasoningEffort::High)),
                     &mut budget,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await
                 .expect("the chain target answers after the origin's dead endpoint fails");
@@ -242,13 +249,14 @@ async fn hop_to_a_target_with_no_effort_dial_omits_the_parameter() {
             .await;
             point_session_at(&actor, "origin-model", &dead_url());
 
-            let mut budget = actor.rate_limit_wait_budget();
+            let mut budget = actor.rate_limit_wait_budget(None);
             let outcome = actor
                 .run_turn_via_sampler(
                     probe_request(Some(ReasoningEffort::High)),
                     &mut budget,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await
                 .expect("the chain target answers after the origin's dead endpoint fails");

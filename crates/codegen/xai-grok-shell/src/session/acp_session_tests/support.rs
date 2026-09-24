@@ -29,7 +29,6 @@ pub(crate) fn block_on_local<F: std::future::Future>(fut: F) -> F::Output {
     tokio::task::LocalSet::new().block_on(&rt, fut)
 }
 
-
 use xai_grok_tools::implementations::grok_build::task::types::{
     SubagentCompletionSummary, SubagentSnapshot, SubagentSnapshotStatus,
 };

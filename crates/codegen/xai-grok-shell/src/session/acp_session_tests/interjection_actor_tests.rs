@@ -618,7 +618,7 @@ async fn a_child_report_lands_framed_as_a_report_and_acks_at_enqueue() {
                 Some(ConversationItem::User(u)) => u,
                 other => panic!("conversation tail must be a user item, got: {other:?}"),
             };
-            assert_eq!(item.synthetic_reason, Some(SyntheticReason::SystemReminder));
+            assert_eq!(item.synthetic_reason, SyntheticReason::SystemReminder);
             let text = match item.content.first() {
                 Some(xai_grok_sampling_types::conversation::ContentPart::Text { text }) => {
                     text.to_string()

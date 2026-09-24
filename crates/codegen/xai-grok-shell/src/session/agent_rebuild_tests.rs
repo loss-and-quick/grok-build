@@ -19,6 +19,14 @@ impl ChildControl for SenderProbeControl {
     fn progress(&self) -> Self::ProgressFuture {
         std::future::ready(Default::default())
     }
+    type ParentReportFuture = std::future::Ready<
+        xai_grok_tools::implementations::grok_build::task::coordinator::ParentReportDelivery,
+    >;
+    fn message_parent(&self, _text: String) -> Self::ParentReportFuture {
+        std::future::ready(
+            xai_grok_tools::implementations::grok_build::task::coordinator::ParentReportDelivery::Unreachable,
+        )
+    }
     fn cancel(&self) {}
 }
 
@@ -30,6 +38,9 @@ impl ChildRunner for SenderProbeRunner {
     type RunFuture = SendBoxFuture<ChildRunOutput<()>>;
     type ValidateFuture = SendBoxFuture<SubagentValidateTypeOutcome>;
     type DescribeFuture = SendBoxFuture<SubagentDescribeOutcome>;
+    type ListTypesFuture = SendBoxFuture<
+        Vec<xai_grok_tools::implementations::grok_build::task::types::SubagentTypeDescriptor>,
+    >;
 
     fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
         let sender = self.0.clone();
@@ -43,6 +54,9 @@ impl ChildRunner for SenderProbeRunner {
     }
     fn describe_type(&self, _: String, _: Option<String>, _: String) -> Self::DescribeFuture {
         Box::pin(std::future::pending())
+    }
+    fn list_types(&self, _: String) -> Self::ListTypesFuture {
+        Box::pin(std::future::ready(Vec::new()))
     }
     fn supports_wake(&self) -> bool {
         true

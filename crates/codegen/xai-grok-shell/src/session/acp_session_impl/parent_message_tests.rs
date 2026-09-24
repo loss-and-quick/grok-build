@@ -1042,6 +1042,7 @@ async fn response_boundary_drain_promotes_loop_fire_and_parent_message() {
         let (respond_to, response_rx) = oneshot::channel();
         await_with_timeout(actor.admit_parent_agent_message_for_test(
             message("loop-parent"),
+            ActiveAgentMessageSource::Agent,
             ActiveAgentMessageOperation::Queue,
             receipt_sink,
             respond_to,

@@ -2,9 +2,7 @@ use agent_client_protocol as acp;
 use serial_test::serial;
 use xai_grok_test_support::EnvGuard;
 
-use super::{
-    ExplicitSessionIdentity, OaiCompatClient, Summary, default_model_id, new_with_explicit_dir,
-};
+use super::{ExplicitSessionIdentity, Summary, default_model_id, new_with_explicit_dir};
 use crate::session::info::Info;
 
 fn worktree_cwd_under(home: &std::path::Path) -> String {
@@ -109,7 +107,6 @@ async fn new_with_explicit_dir_stores_requested_identity() {
         },
         target_dir.clone(),
         default_model_id(),
-        OaiCompatClient::new(xai_grok_sampler::SamplerConfig::default()).unwrap(),
         "test-model".to_owned(),
         crate::session::persistence::ExplicitSessionOpen::New {
             identity: Some(ExplicitSessionIdentity {

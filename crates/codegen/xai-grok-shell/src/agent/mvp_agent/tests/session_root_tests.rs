@@ -315,7 +315,7 @@ fn agent_with_cli_plugin(plugin_dir: &std::path::Path) -> crate::agent::mvp_agen
     let gateway = xai_acp_lib::AcpAgentGatewaySender::new(tx);
     let mut cfg = AgentConfig::default();
     cfg.plugins.cli_plugin_dirs = vec![plugin_dir.to_path_buf()];
-    crate::agent::mvp_agent::MvpAgent::new(gateway, &cfg, auth_manager, None)
+    crate::agent::mvp_agent::MvpAgent::new(gateway, &cfg, auth_manager, None, None)
         .expect("valid test config")
 }
 

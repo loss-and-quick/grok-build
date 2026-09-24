@@ -4209,51 +4209,17 @@ pub struct ModelEntryConfig {
 }
 impl ModelEntryConfig {
     /// A fully-defaulted entry for the given wire slug, used as the `..base`
-    /// when synthesizing a `[[provider]]` catalog entry. `ModelEntryConfig`
-    /// has no `Default` (its `context_window` is a required `NonZeroU64`), so
+    /// when synthesizing a `[[provider]]` catalog entry. [`Default`] leaves
+    /// `context_window` at the inert minimum, so this sets a working one;
     /// provider expansion overrides the meaningful fields over this base.
     fn minimal_for_provider(model: &str) -> Self {
         Self {
-            id: None,
             model: model.to_owned(),
-            model_family: None,
-            base_url: String::new(),
-            name: None,
-            description: None,
-            max_completion_tokens: None,
-            temperature: None,
-            top_p: None,
-            api_key: None,
-            env_key: None,
-            api_backend: ApiBackend::default(),
-            auth_scheme: None,
-            reasoning_effort: None,
-            supports_reasoning_effort: false,
-            reasoning_efforts: Vec::new(),
-            thinking: None,
-            max_concurrent: None,
             // A `[[provider]]` declares one slug, not an effort-spelled id
             // family, so a synthesized entry never has variants to inherit.
             variants: Vec::new(),
-            extra_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
-            auto_compact_threshold_percent: None,
-            system_prompt_label: None,
-            api_base_url: None,
-            use_concise: false,
-            agent_type: default_agent_type(),
-            inference_idle_timeout_secs: None,
-            max_retries: None,
-            subagent_rate_limit_max_attempts: None,
-            hidden: false,
-            supported_in_api: true,
-            supports_backend_search: false,
-            compactions_remaining: None,
-            compaction_at_tokens: None,
-            show_model_fingerprint: false,
-            stream_tool_calls: None,
-            laziness_detector: LazinessDetectorPerModelConfig::default(),
-            auth_account: None,
+            ..Self::default()
         }
     }
 }
@@ -4302,6 +4268,9 @@ impl Default for ModelEntryConfig {
             stream_tool_calls: None,
             reasoning_summary: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            thinking: None,
+            max_concurrent: None,
+            auth_account: None,
         }
     }
 }

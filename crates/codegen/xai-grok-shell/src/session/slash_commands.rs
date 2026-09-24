@@ -511,7 +511,7 @@ pub const PAGER_COMMAND_KEYS: &[(&str, CommandSurface)] = &[
     ("delete", CommandSurface::Any),
     ("docs", CommandSurface::WireMissing), // the guides are `include_str!`-ed into the pager binary
     ("doctor", CommandSurface::Terminal), // probes the terminal: kitty flags, XTVERSION, tmux passthrough, clipboard
-    ("dream", CommandSurface::Any), // `x.ai/memory/dream`
+    ("dream", CommandSurface::Any),       // `x.ai/memory/dream`
     ("edit-prompt", CommandSurface::Terminal), // drops raw mode and runs the user's `$EDITOR` as a child process
     ("effort", CommandSurface::Any),
     ("exit", CommandSurface::Any),
@@ -545,7 +545,7 @@ pub const PAGER_COMMAND_KEYS: &[(&str, CommandSurface)] = &[
     ("loop", CommandSurface::Any),
     ("m", CommandSurface::Any),
     ("marketplace", CommandSurface::Any),
-    ("mem", CommandSurface::Any), // alias of `memory`
+    ("mem", CommandSurface::Any),    // alias of `memory`
     ("memory", CommandSurface::Any), // the listing and the toggle cross as `x.ai/memory/list` and `x.ai/memory/toggle`
     ("mcps", CommandSurface::Any),
     ("minimal", CommandSurface::Terminal), // relaunches out of the alternate screen
