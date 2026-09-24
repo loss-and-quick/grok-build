@@ -1486,7 +1486,46 @@ fn builtin_tools_fragment(name: BuiltinAgentName) -> String {
         BuiltinAgentName::Plan => xai_tool_types::PLAN_SUBAGENT,
         _ => return String::new(),
     };
-    subagent.render_tools(&SUBAGENT_TOOL_NAMING)
+    guard_absent_tool_kinds(&subagent.render_tools(&SUBAGENT_TOOL_NAMING))
+}
+/// Rewrite a fragment's `${{ tools.by_kind.* }}` run as one filtered list, so a kind
+/// this toolset does not register (web search is often off) drops out instead of
+/// rendering an empty slot (`grep, , and todo_write`). The list loses its final
+/// "and" — a plain comma list is the price of not naming an absent tool.
+fn guard_absent_tool_kinds(fragment: &str) -> String {
+    const OPEN: &str = "${{ tools.by_kind.";
+    const CLOSE: &str = " }}";
+    let (Some(first), Some(last)) = (fragment.find(OPEN), fragment.rfind(OPEN)) else {
+        return fragment.to_owned();
+    };
+    let Some(last_end) = fragment
+        .get(last..)
+        .and_then(|rest| rest.find(CLOSE))
+        .map(|at| last + at + CLOSE.len())
+    else {
+        return fragment.to_owned();
+    };
+    let (Some(head), Some(body), Some(tail)) = (
+        fragment.get(..first),
+        fragment.get(first..last_end),
+        fragment.get(last_end..),
+    ) else {
+        return fragment.to_owned();
+    };
+    let kinds: Vec<String> = body
+        .split(OPEN)
+        .filter_map(|piece| {
+            piece
+                .split_once(CLOSE)
+                .map(|(kind, _)| kind.trim().to_owned())
+        })
+        .filter(|kind| !kind.is_empty())
+        .map(|kind| format!("tools.by_kind.{kind}"))
+        .collect();
+    format!(
+        "{head}${{{{ [{}] | select | join(\", \") }}}}{tail}",
+        kinds.join(", ")
+    )
 }
 /// Replaces the upstream paragraph that listed every catalog slug and invited
 /// the caller to pass one. The `task` tool takes no model argument, so a list of
@@ -1901,11 +1940,19 @@ mod tests {
         ];
         let desc = build_task_description(&subagents);
         assert!(
-            desc.contains(xai_tool_types::GENERAL_PURPOSE_SUBAGENT.tools_template),
+            desc.contains(&guard_absent_tool_kinds(
+                &xai_tool_types::GENERAL_PURPOSE_SUBAGENT.render_tools(&SUBAGENT_TOOL_NAMING)
+            )),
             "should include general-purpose tool names"
         );
         assert!(
-            desc.contains(xai_tool_types::EXPLORE_SUBAGENT.tools_template),
+            desc.contains("tools.by_kind.web_search") && desc.contains("| select | join"),
+            "absent tool kinds must drop out of the list, not leave an empty slot"
+        );
+        assert!(
+            desc.contains(&guard_absent_tool_kinds(
+                &xai_tool_types::EXPLORE_SUBAGENT.render_tools(&SUBAGENT_TOOL_NAMING)
+            )),
             "should include explore tool names"
         );
         assert!(
@@ -1997,7 +2044,7 @@ mod tests {
             "should use tools.by_kind.task template variable"
         );
         assert!(
-            desc.contains("${{ tools.by_kind.read }}"),
+            desc.contains("tools.by_kind.read"),
             "should use tools.by_kind.read template variable"
         );
         assert!(
