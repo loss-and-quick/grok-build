@@ -1173,11 +1173,55 @@ mod tests {
         (diamonds, dotted, free, diamonds + dotted + free)
     }
 
+    /// The bands the agent resolves never claim more than the window holds:
+    /// `used` is capped at `total`, the system prompt at `used`, and messages
+    /// at what the system prompt leaves; free is what the window has left.
+    #[test]
+    fn resolved_bands_cap_used_to_total_and_system_to_used() {
+        use xai_grok_shell::session::ContributorKind;
+        let tokens = |facts: &ContextFacts, kind: ContributorKind| {
+            facts
+                .contributors
+                .iter()
+                .filter(|c| c.kind == kind)
+                .map(|c| c.tokens)
+                .sum::<u64>()
+        };
+        let mut snap = snapshot();
+        snap.used = 600_000;
+        snap.total = 500_000;
+        snap.system_prompt_tokens = 1_000;
+        snap.message_tokens = 400_000;
+        snap.tool_definitions_tokens = 0;
+        let facts = ContextFacts::resolve(&snap, &[]);
+        assert_eq!(500_000, facts.used);
+        let occupied: u64 = facts
+            .contributors
+            .iter()
+            .filter(|c| c.kind != ContributorKind::Free)
+            .map(|c| c.tokens)
+            .sum();
+        assert_eq!(
+            500_000, occupied,
+            "the bands partition the capped occupancy"
+        );
+
+        snap.used = 100;
+        snap.total = 1_000;
+        snap.system_prompt_tokens = 500;
+        snap.message_tokens = 50;
+        let facts = ContextFacts::resolve(&snap, &[]);
+        assert_eq!(100, tokens(&facts, ContributorKind::SystemPrompt));
+        assert_eq!(0, tokens(&facts, ContributorKind::Messages));
+        assert_eq!(0, tokens(&facts, ContributorKind::Unattributed));
+    }
+
     #[test]
     fn legend_caps_messages_when_estimate_exceeds_used() {
         let mut snap = snapshot();
         snap.used = 206_000;
         snap.total = 500_000;
+        snap.free_tokens = 294_000;
         snap.system_prompt_tokens = 1_500;
         snap.message_tokens = 380_000;
         snap.usage_pct = 41;
@@ -1335,6 +1379,8 @@ mod tests {
             !all.contains("Unattributed = "),
             "nothing is left over here, so the note must not print:\n{all}"
         );
+        // Tool schemas are measured, not estimated, so the row keeps its 75k even
+        // where the parts together outrun `used`.
         assert!(
             all.contains("Tool schemas") && all.contains("75.0k"),
             "tool schemas must be a legend row carrying their measured size:\n{all}"

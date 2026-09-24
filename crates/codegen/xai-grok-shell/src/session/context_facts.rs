@@ -333,16 +333,22 @@ impl ContextFacts {
     /// client calls it only as the fallback for an agent that answered
     /// without them.
     pub fn resolve(snapshot: &ContextInfo, history: &[CompactionRecord]) -> Self {
-        let used = snapshot.used;
         let total = snapshot.total;
-        let system = snapshot.system_prompt_tokens;
-        let messages = snapshot.message_tokens;
+        // An unknown window (`total == 0`) leaves occupancy uncapped.
+        let used = if total > 0 {
+            snapshot.used.min(total)
+        } else {
+            snapshot.used
+        };
+        // The message count is a local estimate and can overshoot the server's `used`
+        // (380k estimated against 206k occupied), so it is capped at what the system
+        // prompt leaves; the legend then never claims more history than is occupied.
+        // Tool schemas are measured, not estimated, so they keep their measurement.
+        let system = snapshot.system_prompt_tokens.min(used);
+        let messages = snapshot.message_tokens.min(used - system);
         let tools = snapshot.tool_definitions_tokens;
-        // Saturating because these are independently measured over the same
-        // request and can together exceed the server's `used` — most obviously
-        // before the first response, when `used` is itself a local estimate
-        // that has not yet been replaced by a provider count that includes the
-        // tool schemas.
+        // Saturating: before the first response `used` is itself a local estimate that
+        // does not yet include the tool schemas, so the measured parts can outrun it.
         let unattributed =
             used.saturating_sub(system.saturating_add(messages).saturating_add(tools));
 
