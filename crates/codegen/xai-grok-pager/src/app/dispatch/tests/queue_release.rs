@@ -549,6 +549,8 @@ fn flush_does_not_leapfrog_held_server_queue_front() {
             text: "from another client".into(),
             position: 0,
             combined_texts: None,
+            images: None,
+            editable: None,
         }];
     }
 
@@ -637,6 +639,7 @@ fn send_now_does_not_interject_held_follow_ups_into_cancelled_turn() {
             text: "just typed".into(),
             images: vec![],
             image_notice: None,
+            chip_elements: vec![],
         },
         &mut app,
     );

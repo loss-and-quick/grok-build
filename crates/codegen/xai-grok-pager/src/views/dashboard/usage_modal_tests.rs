@@ -127,16 +127,19 @@ fn close_button_click_closes_usage_modal() {
 fn tab_header_click_switches_tab() {
     let mut state = DashboardState::new();
     let mut modal = session_less_modal(UsageInfoTab::UsageLimit);
+    // One rect per tab, in `UsageInfoTab::ALL` order; the last one is Session info.
     modal.window.tab_rects = vec![
         Some(Rect::new(10, 2, 13, 1)),
         Some(Rect::new(25, 2, 11, 1)),
         Some(Rect::new(38, 2, 12, 1)),
+        Some(Rect::new(52, 2, 12, 1)),
     ];
+    assert_eq!(modal.window.tab_rects.len(), UsageInfoTab::ALL.len());
     state.usage_modal = Some(modal);
     let reg = crate::actions::ActionRegistry::defaults();
     let click = Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: 40,
+        column: 54,
         row: 2,
         modifiers: KeyModifiers::NONE,
     });

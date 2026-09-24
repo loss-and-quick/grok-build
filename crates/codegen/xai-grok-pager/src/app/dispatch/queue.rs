@@ -1289,6 +1289,7 @@ fn resend_hook_blocked_front_via_server(app: &mut AppView, id: AgentId) -> Optio
         prompt.text,
         prompt.images,
         prompt.chip_elements,
+        None,
     ))
 }
 
@@ -2488,6 +2489,8 @@ mod tests {
             text: "flush me".into(),
             position: 0,
             combined_texts: None,
+            images: None,
+            editable: None,
         }];
 
         arm_send_now_and_paint(agent, "p-next", None);

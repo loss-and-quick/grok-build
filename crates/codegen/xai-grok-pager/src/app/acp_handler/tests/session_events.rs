@@ -1518,11 +1518,27 @@
             .scrollback
             .len();
 
+        // A failed run is the one outcome that leaves a scrollback line, so it
+        // is the one that could leak.
+        let failed_batch = |sid: &str, event: &str| {
+            xai_hook_execution_notif_with_runs(
+                sid,
+                event,
+                Some("pid-1"),
+                false,
+                vec![xai_grok_shell::extensions::notification::HookRunEntryDto {
+                    name: "global/lint".into(),
+                    status: xai_grok_shell::extensions::notification::HookRunStatusDto::Failed {
+                        error: "boom".into(),
+                        elapsed_ms: 3,
+                        blocked: false,
+                    },
+                    output: None,
+                }],
+            )
+        };
         for event in ["pre_tool_use", "post_tool_use", "session_end", "stop"] {
-            let _ = handle_ext_notification(
-                &xai_hook_execution_notif(child_sid, event, false),
-                &mut app,
-            );
+            let _ = handle_ext_notification(&failed_batch(child_sid, event), &mut app);
         }
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -1530,10 +1546,6 @@
             agent.scrollback.len(),
             parent_before,
             "a child's hook runs pushed blocks into the parent's scrollback"
-        );
-        assert!(
-            agent.pending_stop_hooks.is_none(),
-            "a child's stop hooks were stashed against the parent's turn marker"
         );
         assert_eq!(
             agent.subagent_views.get(child_sid).unwrap().scrollback.len(),
@@ -1544,13 +1556,10 @@
         // Control: the identical update stamped with the parent's own session
         // id does land, so the assertions above are reading a live path rather
         // than a notification the dispatcher rejected for some other reason.
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-parent", "stop", false),
-            &mut app,
-        );
+        let _ = handle_ext_notification(&failed_batch("sess-parent", "stop"), &mut app);
         assert!(
-            app.agents[&AgentId(0)].pending_stop_hooks.is_some(),
-            "the parent's own stop hooks did not reach the UI either"
+            app.agents[&AgentId(0)].scrollback.len() > parent_before,
+            "the parent's own failed hook did not reach the UI either"
         );
     }
 

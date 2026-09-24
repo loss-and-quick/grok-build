@@ -6079,6 +6079,7 @@ fn send_now_with_unbound_placeholder_toasts() {
         text,
         images,
         image_notice,
+        ..
     } = &action
     else {
         panic!("expected SendPromptNow, got {action:?}");

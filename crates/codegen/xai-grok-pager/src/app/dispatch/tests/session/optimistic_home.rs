@@ -234,8 +234,14 @@ fn welcome_shift_tab_reveals_home_session_in_plan_mode() {
 
     // Bind after a queued prompt: the mode must go out before that prompt.
     let _ = dispatch(Action::SendPrompt("go".into()), &mut app);
-    let effects =
-        handle_session_created(&mut app, home, acp::SessionId::new("plan-home"), None, None);
+    let effects = handle_session_created(
+        &mut app,
+        home,
+        acp::SessionId::new("plan-home"),
+        None,
+        None,
+        None,
+    );
     let mode_at = effects
         .iter()
         .position(|e| matches!(e, Effect::SetSessionMode { .. }));
@@ -556,7 +562,14 @@ fn load_session_does_not_abandon_empty_new_session() {
             app.active_view
         );
     };
-    let _ = handle_session_created(&mut app, new_id, acp::SessionId::new("new-sid"), None, None);
+    let _ = handle_session_created(
+        &mut app,
+        new_id,
+        acp::SessionId::new("new-sid"),
+        None,
+        None,
+        None,
+    );
 
     let _ = dispatch(
         Action::LoadSession("resume-me".into(), None, false),
@@ -915,8 +928,14 @@ fn session_created_after_abandon_unregisters() {
     let _ = dispatch(Action::NewSession, &mut app);
     assert!(!app.agents.contains_key(&home));
 
-    let effects =
-        handle_session_created(&mut app, home, acp::SessionId::new("late-home"), None, None);
+    let effects = handle_session_created(
+        &mut app,
+        home,
+        acp::SessionId::new("late-home"),
+        None,
+        None,
+        None,
+    );
     assert!(
         effects.iter().any(|e| matches!(
             e,
@@ -1040,7 +1059,7 @@ fn send_after_home_session_create_failure_creates_and_sends() {
 
 fn bind_home_session(app: &mut AppView) {
     let home = app.home_session_agent.expect("home session");
-    let _ = handle_session_created(app, home, acp::SessionId::new("home-sid"), None, None);
+    let _ = handle_session_created(app, home, acp::SessionId::new("home-sid"), None, None, None);
 }
 
 #[test]
@@ -1504,6 +1523,7 @@ fn welcome_shift_tab_off_yolo_notifies_after_session_created() {
         &mut app,
         home_id,
         acp::SessionId::new("yolo-home"),
+        None,
         None,
         None,
     );

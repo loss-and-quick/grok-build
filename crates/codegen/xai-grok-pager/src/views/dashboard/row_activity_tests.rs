@@ -244,6 +244,8 @@ fn live_chips_count_all_buckets_and_exclude_finished_workflow_children_and_queue
             text: "held".to_owned(),
             combined_texts: None,
             position: 0,
+            images: None,
+            editable: None,
         });
     assert_eq!(
         vec![

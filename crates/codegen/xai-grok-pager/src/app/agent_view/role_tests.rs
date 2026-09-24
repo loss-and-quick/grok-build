@@ -52,6 +52,8 @@ fn child_unaddressable_hides_composer_and_refuses_prompt_pane() {
         text: String::from("queued"),
         combined_texts: None,
         position: 0,
+        images: None,
+        editable: None,
     }];
     child.sync_queue_pane();
     child.queue.overlay.visible = true;

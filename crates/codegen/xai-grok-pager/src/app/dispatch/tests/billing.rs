@@ -1738,6 +1738,7 @@ fn load_session(app: &mut AppView, session_id: &str) -> Vec<Effect> {
             restore_degree: None,
             running_prompt_id: None,
             scheduler_background_loops: None,
+            modes: None,
         }),
         app,
     )

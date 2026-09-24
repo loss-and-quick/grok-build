@@ -60,6 +60,7 @@ fn unreached_denied_samples() -> Vec<Action> {
             text: String::from("hi"),
             images: Vec::new(),
             image_notice: None,
+            chip_elements: vec![],
         },
         Action::Interject {
             text: String::from("hi"),
@@ -166,6 +167,7 @@ fn child_send_family_is_denied() {
             text: String::from("hi"),
             images: Vec::new(),
             image_notice: None,
+            chip_elements: vec![],
         }),
         InputOutcome::ActionPair(
             Action::CopyBlockContent,
