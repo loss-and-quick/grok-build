@@ -144,6 +144,28 @@
       "hiddenInMinimal": true
     },
     {
+      "key": "dashboard_preview",
+      "category": "appearance",
+      "owner": "shellCached",
+      "surface": "terminal",
+      "label": "Dashboard preview",
+      "description": "Show the selected session's preview and reply panel in the dashboard. Turn off to give the session list more space. Open a session to reply or answer permissions when the preview is off.",
+      "keywords": [
+        "dashboard",
+        "peek",
+        "preview",
+        "prompt",
+        "reply",
+        "panel"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": true
+      },
+      "restartRequired": false,
+      "hiddenInMinimal": true
+    },
+    {
       "key": "page_flip_on_send",
       "category": "appearance",
       "owner": "shellCached",
@@ -346,6 +368,11 @@
             "canonical": "oscura-midnight",
             "display": "Oscura Midnight",
             "description": "Deep dark with warm accents; needs truecolor."
+          },
+          {
+            "canonical": "terminal",
+            "display": "Terminal",
+            "description": "Terminal's own background and text colors."
           }
         ],
         "supports_preview": true
@@ -396,6 +423,11 @@
             "canonical": "oscura-midnight",
             "display": "Oscura Midnight",
             "description": "Deep dark with warm accents; needs truecolor."
+          },
+          {
+            "canonical": "terminal",
+            "display": "Terminal",
+            "description": "Terminal's own background and text colors."
           }
         ],
         "supports_preview": true
@@ -446,6 +478,11 @@
             "canonical": "oscura-midnight",
             "display": "Oscura Midnight",
             "description": "Deep dark with warm accents; needs truecolor."
+          },
+          {
+            "canonical": "terminal",
+            "display": "Terminal",
+            "description": "Terminal's own background and text colors."
           }
         ],
         "supports_preview": true
@@ -614,6 +651,36 @@
         "supports_preview": false
       },
       "restartRequired": false,
+      "hiddenInMinimal": false
+    },
+    {
+      "key": "subagent_model_inheritance",
+      "category": "models",
+      "owner": "shell",
+      "surface": "any",
+      "label": "Subagent model inheritance",
+      "description": "On: Grok cannot set models for subagents\nOff: Grok may choose a different model for a subagent. Takes effect after restart.\nNOTE: This setting only applies when all models are xAI \"model_family\". You likely don't need to configure this setting.",
+      "keywords": [
+        "subagent",
+        "subagents",
+        "subagent model",
+        "same model",
+        "model",
+        "parent",
+        "inherit",
+        "inheritance",
+        "picker",
+        "argument",
+        "task",
+        "spawn",
+        "xai",
+        "features"
+      ],
+      "kind": {
+        "type": "bool",
+        "default": false
+      },
+      "restartRequired": true,
       "hiddenInMinimal": false
     },
     {

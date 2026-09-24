@@ -550,6 +550,7 @@ fn render_setting_row_selected_is_reversed_on_terminal_theme() {
         key: "test-key",
         category: SettingCategory::Appearance,
         owner: crate::settings::SettingOwner::Shared,
+        surface: crate::settings::SettingSurface::Any,
         label: "Compact mode",
         description: "Test description.",
         keywords: &["test"],

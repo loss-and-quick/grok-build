@@ -28,8 +28,10 @@ describe("settings surface", () => {
     // changes surface is a deliberate decision about which clients draw it, so
     // it should be visible in a diff rather than discovered later.
     const terminal = rows.filter((row) => row.surface === "terminal");
-    expect(rows).toHaveLength(50);
-    expect(terminal).toHaveLength(15);
+    // 52 / 16 since the sync added `dashboard_preview` (terminal: the pager's
+    // dashboard pane) and `subagent_model_inheritance` (any).
+    expect(rows).toHaveLength(52);
+    expect(terminal).toHaveLength(16);
   });
 
   test("every row a browser draws has a label and a kind to draw it with", () => {

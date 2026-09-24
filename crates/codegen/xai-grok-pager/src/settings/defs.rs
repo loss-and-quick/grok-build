@@ -557,6 +557,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "dashboard_preview",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
+            // The session dashboard is the terminal's own view; a browser lists
+            // sessions its own way and has no preview panel to show or hide.
+            surface: SettingSurface::Terminal,
             label: "Dashboard preview",
             description: "Show the selected session's preview and reply panel in the dashboard. \
                           Turn off to give the session list more space. Open a session to reply \
@@ -887,6 +890,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "subagent_model_inheritance",
             category: SettingCategory::Models,
             owner: SettingOwner::Shell,
+            surface: SettingSurface::Any,
             label: "Subagent model inheritance",
             description: "On: Grok cannot set models for subagents\n\
                           Off: Grok may choose a different model for a subagent. Takes effect \

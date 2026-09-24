@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn the_catalog_shape_is_pinned() {
         let catalog = catalog_from(&crate::settings::defs::default_settings());
-        assert_eq!(catalog.rows.len(), 50, "a setting was added or removed");
+        assert_eq!(catalog.rows.len(), 52, "a setting was added or removed");
         assert_eq!(
             catalog.categories.len(),
             SettingCategory::ALL.len(),
@@ -530,7 +530,7 @@ mod tests {
             .filter(|r| r.surface == wire::SettingSurface::Terminal)
             .count();
         assert_eq!(
-            terminal, 15,
+            terminal, 16,
             "the terminal-only set changed; a row moved in or out of every \
              non-terminal client's settings view"
         );

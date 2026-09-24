@@ -86,6 +86,14 @@ async fn write_to_config(key: &str, value: SettingValue) -> Result<(), String> {
                 .await
                 .map_err(|e| e.to_string())
         }
+        "dashboard_preview" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("dashboard_preview", "Bool", &value));
+            };
+            crate::util::config::set_dashboard_preview(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "confirm_before_rewind" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("confirm_before_rewind", "Bool", &value));
