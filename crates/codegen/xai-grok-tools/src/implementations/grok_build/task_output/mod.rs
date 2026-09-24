@@ -1770,6 +1770,7 @@ mod tests {
             TaskOutputToolInput {
                 task_ids: vec!["task-unknown".into()],
                 timeout_ms: None,
+                wait_for_event: false,
             },
         )
         .await

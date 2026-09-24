@@ -431,7 +431,6 @@ pub(in crate::implementations::grok_build::task::coordinator) fn request(
         subagent_type: "explore".to_owned(),
         parent_session_id: "parent".to_owned(),
         parent_prompt_id: Some("prompt".to_owned()),
-        tool_call_id: None,
         resume_from: None,
         cwd: None,
         runtime_overrides: Default::default(),

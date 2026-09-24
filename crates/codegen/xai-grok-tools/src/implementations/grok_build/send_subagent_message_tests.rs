@@ -783,8 +783,17 @@ async fn a_nested_agent_that_may_still_spawn_reaches_the_backend() {
             .expect("a depth-1 sender must reach the active-message ingress");
         // The sender's own session id, which is what the coordinator reads as
         // "who is speaking" when it checks ownership.
-        assert_eq!(ingress.request.parent_session_id, "trusted-parent");
-        assert_eq!(ingress.request.request.subagent_id(), "sub-1");
+        assert!(matches!(
+            &ingress.request.sender_context,
+            crate::implementations::grok_build::task::types::ActiveMessageSenderContext::RootSession {
+                session_id
+            } if session_id.as_ref() == "trusted-parent"
+        ));
+        assert!(matches!(
+            ingress.request.request.target(),
+            crate::implementations::grok_build::task::types::ActiveMessageTarget::ChildId(id)
+                if id == "sub-1"
+        ));
         ingress
             .request
             .respond_to

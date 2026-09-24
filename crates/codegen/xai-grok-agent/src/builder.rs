@@ -2,6 +2,7 @@ use crate::agent::Agent;
 use crate::compaction::CompactionPolicy;
 use crate::config::{AGENT_TASK_CLASSIFIER_RE, short_tool_name, tool_id_eq, tool_id_matches};
 use crate::config::{AgentDefinition, BuiltinAgentName, PermissionMode, PromptMode};
+use crate::discovery::{SubagentEntry, SubagentSource};
 use crate::error::AgentBuildError;
 use crate::prompt::context::{PromptAudience, PromptContext};
 use crate::system_reminder::ReminderPolicy;
@@ -1581,6 +1582,7 @@ fn resolve_shell_for_prompt() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AgentScope;
     use xai_grok_tools::types::definition::ToolDefinition;
     use xai_grok_tools::types::template_renderer::unresolved_template_markers;
     #[derive(Debug)]

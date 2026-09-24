@@ -2101,9 +2101,16 @@ mod tests {
                 success && worktree.is_some(),
                 "{case}"
             );
+            // A failed or cancelled child that did work carries the fork's
+            // resumable footer, which names the persona just like the success one.
             assert_eq!(
                 body.contains("The subagent used persona=\"reviewer\"."),
-                success && persona.is_some(),
+                persona.is_some()
+                    && (success
+                        || xai_tool_types::subagent_failure_is_resumable(
+                            result.tool_calls,
+                            result.turns,
+                        )),
                 "{case}"
             );
         }
@@ -2121,7 +2128,10 @@ mod tests {
         assert!(header.ends_with(" completed with failure."), "{header}");
         assert!(body.contains("\nStatus: failed\n"), "{body}");
         assert!(body.contains("\nExit Code: 1\n"), "{body}");
-        assert!(body.ends_with("\n=== Output ===\nUnknown error"), "{body}");
+        assert!(
+            body.contains("\n=== Output ===\nUnknown error\n\n<subagent_resumable>"),
+            "{body}"
+        );
         result.cancelled = true;
         let msg = format_subagent_completion(
             &summarize(&test_request("sub-fail"), &result),
@@ -2137,7 +2147,7 @@ mod tests {
         assert!(body.contains("\nStatus: cancelled\n"), "{body}");
         assert!(!body.contains("Exit Code:"), "{body}");
         assert!(
-            body.ends_with("\n=== Output ===\nSubagent was cancelled"),
+            body.contains("\n=== Output ===\nSubagent was cancelled\n\n<subagent_resumable>"),
             "{body}"
         );
     }
@@ -2232,7 +2242,9 @@ mod tests {
             format_between_turn_completions(&[ok, failed], Some("get_task_output"), None, None);
         assert_eq!(inlined_child_text(&wake), neutralized, "{wake}");
         assert!(
-            failed_wake.ends_with(&format!("\n=== Output ===\n{neutralized}")),
+            failed_wake.contains(&format!(
+                "\n=== Output ===\n{neutralized}\n\n<subagent_resumable>"
+            )),
             "{failed_wake}"
         );
         let header = format!("(general-purpose: \"{neutralized}\") ");
@@ -2370,9 +2382,13 @@ mod tests {
         let a = summarize(&request_a, &result_a);
         let b = summarize(&request_b, &result_b);
         let msg = format_between_turn_completions(&[a, b], Some("get_task_output"), None, None);
+        let resumable_b =
+            xai_tool_types::format_failed_resume_footer("b", "general-purpose", None, 8, 2)
+                .expect("a cancelled child that did work is resumable");
         assert_eq!(
             msg,
-            "While you were idle, 2 background subagents completed:\n\
+            format!(
+                "While you were idle, 2 background subagents completed:\n\
              - [explore] \"task 1\" \u{2014} completed successfully (1.0s, 2 tool calls)\n\
              === Task a ===\n\
              Command: [subagent:explore] task 1\n\
@@ -2397,7 +2413,8 @@ mod tests {
              Duration: 5.00s\n\
              \n\
              === Output ===\n\
-             killed by the user\n"
+             killed by the user\n\n{resumable_b}\n"
+            )
         );
     }
     #[test]

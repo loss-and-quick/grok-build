@@ -1673,7 +1673,7 @@ mod tests {
         fs::write(commands.join("rollback.md"), "Roll the last deploy back.\n").unwrap();
 
         let registry = make_registry_with_dirs("infra", tmp.path(), vec![], vec![commands]);
-        let mut skills = collect_plugin_skills(&registry);
+        let mut skills = collect_plugin_skills(Some(&registry));
         skills.sort_by(|a, b| a.name.cmp(&b.name));
 
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
@@ -1711,7 +1711,7 @@ mod tests {
 
         let registry =
             make_registry_with_dirs("infra", tmp.path(), vec![skills_dir], vec![commands]);
-        let merged = merge_skills_with_plugins(vec![], collect_plugin_skills(&registry));
+        let merged = merge_skills_with_plugins(vec![], collect_plugin_skills(Some(&registry)));
 
         let deploy: Vec<_> = merged.iter().filter(|s| s.name == "deploy").collect();
         assert_eq!(deploy.len(), 1, "{merged:?}");

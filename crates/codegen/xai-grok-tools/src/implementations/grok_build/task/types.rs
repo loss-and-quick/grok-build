@@ -114,8 +114,6 @@ pub struct SubagentRequest {
     pub owner: SubagentOwner,
     pub cancel_token: CancellationToken,
     pub spawn_root: SpawnRootSpan,
-    /// Model tool call that issued this spawn; `None` for harness-internal spawns.
-    pub tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Default)]

@@ -1840,7 +1840,9 @@ mod tests {
     fn task_tool_input_schema_hides_workspace() {
         let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
         let properties = schema["properties"].as_object().unwrap();
-        assert!(properties.contains_key("model"));
+        // Fork: `model` is refused, not advertised (the subagent type pins it).
+        assert!(!properties.contains_key("model"));
+        assert!(properties.contains_key("subagent_type"));
         assert!(!properties.contains_key("workspace"));
         assert!(!properties.contains_key("task_id"));
     }

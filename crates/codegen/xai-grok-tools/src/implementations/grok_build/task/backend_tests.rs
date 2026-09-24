@@ -195,7 +195,6 @@ async fn channel_backend_spawn_success() {
         owner: super::super::types::SubagentOwner::Task,
         cancel_token: tokio_util::sync::CancellationToken::new(),
         spawn_root: Default::default(),
-        tool_call_id: None,
     };
 
     let result = backend.spawn(request, None).await.unwrap();
@@ -231,7 +230,6 @@ async fn channel_backend_spawn_closed_channel() {
         owner: super::super::types::SubagentOwner::Task,
         cancel_token: tokio_util::sync::CancellationToken::new(),
         spawn_root: Default::default(),
-        tool_call_id: None,
     };
 
     let err = backend.spawn(request, None).await.unwrap_err();
@@ -589,7 +587,6 @@ async fn workflow_spawn_future_drop_cancels_but_task_drop_does_not() {
             owner,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             spawn_root: Default::default(),
-            tool_call_id: None,
         }
     }
 
@@ -645,7 +642,6 @@ async fn channel_backend_spawn_result_dropped() {
         owner: super::super::types::SubagentOwner::Task,
         cancel_token: tokio_util::sync::CancellationToken::new(),
         spawn_root: Default::default(),
-        tool_call_id: None,
     };
 
     let err = backend.spawn(request, None).await.unwrap_err();

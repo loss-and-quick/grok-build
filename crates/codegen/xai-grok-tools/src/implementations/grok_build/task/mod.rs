@@ -705,7 +705,6 @@ impl xai_tool_runtime::Tool for TaskTool {
             owner: SubagentOwner::Task,
             cancel_token: child_cancellation,
             spawn_root: SpawnRootSpan::new(spawn_root_span),
-            tool_call_id: Some(ctx.call_id.as_str().to_owned()),
         };
 
         // 4. Background mode: await registration (pending/queued), not the
@@ -1321,6 +1320,7 @@ mod tests {
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "explore".into(),
+                subagent_type_specified: true,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -1328,6 +1328,7 @@ mod tests {
                 cwd: None,
                 model: None,
                 reasoning_effort: None,
+                workspace: None,
                 task_id: None,
             },
         )
