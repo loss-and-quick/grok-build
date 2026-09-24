@@ -131,6 +131,13 @@ fn daemon_tool_table() -> Vec<(&'static str, Value, Class)> {
         ("memory_search", json!({"query": "q"}), Class::Read),
         ("memory_get", json!({"path": "notes.md"}), Class::Read),
         (
+            "memory_write",
+            json!({"name": "n", "description": "d", "type": "user", "content": "c"}),
+            Class::Read,
+        ),
+        ("memory_delete", json!({"name": "n"}), Class::Read),
+        ("message_parent", json!({"message": "done"}), Class::Read),
+        (
             "lsp",
             json!({"operation": "hover", "file_path": "/tmp/a.rs", "line": 0, "character": 0}),
             Class::Read,

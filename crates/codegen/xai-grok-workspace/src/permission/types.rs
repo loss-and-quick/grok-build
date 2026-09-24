@@ -275,9 +275,12 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
             // and this tool has no path to gate — the target is derived from a
             // slugified name inside `~/.grok/memory/`. Prompting per saved fact
             // would make "remember this" cost a confirmation every time.
+            // `message_parent` only hands text to the session that spawned this one;
+            // a subagent has nobody at a prompt, so gating it would strand the report.
             ToolInput::TodoWrite(_)
             | ToolInput::MemoryWrite(_)
             | ToolInput::MemoryDelete(_)
+            | ToolInput::MessageParent(_)
             | ToolInput::TaskOutput(_)
             | ToolInput::WaitTasks(_)
             | ToolInput::KillTask(_)
