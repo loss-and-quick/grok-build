@@ -210,6 +210,10 @@ siphasher = { workspace = true }
 windows = { workspace = true }
 
 [dev-dependencies]
+# `tests/jwt_crypto_backend.rs` signs a JWT in this crate's dependency graph, the one that also
+# pulls `gcloud-storage`, so a second crypto backend re-enabled there fails here by name. The
+# runtime JWT code now lives in `xai-grok-login`; this edge is for the test alone.
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 xai-dirs = { workspace = true }
 # `leader::transport` socket tests root their scratch dirs under the user's
 # cache dir; `xai-dirs` resolves only home and the grok home, not the

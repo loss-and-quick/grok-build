@@ -14587,6 +14587,7 @@ dependencies = [
  "indexmap",
  "infer 0.15.0",
  "jsonschema",
+ "jsonwebtoken",
  "kanal",
  "libc",
  "moka",
