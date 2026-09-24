@@ -226,9 +226,25 @@ fn server_queue_owns_next_turn(agent: &AgentView) -> bool {
         .any(|e| Some(e.id.as_str()) != running)
 }
 
-/// Frame a scheduled (cron) prompt the way the shell's scheduler does for a foreground fire.
+/// Frame a foreground (in-conversation) scheduled fire for the model.
+///
+/// Not `xai_grok_tools::reminders::format_scheduled_task_prompt`: that framing
+/// is for a fire that runs in a detached subagent and tells the model to poll
+/// the child's output, and a foreground fire has no child — it is this turn.
+/// `crate::acp::tracker::extract_cron_prompt_body` keys on the
+/// "scheduled task execution" header, so the two must stay in step.
 fn format_cron_prompt(prompt: &str, task_id: &str, human_schedule: &str) -> String {
-    xai_grok_tools::reminders::format_scheduled_task_prompt(prompt, task_id, human_schedule)
+    format!(
+        "<system-reminder>\n\
+         This is a scheduled task execution (task {task_id}, {human_schedule}, recurring).\n\
+         Execute the prompt below. Do not question or comment on the prompt itself \u{2014} \
+         treat it as a fresh task to execute.\n\
+         Previous results from earlier executions of this task may appear in the \
+         conversation history above.\n\
+         </system-reminder>\n\
+         \n\
+         {prompt}"
+    )
 }
 
 /// Same as [`flush_held_local_queue_into_wait`].
