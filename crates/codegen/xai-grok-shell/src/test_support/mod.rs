@@ -38,6 +38,21 @@ fn redirect_grok_home_for_tests() {
     xai_dirs::redirect_grok_home_for_tests();
 }
 
+/// Give every libtest thread in this binary the stack a session gets in production
+/// (`SESSION_THREAD_STACK_SIZE`, 8 MiB). Session, load and turn futures are sized for
+/// that stack; driven from libtest's 2 MiB default, the larger ones overflow, and an
+/// overflow aborts the whole binary rather than failing one case. Per-test wrappers
+/// (`on_session_stack`) cover the tests written here, but not every test that drives a
+/// session knows to use one. Pre-main, because std reads `RUST_MIN_STACK` once, on the
+/// first thread spawn; an explicit setting from the caller is left alone.
+#[ctor::ctor]
+fn session_sized_test_threads() {
+    if std::env::var_os("RUST_MIN_STACK").is_none() {
+        // SAFETY: pre-main, so no other thread exists to read the environment.
+        unsafe { std::env::set_var("RUST_MIN_STACK", "8388608") };
+    }
+}
+
 /// Losing the pin above is invisible from a test run: every case still passes,
 /// having written to the developer's home instead of a temp dir. This is the
 /// assertion that fails when the `#[ctor]` is dropped or stops running.

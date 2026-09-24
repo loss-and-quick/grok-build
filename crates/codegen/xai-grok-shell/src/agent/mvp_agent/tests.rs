@@ -5244,17 +5244,32 @@ fn shutdown_generation_invalidates_stale_restart() {
     });
 }
 /// `spawn_gateway_bridge` uses `tokio::task::spawn_local`.
+/// Runs on a thread with the stack a session gets in production (8 MiB, see
+/// `SESSION_THREAD_STACK_SIZE`): an unoptimized session-load future outgrows the 2 MiB a
+/// libtest thread gets, and an overflow aborts the whole test binary.
 fn run_local_for_bridge_test<F, Fut, T>(body: F) -> T
 where
-    F: FnOnce() -> Fut,
+    F: FnOnce() -> Fut + Send,
     Fut: std::future::Future<Output = T>,
+    T: Send,
 {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime must build");
-    let local = tokio::task::LocalSet::new();
-    local.block_on(&rt, body())
+    const SESSION_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+    // Scoped, so the body may borrow from the calling test.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(SESSION_THREAD_STACK_SIZE)
+            .spawn_scoped(scope, move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime must build");
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&rt, body())
+            })
+            .expect("spawn session-sized test thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
 }
 #[test]
 fn chat_session_spawn_options_matches_thin_profile() {

@@ -26,8 +26,12 @@ async fn create_test_actor(
     let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
     let terminal = Arc::new(DummyTerminal {});
     let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    // A session id of its own per actor: the session folder (and the image assets in it)
+    // is keyed by id and cwd, and every actor here shares `/tmp`, so a fixed id made
+    // parallel tests clean up each other's files.
+    let session_id = unique_test_session_id();
     let hunk_tracker_handle = xai_hunk_tracker::HunkTrackerActor::spawn(
-        "test-auto-compact".to_string(),
+        session_id.clone(),
         cwd.to_path_buf(),
         hunk_tx,
         xai_hunk_tracker::TrackingMode::AgentOnly,
@@ -72,7 +76,7 @@ async fn create_test_actor(
         status_wake: Default::default(),
         active_work: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         session_info: SessionInfo {
-            id: acp::SessionId::new("test-auto-compact"),
+            id: acp::SessionId::new(session_id),
             cwd: cwd.as_str().to_string(),
         },
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
@@ -1165,4 +1169,14 @@ async fn compaction_at_tokens_fixed_and_disabled() {
             );
         })
         .await;
+}
+
+fn unique_test_session_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "test-auto-compact-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }

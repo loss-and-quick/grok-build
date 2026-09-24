@@ -396,6 +396,9 @@ mod tests {
     }
 
     #[test]
+    // Reads `default_grok_home()`, which follows `$HOME`; the empty-HOME test below
+    // mutates it, so the two must not overlap.
+    #[serial_test::serial]
     fn display_grok_home_prefix_default_install() {
         if std::env::var("GROK_HOME").is_ok() {
             return;

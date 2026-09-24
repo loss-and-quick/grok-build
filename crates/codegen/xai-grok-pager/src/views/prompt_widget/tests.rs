@@ -4971,6 +4971,9 @@
     #[test]
     #[serial_test::serial]
     fn teal_highlighting_on_second_line() {
+        // Compares against `Theme::current()`, which another test can re-level mid-render
+        // (TrueColor vs 16-colour turns the accent from RGB into `Blue`): hold the theme pin.
+        let _theme = crate::theme::cache::pin_theme();
         // Asserts the full-TUI accent color
         // The slash highlight reads the global `embedded` flag (monochrome when set)
         // Pin it off and serialize against the modal_window embedded test that toggles it
