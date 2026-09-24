@@ -83,10 +83,9 @@ impl Metric {
         }
     }
 
-    /// Where a metric must be present and within budget. RSS everywhere;
-    /// threads and open files only on Linux — macOS now samples threads too,
-    /// but the budgets are tuned against Linux nightlies, so a macOS sample
-    /// lands in the summary without being enforced.
+    /// Where a metric must be present and within budget. RSS everywhere; threads and open files
+    /// only on Linux — macOS now samples threads too, but the budgets are tuned against Linux
+    /// nightlies, so a macOS sample lands in the summary without being enforced.
     fn budgeted_on_this_platform(self) -> bool {
         match self {
             Metric::Rss => true,
@@ -318,6 +317,8 @@ struct SoakRunner {
 
 impl ChildRunner for SoakRunner {
     type Control = SoakControl;
+    type RootControl =
+        xai_grok_tools::implementations::grok_build::task::root_control::NoRootControl;
     type CompletionData = ();
     type RunFuture = LocalBoxFuture<ChildRunOutput<()>>;
     type ValidateFuture = LocalBoxFuture<SubagentValidateTypeOutcome>;
@@ -331,8 +332,14 @@ impl ChildRunner for SoakRunner {
                 request,
                 cancellation,
                 reporter,
+                attempt_id: _,
+                generation: _,
+                agent_message_sender: _,
+                wake_origin: _,
                 queued_for: _,
                 session_running: _,
+                agent_address: _,
+                spawner_session_id: _,
             } = run;
             let promoted = reporter
                 .started(StartedChild {
@@ -399,7 +406,17 @@ impl ChildRunner for SoakRunner {
         Box::pin(std::future::ready(Vec::new()))
     }
 
-    fn on_completed(&self, _completion: ChildCompletion<Self::CompletionData>) {}
+    fn supports_wake(&self) -> bool {
+        true
+    }
+
+    fn on_completed(
+        &self,
+        _completion: ChildCompletion<Self::CompletionData>,
+        terminal_published: Box<dyn FnOnce() + Send>,
+    ) {
+        terminal_published();
+    }
 }
 
 fn soak_request(id: String, background: bool) -> SubagentRequest {
@@ -420,6 +437,8 @@ fn soak_request(id: String, background: bool) -> SubagentRequest {
         fork_context: false,
         owner: SubagentOwner::Task,
         cancel_token: CancellationToken::new(),
+        spawn_root: Default::default(),
+        tool_call_id: None,
     }
 }
 
@@ -524,10 +543,9 @@ async fn measure(
     }
 }
 
-/// Takes `budgeted` as a parameter so both arms are testable on any platform.
-/// An unbudgeted metric never fails: missing is fine, and a present value
-/// (macOS thread counts) is informational, not measured against a bound
-/// tuned for another platform.
+/// Takes `budgeted` as a parameter so both arms are testable on any platform. An unbudgeted metric
+/// never fails: missing is fine, and a present value (macOS thread counts) is informational, not
+/// measured against a bound tuned for another platform.
 fn metric_failure(
     metric: Metric,
     value: Option<usize>,

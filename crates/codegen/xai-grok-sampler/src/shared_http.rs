@@ -1,12 +1,12 @@
-//! Process-wide shared `reqwest::Client`s for sampling.
+//! Shared `reqwest::Client`s for uncredentialed sampling requests.
 //!
-//! Sharing is safe because the builders take no config-derived input.
+//! Sharing the uncredentialed clients is safe because their builders take no config-derived input.
 //! Auth, extra headers, base URL, and User-Agent are applied per-request in `SamplingClient::post`.
 //! Stale connections are bounded by h2 keepalive (15s ping, 5s timeout), 90s idle-pool eviction, and the pool-less HTTP/1.1 first-retry rebuild.
 //! Connections whose per-session runtime died are discarded by hyper's checkout ready-check, with the retry loop covering the rest.
 //!
 //! Wire behavior is pinned by the `shared_http_wire` and `shared_http_kill_switch` binaries.
-//! `GROK_EXTRA_CA_BUNDLE` adds extra CA roots.
+//! `GROK_EXTRA_CA_BUNDLE` adds extra CA roots to these clients and the mTLS clients.
 //!
 //! Proxying: reqwest already honors the `HTTP_PROXY` / `HTTPS_PROXY` /
 //! `NO_PROXY` environment variables by default (the shared builders never call
@@ -18,6 +18,10 @@
 
 use std::sync::OnceLock;
 use std::time::Duration;
+
+mod mtls;
+
+pub(crate) use mtls::client as mtls_client;
 
 static SHARED_H2: OnceLock<reqwest::Client> = OnceLock::new();
 static SHARED_HTTP1: OnceLock<reqwest::Client> = OnceLock::new();
@@ -108,9 +112,9 @@ pub(crate) fn client_with_proxy(
     let proxy = reqwest::Proxy::all(proxy)?;
     xai_grok_extra_ca::build_reqwest_client(|builder| {
         let builder = if http1_only {
-            http1_settings(builder)
+            configure_http1(builder)
         } else {
-            h2_settings(builder)
+            configure_http2(builder)
         };
         builder.proxy(proxy.clone())
     })
@@ -119,20 +123,10 @@ pub(crate) fn client_with_proxy(
 /// Build a `reqwest::Client` for sampling with HTTP/2 and connection pooling.
 /// Env knobs are read once, when the shared client is first built.
 fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    xai_grok_extra_ca::build_reqwest_client(h2_settings)
+    xai_grok_extra_ca::build_reqwest_client(configure_http2)
 }
 
-/// Build a `reqwest::Client` constrained to HTTP/1.1 with pooling disabled.
-/// Used as a fallback after HTTP/2 transport failures.
-fn build_http_client_http1() -> Result<reqwest::Client, reqwest::Error> {
-    xai_grok_extra_ca::build_reqwest_client(http1_settings)
-}
-
-/// Shared HTTP/2 transport config (pool + keep-alive knobs). Applied inside
-/// `xai_grok_extra_ca::build_reqwest_client` so the process-wide shared client
-/// and the per-provider proxied client keep identical tuning *and* the same
-/// root-certificate policy (`GROK_EXTRA_CA_BUNDLE` included).
-fn h2_settings(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+fn configure_http2(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     let pool_max_idle: usize = std::env::var("GROK_POOL_MAX_IDLE")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -152,9 +146,13 @@ fn h2_settings(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
         .http2_keep_alive_while_idle(true)
 }
 
-/// Shared HTTP/1.1 transport config (pool-less). Reused by the shared fallback
-/// client and the per-provider proxied client.
-fn http1_settings(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+/// Build a `reqwest::Client` constrained to HTTP/1.1 with pooling disabled.
+/// Used as a fallback after HTTP/2 transport failures.
+fn build_http_client_http1() -> Result<reqwest::Client, reqwest::Error> {
+    xai_grok_extra_ca::build_reqwest_client(configure_http1)
+}
+
+fn configure_http1(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     let connect_timeout_secs: u64 = std::env::var("GROK_CONNECT_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())

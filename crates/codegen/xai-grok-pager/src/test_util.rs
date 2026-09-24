@@ -1,4 +1,9 @@
 //! Compiled only in `#[cfg(test)]` builds. Import via `crate::test_util`.
+use crate::app::PagerTerminal;
+use crate::render::draw::{TermWriter, WriterPayload, WriterSync};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
+use ratatui::{TerminalOptions, Viewport};
 use std::path::{Path, PathBuf};
 
 /// Keep this crate's unit-test binary out of the developer's real `~/.grok`.
@@ -33,6 +38,20 @@ fn the_unit_test_binary_never_resolves_the_real_grok_home() {
         xai_dirs::default_grok_home(),
         "this binary resolved <home>/.grok: the pre-main grok-home pin is gone"
     );
+}
+
+/// Keep the receiver alive for as long as frames are drawn, or the writer's sends fail.
+pub fn test_terminal() -> (PagerTerminal, std::sync::mpsc::Receiver<WriterPayload>) {
+    let (frame_tx, frame_rx) = std::sync::mpsc::channel();
+    let writer = TermWriter::new(frame_tx, WriterSync::new()).expect("single test writer");
+    let terminal = xai_ratatui_inline::Terminal::with_options(
+        CrosstermBackend::new(writer),
+        TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+        },
+    )
+    .expect("channel-backed terminal requires no tty");
+    (terminal, frame_rx)
 }
 /// Minimal `AgentView` for unit tests outside the dispatch/handler modules (which keep their own richer factories).
 pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent_view::AgentView {
@@ -214,7 +233,9 @@ impl GrokHomeFixture {
         });
         if let Some(map) = extra.as_object() {
             for (k, val) in map {
-                v[k.as_str()] = val.clone();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert(k.clone(), val.clone());
+                }
             }
         }
         std::fs::write(dir.join("summary.json"), serde_json::to_vec(&v).unwrap()).unwrap();

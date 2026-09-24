@@ -32,7 +32,7 @@ pub(crate) fn legacy_effort_options() -> Vec<ReasoningEffortOption> {
     EFFORT_LEVELS
         .iter()
         .map(|&level| ReasoningEffortOption {
-            id: level.as_str().to_string(),
+            id: level.as_ref().to_string(),
             value: level,
             label: level.to_string(),
             description: Some(effort_description(level).to_string()),

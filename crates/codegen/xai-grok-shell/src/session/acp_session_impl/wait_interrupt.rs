@@ -1,11 +1,42 @@
 //! Mid-turn wait interrupt: remember aborted wait ids (union across concurrent aborts) and strip extras from the next wait that is a proper superset.
 //! Apply never forgets the set (siblings in the same batch still see it).
 //! Complete drops only the finished ids.
+//! Also polls for the interrupt itself (`wait_for_wait_interrupt`), names its cause
+//! (`WaitInterruptCause`), and builds the cancelled tool result.
+
+use std::time::Duration;
 
 use xai_grok_tools::types::output::{ToolOutput as ToolsToolOutput, ToolRunResult};
+use xai_interjection_core::InterjectionBuffer;
 use xai_tool_types::{TaskOutputOutput, TaskOutputResult};
 
+use crate::session::acp_session::parent_interject::ParentInterjectSignal;
 use crate::tools::tool_context::BlockingWaitState;
+
+/// Why an interruptible wait tool was aborted before it produced its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WaitInterruptCause {
+    HumanInterjection,
+    ParentInterject,
+}
+
+const WAIT_INTERRUPT_POLL: Duration = Duration::from_millis(50);
+
+/// Human first, then parent.
+pub(super) async fn wait_for_wait_interrupt(
+    human: &InterjectionBuffer<agent_client_protocol::ImageContent>,
+    parent: &ParentInterjectSignal,
+) -> WaitInterruptCause {
+    loop {
+        if !human.is_empty() {
+            return WaitInterruptCause::HumanInterjection;
+        }
+        if parent.is_pending() {
+            return WaitInterruptCause::ParentInterject;
+        }
+        tokio::time::sleep(WAIT_INTERRUPT_POLL).await;
+    }
+}
 
 /// Outcome of applying the remembered interrupted wait to a new wait call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,9 +172,24 @@ pub(super) fn record_interruptible_wait_outcome(
 
 pub(super) const WAIT_INTERRUPTED_HEAD: &str = "Wait interrupted: the user sent a message.";
 
-fn interrupted_wait_prompt(head: &str, has_ids: bool) -> String {
+/// Sender-neutral: the parent lane also carries a human's message relayed through the parent.
+pub(super) const WAIT_INTERRUPTED_BY_AGENT_MESSAGE_HEAD: &str =
+    "Wait interrupted: an agent message is pending.";
+
+fn interrupt_cause_head(cause: WaitInterruptCause) -> &'static str {
+    match cause {
+        WaitInterruptCause::HumanInterjection => WAIT_INTERRUPTED_HEAD,
+        WaitInterruptCause::ParentInterject => WAIT_INTERRUPTED_BY_AGENT_MESSAGE_HEAD,
+    }
+}
+
+fn interrupted_wait_prompt(has_ids: bool, cause: WaitInterruptCause) -> String {
+    interrupted_wait_prompt_with_head(interrupt_cause_head(cause), has_ids)
+}
+
+fn interrupted_wait_prompt_with_head(head: &str, has_ids: bool) -> String {
     if !has_ids {
-        return head.to_string();
+        return head.to_owned();
     }
     format!(
         "{head}\n\n\
@@ -152,9 +198,12 @@ fn interrupted_wait_prompt(head: &str, has_ids: bool) -> String {
     )
 }
 
-/// Model-facing result when a wait is aborted for a pending interjection.
-pub(super) fn interrupted_wait_tool_result(args: &serde_json::Value) -> ToolRunResult {
-    interrupted_wait_tool_result_with_msg(args, WAIT_INTERRUPTED_HEAD)
+/// Model-facing result when a wait is aborted for a pending interjection or parent interject.
+pub(super) fn interrupted_wait_tool_result(
+    args: &serde_json::Value,
+    cause: WaitInterruptCause,
+) -> ToolRunResult {
+    interrupted_wait_tool_result_with_msg(args, interrupt_cause_head(cause))
 }
 
 /// [`interrupted_wait_tool_result`] with a caller-chosen opening line, so a
@@ -166,7 +215,7 @@ pub(super) fn interrupted_wait_tool_result_with_msg(
     head: &str,
 ) -> ToolRunResult {
     let ids = wait_task_ids_from_args(args);
-    let msg = interrupted_wait_prompt(head, !ids.is_empty());
+    let msg = interrupted_wait_prompt_with_head(head, !ids.is_empty());
     let task_id = ids.first().cloned().unwrap_or_default();
     let result = TaskOutputResult {
         task_id,

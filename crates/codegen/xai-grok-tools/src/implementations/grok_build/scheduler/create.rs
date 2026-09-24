@@ -141,7 +141,7 @@ Usage notes:
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
-        Expr::True
+        super::scheduler_bundle_requires_expr()
     }
 }
 

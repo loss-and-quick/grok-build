@@ -631,7 +631,6 @@
 
     /// A replayed expiry tombstone renders only while the agent accepts replay.
     /// That means an open `session/load` window (`loading_replay`) or the post-load `late_replay_until` grace.
-    /// Legitimate replay tails still arrive after `SessionLoaded` during that grace.
     /// A misrouted replay against a live transcript (neither open) must remove the chip but never duplicate history.
     #[test]
     fn replayed_expiry_notice_requires_replay_window() {

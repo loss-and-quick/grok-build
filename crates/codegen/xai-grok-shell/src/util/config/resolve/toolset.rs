@@ -3,13 +3,8 @@ use toml::Value as TomlValue;
 use xai_grok_tools::implementations::grok_build::ask_user_question;
 
 /// Resolve whether the bash-harness shadows that swap `find` for `bfs` and `grep` for `ugrep` are enabled.
-/// Precedence (highest first): `requirements.toml` (org policy, wins outright) > a truthy `DISABLE_EMBEDDED_SEARCH_TOOLS` master (forces off)
-/// > env > `config.toml` `[toolset.bash]` > `managed_config.toml` > default-on.
-///
-/// Pass the **merged** requirements ([`crate::config::load_merged_requirements`])
-/// so an org policy in any requirements layer — not only
-/// `~/.grok/requirements.toml` — is honored. Returns `(find_bfs, grep_ugrep)`,
-/// which the caller bakes into a [`xai_grok_tools::computer::local::SearchShadowConfig`] on the local terminal backend.
+/// Precedence (highest first): `requirements.toml` (org policy, wins outright) > a truthy `DISABLE_EMBEDDED_SEARCH_TOOLS` master (forces off) > env > `config.toml` `[toolset.bash]` > `managed_config.toml` > default-on.
+/// Pass the **merged** requirements ([`crate::config::load_merged_requirements`]) so an org policy in any requirements layer — not only `~/.grok/requirements.toml` — is honored. Returns `(find_bfs, grep_ugrep)`, which the caller bakes into a [`xai_grok_tools::computer::local::SearchShadowConfig`] on the local terminal backend.
 pub(crate) fn resolve_search_tools_enabled(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -121,8 +116,7 @@ struct LoginShellCaptureTiers<'a> {
     remote: Option<bool>,
 }
 
-/// Precedence (highest first): requirements/MDM (clamp, via [`crate::config::load_merged_requirements`]) > `GROK_LOGIN_ENV` env
-/// > `GROK_CONFIG` overlay > user `config.toml` > managed layers > remote > default `true`.
+/// Precedence (highest first): requirements/MDM (clamp, via [`crate::config::load_merged_requirements`]) > `GROK_LOGIN_ENV` env > `GROK_CONFIG` overlay > user `config.toml` > managed layers > remote > default `true`.
 /// `login_shell_capture` is a soft key, so the overlay is merged just above user config, mirroring its place in the disk merge.
 /// That lets a `GROK_CONFIG` toggle reach it while requirements/MDM still clamp the value.
 fn resolve_login_shell_capture_tiers(tiers: LoginShellCaptureTiers<'_>) -> bool {
@@ -429,7 +423,8 @@ mod scheduler_background_loops_tests {
     }
 }
 
-/// The secs env var lives in the tools crate (`RESPONSE_TIMEOUT_ENV`), parsed once there.
+/// Env override for `[toolset.ask_user_question] timeout_enabled`. The secs env
+/// var lives in the tools crate (`RESPONSE_TIMEOUT_ENV`), parsed once there.
 const ENV_ASK_USER_QUESTION_TIMEOUT_ENABLED: &str = "GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED";
 
 fn ask_user_question_timeout_enabled_from_toml(v: Option<&TomlValue>) -> Option<bool> {
@@ -518,7 +513,6 @@ fn resolve_ask_user_question_timeout_secs(
 }
 
 /// Resolve the full `[toolset.ask_user_question]` params injected into the tool as `Params<AskUserQuestionParams>` at agent build/rebuild.
-///
 /// Reads the raw requirements / user / managed / system-managed layers from disk, not the effective merge, so a managed-only value stays below env.
 /// Both fields resolve to concrete values, so the tool's legacy env fallback only runs for consumers that skip this resolver.
 pub(crate) fn resolve_ask_user_question_params_from_disk(
@@ -611,8 +605,7 @@ fn cap_web_search_domains(list: Option<Vec<String>>, field: &str) -> Option<Vec<
     })
 }
 
-/// Layer precedence and the allow/exclude atomicity are handled **upstream** by `ConfigLayers`:
-/// per-layer normalization couples the two keys, then the normal `deep_merge_toml` picks the whole policy from the winning layer.
+/// Layer precedence and the allow/exclude atomicity are handled **upstream** by `ConfigLayers`: per-layer normalization couples the two keys, then the normal `deep_merge_toml` picks the whole policy from the winning layer.
 /// This only shapes the already-merged `[toolset.web_search]` section.
 /// Returns `None` when neither filter is set.
 pub(crate) fn resolve_web_search_domains_from_disk()

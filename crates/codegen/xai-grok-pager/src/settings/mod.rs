@@ -31,9 +31,10 @@ pub use plugin_rows::{
     plugin_settings_fingerprint, resolve_plugin_values, split_plugin_key,
 };
 pub use registry::{
-    CodingDataSharingLock, DynamicEnumSource, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot,
-    RowLock, SettingCategory, SettingKey, SettingKind, SettingMeta, SettingOwner, SettingSurface,
-    SettingValue, SettingsRegistry, StringValidator, canonical_hunk_tracker_mode,
-    canonical_screen_mode, canonical_voice_capture_mode, canonical_voice_stt_language,
-    current_value_for, default_value_for, dynamic_enum_choices, is_consent_chooser,
+    CodingDataSharingLock, DynamicEnumSource, EnumChoice, FeatureOverrideState, OwnedEnumChoice,
+    PagerLocalSnapshot, PendingWrite, RowLock, SettingCategory, SettingKey, SettingKind,
+    SettingMeta, SettingOwner, SettingSurface, SettingValue, SettingsRegistry, StringValidator,
+    canonical_hunk_tracker_mode, canonical_screen_mode, canonical_voice_capture_mode,
+    canonical_voice_stt_language, current_value_for, default_value_for, dynamic_enum_choices,
+    is_consent_chooser,
 };

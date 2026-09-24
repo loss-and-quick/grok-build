@@ -33,10 +33,16 @@ fn plugin_cta_catalog_loaded_sanitizes_components_at_ingestion() {
         &mut app,
     );
 
-    let cta = &app.agents[&id].plugin_cta;
-    let components = cta.candidates[0].components.as_ref().unwrap();
-    assert_eq!(components.skills[0].name, "evil[31mskill");
-    let desc = components.skills[0].description.as_deref().unwrap();
+    let cta = &test_agent(&app, id).plugin_cta;
+    let Some(candidate) = cta.candidates.first() else {
+        panic!("expected CTA candidate");
+    };
+    let components = candidate.components.as_ref().unwrap();
+    let Some(skill) = components.skills.first() else {
+        panic!("expected skill");
+    };
+    assert_eq!(skill.name, "evil[31mskill");
+    let desc = skill.description.as_deref().unwrap();
     assert_eq!(desc.chars().count(), 120);
     assert!(desc.chars().all(|c| c == 'd'));
 }
@@ -97,12 +103,15 @@ fn plugin_cta_catalog_keeps_official_not_installed_only() {
     );
     assert!(effects.is_empty());
 
-    let cta = &app.agents[&id].plugin_cta;
+    let cta = &test_agent(&app, id).plugin_cta;
     let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
     // One source wins: both the first source and "Custom Mirror" are URL-verified official
     // The first-registered one supplies the candidates and the install target
     assert_eq!(names, vec!["keep-me"]);
-    assert_eq!(cta.candidates[0].install_status, "not_installed");
+    assert_eq!(
+        cta.candidates.first().map(|c| c.install_status.as_str()),
+        Some("not_installed")
+    );
     assert_eq!(
         cta.source_url_or_path.as_deref(),
         Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL),
@@ -143,7 +152,7 @@ fn plugin_cta_default_prefers_url_verified_official_over_impostor() {
         &mut app,
     );
 
-    let cta = &app.agents[&id].plugin_cta;
+    let cta = &test_agent(&app, id).plugin_cta;
     let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, vec!["genuine"]);
     assert_eq!(
@@ -175,7 +184,7 @@ fn plugin_cta_default_name_only_official_mirror_selected() {
         &mut app,
     );
 
-    let cta = &app.agents[&id].plugin_cta;
+    let cta = &test_agent(&app, id).plugin_cta;
     let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, vec!["mirrored"]);
     assert_eq!(
@@ -211,7 +220,7 @@ fn plugin_cta_marketplace_override_selects_named_source() {
         &mut app,
     );
 
-    let cta = &app.agents[&id].plugin_cta;
+    let cta = &test_agent(&app, id).plugin_cta;
     let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, vec!["starlink"]);
     assert_eq!(
@@ -255,7 +264,7 @@ fn plugin_cta_marketplace_duplicate_named_sources_first_wins() {
         &mut app,
     );
 
-    let cta = &app.agents[&id].plugin_cta;
+    let cta = &test_agent(&app, id).plugin_cta;
     let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, vec!["starlink"]);
     assert_eq!(
@@ -304,7 +313,10 @@ fn plugin_cta_marketplace_override_install_targets_named_source() {
     ));
     agent.connect_matched_plugin();
     assert_eq!(agent.pending_effects.len(), 1);
-    match &agent.pending_effects[0] {
+    let Some(effect) = agent.pending_effects.first() else {
+        panic!("expected pending effect: {:?}", agent.pending_effects);
+    };
+    match effect {
         Effect::InstallPluginFromCta {
             source_url_or_path,
             plugin_relative_path,
@@ -341,7 +353,7 @@ fn plugin_cta_marketplace_override_naming_official_selects_it() {
         &mut app,
     );
 
-    let cta = &app.agents[&id].plugin_cta;
+    let cta = &test_agent(&app, id).plugin_cta;
     assert!(cta.source_url_or_path.is_some());
     let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, vec!["official-plugin"]);
@@ -384,7 +396,7 @@ fn plugin_cta_marketplace_override_excludes_official_source() {
         &mut app,
     );
 
-    let cta = &app.agents[&id].plugin_cta;
+    let cta = &test_agent(&app, id).plugin_cta;
     assert!(cta.source_url_or_path.is_some());
     let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, vec!["starlink"], "official plugins are excluded");
@@ -423,7 +435,7 @@ fn plugin_cta_marketplace_override_absent_source_hides_cta() {
         &mut app,
     );
 
-    let cta = &app.agents[&id].plugin_cta;
+    let cta = &test_agent(&app, id).plugin_cta;
     assert!(cta.source_url_or_path.is_none());
     assert!(cta.candidates.is_empty());
     assert_eq!(cta.phase, CtaPhase::Hidden);
@@ -448,7 +460,7 @@ fn plugin_cta_catalog_err_preserves_cache() {
     );
     assert!(effects.is_empty());
 
-    let cta = &app.agents[&id].plugin_cta;
+    let cta = &test_agent(&app, id).plugin_cta;
     assert!(cta.source_url_or_path.is_some());
     assert_eq!(cta.candidates.len(), 1);
 }
@@ -484,7 +496,7 @@ fn plugin_cta_catalog_reload_empty_candidates_preserves_installed_checkmark() {
         }),
         &mut app,
     );
-    let cta = &app.agents[&id].plugin_cta;
+    let cta = &test_agent(&app, id).plugin_cta;
     assert!(cta.candidates.is_empty());
     assert_eq!(
         cta.phase,
@@ -531,7 +543,7 @@ fn plugin_cta_catalog_load_recomputes_match_for_typed_draft() {
         &mut app,
     );
     assert!(matches!(
-        &app.agents[&id].plugin_cta.phase,
+        &test_agent(&app, id).plugin_cta.phase,
         CtaPhase::Matched { name, .. } if name == "zzctaplugin"
     ));
 }
@@ -699,7 +711,7 @@ fn plugin_cta_debounce_ignores_stale_generation() {
         &mut app,
     );
     assert!(effects.is_empty());
-    assert_eq!(app.agents[&id].plugin_cta.phase, CtaPhase::Hidden);
+    assert_eq!(test_agent(&app, id).plugin_cta.phase, CtaPhase::Hidden);
 }
 
 #[test]
@@ -726,7 +738,7 @@ fn plugin_cta_debounce_sets_hidden_when_feature_disabled() {
         &mut app,
     );
     assert!(effects.is_empty());
-    assert_eq!(app.agents[&id].plugin_cta.phase, CtaPhase::Hidden);
+    assert_eq!(test_agent(&app, id).plugin_cta.phase, CtaPhase::Hidden);
 }
 
 #[test]
@@ -771,7 +783,7 @@ fn plugin_cta_debounce_preserves_in_flight_states() {
             &mut app,
         );
         assert!(effects.is_empty());
-        assert_eq!(app.agents[&id].plugin_cta.phase, phase);
+        assert_eq!(test_agent(&app, id).plugin_cta.phase, phase);
     }
 }
 
@@ -798,7 +810,7 @@ fn cta_install_done_ok_no_reload_enters_awaiting_mcps() {
         &mut app,
     );
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::AwaitingMcps {
             name: "figma".into()
         }
@@ -828,7 +840,7 @@ fn cta_install_done_ok_requires_reload_enters_awaiting_reload() {
         &mut app,
     );
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::AwaitingReload {
             name: "figma".into()
         }
@@ -857,7 +869,7 @@ fn cta_install_done_err_sets_error() {
         &mut app,
     );
     assert!(effects.is_empty());
-    match &app.agents[&id].plugin_cta.phase {
+    match &test_agent(&app, id).plugin_cta.phase {
         CtaPhase::Error {
             plugin_relative_path,
             name,
@@ -882,7 +894,10 @@ fn cta_install_done_non_success_sets_error_with_sanitized_message() {
         name: "figma".into(),
     };
     // Input and expectation both derive from the shared table so no service name is respelled here and a rename cannot strand the assertions
-    let (pattern, expected) = xai_grok_shell::sampling::error::SERVICE_NAME_REWRITES[0];
+    let Some(&(pattern, expected)) = xai_grok_shell::sampling::error::SERVICE_NAME_REWRITES.first()
+    else {
+        panic!("expected a service-name rewrite");
+    };
     let effects = dispatch(
         Action::TaskComplete(TaskResult::CtaPluginInstallDone {
             agent_id: id,
@@ -895,7 +910,7 @@ fn cta_install_done_non_success_sets_error_with_sanitized_message() {
         &mut app,
     );
     assert!(effects.is_empty());
-    match &app.agents[&id].plugin_cta.phase {
+    match &test_agent(&app, id).plugin_cta.phase {
         CtaPhase::Error { message, .. } => {
             assert!(message.contains(expected), "sanitized message: {message}");
             assert!(!message.contains(pattern), "unsanitized: {message}");
@@ -924,7 +939,7 @@ fn cta_install_done_ignored_when_not_installing() {
     );
     assert!(effects.is_empty());
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::Matched {
             plugin_relative_path: "plugins/figma".into(),
             name: "figma".into(),
@@ -951,7 +966,7 @@ fn cta_install_done_ignored_for_different_plugin() {
         &mut app,
     );
     assert!(effects.is_empty());
-    match &app.agents[&id].plugin_cta.phase {
+    match &test_agent(&app, id).plugin_cta.phase {
         CtaPhase::Installing { name, .. } => assert_eq!(name.as_str(), "figma"),
         other => panic!("expected Installing, got {other:?}"),
     }
@@ -996,7 +1011,7 @@ fn cta_reload_done_ok_enters_awaiting_mcps() {
         &mut app,
     );
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::AwaitingMcps {
             name: "figma".into()
         }
@@ -1030,7 +1045,7 @@ fn cta_reload_done_non_success_sets_error() {
         &mut app,
     );
     assert!(effects.is_empty());
-    match &app.agents[&id].plugin_cta.phase {
+    match &test_agent(&app, id).plugin_cta.phase {
         CtaPhase::Error { name, .. } => assert_eq!(name, "figma"),
         other => panic!("expected Error, got {other:?}"),
     }
@@ -1053,7 +1068,7 @@ fn cta_reload_done_err_sets_error() {
         &mut app,
     );
     assert!(effects.is_empty());
-    match &app.agents[&id].plugin_cta.phase {
+    match &test_agent(&app, id).plugin_cta.phase {
         CtaPhase::Error {
             plugin_relative_path,
             name,
@@ -1087,7 +1102,7 @@ fn cta_reload_done_ignored_for_stale_phase_or_plugin() {
     );
     assert!(effects.is_empty());
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::AwaitingReload {
             name: "figma".into()
         }
@@ -1106,7 +1121,7 @@ fn cta_reload_done_ignored_for_stale_phase_or_plugin() {
     );
     assert!(effects.is_empty());
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::AwaitingMcps {
             name: "figma".into()
         }
@@ -1135,8 +1150,8 @@ fn cta_mcps_loaded_handoff_requires_section_name_parity() {
         }),
         &mut app,
     );
-    assert_eq!(app.agents[&id].plugin_cta.phase, CtaPhase::Hidden);
-    assert!(app.agents[&id].extensions_modal.is_some());
+    assert_eq!(test_agent(&app, id).plugin_cta.phase, CtaPhase::Hidden);
+    assert!(test_agent(&app, id).extensions_modal.is_some());
 
     // Mismatch: the needs-auth server is labelled "plugin: figma-connector" while the catalog name is "figma"
     // The CTA gracefully degrades to Installed, with no modal
@@ -1157,12 +1172,12 @@ fn cta_mcps_loaded_handoff_requires_section_name_parity() {
         &mut app,
     );
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::Installed {
             name: "figma".into()
         }
     );
-    assert!(app.agents[&id].extensions_modal.is_none());
+    assert!(test_agent(&app, id).extensions_modal.is_none());
 }
 
 #[test]
@@ -1194,17 +1209,17 @@ fn cta_mcps_loaded_initializing_keeps_waiting_and_retries() {
     );
     // Phase stays AwaitingMcps; a delayed re-probe is queued and the attempt counter advances
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::AwaitingMcps {
             name: "figma".into()
         }
     );
-    assert_eq!(app.agents[&id].plugin_cta.mcp_attempt, 1);
+    assert_eq!(test_agent(&app, id).plugin_cta.mcp_attempt, 1);
     assert!(matches!(
         effects.as_slice(),
         [Effect::RetryPluginCtaMcps { plugin_name, .. }] if plugin_name == "figma"
     ));
-    assert!(app.agents[&id].extensions_modal.is_none());
+    assert!(test_agent(&app, id).extensions_modal.is_none());
 }
 
 #[test]
@@ -1236,12 +1251,12 @@ fn cta_mcps_loaded_unavailable_keeps_waiting() {
         &mut app,
     );
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::AwaitingMcps {
             name: "figma".into()
         }
     );
-    assert_eq!(app.agents[&id].plugin_cta.mcp_attempt, 1);
+    assert_eq!(test_agent(&app, id).plugin_cta.mcp_attempt, 1);
     assert!(matches!(
         effects.as_slice(),
         [Effect::RetryPluginCtaMcps { .. }]
@@ -1276,7 +1291,7 @@ fn cta_mcps_loaded_no_plugin_servers_yet_keeps_waiting() {
         &mut app,
     );
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::AwaitingMcps {
             name: "figma".into()
         }
@@ -1318,7 +1333,7 @@ fn cta_mcps_loaded_absent_servers_settles_without_full_poll() {
     );
     // Settles well before the full 15-probe budget; no further re-probe.
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::Installed {
             name: "superpowers".into()
         }
@@ -1359,7 +1374,7 @@ fn cta_mcps_loaded_empty_list_keeps_waiting_not_absent_settle() {
         &mut app,
     );
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::AwaitingMcps {
             name: "figma".into()
         }
@@ -1397,7 +1412,7 @@ fn cta_mcps_loaded_skips_wait_when_not_expecting_mcp() {
         &mut app,
     );
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::Installed {
             name: "figma".into()
         }
@@ -1442,7 +1457,7 @@ fn cta_mcps_loaded_times_out_to_installed_after_budget() {
         &mut app,
     );
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::Installed {
             name: "figma".into()
         }
@@ -1475,7 +1490,7 @@ fn cta_installed_dismiss_timeout_hides_when_unchanged() {
         &mut app,
     );
     assert!(effects.is_empty());
-    assert_eq!(app.agents[&id].plugin_cta.phase, CtaPhase::Hidden);
+    assert_eq!(test_agent(&app, id).plugin_cta.phase, CtaPhase::Hidden);
 }
 
 #[test]
@@ -1497,7 +1512,7 @@ fn cta_installed_dismiss_timeout_ignored_when_phase_moved_on() {
     );
     assert!(effects.is_empty());
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::Matched {
             plugin_relative_path: "plugins/slack".into(),
             name: "slack".into(),
@@ -1515,7 +1530,7 @@ fn cta_installed_dismiss_timeout_ignored_when_phase_moved_on() {
         &mut app,
     );
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::Installed {
             name: "figma".into()
         }
@@ -1539,7 +1554,7 @@ fn cta_mcps_loaded_err_sets_error() {
         &mut app,
     );
     assert!(effects.is_empty());
-    match &app.agents[&id].plugin_cta.phase {
+    match &test_agent(&app, id).plugin_cta.phase {
         CtaPhase::Error {
             plugin_relative_path,
             name,
@@ -1551,7 +1566,7 @@ fn cta_mcps_loaded_err_sets_error() {
         }
         other => panic!("expected Error, got {other:?}"),
     }
-    assert!(app.agents[&id].extensions_modal.is_none());
+    assert!(test_agent(&app, id).extensions_modal.is_none());
 }
 
 #[test]
@@ -1578,12 +1593,12 @@ fn cta_mcps_loaded_ignored_for_stale_phase_or_plugin() {
     );
     assert!(effects.is_empty());
     assert_eq!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::AwaitingMcps {
             name: "figma".into()
         }
     );
-    assert!(app.agents[&id].extensions_modal.is_none());
+    assert!(test_agent(&app, id).extensions_modal.is_none());
     // Non-matching phase (Installing, not AwaitingMcps).
     app.agents.get_mut(&id).unwrap().plugin_cta.phase = CtaPhase::Installing {
         plugin_relative_path: "plugins/figma".into(),
@@ -1599,14 +1614,16 @@ fn cta_mcps_loaded_ignored_for_stale_phase_or_plugin() {
     );
     assert!(effects.is_empty());
     assert!(matches!(
-        app.agents[&id].plugin_cta.phase,
+        test_agent(&app, id).plugin_cta.phase,
         CtaPhase::Installing { .. }
     ));
 }
 
 #[allow(clippy::module_inception)]
 mod cta_e2e {
-    use super::{cta_entry, cta_mcp_server, cta_outcome, cta_outcome_reload, test_app_with_agent};
+    use super::{
+        cta_entry, cta_mcp_server, cta_outcome, cta_outcome_reload, test_agent, test_app_with_agent,
+    };
     use crate::app::actions::{Action, Effect, TaskResult};
     use crate::app::agent::AgentId;
     use crate::app::agent_view::CtaPhase;
@@ -1660,7 +1677,7 @@ mod cta_e2e {
         );
         assert!(effects.is_empty());
         assert_eq!(
-            app.agents[&id].plugin_cta.phase,
+            test_agent(&app, id).plugin_cta.phase,
             CtaPhase::Matched {
                 plugin_relative_path: "plugins/figma".into(),
                 name: "figma".into(),
@@ -1676,7 +1693,7 @@ mod cta_e2e {
         let outcome = app.handle_input(&left_click(3, 3));
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(matches!(
-            app.agents[&id].plugin_cta.phase,
+            test_agent(app, id).plugin_cta.phase,
             CtaPhase::Installing { .. }
         ));
         std::mem::take(&mut app.pending_effects)
@@ -1695,7 +1712,7 @@ mod cta_e2e {
             &mut app,
         );
         assert_eq!(
-            app.agents[&id].plugin_cta.phase,
+            test_agent(&app, id).plugin_cta.phase,
             CtaPhase::AwaitingMcps {
                 name: "figma".into()
             }
@@ -1735,7 +1752,7 @@ mod cta_e2e {
             &mut app,
         );
         assert_eq!(
-            app.agents[&id].plugin_cta.phase,
+            test_agent(&app, id).plugin_cta.phase,
             CtaPhase::AwaitingReload {
                 name: "figma".into()
             }
@@ -1754,7 +1771,7 @@ mod cta_e2e {
             &mut app,
         );
         assert_eq!(
-            app.agents[&id].plugin_cta.phase,
+            test_agent(&app, id).plugin_cta.phase,
             CtaPhase::AwaitingMcps {
                 name: "figma".into()
             }
@@ -1782,8 +1799,8 @@ mod cta_e2e {
             }),
             &mut app,
         );
-        assert_eq!(app.agents[&id].plugin_cta.phase, CtaPhase::Hidden);
-        let modal = app.agents[&id]
+        assert_eq!(test_agent(&app, id).plugin_cta.phase, CtaPhase::Hidden);
+        let modal = test_agent(&app, id)
             .extensions_modal
             .as_ref()
             .expect("extensions modal should be open");
@@ -1819,7 +1836,7 @@ mod cta_e2e {
             &mut app,
         );
         assert_eq!(
-            app.agents[&id].plugin_cta.phase,
+            test_agent(&app, id).plugin_cta.phase,
             CtaPhase::AwaitingMcps {
                 name: "figma".into()
             }
@@ -1848,12 +1865,12 @@ mod cta_e2e {
             &mut app,
         );
         assert_eq!(
-            app.agents[&id].plugin_cta.phase,
+            test_agent(&app, id).plugin_cta.phase,
             CtaPhase::Installed {
                 name: "figma".into()
             }
         );
-        assert!(app.agents[&id].extensions_modal.is_none());
+        assert!(test_agent(&app, id).extensions_modal.is_none());
         assert!(
             !effects
                 .iter()
@@ -1882,7 +1899,17 @@ mod cta_e2e {
         let mut app = app_matched();
         let id = AgentId(0);
         // Skills-only plugin: clear has_mcp so connect captures expects_mcp=false.
-        app.agents.get_mut(&id).unwrap().plugin_cta.candidates[0].has_mcp = false;
+        let Some(candidate) = app
+            .agents
+            .get_mut(&id)
+            .unwrap()
+            .plugin_cta
+            .candidates
+            .first_mut()
+        else {
+            panic!("expected CTA candidate");
+        };
+        candidate.has_mcp = false;
         connect(&mut app);
         let effects = dispatch(
             Action::TaskComplete(TaskResult::CtaPluginInstallDone {
@@ -1894,7 +1921,7 @@ mod cta_e2e {
         );
         // No MCP fetch, no "Setting up…" flash: straight to Installed.
         assert_eq!(
-            app.agents[&id].plugin_cta.phase,
+            test_agent(&app, id).plugin_cta.phase,
             CtaPhase::Installed {
                 name: "figma".into()
             }
@@ -1909,7 +1936,7 @@ mod cta_e2e {
                 .iter()
                 .any(|e| matches!(e, Effect::DismissCtaInstalled { .. }))
         );
-        assert!(app.agents[&id].extensions_modal.is_none());
+        assert!(test_agent(&app, id).extensions_modal.is_none());
     }
 
     #[test]
@@ -1926,7 +1953,7 @@ mod cta_e2e {
             &mut app,
         );
         assert!(effects.is_empty());
-        match &app.agents[&id].plugin_cta.phase {
+        match &test_agent(&app, id).plugin_cta.phase {
             CtaPhase::Error {
                 plugin_relative_path,
                 name,
@@ -1962,7 +1989,7 @@ mod cta_e2e {
             &mut app,
         );
         assert!(effects.is_empty());
-        match &app.agents[&id].plugin_cta.phase {
+        match &test_agent(&app, id).plugin_cta.phase {
             CtaPhase::Error { name, message, .. } => {
                 assert_eq!(name, "figma");
                 assert_eq!(message, "reload boom");
@@ -1984,14 +2011,14 @@ mod cta_e2e {
             &mut app,
         );
         assert!(effects.is_empty());
-        match &app.agents[&id].plugin_cta.phase {
+        match &test_agent(&app, id).plugin_cta.phase {
             CtaPhase::Error { name, message, .. } => {
                 assert_eq!(name, "figma");
                 assert_eq!(message, "mcps boom");
             }
             other => panic!("expected Error, got {other:?}"),
         }
-        assert!(app.agents[&id].extensions_modal.is_none());
+        assert!(test_agent(&app, id).extensions_modal.is_none());
     }
 
     #[test]
@@ -2048,7 +2075,7 @@ mod cta_e2e {
             );
             assert!(effects.is_empty());
             assert_eq!(
-                app.agents[&id].plugin_cta.phase,
+                test_agent(&app, id).plugin_cta.phase,
                 CtaPhase::Hidden,
                 "enabled={enabled} source_present={source_present}"
             );
@@ -2071,8 +2098,8 @@ mod cta_e2e {
             }),
             &mut app,
         );
-        assert_eq!(app.agents[&id].plugin_cta.phase, CtaPhase::Hidden);
-        assert!(app.agents[&id].extensions_modal.is_some());
+        assert_eq!(test_agent(&app, id).plugin_cta.phase, CtaPhase::Hidden);
+        assert!(test_agent(&app, id).extensions_modal.is_some());
     }
 
     #[test]
@@ -2095,12 +2122,12 @@ mod cta_e2e {
             &mut app,
         );
         assert_eq!(
-            app.agents[&id].plugin_cta.phase,
+            test_agent(&app, id).plugin_cta.phase,
             CtaPhase::Installed {
                 name: "figma".into()
             }
         );
-        assert!(app.agents[&id].extensions_modal.is_none());
+        assert!(test_agent(&app, id).extensions_modal.is_none());
         assert!(
             !effects
                 .iter()

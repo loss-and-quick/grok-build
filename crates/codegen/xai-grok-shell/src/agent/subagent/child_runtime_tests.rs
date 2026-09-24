@@ -64,6 +64,8 @@ struct SnapshotProbeRunner {
 
 impl ChildRunner for SnapshotProbeRunner {
     type Control = SnapshotProbeControl;
+    type RootControl =
+        xai_grok_tools::implementations::grok_build::task::root_control::NoRootControl;
     type CompletionData = ();
     type RunFuture = LocalBoxFuture<ChildRunOutput<()>>;
     type ValidateFuture = LocalBoxFuture<SubagentValidateTypeOutcome>;
@@ -98,6 +100,10 @@ impl ChildRunner for SnapshotProbeRunner {
                                 ),
                             child_cmd_tx,
                             active_message_target_session_id: run.request.id.clone(),
+                            active_message_target_agent_id:
+                                xai_message_delivery_core::AgentId::parse("ag1.c1")
+                                    .expect("test child id"),
+                            active_message_target_generation: run.generation,
                             child_signals: crate::session::signals::SessionSignalsHandle::new(),
                             _child_thread: Some(SessionThread::from_handle(std::thread::spawn(
                                 || {},
@@ -135,7 +141,13 @@ impl ChildRunner for SnapshotProbeRunner {
         Box::pin(std::future::ready(Vec::new()))
     }
 
-    fn on_completed(&self, _: ChildCompletion<()>) {}
+    fn supports_wake(&self) -> bool {
+        true
+    }
+
+    fn on_completed(&self, _: ChildCompletion<()>, terminal_published: Box<dyn FnOnce() + Send>) {
+        terminal_published();
+    }
 }
 
 fn request() -> SubagentRequest {
@@ -156,6 +168,8 @@ fn request() -> SubagentRequest {
         fork_context: false,
         owner: SubagentOwner::Task,
         cancel_token: CancellationToken::new(),
+        spawn_root: Default::default(),
+        tool_call_id: None,
     }
 }
 
@@ -294,7 +308,10 @@ async fn rejected_delivery(
             }
         });
         let (outcome, dispatched) = if target == "child"
-            && operation == ActiveAgentMessageOperation::Steer
+            && matches!(
+                operation,
+                ActiveAgentMessageOperation::Steer | ActiveAgentMessageOperation::Interject
+            )
             && !force_queue_envelope
         {
             let command = await_with_timeout(child_cmd_rx.recv())
@@ -334,6 +351,15 @@ async fn target_mismatch_rejects_without_dispatch() {
 #[tokio::test]
 async fn matched_steer_dispatches_to_the_child_host() {
     let actual = rejected_delivery("child", ActiveAgentMessageOperation::Steer, false).await;
+    assert_eq!(
+        actual,
+        (ActiveAgentMessageOutcome::NotActiveOrFinalizing, true)
+    );
+}
+
+#[tokio::test]
+async fn matched_interject_dispatches_to_the_child_host() {
+    let actual = rejected_delivery("child", ActiveAgentMessageOperation::Interject, false).await;
     assert_eq!(
         actual,
         (ActiveAgentMessageOutcome::NotActiveOrFinalizing, true)

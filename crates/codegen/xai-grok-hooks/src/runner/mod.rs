@@ -24,6 +24,14 @@ pub struct RunContext<'a> {
     /// then fail open. Command/http hooks never consult it.
     pub plugin_invoker: Option<Arc<dyn PluginHookInvoker>>,
     pub process_scope: Option<xai_grok_tools::util::ProcessScope>,
+    /// Loaded by the caller off the dispatch path, so the announced count and the run loop agree and no dispatch reads the file.
+    pub disabled: std::sync::Arc<crate::trust::DisabledHooks>,
+}
+
+impl RunContext<'_> {
+    pub fn disabled(&self) -> &crate::trust::DisabledHooks {
+        &self.disabled
+    }
 }
 
 #[derive(Debug)]
@@ -331,7 +339,7 @@ pub(crate) fn gate_outcome(
                 .unwrap_or_else(|| format!("denied by hook '{hook_name}'")),
         )),
         DecisionToken::Unknown { field, token } => GateOutcome::Failed(format!(
-            "unknown decision value '{}' in '{}' from hook '{hook_name}'",
+            "unknown decision value '{}' in '{}'",
             clip_reason(&token),
             field.wire_name()
         )),
@@ -409,9 +417,7 @@ pub(crate) fn prompt_json_to_block(
                 .unwrap_or_else(|| format!("Prompt blocked by hook '{hook_name}'")),
         )),
         None | Some("approve") => Ok(None),
-        Some(other) => Err(format!(
-            "unknown decision value '{other}' from hook '{hook_name}'"
-        )),
+        Some(other) => Err(format!("unknown decision value '{other}'")),
     }
 }
 
@@ -487,9 +493,7 @@ pub(crate) fn stop_json_to_outcome(
         ),
         Some("approve") | None => None,
         Some(other) => {
-            return Err(format!(
-                "unknown decision value '{other}' from hook '{hook_name}'"
-            ));
+            return Err(format!("unknown decision value '{other}'"));
         }
     };
     Ok(StopHookOutcome {
@@ -549,7 +553,7 @@ pub(crate) fn post_tool_use_json_to_outcome(
                 "post_tool_use hook set an unrecognized decision; only \"block\" is honored"
             );
             failure = Some(format!(
-                "post_tool_use hook '{hook_name}' set an unrecognized decision value '{}'; only \"block\" is honored",
+                "unrecognized decision value '{}'; only \"block\" is honored",
                 clip_reason(other)
             ));
             None

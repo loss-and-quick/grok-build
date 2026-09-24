@@ -19,9 +19,18 @@ account = "other@example.com"
 
     let consent = super::super::load_config_from_toml(&root).consent;
 
-    assert_eq!(consent.answers["enterprise-tos-2026-08"].version, 2);
     assert_eq!(
-        consent.answers["consumer-tos-2026-08"].account.as_deref(),
+        consent
+            .answers
+            .get("enterprise-tos-2026-08")
+            .map(|a| a.version),
+        Some(2)
+    );
+    assert_eq!(
+        consent
+            .answers
+            .get("consumer-tos-2026-08")
+            .and_then(|a| a.account.as_deref()),
         Some("other@example.com")
     );
 

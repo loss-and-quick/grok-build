@@ -210,6 +210,8 @@ pub struct ScheduledTask {
     pub recurring: bool,
     #[serde(default)]
     pub durable: bool,
+    /// Fire as a turn in the conversation that owns the scheduler instead of a
+    /// detached background subagent.
     #[serde(default)]
     pub foreground: bool,
     pub created_at: DateTime<Utc>,
@@ -219,10 +221,9 @@ pub struct ScheduledTask {
     pub last_subagent_id: Option<String>,
     #[serde(default)]
     pub iterations_since_fresh: u32,
-    /// Set when the prompt is patched: the next fire starts a fresh
-    /// transcript instead of resuming the old task's. The anchor itself is
-    /// kept until then so the in-flight guard can still see a running
-    /// iteration.
+    /// Set when the prompt is patched: the next fire starts a fresh transcript instead of resuming
+    /// the old task's. The anchor itself is kept until then so the in-flight guard can still see a
+    /// running iteration.
     #[serde(default)]
     pub chain_reset_pending: bool,
     /// Who scheduled this task. `None` for state written before creators were
@@ -348,10 +349,9 @@ impl ScheduledTask {
         anchor + chrono::Duration::seconds(self.interval_secs as i64)
     }
 
-    /// Next moment the actor must wake for this task: the sooner of the next fire and the
-    /// auto-expiry deadline. Sleeping purely on `next_fire_at` would let a task whose interval
-    /// stretches past `expires_at` outlive the TTL (an 8-day interval must still expire at day
-    /// 7, not when its first fire comes due).
+    /// Next moment the actor must wake for this task: the sooner of the next fire and the auto-expiry deadline. Sleeping
+    /// purely on `next_fire_at` would let a task whose interval stretches past `expires_at` outlive the TTL (an 8-day
+    /// interval must still expire at day 7, not when its first fire comes due).
     pub fn next_wake_at(&self) -> DateTime<Utc> {
         match self.expires_at {
             Some(expires_at) => self.next_fire_at().min(expires_at),

@@ -18,9 +18,11 @@ pub struct LoopCommand;
 /// Otherwise returns `None` and the model derives the real interval; there is no host-side default.
 fn parse_loop_args(args: &str) -> (Option<&str>, &str) {
     let trimmed = args.trim();
-    if let Some(space) = trimmed.find(char::is_whitespace) {
-        let first = &trimmed[..space];
-        let rest = trimmed[space..].trim_start();
+    if let Some((first, rest)) = trimmed
+        .find(char::is_whitespace)
+        .and_then(|space| trimmed.split_at_checked(space))
+    {
+        let rest = rest.trim_start();
         if is_interval_token(first) && !rest.is_empty() {
             return (Some(first), rest);
         }

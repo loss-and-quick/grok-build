@@ -52,7 +52,7 @@ fn spawn_persistence_drain(
                     let _ = respond_to.send(Ok(()));
                 }
                 PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n)) => {
-                    if let XaiSessionUpdate::HookAnnotation { message } = n.update {
+                    if let XaiSessionUpdate::HookAnnotation { message, .. } = n.update {
                         sink.borrow_mut().push(message);
                     }
                 }
@@ -805,7 +805,6 @@ fn spawn_persistence_capture(
 }
 
 /// The strongest storage boundary: a blocked prompt's text reaches NO persistence channel.
-/// That covers the user-echo `updates.jsonl` stream, the `summary.json` content feed, and chat items.
 /// Chat-history rebuilds and resume scrollback replay both read the `updates.jsonl` stream.
 /// An allowed prompt's echo is the control proving the capture sees persistence traffic.
 #[test]

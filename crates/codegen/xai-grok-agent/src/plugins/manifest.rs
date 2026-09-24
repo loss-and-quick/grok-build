@@ -133,10 +133,8 @@ fn is_executable(_path: &Path) -> bool {
 }
 
 /// Resolve a plugin component path (hooks, MCP, LSP) from a manifest field.
-///
-/// If the field is `Path(p)`, resolves relative to plugin root with containment check.
-/// If `Inline(_)`, returns `None` (caller reads inline value directly).
-/// If `None`, checks for `default_file` at the plugin root.
+/// `Path` resolves relative to the plugin root with a containment check.
+/// `Inline` returns `None`; `None` checks for `default_file` at the plugin root.
 fn resolve_component_path(
     field: &Option<PathOrInline>,
     plugin_root: &Path,
@@ -1424,9 +1422,11 @@ mod tests {
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         match manifest.skills.unwrap() {
             PathOrPaths::Multiple(paths) => {
-                assert_eq!(paths.len(), 2);
-                assert_eq!(paths[0], "./skills-a/");
-                assert_eq!(paths[1], "./skills-b/");
+                let [a, b] = paths.as_slice() else {
+                    panic!("expected two skill paths: {paths:?}");
+                };
+                assert_eq!(a, "./skills-a/");
+                assert_eq!(b, "./skills-b/");
             }
             _ => panic!("expected Multiple"),
         }
@@ -1570,7 +1570,7 @@ mod tests {
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1);
-        assert!(dirs[0].ends_with("skills"));
+        assert!(dirs.first().is_some_and(|d| d.ends_with("skills")));
     }
 
     #[test]

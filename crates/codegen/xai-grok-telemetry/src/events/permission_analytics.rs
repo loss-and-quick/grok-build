@@ -285,6 +285,7 @@ impl TryFrom<&str> for PermissionClassifierVerdict {
 pub enum PermissionSecurityFinding {
     FailClosedPolicy,
     UnparseableShell,
+    UnresolvedArgument,
     OpaqueShell,
     ExecOrAmbientGit,
     EnvInjection,
@@ -298,6 +299,7 @@ impl PermissionSecurityFinding {
     pub const ALL: &'static [Self] = &[
         Self::FailClosedPolicy,
         Self::UnparseableShell,
+        Self::UnresolvedArgument,
         Self::OpaqueShell,
         Self::ExecOrAmbientGit,
         Self::EnvInjection,
@@ -314,6 +316,7 @@ impl TryFrom<&str> for PermissionSecurityFinding {
         Ok(match s {
             "fail_closed_policy" => Self::FailClosedPolicy,
             "unparseable_shell" => Self::UnparseableShell,
+            "unresolved_argument" => Self::UnresolvedArgument,
             "opaque_shell" => Self::OpaqueShell,
             "exec_or_ambient_git" => Self::ExecOrAmbientGit,
             "env_injection" => Self::EnvInjection,
