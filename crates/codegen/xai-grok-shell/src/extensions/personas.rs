@@ -715,7 +715,14 @@ fn save_at(
             Some("") => {
                 doc.remove(key);
             }
-            Some(text) => doc[key] = toml_edit::value(text),
+            // Assign through the existing item so the key keeps its decor (a hand-written
+            // comment above it); `insert` would replace the key along with it.
+            Some(text) => match doc.get_mut(key) {
+                Some(item) => *item = toml_edit::value(text),
+                None => {
+                    doc.insert(key, toml_edit::value(text));
+                }
+            },
         }
     }
 
