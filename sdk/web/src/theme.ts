@@ -73,9 +73,9 @@ export function cssVarName(role: ThemeRole): string {
  * `Theme::diff_uses_line_fg` (`pager-render/src/theme/mod.rs`): when both
  * `diff_*_bg` roles are `"reset"` the pager drops the row band and paints the
  * entire changed line in `diff_delete_fg` / `diff_insert_fg` instead of letting
- * syntax colours through. Only `terminal-native` is built that way, and it is
- * the one palette a browser must ask about — every other role resolves the
- * same in both clients, but this one decides between two different renderings.
+ * syntax colours through. `terminal` and `terminal-native` are built that way,
+ * and they are the palettes a browser must ask about — every other role resolves
+ * the same in both clients, but this one decides between two different renderings.
  */
 export function diffUsesLineFg(theme: Theme): boolean {
   return theme.colors.diff_delete_bg === "reset" && theme.colors.diff_insert_bg === "reset";
@@ -121,7 +121,7 @@ export function themeCssVariables(theme: Theme): Record<string, string> {
  * Opacity standing in for the SGR dim effect.
  *
  * `Theme::muted` de-emphasizes with dim instead of painting a gray when a
- * palette's gray role is `"reset"` — which is `terminal-native`, and only it.
+ * palette's gray role is `"reset"` — which is `terminal` and `terminal-native`.
  * The generated artifact carries the *flag* but no ratio, because a terminal
  * does not need one, so the number is chosen here.
  *

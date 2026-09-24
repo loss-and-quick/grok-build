@@ -108,12 +108,13 @@ describe("theme tokens", () => {
 });
 
 describe("the dim stand-in", () => {
-  test("only the palette with no gray of its own uses it", () => {
+  test("only the palettes with no gray of their own use it", () => {
     // `Theme::muted` dims instead of painting a gray exactly when the gray role
-    // is `"reset"`. If a second palette ever takes that branch, the derivation
-    // below has to be re-checked against it.
+    // is `"reset"`. Both such palettes paint the platform foreground on the
+    // platform canvas, which is what the derivation below assumes; a palette
+    // that takes this branch any other way has to be re-checked against it.
     const dimming = themes.filter((theme) => theme.terminal.muted_uses_dim);
-    expect(dimming.map((theme) => theme.name)).toEqual(["terminal-native"]);
+    expect(dimming.map((theme) => theme.name)).toEqual(["terminal", "terminal-native"]);
     for (const theme of dimming) expect(theme.colors.gray).toBe("reset");
   });
 

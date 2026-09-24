@@ -84,6 +84,9 @@ fn theme_for(kind: ThemeKind) -> Theme {
         ThemeKind::TokyoNight => Theme::tokyonight(),
         ThemeKind::RosePineMoon => Theme::rosepine_moon(),
         ThemeKind::OscuraMidnight => Theme::oscura_midnight(),
+        // Every background is `Reset`; the browser maps each `"reset"` to its
+        // platform default (see `sdk/web/src/theme.ts`).
+        ThemeKind::Terminal => Theme::terminal(),
         // Meta-variant: resolved to a concrete kind before rendering, and excluded
         // from `ThemeKind::ALL`. The browser resolves it from `prefers-color-scheme`
         // against the exported `polarity` field.
@@ -396,8 +399,8 @@ fn type_declarations(sample: &Theme) -> String {
          \x20*   through the host terminal's own palette when painting a terminal pane.\n\
          \x20* - `\"idx:N\"` — 256-color palette index.\n\
          \x20* - `\"reset\"` — no color: the platform default. In CSS that is `canvas` for a\n\
-         \x20*   background role and `canvastext` for a foreground one. Only the\n\
-         \x20*   `terminal-native` palette uses it.\n\
+         \x20*   background role and `canvastext` for a foreground one. The `terminal`\n\
+         \x20*   and `terminal-native` palettes use it.\n\
          \x20*/\n\
          export type ThemeColor = string;\n\n",
     );
@@ -800,7 +803,7 @@ mod tests {
     fn every_theme_kind_is_exported() {
         assert_eq!(
             ThemeKind::ALL.len(),
-            5,
+            6,
             "ThemeKind::ALL grew/shrank; the new kind needs a `theme_for` arm and this count"
         );
         // The kinds, plus the terminal-native palette which has no kind.
