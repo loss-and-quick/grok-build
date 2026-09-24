@@ -155,6 +155,12 @@ const CENSUS: &[(&str, Reach)] = &[
     ("chevron_down", Reach::Exported("chevron_down")),
     ("disclosure_open", Reach::Exported("disclosure_open")),
     ("disclosure_closed", Reach::Exported("disclosure_closed")),
+    (
+        "disclosure_up",
+        Reach::Withheld(
+            "declared upstream but drawn by no pager surface yet; export it with its first use",
+        ),
+    ),
     ("ballot_x_button", Reach::Exported("ballot_x_button")),
     ("enlarge_button", Reach::Exported("enlarge_button")),
     (
