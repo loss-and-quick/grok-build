@@ -1,6 +1,6 @@
 // The widget rail's model — a port of the pager's dock, not a new design.
 //
-// `views/dock.rs` is the Figma "Exploration" layout as the terminal built it:
+// `views/dock/mod.rs` is the Figma "Exploration" layout as the terminal built it:
 // "one header row per non-empty section (Subagents / Tasks / Watchers / Queued)
 // directly above the prompt, each with a live count and a rule filling the rest
 // of the line. Sections with a zero count are hidden; an all-zero dock renders
@@ -68,7 +68,8 @@ export interface RailRow {
 }
 
 /**
- * `dock.rs`'s `fmt_elapsed` (`:381`): `42s`, then `2m14s`.
+ * `views/dock/mod.rs`'s `fmt_elapsed`, which is `goal_detail::format_elapsed`:
+ * `42s`, then `2m14s`, then `1h01m` (seconds drop once hours appear).
  *
  * Not `subagents.ts`'s `formatDuration`, which is `pager-render`'s own
  * `format_duration` and starts at tenths of a second. The two live side by side
@@ -78,8 +79,12 @@ export interface RailRow {
  */
 export function fmtElapsed(seconds: number): string {
   const whole = Math.max(0, Math.floor(seconds));
-  if (whole < 60) return `${whole}s`;
-  return `${Math.floor(whole / 60)}m${String(whole % 60).padStart(2, "0")}s`;
+  const hours = Math.floor(whole / 3600);
+  const mins = Math.floor((whole % 3600) / 60);
+  const secs = whole % 60;
+  if (hours > 0) return `${hours}h${String(mins).padStart(2, "0")}m`;
+  if (mins > 0) return `${mins}m${String(secs).padStart(2, "0")}s`;
+  return `${secs}s`;
 }
 
 /**

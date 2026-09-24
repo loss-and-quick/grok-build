@@ -161,12 +161,18 @@ describe("what a row is allowed to say about time", () => {
     // Two different formatters live side by side in the terminal and say
     // different things; using one for both would be this client deciding
     // something the terminal did not.
-    const dock = await rust("xai-grok-pager/src/views/dock.rs");
-    expect(dock).toContain('format!("{}m{:02}s", secs / 60, secs % 60)');
+    const dock = await rust("xai-grok-pager/src/views/dock/mod.rs");
+    expect(dock).toContain(
+      "crate::views::goal_detail::format_elapsed(secs.saturating_mul(1000))",
+    );
+    const goal = await rust("xai-grok-pager/src/views/goal_detail.rs");
+    expect(goal).toContain('format!("{hours}h{mins:02}m")');
+    expect(goal).toContain('format!("{mins}m{secs:02}s")');
     expect(fmtElapsed(42)).toBe("42s");
     expect(fmtElapsed(59)).toBe("59s");
     expect(fmtElapsed(60)).toBe("1m00s");
     expect(fmtElapsed(134)).toBe("2m14s");
+    expect(fmtElapsed(3_665)).toBe("1h01m");
   });
 });
 

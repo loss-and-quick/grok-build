@@ -467,9 +467,10 @@ describe("choosing a body", () => {
   });
 
   test("a successful edit opens showing its diff, which is the terminal's default", () => {
-    // `effective_expanded` is `!collapsed_edit_blocks`, and that flag is
-    // asserted OFF by default in the pager's own test.
-    expect(APPEARANCE).toContain("self.expanded_by_default.unwrap_or(!collapsed_edit_blocks)");
+    // `effective_expanded` is `!collapsed_edit_blocks` when no pager.toml value
+    // pins it (a browser has none), and that flag is asserted OFF by default
+    // in the pager's own test.
+    expect(APPEARANCE).toContain("!collapsed_edit_blocks && self.expanded_by_default.unwrap_or(true)");
     expect(CACHE).toContain('"collapsed_edit_blocks must default OFF (rollout flag)"');
     expect(defaultMode("edit", false)).toBe("expanded");
     expect(defaultMode("edit", true)).toBe("collapsed");

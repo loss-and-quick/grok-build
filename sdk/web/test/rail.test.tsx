@@ -326,7 +326,7 @@ describe("the dock's own sections in the rail", () => {
       } as unknown as SessionUpdate);
     });
     const [row] = rowsOf(container, "subagents");
-    expect(row).toContain("Explore");
+    expect(row).toContain("Subagent");
     expect(row).toContain("find the render path");
     expect(row).toContain("Thinking");
     expect(row).toContain("grok-4.5");

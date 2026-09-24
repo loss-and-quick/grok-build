@@ -414,7 +414,9 @@ export function truncationFor(kind: string): { first: number; last: number } | n
  * diff**, and that is the terminal's own default rather than a preference:
  * `edit_default_display_mode` (`scrollback/state/mod.rs`) expands a fresh edit
  * block whenever `EditBlockConfig::effective_expanded` says so, and that reads
- * `!collapsed_edit_blocks` — a rollout flag whose default is off, asserted as
+ * `!collapsed_edit_blocks && expanded_by_default.unwrap_or(true)` — with no
+ * pager.toml pin (a browser has none) that is `!collapsed_edit_blocks`, a
+ * rollout flag whose default is off, asserted as
  * `"collapsed_edit_blocks must default OFF"` in `appearance/cache.rs`. A failed
  * edit collapses, which is the same function's other arm.
  *

@@ -9,17 +9,16 @@
 //
 // What the terminal decided, and is therefore reproduced rather than invented:
 //
-//   - the row label (persona > role > type > `[tag]` > "general"), and the
-//     `[tag]` prefix being stripped from the description either way
-//     (`app/subagent.rs:840`, `format_subagent_label`);
-//   - `"general-purpose"` displaying as `general` (`:810`);
+//   - the row label (persona > role > `[tag]` > "subagent"; the type is not
+//     part of it), and the `[tag]` prefix being stripped from the description
+//     either way (`app/subagent.rs`, `format_subagent_label`);
 //   - the meta suffix ` (persona · role · model)`, with persona and role
 //     collapsed when they name the same thing (`:875`, `:798`);
 //   - the activity vocabulary — "Thinking", "Responding", "Running: <title>"
 //     clamped to 40 characters (`app/subagent.rs:891`,
 //     `acp/tracker.rs:80`);
 //   - the compact duration format (`pager-render/src/util.rs:83`);
-//   - the sort: running first, then agent type alphabetically, then newest
+//   - the sort: running first, then the row label alphabetically, then newest
 //     first, then a stable id (`views/tasks_pane.rs:941`);
 //   - hiding finished rows behind a toggle (`tasks_pane.rs:900`, `show_done`).
 import { createStore, produce } from "solid-js/store";
@@ -332,11 +331,6 @@ function nonEmpty(value: string | null | undefined): string | undefined {
 // The pager's own labelling, reproduced
 // ---------------------------------------------------------------------------
 
-/** `format_type_label` (`app/subagent.rs:810`). */
-export function typeLabel(subagentType: string): string {
-  return subagentType === "general-purpose" ? "general" : subagentType;
-}
-
 /**
  * `parse_tag_prefix` (`app/subagent.rs:826`): a leading `[tag]` is a label, not
  * part of the description, and is stripped from the description either way so
@@ -360,9 +354,8 @@ export function subagentLabel(row: Subagent): { label: string; description: stri
   const raw =
     row.persona ??
     row.role ??
-    (row.subagentType !== "general-purpose" ? typeLabel(row.subagentType) : undefined) ??
     tag ??
-    "general";
+    "subagent";
   return { label: raw.charAt(0).toUpperCase() + raw.slice(1), description: rest };
 }
 
@@ -455,9 +448,9 @@ export function activityOf(update: SessionUpdate): string | undefined {
 }
 
 /**
- * The terminal's order (`views/tasks_pane.rs:941`): running before done, then
- * agent type alphabetically, then newest first, then a stable id so equal rows
- * do not reshuffle.
+ * The terminal's order (`views/tasks_pane.rs`): running before done, then the
+ * row label ({@link subagentLabel}) alphabetically, then newest first, then a
+ * stable id so equal rows do not reshuffle.
  *
  * "Newest" is arrival order of the spawn, because that is the only *when* the
  * update stream carries — `subagent_spawned` has no timestamp. The pager reads

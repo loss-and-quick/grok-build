@@ -14,7 +14,6 @@ import {
   parseTagPrefix,
   sortRows,
   subagentLabel,
-  typeLabel,
   type Subagent,
 } from "../src/subagents.ts";
 import type { SessionUpdate } from "../src/wire.ts";
@@ -297,12 +296,13 @@ describe("the pager's own labelling", () => {
       ...over,
     }) as Subagent;
 
-  test("`general-purpose` displays as `general`, and anything else as itself", async () => {
+  test("the type is not part of the label, and the last resort is `subagent`", async () => {
     const body = await rust("xai-grok-pager/src/app/subagent.rs");
-    const fn = body.slice(body.indexOf("pub(crate) fn format_type_label"));
-    expect(fn).toContain('"general-purpose" => "general"');
-    expect(typeLabel("general-purpose")).toBe("general");
-    expect(typeLabel("explore")).toBe("explore");
+    const start = body.indexOf("pub(crate) fn format_subagent_label");
+    const fn = body.slice(start, body.indexOf("\n}\n", start));
+    expect(fn).toContain('"subagent".to_string()');
+    expect(fn).not.toContain("subagent_type");
+    expect(body).not.toContain("fn format_type_label");
   });
 
   test("a leading [tag] is a label, and leaves the description either way", () => {
@@ -311,15 +311,15 @@ describe("the pager's own labelling", () => {
     expect(parseTagPrefix("no tag here")).toEqual({ rest: "no tag here" });
   });
 
-  test("the label prefers persona, then role, then type, then the tag", () => {
+  test("the label prefers persona, then role, then the tag", () => {
     expect(subagentLabel(row({ persona: "scribe", role: "writer" })).label).toBe("Scribe");
     expect(subagentLabel(row({ role: "writer" })).label).toBe("Writer");
-    expect(subagentLabel(row({ subagentType: "explore" })).label).toBe("Explore");
+    expect(subagentLabel(row({ subagentType: "explore" })).label).toBe("Subagent");
     expect(subagentLabel(row({ description: "[ship] land it" }))).toEqual({
       label: "Ship",
       description: "land it",
     });
-    expect(subagentLabel(row({})).label).toBe("General");
+    expect(subagentLabel(row({})).label).toBe("Subagent");
   });
 
   test("persona and role collapse when they name the same thing", () => {
@@ -361,14 +361,23 @@ describe("the pager's own labelling", () => {
     expect(Number(declared![1]) * 1000).toBe(PENDING_KILL_TIMEOUT_MS);
   });
 
-  test("the order is the tasks pane's: running first, then type, then newest", () => {
+  test("the order is the tasks pane's: running first, then label, then newest", () => {
+    // `tasks_pane.rs` sorts on `format_subagent_label`'s label, not on the type.
     const rows = [
-      row({ subagentId: "a", subagentType: "explore", seq: 0 }),
-      row({ subagentId: "b", subagentType: "explore", seq: 1 }),
-      row({ subagentId: "c", subagentType: "plan", seq: 2 }),
-      row({ subagentId: "d", subagentType: "explore", seq: 3, status: "completed" }),
+      row({ subagentId: "a", role: "explore", seq: 0 }),
+      row({ subagentId: "b", role: "explore", seq: 1 }),
+      row({ subagentId: "c", role: "plan", seq: 2 }),
+      row({ subagentId: "d", role: "explore", seq: 3, status: "completed" }),
     ];
     expect(sortRows(rows).map((entry) => entry.subagentId)).toEqual(["b", "a", "c", "d"]);
+    // Nameless children share the `Subagent` label, so their type does not
+    // group them: newest first (`nameless_explore_and_plan_type_labels_are_subagent`).
+    const nameless = [
+      row({ subagentId: "a", subagentType: "explore", seq: 0 }),
+      row({ subagentId: "b", subagentType: "plan", seq: 1 }),
+      row({ subagentId: "c", subagentType: "explore", seq: 2 }),
+    ];
+    expect(sortRows(nameless).map((entry) => entry.subagentId)).toEqual(["c", "b", "a"]);
   });
 });
 

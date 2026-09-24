@@ -76,11 +76,20 @@ describe("the numbers are the pager's, and stay the pager's", () => {
     expect(ellipsisFor("read", 47)).toBe("…");
   });
 
-  test("the match summaries are the ones `search.rs` documents", () => {
-    // The doc comment above `match_summary` lists the exact strings, so the
-    // comparison is against the pager's own statement of them.
-    const doc = SEARCH.slice(SEARCH.indexOf("/// Build the match summary"));
-    expect(doc).toContain("`(3 matches in 2 files)` / `(1 match)` / `(no matches)`");
+  test("the match summaries are the ones `search.rs` writes", () => {
+    // `match_summary` itself spells the strings (its doc comment used to list
+    // them and no longer does), so the comparison is against the pager's code.
+    const body = SEARCH.slice(SEARCH.indexOf("fn match_summary("));
+    for (const literal of [
+      '"(no matches)"',
+      '"(no files)"',
+      '"({} matches in {} files)"',
+      '"(1 match)"',
+      '"({n} files)"',
+      '"({} matches across {} files)"',
+    ]) {
+      expect(body).toContain(literal);
+    }
     expect(matchSummary(3, 2, "content")).toBe("(3 matches in 2 files)");
     expect(matchSummary(1, 1, "content")).toBe("(1 match)");
     expect(matchSummary(0, 0, "content")).toBe("(no matches)");
@@ -151,7 +160,7 @@ describe("a title is derived from the arguments, not from `title`", () => {
     expect(EXECUTE).toContain("do not read `Run Run the tests`");
     // Collapsed hides the command line, which is why the fold has to.
     expect(EXECUTE).toContain(
-      "Collapsed mode passes `include_command = false` so only the description title is shown",
+      "`include_command` is false in collapsed mode so a description title alone is shown without the command line",
     );
   });
 
