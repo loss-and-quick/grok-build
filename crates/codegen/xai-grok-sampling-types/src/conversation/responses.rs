@@ -328,7 +328,11 @@ fn drop_dangling_reasoning(items: &mut Vec<rs::InputItem>) {
         match reasoning_follower(item) {
             // When this one is dropped `attached` stays false, so the
             // reasoning items ahead of it in the same run drop as well.
-            ReasoningFollower::Reasoning => keep[idx] = attached,
+            ReasoningFollower::Reasoning => {
+                if let Some(slot) = keep.get_mut(idx) {
+                    *slot = attached;
+                }
+            }
             ReasoningFollower::SameTurn => attached = true,
             ReasoningFollower::Foreign => attached = false,
         }

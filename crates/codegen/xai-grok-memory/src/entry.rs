@@ -486,7 +486,9 @@ pub fn upsert_index_line(existing: &str, file_name: &str, new_line: &str) -> Str
         match pointer_target(line) {
             Some(target) if target == file_name => {
                 let mut out = lines.clone();
-                out[i] = new_line.to_string();
+                if let Some(slot) = out.get_mut(i) {
+                    *slot = new_line.to_string();
+                }
                 return join_lines(&out);
             }
             Some(_) => last_pointer = Some(i),

@@ -1925,7 +1925,7 @@ async fn enable_mcp_server_gated(
     cwd: &std::path::Path,
     server_name: &str,
 ) -> Result<(), GatedEnableError> {
-    let plugin_reg = agent.plugin_registry_for_root(&cwd);
+    let plugin_reg = agent.plugin_registry_for_root(cwd);
     let compat = agent.cfg.borrow().compat_resolved;
 
     let probe_reg = plugin_reg.clone();

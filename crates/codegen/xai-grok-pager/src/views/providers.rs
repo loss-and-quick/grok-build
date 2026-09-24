@@ -471,7 +471,10 @@ impl ProvidersViewState {
             return;
         }
         loop {
-            let used: u16 = heights[self.viewport..=self.selected.min(heights.len() - 1)]
+            let last = self.selected.min(heights.len() - 1);
+            let used: u16 = heights
+                .get(self.viewport..=last)
+                .unwrap_or_default()
                 .iter()
                 .copied()
                 .sum();
@@ -592,7 +595,10 @@ pub fn render_providers(
         let selected = idx == state.selected;
         let rows = match entry {
             PanelEntry::Group { group } => {
-                let group = &groups[*group];
+                // Entries are built from `groups` in the same frame; a miss skips the row.
+                let Some(group) = groups.get(*group) else {
+                    continue;
+                };
                 let meta = group.header_meta();
                 let row = PickerRow {
                     label: &group.id,
@@ -623,7 +629,9 @@ pub fn render_providers(
                 .rows
             }
             PanelEntry::Model { group, row } => {
-                let model = &groups[*group].rows[*row];
+                let Some(model) = groups.get(*group).and_then(|g| g.rows.get(*row)) else {
+                    continue;
+                };
                 let badge = model.badge();
                 let summary = model.summary();
                 let summary_lines = [summary.as_str()];
@@ -700,7 +708,10 @@ fn entry_heights(
             PanelEntry::Group { .. } => 1,
             PanelEntry::Model { group, row } => {
                 if idx == selected {
-                    let fields = groups[*group].rows[*row].fields().len() as u16;
+                    let fields = groups
+                        .get(*group)
+                        .and_then(|g| g.rows.get(*row))
+                        .map_or(0, |m| m.fields().len()) as u16;
                     fields.saturating_add(1)
                 } else {
                     2

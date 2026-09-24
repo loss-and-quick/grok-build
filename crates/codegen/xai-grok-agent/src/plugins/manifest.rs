@@ -1014,9 +1014,10 @@ impl PluginManifest {
                 // cannot select; the first choice is the one the plugin listed
                 // first, which is the closest thing to an intended default.
                 let declared_default = spec.default.as_ref().and_then(|v| v.as_str());
+                let first_choice = choices.first()?.value.as_str();
                 let default = declared_default
                     .filter(|d| choices.iter().any(|c| c.value == *d))
-                    .unwrap_or(&choices[0].value)
+                    .unwrap_or(first_choice)
                     .to_string();
                 if declared_default.is_some_and(|d| d != default) {
                     tracing::warn!(plugin = %self.name, setting = %spec.key,
